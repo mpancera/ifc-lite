@@ -50,7 +50,7 @@ function buildClashModel(): string {
   return creator.toIfc().content;
 }
 
-describe('clash --json stdout hygiene', () => {
+describe('clash --json stdout hygiene (regression, PR #1872)', () => {
   it.skipIf(!canRun)(
     'stdout is exactly one parseable JSON document; diagnostics go to stderr',
     async () => {
