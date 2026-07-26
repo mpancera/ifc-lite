@@ -27,14 +27,15 @@
  */
 
 import path from 'node:path';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { optimize } from '../diff-spike/optimize.mjs';
+import { optimize, G_SCALE } from '../diff-spike/optimize.mjs';
 import { PARAMS, evaluateNumeric } from '../diff-spike/carbon-model.mjs';
 import { buildIfc, REPO_ROOT } from '../diff-spike/build-ifc.mjs';
 import { serializeScene, unionBounds } from './lib/scene-bin.mjs';
 import { startRenderHost, orbitPosition, framingDistance } from './lib/render-host.mjs';
 import { hasFfmpeg, assembleMp4, exportSampleJpgs, defaultOutRoot } from './lib/assemble.mjs';
+import { parseArgs, intArg, stringArg, UsageError, failUsage } from './lib/args.mjs';
 
 const { GeometryProcessor } = await import(
   path.join(REPO_ROOT, 'packages/geometry/dist/index.js')
@@ -43,20 +44,32 @@ const { GeometryProcessor } = await import(
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ---- args ------------------------------------------------------------------
-const args = Object.fromEntries(
-  process.argv.slice(2).map((a) => {
-    const [k, v] = a.replace(/^--/, '').split('=');
-    return [k, v ?? true];
-  }),
-);
-const OUT = path.resolve(args.out ?? path.join(defaultOutRoot(), 'morph'));
-const N_SNAPSHOTS = parseInt(args.snapshots ?? '200', 10);
-const FPS = parseInt(args.fps ?? '30', 10);
-const HEADLESS = !args.headed;
-const MAKE_VIDEO = !args['no-video'];
+const USAGE = `Usage: node scripts/moonshot/video/pipeline-morph.mjs \\
+  [--out DIR] [--snapshots 200] [--fps 30] [--headed] [--no-video]
+
+Both --key=value and --key value are accepted.`;
+
+let OUT, N_SNAPSHOTS, FPS, HEADLESS, MAKE_VIDEO;
+try {
+  const args = parseArgs(process.argv.slice(2), {
+    booleans: ['headed', 'no-video'],
+    known: ['out', 'snapshots', 'fps'],
+  });
+  OUT = path.resolve(stringArg(args, 'out', path.join(defaultOutRoot(), 'morph')));
+  N_SNAPSHOTS = intArg(args, 'snapshots', 200);
+  FPS = intArg(args, 'fps', 30);
+  HEADLESS = !args.headed;
+  MAKE_VIDEO = !args['no-video'];
+} catch (err) {
+  if (err instanceof UsageError) failUsage(err, USAGE);
+  throw err;
+}
 
 const SCENE_DIR = path.join(OUT, 'scenes');
 const FRAME_DIR = path.join(OUT, 'frames');
+// Clear stale frames first: ffmpeg globs the directory, so leftovers from a
+// previous longer run would be spliced into this render's video.
+rmSync(FRAME_DIR, { recursive: true, force: true });
 mkdirSync(SCENE_DIR, { recursive: true });
 mkdirSync(FRAME_DIR, { recursive: true });
 
@@ -90,12 +103,22 @@ const M = traj.length - 1;
 
 // Start-heavy log-spaced snapshot schedule over [0, M]. Early steps are where
 // the design visibly changes; later steps refine mm-scale dimensions.
+//
+// The sample parameter u must sweep the full [0, 1] so the schedule spans the
+// whole trajectory: an earlier version stopped as soon as the set reached n,
+// which on a 22k-step run truncated coverage at roughly step 200 (log spacing
+// packs the early indices densely) and rendered only the opening moments plus
+// the final frame. Log dedupe still collapses the head, so backfill linearly
+// until the requested frame count is met.
 function schedule(n) {
+  const wanted = Math.max(2, Math.min(n, M + 1));
   const idx = new Set([0, M]);
-  for (let i = 0; i < n * 3; i++) {
-    const u = i / (n * 3 - 1);
-    idx.add(Math.min(M, Math.round(Math.exp(Math.log(1 + M) * u)) - 1));
-    if (idx.size >= n) break;
+  for (let i = 0; i < wanted; i++) {
+    const u = i / (wanted - 1);
+    idx.add(Math.min(M, Math.max(0, Math.round(Math.exp(Math.log(1 + M) * u)) - 1)));
+  }
+  for (let i = 0; i < wanted && idx.size < wanted; i++) {
+    idx.add(Math.round((i * M) / (wanted - 1)));
   }
   return [...idx].sort((a, b) => a - b);
 }
@@ -148,7 +171,9 @@ await quiet(async () => {
       mu,
       file,
       carbon: n.carbon,
-      maxViol: Math.max(0, ...n.constraints.map((c) => c.g)),
+      // Same normalization the optimizer reports against (raw g values are not
+      // comparable across constraints; G_SCALE puts them on one scale).
+      maxViol: Math.max(0, ...n.constraints.map((c) => c.g / (G_SCALE[c.name] ?? 1))),
       activeConstraints: n.constraints.filter((c) => c.g > -1e-3).map((c) => c.name),
       bounds: header.bounds,
     });
@@ -156,6 +181,9 @@ await quiet(async () => {
     if (s % 25 === 0) realLog(`[morph] meshed snapshot ${s}/${snapIdx.length}`);
   }
 });
+// The wasm handle holds the whole batch's scratch buffers; free it before the
+// render phase rather than leaning on process exit (dispose is idempotent).
+processor.dispose();
 console.log(`[morph] meshing: ${snapIdx.length} models in ${((performance.now() - tMesh) / 1000).toFixed(1)}s`);
 console.log(`[morph] carbon ${snapshots[0].carbon.toFixed(0)} -> ${snapshots.at(-1).carbon.toFixed(0)} kgCO2e`);
 

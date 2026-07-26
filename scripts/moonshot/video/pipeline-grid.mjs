@@ -19,13 +19,14 @@
  */
 
 import path from 'node:path';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { generateModel } from '../../../tools/world-gym/generator.mjs';
 import { Rng } from '../../../tools/world-gym/lib/rng.mjs';
 import { serializeScene } from './lib/scene-bin.mjs';
 import { startRenderHost, orbitPosition, framingDistance, smootherstep, easeOutCubic } from './lib/render-host.mjs';
 import { hasFfmpeg, assembleMp4, exportSampleJpgs, defaultOutRoot } from './lib/assemble.mjs';
+import { parseArgs, intArg, stringArg, UsageError, failUsage } from './lib/args.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '../../..');
@@ -34,22 +35,34 @@ const { GeometryProcessor } = await import(
 );
 
 // ---- args ------------------------------------------------------------------
-const args = Object.fromEntries(
-  process.argv.slice(2).map((a) => {
-    const [k, v] = a.replace(/^--/, '').split('=');
-    return [k, v ?? true];
-  }),
-);
-const OUT = path.resolve(args.out ?? path.join(defaultOutRoot(), 'grid'));
-const COUNT = parseInt(args.count ?? '576', 10);
-const FRAMES = parseInt(args.frames ?? '240', 10);
-const FPS = parseInt(args.fps ?? '30', 10);
-const HEADLESS = !args.headed;
-const MAKE_VIDEO = !args['no-video'];
+const USAGE = `Usage: node scripts/moonshot/video/pipeline-grid.mjs \\
+  [--out DIR] [--count 576] [--frames 240] [--fps 30] [--headed] [--no-video]
+
+Both --key=value and --key value are accepted.`;
+
+let OUT, COUNT, FRAMES, FPS, HEADLESS, MAKE_VIDEO;
+try {
+  const args = parseArgs(process.argv.slice(2), {
+    booleans: ['headed', 'no-video'],
+    known: ['out', 'count', 'frames', 'fps'],
+  });
+  OUT = path.resolve(stringArg(args, 'out', path.join(defaultOutRoot(), 'grid')));
+  COUNT = intArg(args, 'count', 576);
+  FRAMES = intArg(args, 'frames', 240);
+  FPS = intArg(args, 'fps', 30);
+  HEADLESS = !args.headed;
+  MAKE_VIDEO = !args['no-video'];
+} catch (err) {
+  if (err instanceof UsageError) failUsage(err, USAGE);
+  throw err;
+}
 
 const SIDE = Math.ceil(Math.sqrt(COUNT));
 const SCENE_DIR = path.join(OUT, 'scenes');
 const FRAME_DIR = path.join(OUT, 'frames');
+// Clear stale frames first: ffmpeg globs the directory, so leftovers from a
+// previous longer run would be spliced into this render's video.
+rmSync(FRAME_DIR, { recursive: true, force: true });
 mkdirSync(SCENE_DIR, { recursive: true });
 mkdirSync(FRAME_DIR, { recursive: true });
 
@@ -139,6 +152,8 @@ for (let seed = 0; seed < COUNT; seed++) {
 }
 console.log = realLog;
 const meshMs = performance.now() - tMesh;
+// Free the wasm handle before rendering; dispose is idempotent.
+processor.dispose();
 console.log(`[grid] meshed ${COUNT} buildings in ${(meshMs / 1000).toFixed(1)}s`);
 
 // ---- 2. grid layout, hero, waves -------------------------------------------

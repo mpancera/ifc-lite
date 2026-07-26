@@ -86,26 +86,37 @@ export async function startRenderHost({ sceneDir, headless = true }) {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
 
-  const browser = await chromium.launch({
-    channel: 'chrome',
-    headless,
-    args: [
-      '--use-angle=metal',
-      '--enable-gpu',
-      '--force-color-profile=srgb',
-      '--disable-lcd-text',
-      '--hide-scrollbars',
-    ],
-  });
-  const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
-  page.on('pageerror', (err) => console.error('[page error]', err.message));
-  page.on('console', (msg) => {
-    if (msg.type() === 'error') console.error('[page console]', msg.text());
-  });
-  await page.goto(`${baseUrl}/viewer.html`);
-  await page.waitForFunction(() => window.__viewerUp === true, undefined, { timeout: 30000 });
-  const info = await page.evaluate(() => window.rendererInfo());
-  console.log(`[render-host] ${info.webgl2 ? 'WebGL2' : 'WebGL1'} on ${info.vendor}`);
+  // Everything from here to a live, ready page is guarded: a failure partway
+  // (chrome missing, viewer.html throwing, the ready-flag timing out) must not
+  // strand a browser process and a listening socket for the life of the run.
+  let browser;
+  let page;
+  try {
+    browser = await chromium.launch({
+      channel: 'chrome',
+      headless,
+      args: [
+        '--use-angle=metal',
+        '--enable-gpu',
+        '--force-color-profile=srgb',
+        '--disable-lcd-text',
+        '--hide-scrollbars',
+      ],
+    });
+    page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+    page.on('pageerror', (err) => console.error('[page error]', err.message));
+    page.on('console', (msg) => {
+      if (msg.type() === 'error') console.error('[page console]', msg.text());
+    });
+    await page.goto(`${baseUrl}/viewer.html`);
+    await page.waitForFunction(() => window.__viewerUp === true, undefined, { timeout: 30000 });
+    const info = await page.evaluate(() => window.rendererInfo());
+    console.log(`[render-host] ${info.webgl2 ? 'WebGL2' : 'WebGL1'} on ${info.vendor}`);
+  } catch (err) {
+    await browser?.close().catch(() => {});
+    await new Promise((resolve) => server.close(resolve));
+    throw err;
+  }
 
   async function initScene(cfg) {
     return page.evaluate((c) => window.initScene(c), cfg);
