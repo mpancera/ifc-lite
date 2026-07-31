@@ -30,7 +30,8 @@ export type AddElementType =
   | 'space'
   | 'roof'
   | 'plate'
-  | 'member';
+  | 'member'
+  | 'sensor';
 export type AddElementSlabMode = 'rectangle' | 'polygon';
 
 /**
@@ -103,6 +104,15 @@ export interface AddElementMemberParams {
   Height: number;
 }
 
+/** Small MEP/building-automation device (fire detector, sensor, etc.) — IfcSensor. */
+export interface AddElementSensorParams {
+  Width: number;
+  Depth: number;
+  Height: number;
+  /** IfcSensorTypeEnum value (without dots). Ignored on IFC2X3. */
+  PredefinedType: string;
+}
+
 /**
  * Auto-space generation settings — ties into `generateSpacesFromWalls`.
  * Lives here so the panel form survives type-switches.
@@ -162,6 +172,7 @@ export interface AddElementSlice {
   addElementRoofParams: AddElementRoofParams;
   addElementPlateParams: AddElementPlateParams;
   addElementMemberParams: AddElementMemberParams;
+  addElementSensorParams: AddElementSensorParams;
   addElementAutoSpaceParams: AddElementAutoSpaceParams;
   addElementAutoSpacePreview: AddElementAutoSpacePreview | null;
 
@@ -185,6 +196,7 @@ export interface AddElementSlice {
   setAddElementRoofParams: (p: Partial<AddElementRoofParams>) => void;
   setAddElementPlateParams: (p: Partial<AddElementPlateParams>) => void;
   setAddElementMemberParams: (p: Partial<AddElementMemberParams>) => void;
+  setAddElementSensorParams: (p: Partial<AddElementSensorParams>) => void;
   setAddElementAutoSpaceParams: (p: Partial<AddElementAutoSpaceParams>) => void;
   setAddElementAutoSpacePreview: (preview: AddElementAutoSpacePreview | null) => void;
   setAddElementSlabMode: (m: AddElementSlabMode) => void;
@@ -205,6 +217,8 @@ const ADD_ELEMENT_DEFAULTS = {
   roof: { Width: 8, Depth: 8, Thickness: 0.3 } as AddElementRoofParams,
   plate: { Width: 1, Depth: 1, Thickness: 0.02 } as AddElementPlateParams,
   member: { Width: 0.1, Height: 0.1 } as AddElementMemberParams,
+  // Ceiling-puck-sized default (typical smoke/fire detector housing).
+  sensor: { Width: 0.1, Depth: 0.1, Height: 0.05, PredefinedType: 'FIRESENSOR' } as AddElementSensorParams,
   autoSpace: {
     SnapTolerance: 0.1,
     MinArea: 0.5,
@@ -228,6 +242,7 @@ export const createAddElementSlice: StateCreator<AddElementSlice, [], [], AddEle
   addElementRoofParams: { ...ADD_ELEMENT_DEFAULTS.roof },
   addElementPlateParams: { ...ADD_ELEMENT_DEFAULTS.plate },
   addElementMemberParams: { ...ADD_ELEMENT_DEFAULTS.member },
+  addElementSensorParams: { ...ADD_ELEMENT_DEFAULTS.sensor },
   addElementAutoSpaceParams: { ...ADD_ELEMENT_DEFAULTS.autoSpace },
   addElementAutoSpacePreview: null,
   addElementSlabMode: 'rectangle',
@@ -261,6 +276,8 @@ export const createAddElementSlice: StateCreator<AddElementSlice, [], [], AddEle
     set((s) => ({ addElementPlateParams: { ...s.addElementPlateParams, ...p } })),
   setAddElementMemberParams: (p) =>
     set((s) => ({ addElementMemberParams: { ...s.addElementMemberParams, ...p } })),
+  setAddElementSensorParams: (p) =>
+    set((s) => ({ addElementSensorParams: { ...s.addElementSensorParams, ...p } })),
   setAddElementAutoSpaceParams: (p) =>
     set((s) => ({ addElementAutoSpaceParams: { ...s.addElementAutoSpaceParams, ...p } })),
   setAddElementAutoSpacePreview: (preview) =>

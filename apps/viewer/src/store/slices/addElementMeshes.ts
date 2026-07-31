@@ -34,6 +34,7 @@ import type {
   AddElementRoofParams,
   AddElementPlateParams,
   AddElementMemberParams,
+  AddElementSensorParams,
 } from './addElementSlice';
 
 type Vec3 = [number, number, number];
@@ -50,6 +51,7 @@ const COLORS: Record<AddElementType, [number, number, number, number]> = {
   roof:   [0.55, 0.35, 0.30, 1.0],
   plate:  [0.70, 0.70, 0.72, 1.0],
   member: [0.55, 0.55, 0.50, 1.0],
+  sensor: [0.90, 0.15, 0.15, 1.0],
 };
 
 const IFC_TYPE: Record<AddElementType, string> = {
@@ -63,6 +65,7 @@ const IFC_TYPE: Record<AddElementType, string> = {
   roof:   'IfcRoof',
   plate:  'IfcPlate',
   member: 'IfcMember',
+  sensor: 'IfcSensor',
 };
 
 export interface ElementBuildContext {
@@ -82,6 +85,7 @@ export type ElementMeshPayload =
   | { type: 'column'; params: AddElementColumnParams; position: Vec3 }
   | { type: 'door'; params: AddElementDoorParams; position: Vec3 }
   | { type: 'window'; params: AddElementWindowParams; position: Vec3 }
+  | { type: 'sensor'; params: AddElementSensorParams; position: Vec3 }
   | { type: 'slab'; params: AddElementSlabParams; corners: Vec3[] }
   | { type: 'space'; params: AddElementSpaceParams; corners: Vec3[] }
   | { type: 'roof'; params: AddElementRoofParams; corners: Vec3[] }
@@ -116,6 +120,10 @@ export function buildElementMesh(ctx: ElementBuildContext): MeshData | null {
     case 'window': {
       const { Width, Height, FrameThickness } = payload.params;
       return buildAxisBox(globalId, type, payload.position, Width, FrameThickness, Height, storeyElevation);
+    }
+    case 'sensor': {
+      const { Width, Depth, Height } = payload.params;
+      return buildAxisBox(globalId, type, payload.position, Width, Depth, Height, storeyElevation);
     }
     case 'slab':
     case 'roof':

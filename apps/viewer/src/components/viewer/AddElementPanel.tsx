@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { Box, Cog, DoorOpen, Home, Layers, Minus, Square, SquareDashedBottom, Wand2, X } from 'lucide-react';
+import { Box, Cog, DoorOpen, Home, Layers, Minus, Siren, Square, SquareDashedBottom, Wand2, X } from 'lucide-react';
 import { toast } from '@/components/ui/toast';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -51,6 +51,7 @@ const ELEMENT_OPTIONS: ElementOption[] = [
   { type: 'roof', label: 'Roof', Icon: Square, hint: 'Same shape as a slab — flat-roof emit with .FLAT_ROOF. PredefinedType. Pitched roofs need IfcCreator.addIfcGableRoof.' },
   { type: 'plate', label: 'Plate', Icon: Square, hint: 'Thin flat plate (steel / gusset). Rectangle or polygon profile, extruded by Thickness.' },
   { type: 'member', label: 'Member', Icon: Cog, hint: 'Generic structural member (brace, post, strut). Click Start, then End. Pick PredefinedType to set role.' },
+  { type: 'sensor', label: 'Sensor', Icon: Siren, hint: 'Single click to drop a small MEP device (e.g. a fire detector). Emits IfcSensor — pick PredefinedType below.' },
 ];
 
 interface StoreyOption {
@@ -93,6 +94,8 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
   const setPlateParams = useViewerStore((s) => s.setAddElementPlateParams);
   const memberParams = useViewerStore((s) => s.addElementMemberParams);
   const setMemberParams = useViewerStore((s) => s.setAddElementMemberParams);
+  const sensorParams = useViewerStore((s) => s.addElementSensorParams);
+  const setSensorParams = useViewerStore((s) => s.setAddElementSensorParams);
 
   const slabMode = useViewerStore((s) => s.addElementSlabMode);
   const setSlabMode = useViewerStore((s) => s.setAddElementSlabMode);
@@ -347,6 +350,39 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
               <NumberField label="Height" suffix="m" value={memberParams.Height} min={0.01} onChange={(v) => setMemberParams({ Height: v })} />
             </div>
           )}
+
+          {addElementType === 'sensor' && (
+            <div className="space-y-2">
+              <div className="grid grid-cols-3 gap-2">
+                <NumberField label="Width" suffix="m" value={sensorParams.Width} min={0.01} onChange={(v) => setSensorParams({ Width: v })} />
+                <NumberField label="Depth" suffix="m" value={sensorParams.Depth} min={0.01} onChange={(v) => setSensorParams({ Depth: v })} />
+                <NumberField label="Height" suffix="m" value={sensorParams.Height} min={0.01} onChange={(v) => setSensorParams({ Height: v })} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400" htmlFor="sensor-predefined-type">
+                  Type
+                </Label>
+                <Select
+                  value={sensorParams.PredefinedType}
+                  onValueChange={(v) => setSensorParams({ PredefinedType: v })}
+                >
+                  <SelectTrigger id="sensor-predefined-type" className="h-8 font-mono text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="FIRESENSOR" className="font-mono text-xs">FIRESENSOR</SelectItem>
+                    <SelectItem value="SMOKESENSOR" className="font-mono text-xs">SMOKESENSOR</SelectItem>
+                    <SelectItem value="HEATSENSOR" className="font-mono text-xs">HEATSENSOR</SelectItem>
+                    <SelectItem value="GASSENSOR" className="font-mono text-xs">GASSENSOR</SelectItem>
+                    <SelectItem value="MOVEMENTSENSOR" className="font-mono text-xs">MOVEMENTSENSOR</SelectItem>
+                    <SelectItem value="CO2SENSOR" className="font-mono text-xs">CO2SENSOR</SelectItem>
+                    <SelectItem value="USERDEFINED" className="font-mono text-xs">USERDEFINED</SelectItem>
+                    <SelectItem value="NOTDEFINED" className="font-mono text-xs">NOTDEFINED</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Auto Spaces — wall-graph face finder, runs only when the
@@ -431,7 +467,7 @@ function DropGuidance({ ready, type, slabMode, pendingCount, hoverDistance, onCl
   let primary: string;
   let secondary: string;
   // Single-click placements share the same prompt shape.
-  if (type === 'column' || type === 'door' || type === 'window') {
+  if (type === 'column' || type === 'door' || type === 'window' || type === 'sensor') {
     primary = `Click in 3D to drop the ${type}.`;
     secondary = 'Keep clicking to place more — Esc to exit.';
   } else if (type === 'wall' || type === 'beam' || type === 'member') {

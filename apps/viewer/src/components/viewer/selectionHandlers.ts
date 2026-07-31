@@ -9,6 +9,7 @@
  */
 
 import type { MouseHandlerContext } from './mouseHandlerTypes.js';
+import type { SensorInStoreParams } from '@ifc-lite/create';
 import { useViewerStore } from '@/store';
 import { fromGlobalIdFromModels, toGlobalIdFromModels } from '@/store/globalId';
 import { pointInPolygon } from '@/lib/polygon-clip';
@@ -685,6 +686,14 @@ async function handleAddElementDrop(
     finishAddElement(state.addWindow(modelId, storeyId, {
       Position: ifc, Width: p.Width, Height: p.Height, FrameThickness: p.FrameThickness,
     }), modelId, 'Window');
+    return;
+  }
+  if (type === 'sensor') {
+    const ifc = rendererPointToIfcStoreyLocal(point);
+    const p = state.addElementSensorParams;
+    finishAddElement(state.addSensor(modelId, storeyId, {
+      Position: ifc, Width: p.Width, Depth: p.Depth, Height: p.Height, PredefinedType: p.PredefinedType as SensorInStoreParams['PredefinedType'],
+    }), modelId, 'Sensor');
     return;
   }
 

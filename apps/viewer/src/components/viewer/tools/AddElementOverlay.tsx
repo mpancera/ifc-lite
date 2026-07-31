@@ -162,8 +162,8 @@ export function AddElementOverlay() {
         </filter>
       </defs>
 
-      {/* Hover-ghost for single-click placements — column/door/window. */}
-      {(type === 'column' || type === 'door' || type === 'window') && hoverPoint && (
+      {/* Hover-ghost for single-click placements — column/door/window/sensor. */}
+      {(type === 'column' || type === 'door' || type === 'window' || type === 'sensor') && hoverPoint && (
         <SingleClickGhost
           type={type}
           hoverWorld={hoverPoint}
@@ -319,7 +319,7 @@ function SingleClickGhost({
   hoverWorld,
   projection,
 }: {
-  type: 'column' | 'door' | 'window';
+  type: 'column' | 'door' | 'window' | 'sensor';
   hoverWorld: AddElementVec3;
   projection: Project;
 }) {
@@ -331,9 +331,12 @@ function SingleClickGhost({
   } else if (type === 'door') {
     const p = state.addElementDoorParams;
     sx = p.Width; sy = p.FrameThickness; sz = p.Height;
-  } else {
+  } else if (type === 'window') {
     const p = state.addElementWindowParams;
     sx = p.Width; sy = p.FrameThickness; sz = p.Height;
+  } else {
+    const p = state.addElementSensorParams;
+    sx = p.Width; sy = p.Depth; sz = p.Height;
   }
   // Hover is in renderer-frame; project the axis-aligned box around it.
   const hx = sx / 2;

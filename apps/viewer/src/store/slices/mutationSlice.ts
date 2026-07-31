@@ -19,6 +19,7 @@ import {
   addMemberToStore,
   addPlateToStore,
   addRoofToStore,
+  addSensorToStore,
   addSlabToStore,
   addSpaceToStore,
   addWallToStore,
@@ -36,6 +37,7 @@ import {
   type MemberInStoreParams,
   type PlateInStoreParams,
   type RoofInStoreParams,
+  type SensorInStoreParams,
   type SlabInStoreParams,
   type SpaceInStoreParams,
   type WallInStoreParams,
@@ -634,6 +636,12 @@ export interface MutationSlice {
     modelId: string,
     storeyExpressId: number,
     params: MemberInStoreParams
+  ) => { expressId: number } | { error: string };
+  /** Add a free-standing IfcSensor (fire detector, etc.) anchored to a storey. */
+  addSensor: (
+    modelId: string,
+    storeyExpressId: number,
+    params: SensorInStoreParams
   ) => { expressId: number } | { error: string };
   /**
    * Auto-generate IfcSpace volumes for every enclosed area formed by
@@ -2440,6 +2448,16 @@ export const createMutationSlice: StateCreator<
     get, set, modelId, storeyExpressId, 'IFCMEMBER', 'add member',
     (editor, anchor) => addMemberToStore(editor, anchor, params).memberId,
     { type: 'member', params: { Width: params.Width, Height: params.Height }, start: params.Start, end: params.End },
+  ),
+
+  addSensor: (modelId, storeyExpressId, params) => runInStoreElementBuilder(
+    get, set, modelId, storeyExpressId, 'IFCSENSOR', 'add sensor',
+    (editor, anchor) => addSensorToStore(editor, anchor, params).sensorId,
+    {
+      type: 'sensor',
+      params: { Width: params.Width ?? 0.1, Depth: params.Depth ?? 0.1, Height: params.Height ?? 0.05, PredefinedType: params.PredefinedType ?? 'NOTDEFINED' },
+      position: params.Position,
+    },
   ),
 
   generateSpacesFromWalls: (modelId, storeyExpressId, options) => {

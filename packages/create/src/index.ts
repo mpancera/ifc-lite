@@ -31,6 +31,7 @@ export { addSlabToStore, type SlabInStoreParams, type SlabRectangleParams, type 
 export { addBeamToStore, type BeamInStoreParams, type BeamBuildResult } from './in-store/beam.js';
 export { addDoorToStore, type DoorInStoreParams, type DoorBuildResult } from './in-store/door.js';
 export { addWindowToStore, type WindowInStoreParams, type WindowBuildResult } from './in-store/window.js';
+export { addSensorToStore, type SensorInStoreParams, type SensorBuildResult, type SensorPredefinedType } from './in-store/sensor.js';
 export { addSpaceToStore, type SpaceInStoreParams, type SpaceRectangleParams, type SpacePolygonParams, type SpaceBuildResult } from './in-store/space.js';
 export { addRoofToStore, type RoofInStoreParams, type RoofRectangleParams, type RoofPolygonParams, type RoofBuildResult } from './in-store/roof.js';
 export { addPlateToStore, type PlateInStoreParams, type PlateRectangleParams, type PlatePolygonParams, type PlateBuildResult } from './in-store/plate.js';
