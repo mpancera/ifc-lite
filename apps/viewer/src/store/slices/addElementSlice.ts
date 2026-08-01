@@ -19,6 +19,7 @@
  */
 
 import { type StateCreator } from 'zustand';
+import type { CatalogEntry } from '@/lib/catalog';
 
 export type AddElementType =
   | 'wall'
@@ -31,7 +32,8 @@ export type AddElementType =
   | 'roof'
   | 'plate'
   | 'member'
-  | 'sensor';
+  | 'sensor'
+  | 'library';
 export type AddElementSlabMode = 'rectangle' | 'polygon';
 
 /**
@@ -113,6 +115,13 @@ export interface AddElementSensorParams {
   PredefinedType: string;
 }
 
+/** Placement box for a library-catalog element — seeded from the selected entry's geometry hint, editable per placement. */
+export interface AddElementLibraryParams {
+  Width: number;
+  Depth: number;
+  Height: number;
+}
+
 /**
  * Auto-space generation settings — ties into `generateSpacesFromWalls`.
  * Lives here so the panel form survives type-switches.
@@ -173,6 +182,9 @@ export interface AddElementSlice {
   addElementPlateParams: AddElementPlateParams;
   addElementMemberParams: AddElementMemberParams;
   addElementSensorParams: AddElementSensorParams;
+  addElementLibraryParams: AddElementLibraryParams;
+  /** Currently selected catalog entry for the `'library'` type; `null` until the user picks one. */
+  addElementLibrarySelection: CatalogEntry | null;
   addElementAutoSpaceParams: AddElementAutoSpaceParams;
   addElementAutoSpacePreview: AddElementAutoSpacePreview | null;
 
@@ -197,6 +209,9 @@ export interface AddElementSlice {
   setAddElementPlateParams: (p: Partial<AddElementPlateParams>) => void;
   setAddElementMemberParams: (p: Partial<AddElementMemberParams>) => void;
   setAddElementSensorParams: (p: Partial<AddElementSensorParams>) => void;
+  setAddElementLibraryParams: (p: Partial<AddElementLibraryParams>) => void;
+  /** Selecting an entry reseeds the dimension params from its geometry hint. */
+  setAddElementLibrarySelection: (entry: CatalogEntry | null) => void;
   setAddElementAutoSpaceParams: (p: Partial<AddElementAutoSpaceParams>) => void;
   setAddElementAutoSpacePreview: (preview: AddElementAutoSpacePreview | null) => void;
   setAddElementSlabMode: (m: AddElementSlabMode) => void;
@@ -219,6 +234,7 @@ const ADD_ELEMENT_DEFAULTS = {
   member: { Width: 0.1, Height: 0.1 } as AddElementMemberParams,
   // Ceiling-puck-sized default (typical smoke/fire detector housing).
   sensor: { Width: 0.1, Depth: 0.1, Height: 0.05, PredefinedType: 'FIRESENSOR' } as AddElementSensorParams,
+  library: { Width: 0.1, Depth: 0.1, Height: 0.05 } as AddElementLibraryParams,
   autoSpace: {
     SnapTolerance: 0.1,
     MinArea: 0.5,
@@ -243,6 +259,8 @@ export const createAddElementSlice: StateCreator<AddElementSlice, [], [], AddEle
   addElementPlateParams: { ...ADD_ELEMENT_DEFAULTS.plate },
   addElementMemberParams: { ...ADD_ELEMENT_DEFAULTS.member },
   addElementSensorParams: { ...ADD_ELEMENT_DEFAULTS.sensor },
+  addElementLibraryParams: { ...ADD_ELEMENT_DEFAULTS.library },
+  addElementLibrarySelection: null,
   addElementAutoSpaceParams: { ...ADD_ELEMENT_DEFAULTS.autoSpace },
   addElementAutoSpacePreview: null,
   addElementSlabMode: 'rectangle',
@@ -278,6 +296,15 @@ export const createAddElementSlice: StateCreator<AddElementSlice, [], [], AddEle
     set((s) => ({ addElementMemberParams: { ...s.addElementMemberParams, ...p } })),
   setAddElementSensorParams: (p) =>
     set((s) => ({ addElementSensorParams: { ...s.addElementSensorParams, ...p } })),
+  setAddElementLibraryParams: (p) =>
+    set((s) => ({ addElementLibraryParams: { ...s.addElementLibraryParams, ...p } })),
+  setAddElementLibrarySelection: (entry) =>
+    set({
+      addElementLibrarySelection: entry,
+      addElementLibraryParams: entry
+        ? { Width: entry.geometry.width, Depth: entry.geometry.depth, Height: entry.geometry.height }
+        : { ...ADD_ELEMENT_DEFAULTS.library },
+    }),
   setAddElementAutoSpaceParams: (p) =>
     set((s) => ({ addElementAutoSpaceParams: { ...s.addElementAutoSpaceParams, ...p } })),
   setAddElementAutoSpacePreview: (preview) =>

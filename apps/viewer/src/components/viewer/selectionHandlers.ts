@@ -696,6 +696,25 @@ async function handleAddElementDrop(
     }), modelId, 'Sensor');
     return;
   }
+  if (type === 'library') {
+    const entry = state.addElementLibrarySelection;
+    if (!entry) {
+      toast.error('Pick an element from the library first');
+      return;
+    }
+    const ifc = rendererPointToIfcStoreyLocal(point);
+    const p = state.addElementLibraryParams;
+    finishAddElement(state.addLibraryElement(modelId, storeyId, {
+      IfcEntity: entry.ifc.entity,
+      PredefinedType: entry.ifc.predefinedType,
+      ObjectType: entry.ifc.objectType,
+      Position: ifc,
+      Width: p.Width, Depth: p.Depth, Height: p.Height,
+      Discipline: entry.discipline,
+      Name: entry.label,
+    }), modelId, entry.label);
+    return;
+  }
 
   if (type === 'wall' || type === 'beam' || type === 'member') {
     const pending = state.addElementPendingPoints;

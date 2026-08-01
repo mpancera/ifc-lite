@@ -40,6 +40,7 @@ export function AddElementOverlay() {
   const pendingPoints = useViewerStore((s) => s.addElementPendingPoints);
   const hoverPoint = useViewerStore((s) => s.addElementHoverPoint);
   const autoSpacePreview = useViewerStore((s) => s.addElementAutoSpacePreview);
+  const addElementLibrarySelection = useViewerStore((s) => s.addElementLibrarySelection);
   const projectToScreen = useViewerStore((s) => s.cameraCallbacks.projectToScreen);
   const { models, ifcDataStore } = useIfc();
   const addElementModelId = useViewerStore((s) => s.addElementModelId);
@@ -162,10 +163,18 @@ export function AddElementOverlay() {
         </filter>
       </defs>
 
-      {/* Hover-ghost for single-click placements — column/door/window/sensor. */}
+      {/* Hover-ghost for single-click placements — column/door/window/sensor/library. */}
       {(type === 'column' || type === 'door' || type === 'window' || type === 'sensor') && hoverPoint && (
         <SingleClickGhost
           type={type}
+          hoverWorld={hoverPoint}
+          projection={projection}
+        />
+      )}
+      {/* Library ghost only once an entry is actually selected — otherwise there's nothing to preview. */}
+      {type === 'library' && hoverPoint && addElementLibrarySelection && (
+        <SingleClickGhost
+          type="library"
           hoverWorld={hoverPoint}
           projection={projection}
         />
@@ -319,7 +328,7 @@ function SingleClickGhost({
   hoverWorld,
   projection,
 }: {
-  type: 'column' | 'door' | 'window' | 'sensor';
+  type: 'column' | 'door' | 'window' | 'sensor' | 'library';
   hoverWorld: AddElementVec3;
   projection: Project;
 }) {
@@ -334,8 +343,11 @@ function SingleClickGhost({
   } else if (type === 'window') {
     const p = state.addElementWindowParams;
     sx = p.Width; sy = p.FrameThickness; sz = p.Height;
-  } else {
+  } else if (type === 'sensor') {
     const p = state.addElementSensorParams;
+    sx = p.Width; sy = p.Depth; sz = p.Height;
+  } else {
+    const p = state.addElementLibraryParams;
     sx = p.Width; sy = p.Depth; sz = p.Height;
   }
   // Hover is in renderer-frame; project the axis-aligned box around it.

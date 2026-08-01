@@ -18,6 +18,7 @@ import {
   addDoorToStore,
   addMemberToStore,
   addPlateToStore,
+  addLibraryElementToStore,
   addRoofToStore,
   addSensorToStore,
   addSlabToStore,
@@ -34,6 +35,7 @@ import {
   type DuplicateInStoreOptions,
   type GenerateSpacesOptions,
   type GenerateSpacesResult,
+  type LibraryElementInStoreParams,
   type MemberInStoreParams,
   type PlateInStoreParams,
   type RoofInStoreParams,
@@ -46,6 +48,7 @@ import {
 import { EntityExtractor, type MapConversion, type ProjectedCRS } from '@ifc-lite/parser';
 import type { MeshData } from '@ifc-lite/geometry';
 import { getEntityBounds, getEntityCenter } from '@/utils/viewportUtils';
+import type { CatalogEntry } from '@/lib/catalog';
 import { toGlobalIdFromModels } from '../globalId.js';
 import { buildElementMesh, type ElementMeshPayload } from './addElementMeshes.js';
 import type { AddElementType } from './addElementSlice.js';
@@ -642,6 +645,12 @@ export interface MutationSlice {
     modelId: string,
     storeyExpressId: number,
     params: SensorInStoreParams
+  ) => { expressId: number } | { error: string };
+  /** Add a free-standing element of any catalog-selected IFC entity, anchored to a storey. */
+  addLibraryElement: (
+    modelId: string,
+    storeyExpressId: number,
+    params: LibraryElementInStoreParams & { Discipline: CatalogEntry['discipline'] }
   ) => { expressId: number } | { error: string };
   /**
    * Auto-generate IfcSpace volumes for every enclosed area formed by
@@ -2449,6 +2458,21 @@ export const createMutationSlice: StateCreator<
     (editor, anchor) => addMemberToStore(editor, anchor, params).memberId,
     { type: 'member', params: { Width: params.Width, Height: params.Height }, start: params.Start, end: params.End },
   ),
+
+  addLibraryElement: (modelId, storeyExpressId, params) => {
+    const { Discipline, ...ifcParams } = params;
+    return runInStoreElementBuilder(
+      get, set, modelId, storeyExpressId, ifcParams.IfcEntity.toUpperCase(), `add ${ifcParams.IfcEntity}`,
+      (editor, anchor) => addLibraryElementToStore(editor, anchor, ifcParams).elementId,
+      {
+        type: 'library',
+        params: { Width: ifcParams.Width ?? 0.1, Depth: ifcParams.Depth ?? 0.1, Height: ifcParams.Height ?? 0.05 },
+        position: ifcParams.Position,
+        ifcEntity: ifcParams.IfcEntity,
+        discipline: Discipline,
+      },
+    );
+  },
 
   addSensor: (modelId, storeyExpressId, params) => runInStoreElementBuilder(
     get, set, modelId, storeyExpressId, 'IFCSENSOR', 'add sensor',

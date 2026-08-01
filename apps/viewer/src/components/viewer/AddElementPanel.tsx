@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { Box, Cog, DoorOpen, Home, Layers, Minus, Siren, Square, SquareDashedBottom, Wand2, X } from 'lucide-react';
+import { Box, Cog, DoorOpen, Home, Layers, Library, Minus, Search, Siren, Square, SquareDashedBottom, Wand2, X } from 'lucide-react';
 import { toast } from '@/components/ui/toast';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -31,6 +31,7 @@ import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
 import { EntityNode } from '@ifc-lite/query';
 import type { AddElementType } from '@/store/slices/addElementSlice';
+import { useCatalogEntries, type CatalogEntry } from '@/lib/catalog';
 
 interface ElementOption {
   type: AddElementType;
@@ -52,6 +53,7 @@ const ELEMENT_OPTIONS: ElementOption[] = [
   { type: 'plate', label: 'Plate', Icon: Square, hint: 'Thin flat plate (steel / gusset). Rectangle or polygon profile, extruded by Thickness.' },
   { type: 'member', label: 'Member', Icon: Cog, hint: 'Generic structural member (brace, post, strut). Click Start, then End. Pick PredefinedType to set role.' },
   { type: 'sensor', label: 'Sensor', Icon: Siren, hint: 'Single click to drop a small MEP device (e.g. a fire detector). Emits IfcSensor — pick PredefinedType below.' },
+  { type: 'library', label: 'Library', Icon: Library, hint: 'Pick an installation element from the catalog below, then click in 3D to place it.' },
 ];
 
 interface StoreyOption {
@@ -96,6 +98,10 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
   const setMemberParams = useViewerStore((s) => s.setAddElementMemberParams);
   const sensorParams = useViewerStore((s) => s.addElementSensorParams);
   const setSensorParams = useViewerStore((s) => s.setAddElementSensorParams);
+  const libraryParams = useViewerStore((s) => s.addElementLibraryParams);
+  const setLibraryParams = useViewerStore((s) => s.setAddElementLibraryParams);
+  const librarySelection = useViewerStore((s) => s.addElementLibrarySelection);
+  const setLibrarySelection = useViewerStore((s) => s.setAddElementLibrarySelection);
 
   const slabMode = useViewerStore((s) => s.addElementSlabMode);
   const setSlabMode = useViewerStore((s) => s.setAddElementSlabMode);
@@ -284,7 +290,18 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
           </section>
         )}
 
+        {/* Library browser — replaces the generic dimensions section for the 'library' type */}
+        {addElementType === 'library' && (
+          <LibrarySection
+            selection={librarySelection}
+            onSelect={setLibrarySelection}
+            params={libraryParams}
+            onParamsChange={setLibraryParams}
+          />
+        )}
+
         {/* Type-specific dimensions */}
+        {addElementType !== 'library' && (
         <section className="space-y-2 pt-1">
           <Label className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
             {activeOption.label} dimensions
@@ -384,6 +401,7 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
             </div>
           )}
         </section>
+        )}
 
         {/* Auto Spaces — wall-graph face finder, runs only when the
             current type is 'space' so the panel stays focused. */}
@@ -404,6 +422,7 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
             ? distance2D(pendingPoints[pendingPoints.length - 1], hoverPoint)
             : null}
           onClearPending={clearPending}
+          libraryLabel={librarySelection?.label ?? null}
         />
 
         <p className="text-[10px] font-mono text-zinc-400 dark:text-zinc-600 leading-snug">
@@ -452,10 +471,12 @@ interface DropGuidanceProps {
   pendingCount: number;
   hoverDistance: number | null;
   onClearPending: () => void;
+  /** Selected catalog entry's label, only meaningful when `type === 'library'`. */
+  libraryLabel: string | null;
 }
 
 /** Stateful guidance pane — mirrors the multi-click flow so the user always knows what comes next. */
-function DropGuidance({ ready, type, slabMode, pendingCount, hoverDistance, onClearPending }: DropGuidanceProps) {
+function DropGuidance({ ready, type, slabMode, pendingCount, hoverDistance, onClearPending, libraryLabel }: DropGuidanceProps) {
   if (!ready) {
     return (
       <section className="mt-2 rounded-sm border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 p-3 text-[11px] font-mono text-zinc-500 dark:text-zinc-400">
@@ -466,8 +487,16 @@ function DropGuidance({ ready, type, slabMode, pendingCount, hoverDistance, onCl
 
   let primary: string;
   let secondary: string;
-  // Single-click placements share the same prompt shape.
-  if (type === 'column' || type === 'door' || type === 'window' || type === 'sensor') {
+  if (type === 'library') {
+    if (libraryLabel) {
+      primary = `Click in 3D to drop the ${libraryLabel}.`;
+      secondary = 'Keep clicking to place more — Esc to exit.';
+    } else {
+      primary = 'Pick an element from the library above first.';
+      secondary = 'The placement tool activates once you select one.';
+    }
+  } else if (type === 'column' || type === 'door' || type === 'window' || type === 'sensor') {
+    // Single-click placements share the same prompt shape.
     primary = `Click in 3D to drop the ${type}.`;
     secondary = 'Keep clicking to place more — Esc to exit.';
   } else if (type === 'wall' || type === 'beam' || type === 'member') {
@@ -767,6 +796,132 @@ function AutoSpacesSection({ modelId, storeyId }: AutoSpacesSectionProps) {
       )}
     </section>
   );
+}
+
+const DISCIPLINE_FILTERS: Array<{ value: 'all' | CatalogEntry['discipline']; label: string }> = [
+  { value: 'all', label: 'All' },
+  { value: 'fire', label: 'Fire' },
+  { value: 'security', label: 'Security' },
+  { value: 'intrusion', label: 'Intrusion' },
+  { value: 'other', label: 'Other' },
+];
+
+interface LibrarySectionProps {
+  selection: CatalogEntry | null;
+  onSelect: (entry: CatalogEntry | null) => void;
+  params: { Width: number; Depth: number; Height: number };
+  onParamsChange: (p: Partial<{ Width: number; Depth: number; Height: number }>) => void;
+}
+
+/**
+ * Searchable/filterable catalog browser — the F3 "Element Library"
+ * surface. Replaces one fixed type-chip per element (the earlier Sensor
+ * POC's approach) with a single data-driven list fed by whatever
+ * `CatalogProvider` is active (`useCatalogEntries`, generic local seed
+ * data today).
+ */
+function LibrarySection({ selection, onSelect, params, onParamsChange }: LibrarySectionProps) {
+  const entries = useCatalogEntries();
+  const [search, setSearch] = useState('');
+  const [discipline, setDiscipline] = useState<'all' | CatalogEntry['discipline']>('all');
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return entries.filter((e) => {
+      if (discipline !== 'all' && e.discipline !== discipline) return false;
+      if (!q) return true;
+      return e.label.toLowerCase().includes(q) || e.category.toLowerCase().includes(q);
+    });
+  }, [entries, search, discipline]);
+
+  return (
+    <section className="space-y-2 pt-1">
+      <Label className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+        Element Library
+      </Label>
+
+      <div className="relative">
+        <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-zinc-400" />
+        <Input
+          type="text"
+          placeholder="Search elements…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="h-8 pl-7 font-mono text-xs"
+        />
+      </div>
+
+      <div className="flex flex-wrap gap-1">
+        {DISCIPLINE_FILTERS.map(({ value, label }) => (
+          <ModeChip key={value} selected={discipline === value} onClick={() => setDiscipline(value)}>
+            {label}
+          </ModeChip>
+        ))}
+      </div>
+
+      <div className="max-h-48 overflow-y-auto rounded-sm border border-zinc-200 dark:border-zinc-800 divide-y divide-zinc-100 dark:divide-zinc-900">
+        {filtered.length === 0 && (
+          <p className="p-3 text-[11px] font-mono text-zinc-500 dark:text-zinc-400">
+            {entries.length === 0 ? 'Loading catalog…' : 'No elements match this search.'}
+          </p>
+        )}
+        {filtered.map((entry) => {
+          const active = selection?.id === entry.id;
+          return (
+            <button
+              key={entry.id}
+              type="button"
+              onClick={() => onSelect(entry)}
+              aria-pressed={active}
+              className={[
+                'w-full flex items-center gap-2 px-2 py-1.5 text-left transition-colors',
+                active
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40'
+                  : 'hover:bg-zinc-50 dark:hover:bg-zinc-900',
+              ].join(' ')}
+            >
+              <DisciplineDot discipline={entry.discipline} />
+              <span className="min-w-0 flex-1">
+                <span className="block text-[11px] font-mono text-zinc-900 dark:text-zinc-100 truncate">
+                  {entry.label}
+                </span>
+                <span className="block text-[10px] font-mono text-zinc-500 dark:text-zinc-400 truncate">
+                  {entry.category} · {entry.ifc.entity}
+                  {entry.ifc.predefinedType ? `.${entry.ifc.predefinedType}` : ''}
+                </span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {selection && (
+        <div className="rounded-sm border border-emerald-200 dark:border-emerald-900 bg-emerald-50/50 dark:bg-emerald-950/20 p-2 space-y-2">
+          <div className="text-[10px] font-mono text-emerald-800 dark:text-emerald-300">
+            Selected: <span className="font-semibold">{selection.label}</span>
+            {selection.description && (
+              <span className="block text-zinc-500 dark:text-zinc-400 mt-0.5">{selection.description}</span>
+            )}
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            <NumberField label="Width" suffix="m" value={params.Width} min={0.01} onChange={(v) => onParamsChange({ Width: v })} />
+            <NumberField label="Depth" suffix="m" value={params.Depth} min={0.01} onChange={(v) => onParamsChange({ Depth: v })} />
+            <NumberField label="Height" suffix="m" value={params.Height} min={0.01} onChange={(v) => onParamsChange({ Height: v })} />
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function DisciplineDot({ discipline }: { discipline: CatalogEntry['discipline'] }) {
+  const color = {
+    fire: 'bg-red-500',
+    security: 'bg-blue-500',
+    intrusion: 'bg-amber-500',
+    other: 'bg-zinc-400',
+  }[discipline];
+  return <span className={`inline-block h-2 w-2 rounded-full shrink-0 ${color}`} aria-hidden="true" />;
 }
 
 function NumberField({ label, suffix, value, min, onChange }: NumberFieldProps) {
