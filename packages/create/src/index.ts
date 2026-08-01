@@ -57,8 +57,10 @@ export {
 export {
   extractWallSegmentsForStorey,
   existingSpaceFootprintsByStorey,
+  existingSpacesByStorey,
   type OverlayWallReader,
   type WallExtractionResult,
+  type ExistingSpaceEntry,
 } from './in-store/extract-walls.js';
 export {
   generateSpacesFromWalls,

@@ -313,15 +313,21 @@ function collectDividerIdsOnStorey(
   return ids;
 }
 
+/** An existing `IfcSpace`'s footprint, in the same model-local metre frame as the extracted wall segments. */
+export interface ExistingSpaceEntry {
+  spaceExpressId: number;
+  polygon: Vec2[];
+}
+
 /**
- * Footprint polygons (model-local metres, same frame as the extracted wall
- * segments) of existing `IfcSpace` per storey — so generation can skip *only*
- * the new rooms that overlap an already-present space (per-space dedup), while
- * still adding rooms an empty part of the floor lacks. Keyed by storey
- * expressId; storeys with no resolvable space footprints are omitted.
+ * Existing `IfcSpace` entities per storey, footprint polygon plus the
+ * space's own expressId — the id is what `existingSpaceFootprintsByStorey`
+ * (below) throws away, needed by callers that must resolve *which* space a
+ * point falls in (e.g. auto "is in space" relationship generation) rather
+ * than just deduplicating against space geometry in the aggregate.
  */
-export function existingSpaceFootprintsByStorey(store: IfcDataStore): Map<number, Vec2[][]> {
-  const out = new Map<number, Vec2[][]>();
+export function existingSpacesByStorey(store: IfcDataStore): Map<number, ExistingSpaceEntry[]> {
+  const out = new Map<number, ExistingSpaceEntry[]>();
   if (!store.source) return out;
   const extractor = new EntityExtractor(store.source);
   const scale = extractLengthUnitScale(store.source, store.entityIndex) ?? 1;
@@ -329,7 +335,7 @@ export function existingSpaceFootprintsByStorey(store: IfcDataStore): Map<number
   const contained = buildRelatingChildrenIndex(store, extractor, 'IFCRELCONTAINEDINSPATIALSTRUCTURE', 5, 4);
   for (const st of store.getEntitiesByType('IfcBuildingStorey')) {
     const kids = [...(aggregated.get(st.expressId) ?? []), ...(contained.get(st.expressId) ?? [])];
-    const footprints: Vec2[][] = [];
+    const entries: ExistingSpaceEntry[] = [];
     for (const id of kids) {
       if ((store.entities.getTypeName(id) ?? '').toUpperCase() !== 'IFCSPACE') continue;
       const ref = store.entityIndex.byId.get(id);
@@ -342,12 +348,30 @@ export function existingSpaceFootprintsByStorey(store: IfcDataStore): Map<number
       const frame = readPlacementFrame(store, extractor, undefined, placementId);
       const localPts = gatherBodyFootprintPoints(store, extractor, undefined, representationId);
       if (!frame || !localPts || localPts.length < 3) continue;
-      footprints.push(localPts.map((p) => {
-        const w = applyFrame(frame, p);
-        return [w[0] * scale, w[1] * scale] as Vec2;
-      }));
+      entries.push({
+        spaceExpressId: id,
+        polygon: localPts.map((p) => {
+          const w = applyFrame(frame, p);
+          return [w[0] * scale, w[1] * scale] as Vec2;
+        }),
+      });
     }
-    if (footprints.length) out.set(st.expressId, footprints);
+    if (entries.length) out.set(st.expressId, entries);
+  }
+  return out;
+}
+
+/**
+ * Footprint polygons (model-local metres, same frame as the extracted wall
+ * segments) of existing `IfcSpace` per storey — so generation can skip *only*
+ * the new rooms that overlap an already-present space (per-space dedup), while
+ * still adding rooms an empty part of the floor lacks. Keyed by storey
+ * expressId; storeys with no resolvable space footprints are omitted.
+ */
+export function existingSpaceFootprintsByStorey(store: IfcDataStore): Map<number, Vec2[][]> {
+  const out = new Map<number, Vec2[][]>();
+  for (const [storeyId, entries] of existingSpacesByStorey(store)) {
+    out.set(storeyId, entries.map((e) => e.polygon));
   }
   return out;
 }
