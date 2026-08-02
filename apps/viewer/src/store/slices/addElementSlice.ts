@@ -20,6 +20,7 @@
 
 import { type StateCreator } from 'zustand';
 import type { CatalogEntry } from '@/lib/catalog';
+import { STANDARD_ROLE_ID } from '@/lib/roles/disciplineRoles';
 
 export type AddElementType =
   | 'wall'
@@ -188,6 +189,14 @@ export interface AddElementSlice {
   addElementAutoSpaceParams: AddElementAutoSpaceParams;
   addElementAutoSpacePreview: AddElementAutoSpacePreview | null;
 
+  /**
+   * Active discipline role, as a `DisciplineSystem` id (see
+   * `lib/roles/disciplineRoles.ts`). While one is set, every placed library
+   * element also joins that installation's `IfcDistributionSystem`.
+   * `STANDARD_ROLE_ID` (the default) groups nothing.
+   */
+  activeDisciplineSystemId: string;
+
   /** Rectangle (2 clicks) or polygon (N clicks + Enter to close). */
   addElementSlabMode: AddElementSlabMode;
   /** In-progress click points. Cleared on tool exit, type change, or Esc. */
@@ -195,6 +204,7 @@ export interface AddElementSlice {
   /** Live preview point under the cursor (snap-aware). */
   addElementHoverPoint: AddElementVec3 | null;
 
+  setActiveDisciplineSystemId: (id: string) => void;
   setAddElementType: (t: AddElementType) => void;
   setAddElementStoreyId: (id: number | null) => void;
   setAddElementModelId: (id: string | null) => void;
@@ -266,7 +276,9 @@ export const createAddElementSlice: StateCreator<AddElementSlice, [], [], AddEle
   addElementSlabMode: 'rectangle',
   addElementPendingPoints: [],
   addElementHoverPoint: null,
+  activeDisciplineSystemId: STANDARD_ROLE_ID,
 
+  setActiveDisciplineSystemId: (activeDisciplineSystemId) => set({ activeDisciplineSystemId }),
   setAddElementType: (addElementType) =>
     // Switching types resets the pending-click queue — a wall's start
     // doesn't make sense as a slab's first corner. Hover is cleared

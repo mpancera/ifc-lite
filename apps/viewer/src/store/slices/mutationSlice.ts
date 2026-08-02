@@ -20,7 +20,10 @@ import {
   addPlateToStore,
   addLibraryElementToStore,
   addLibraryTypeToStore,
+  addDistributionSystemToStore,
+  emitRelAssignsToGroup,
   emitRelDefinesByType,
+  findDistributionSystem,
   addRoofToStore,
   addSensorToStore,
   addSlabToStore,
@@ -51,6 +54,7 @@ import { EntityExtractor, type MapConversion, type ProjectedCRS } from '@ifc-lit
 import type { MeshData } from '@ifc-lite/geometry';
 import { getEntityBounds, getEntityCenter } from '@/utils/viewportUtils';
 import type { CatalogEntry } from '@/lib/catalog';
+import { disciplineSystemName, findDisciplineSystem } from '@/lib/roles/disciplineRoles';
 import { toGlobalIdFromModels } from '../globalId.js';
 import { buildElementMesh, type ElementMeshPayload } from './addElementMeshes.js';
 import type { AddElementType } from './addElementSlice.js';
@@ -2504,6 +2508,23 @@ export const createMutationSlice: StateCreator<
           }).typeId;
         }
         emitRelDefinesByType(editor, anchor.ownerHistoryId, [elementId], typeId, anchor.guidRandom);
+
+        // Discipline role: when one is active, the element also joins that
+        // installation's IfcDistributionSystem. Grouping is independent of
+        // spatial containment, so this leaves the placement above untouched.
+        // One system per role is created and then reused for every later
+        // placement (`findDistributionSystem` matches on the same key).
+        const system = findDisciplineSystem(get().activeDisciplineSystemId);
+        if (system) {
+          const entities = get().mutationViews.get(modelId)?.getNewEntities() ?? [];
+          const systemId = findDistributionSystem(entities, system.predefinedType, system.objectType)
+            ?? addDistributionSystemToStore(editor, anchor.ownerHistoryId, {
+              PredefinedType: system.predefinedType,
+              ObjectType: system.objectType,
+              Name: disciplineSystemName(system),
+            }, anchor.guidRandom).systemId;
+          emitRelAssignsToGroup(editor, anchor.ownerHistoryId, [elementId], systemId, anchor.guidRandom);
+        }
 
         return elementId;
       },

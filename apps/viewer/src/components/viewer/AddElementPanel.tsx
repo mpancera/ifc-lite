@@ -22,7 +22,9 @@ import { Label } from '@/components/ui/label';
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
@@ -32,6 +34,7 @@ import { useIfc } from '@/hooks/useIfc';
 import { EntityNode } from '@ifc-lite/query';
 import type { AddElementType } from '@/store/slices/addElementSlice';
 import { useCatalogEntries, type CatalogEntry } from '@/lib/catalog';
+import { DISCIPLINE_ROLES, STANDARD_ROLE_ID, findDisciplineSystem } from '@/lib/roles/disciplineRoles';
 import { CatalogImportControls } from './catalog/CatalogImportControls';
 
 interface ElementOption {
@@ -291,6 +294,10 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
           </section>
         )}
 
+        {/* Discipline role — only meaningful for catalogue elements, which are
+            what an installation system groups. */}
+        {addElementType === 'library' && <DisciplineRoleSection />}
+
         {/* Library browser — replaces the generic dimensions section for the 'library' type */}
         {addElementType === 'library' && (
           <LibrarySection
@@ -437,6 +444,50 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
 
 function distance2D(a: { x: number; y: number }, b: { x: number; y: number }): number {
   return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+/**
+ * Picks the installation being authored. On "Standard" nothing is grouped and
+ * placement behaves exactly as it did before roles existed; on any other
+ * choice each placed element also joins that role's `IfcDistributionSystem`.
+ */
+function DisciplineRoleSection() {
+  const activeDisciplineSystemId = useViewerStore((s) => s.activeDisciplineSystemId);
+  const setActiveDisciplineSystemId = useViewerStore((s) => s.setActiveDisciplineSystemId);
+  const active = findDisciplineSystem(activeDisciplineSystemId);
+
+  return (
+    <section className="space-y-1.5">
+      <Label className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+        Fachrolle
+      </Label>
+      <Select value={activeDisciplineSystemId} onValueChange={setActiveDisciplineSystemId}>
+        <SelectTrigger className="h-8 font-mono text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={STANDARD_ROLE_ID} className="font-mono text-xs">
+            Standard (keine Anlage)
+          </SelectItem>
+          {DISCIPLINE_ROLES.map((role) => (
+            <SelectGroup key={role.id}>
+              <SelectLabel className="font-mono text-[10px] uppercase tracking-wider">{role.label}</SelectLabel>
+              {role.systems.map((system) => (
+                <SelectItem key={system.id} value={system.id} className="font-mono text-xs">
+                  {system.label}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          ))}
+        </SelectContent>
+      </Select>
+      <p className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400">
+        {active
+          ? `Platzierte Bauteile werden IfcDistributionSystem.${active.predefinedType} (${active.objectType}) zugewiesen.`
+          : 'Bauteile werden keiner Anlage zugewiesen.'}
+      </p>
+    </section>
+  );
 }
 
 interface ModeChipProps {
