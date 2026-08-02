@@ -19,6 +19,8 @@ import {
   addMemberToStore,
   addPlateToStore,
   addLibraryElementToStore,
+  addLibraryTypeToStore,
+  emitRelDefinesByType,
   addRoofToStore,
   addSensorToStore,
   addSlabToStore,
@@ -646,11 +648,21 @@ export interface MutationSlice {
     storeyExpressId: number,
     params: SensorInStoreParams
   ) => { expressId: number } | { error: string };
-  /** Add a free-standing element of any catalog-selected IFC entity, anchored to a storey. */
+  /**
+   * Add a free-standing element of any catalog-selected IFC entity, anchored
+   * to a storey. Also finds-or-creates a shared `IfcXxxType` for the catalog
+   * entry (`CatalogEntryId` is stored as the Type's `Tag` so later placements
+   * of the same product reuse it instead of duplicating attributes per
+   * instance) and links the new element to it via `IfcRelDefinesByType`.
+   */
   addLibraryElement: (
     modelId: string,
     storeyExpressId: number,
-    params: LibraryElementInStoreParams & { Discipline: CatalogEntry['discipline'] }
+    params: LibraryElementInStoreParams & {
+      Discipline: CatalogEntry['discipline'];
+      CatalogEntryId: string;
+      TechnicalData?: CatalogEntry['technicalData'];
+    }
   ) => { expressId: number } | { error: string };
   /**
    * Auto-generate IfcSpace volumes for every enclosed area formed by
@@ -2460,10 +2472,41 @@ export const createMutationSlice: StateCreator<
   ),
 
   addLibraryElement: (modelId, storeyExpressId, params) => {
-    const { Discipline, ...ifcParams } = params;
+    const { Discipline, CatalogEntryId, TechnicalData, ...ifcParams } = params;
     return runInStoreElementBuilder(
       get, set, modelId, storeyExpressId, ifcParams.IfcEntity.toUpperCase(), `add ${ifcParams.IfcEntity}`,
-      (editor, anchor) => addLibraryElementToStore(editor, anchor, ifcParams).elementId,
+      (editor, anchor) => {
+        const elementId = addLibraryElementToStore(editor, anchor, ifcParams).elementId;
+
+        // Share one IfcXxxType per catalog product across all its placed
+        // instances instead of repeating attributes per instance — find an
+        // existing Type tagged with this catalog entry's id first (only
+        // overlay-created entities can carry our tag convention; a
+        // source-authored file wouldn't happen to match it).
+        const typeEntity = `${ifcParams.IfcEntity}Type`;
+        const view = get().mutationViews.get(modelId);
+        let typeId: number | null = null;
+        if (view) {
+          for (const entity of view.getNewEntities()) {
+            if (entity.type === typeEntity && entity.attributes[7] === CatalogEntryId) {
+              typeId = entity.expressId;
+              break;
+            }
+          }
+        }
+        if (typeId === null) {
+          typeId = addLibraryTypeToStore(editor, anchor, {
+            IfcEntity: typeEntity,
+            Name: ifcParams.Name,
+            Tag: CatalogEntryId,
+            PredefinedType: ifcParams.PredefinedType,
+            TechnicalData,
+          }).typeId;
+        }
+        emitRelDefinesByType(editor, anchor.ownerHistoryId, [elementId], typeId, anchor.guidRandom);
+
+        return elementId;
+      },
       {
         type: 'library',
         params: { Width: ifcParams.Width ?? 0.1, Depth: ifcParams.Depth ?? 0.1, Height: ifcParams.Height ?? 0.05 },

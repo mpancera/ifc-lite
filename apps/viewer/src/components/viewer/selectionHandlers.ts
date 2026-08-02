@@ -712,6 +712,8 @@ async function handleAddElementDrop(
       Width: p.Width, Depth: p.Depth, Height: p.Height,
       Discipline: entry.discipline,
       Name: entry.label,
+      CatalogEntryId: entry.id,
+      TechnicalData: entry.technicalData,
     }), modelId, entry.label);
     return;
   }

@@ -852,12 +852,36 @@ export function PropertiesPanel() {
     if (!selectedEntity) return null;
     const dataStore = model?.ifcDataStore ?? ifcDataStore;
     if (!dataStore) return null;
-    const result = extractTypePropertiesOnDemand(dataStore as IfcDataStore, selectedEntity.expressId);
-    if (!result) return null;
 
     let modelId = selectedEntity.modelId;
     if (modelId === 'legacy') modelId = '__legacy__';
     const mutationView = modelId ? mutationViews.get(modelId) : null;
+
+    let result = extractTypePropertiesOnDemand(dataStore as IfcDataStore, selectedEntity.expressId);
+
+    // extractTypePropertiesOnDemand only resolves IfcRelDefinesByType from
+    // the parsed file's static relationship graph, so a rel authored this
+    // session (e.g. by the Add Element library flow) isn't in it yet — the
+    // properties panel would show "no property sets" for a freshly-typed
+    // instance until an export+reparse round-trip. Fall back to scanning the
+    // mutation overlay directly for the same relationship.
+    if (!result && mutationView) {
+      for (const entity of mutationView.getNewEntities()) {
+        if (entity.type !== 'IfcRelDefinesByType') continue;
+        const related = entity.attributes[4];
+        if (!Array.isArray(related) || !related.includes(`#${selectedEntity.expressId}`)) continue;
+        const typeRef = entity.attributes[5];
+        const typeId = typeof typeRef === 'string' ? Number(typeRef.replace('#', '')) : NaN;
+        if (Number.isNaN(typeId)) continue;
+        const typeEntity = mutationView.getNewEntities().find((e) => e.expressId === typeId);
+        const typeName = typeof typeEntity?.attributes?.[2] === 'string' ? typeEntity.attributes[2] : (typeEntity?.type ?? 'Type');
+        result = { typeId, typeName, properties: [] };
+        break;
+      }
+    }
+
+    if (!result) return null;
+
     const mutations = mutationView?.getMutationsForEntity(result.typeId) ?? [];
     const mergedTypeProps = mutationView?.getForEntity(result.typeId) ?? [];
 
