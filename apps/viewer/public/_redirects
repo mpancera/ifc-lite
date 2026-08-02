@@ -1,0 +1,15 @@
+# Cloudflare Pages routing. Mirrors the SPA rewrite from vercel.json.
+#
+# Anything without a file extension is an application route (/mcp, deep links
+# into panels), so it has to resolve to the shell rather than 404. Requests
+# that DO carry an extension fall through to the static asset, which is why
+# this cannot simply be `/* /index.html 200`.
+#
+# Note the bSDD proxy that vercel.json provides has no equivalent here:
+# `_redirects` can only proxy same-origin paths, so /api/bsdd/* needs a Pages
+# Function. Until one exists, bSDD classification lookups are unavailable on a
+# Pages deployment — every other feature is unaffected.
+
+/mcp     /index.html   200
+/mcp/*   /index.html   200
+/*       /index.html   200

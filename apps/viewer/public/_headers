@@ -1,0 +1,32 @@
+# Cloudflare Pages header rules. Mirrors the `headers` block of the repo's
+# vercel.json so a Pages deployment behaves like the Vercel one.
+#
+# Pages serves this file from the build output root; it is ignored by other
+# hosts, so keeping it here costs nothing on Vercel.
+
+/*
+  # Cross-origin isolation. Without both of these the browser refuses to
+  # expose SharedArrayBuffer, and the IDS validation worker silently falls
+  # back to copying the model into the worker instead of sharing it — correct,
+  # but much slower on large files. `credentialless` rather than `require-corp`
+  # so same-origin assets load without each needing a CORP header.
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: credentialless
+
+/*.wasm
+  # Streaming compilation (`WebAssembly.instantiateStreaming`) rejects any
+  # response that is not exactly this type, and falls back to a slower
+  # buffered path — or fails outright.
+  Content-Type: application/wasm
+
+/assets/*
+  # Vite fingerprints these filenames, so a given URL can never change content.
+  Cache-Control: public, max-age=31536000, immutable
+
+/fonts/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/
+  # The entry document must be revalidated, otherwise a deploy is invisible to
+  # anyone whose browser still holds the old index.html.
+  Cache-Control: public, max-age=0, must-revalidate
