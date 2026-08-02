@@ -30,6 +30,11 @@ import {
   getMapWebglVerdict, describeMapInitFailure, type MapWebglFailureReason,
 } from '@/lib/geo/map-webgl-support';
 import { posthog } from '@/lib/analytics';
+import {
+  EXTERNAL_ENDPOINTS,
+  externalRequestsAllowed,
+  setExternalRequestsAllowed,
+} from '@/lib/privacy/externalRequests';
 
 // Lazy-load maplibre-gl to avoid bloating the initial bundle
 let maplibrePromise: Promise<typeof import('maplibre-gl')> | null = null;
@@ -74,7 +79,7 @@ type MapState = 'idle' | 'loading' | 'ready' | 'error';
  * failed to download — and it deliberately does NOT latch, because a chunk
  * fetch is transient in a way a missing GPU capability is not.
  */
-type MapUnavailableReason = MapWebglFailureReason | 'map_load_failed';
+type MapUnavailableReason = MapWebglFailureReason | 'map_load_failed' | 'external_requests_off';
 
 /**
  * Dispose a MapLibre map, containing any throw from its teardown.
@@ -106,6 +111,9 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
 /** Geocode a query string via Nominatim */
 async function geocodeSearch(query: string): Promise<Array<{ lat: number; lon: number; display_name: string }>> {
   if (!query.trim()) return [];
+  // The query itself is the disclosure here — a site name or address typed by
+  // someone planning a building says as much as a coordinate would.
+  if (!externalRequestsAllowed()) return [];
   try {
     const q = encodeURIComponent(query.trim());
     const resp = await fetch(
@@ -222,8 +230,11 @@ export function LocationMap({
    */
   const degradeMap = useCallback((reason: MapUnavailableReason, err: unknown) => {
     // A missing GPU capability is a property of the device, so latch it for the
-    // session. A failed chunk download is not — leave that one retryable.
-    if (reason !== 'map_load_failed') markMapWebglUnsupported(reason);
+    // session. A failed chunk download is not — leave that one retryable. Nor
+    // is the privacy gate, which is a choice and can be reversed at any time.
+    if (reason !== 'map_load_failed' && reason !== 'external_requests_off') {
+      markMapWebglUnsupported(reason);
+    }
     setMapUnavailable(reason);
     if (!takeMapWebglReportSlot()) return;
     const detail = describeMapInitFailure(err);
@@ -442,6 +453,16 @@ export function LocationMap({
       // second, so letting it fail leaves a half-built canvas behind. Probing
       // first makes the fallback the user's first paint instead of a flash of
       // a broken map.
+      // Rendering the map means fetching tiles, and the tiles requested ARE
+      // the building's real-world position — so drawing it is itself an
+      // outbound disclosure. Gate before MapLibre is constructed, not at the
+      // network layer, so nothing is requested at all.
+      if (!externalRequestsAllowed()) {
+        setMapUnavailable('external_requests_off');
+        setMapState('idle');
+        return;
+      }
+
       if (!probeMapWebglSupport().supported) {
         degradeMap('probe_no_context', new Error('Failed to initialize WebGL (pre-flight probe)'));
         return;
@@ -724,13 +745,25 @@ export function LocationMap({
             <div className="flex flex-col items-center justify-center h-[180px] bg-zinc-50 dark:bg-zinc-900/50 gap-1.5 px-4 text-center">
               <MapPinOff className="h-4 w-4 text-zinc-400" />
               <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
-                Map preview unavailable on this device
+                {mapUnavailable === 'external_requests_off'
+                  ? 'Map preview off'
+                  : 'Map preview unavailable on this device'}
               </span>
               <span className="text-[9px] text-zinc-400 dark:text-zinc-500 max-w-[240px]">
-                {mapUnavailable === 'map_load_failed'
-                  ? 'The map component could not be loaded. Check your connection and reload the page.'
-                  : 'Your browser could not provide graphics for the map. Coordinates, search and the links below still work; reloading the page may restore it.'}
+                {mapUnavailable === 'external_requests_off'
+                  ? 'Drawing the map requests tiles for this building’s position, so it would send that position to a third party. Coordinates and the export below work without it.'
+                  : mapUnavailable === 'map_load_failed'
+                    ? 'The map component could not be loaded. Check your connection and reload the page.'
+                    : 'Your browser could not provide graphics for the map. Coordinates, search and the links below still work; reloading the page may restore it.'}
               </span>
+              {mapUnavailable === 'external_requests_off' && (
+                <button
+                  onClick={() => { setExternalRequestsAllowed(true); setMapUnavailable(null); }}
+                  className="mt-1 text-[10px] text-zinc-600 dark:text-zinc-300 underline underline-offset-2 hover:text-zinc-900 dark:hover:text-zinc-100"
+                >
+                  Show map (contacts {EXTERNAL_ENDPOINTS[0].host})
+                </button>
+              )}
             </div>
           ) : (
             <div className="relative">

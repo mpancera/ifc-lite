@@ -9,6 +9,51 @@ the small example catalog used to exercise it).
 
 Branch: `add-mep-sensor-element`. Not yet proposed upstream.
 
+## Data leaving the browser
+
+ifclite parses and renders IFC entirely client-side, which is usually taken to
+mean nothing about a model leaves the machine. That is not quite true out of
+the box, and the exceptions are easy to miss because none of them look like a
+network feature — they are things that simply render.
+
+Found while preparing a deployment for an environment that has to guarantee
+project data stays on the device. All four are in the base app, none is
+malicious, and each is a reasonable default for a public web tool — they are
+listed because the guarantee people assume is stronger than the one that held.
+
+| What | Endpoint | What is disclosed |
+|---|---|---|
+| Location map tiles | `basemaps.cartocdn.com` | The building's real-world position — the tiles requested *are* the coordinates |
+| Terrain elevation | `api.open-meteo.com` | Same coordinates, as query parameters |
+| Place search | `nominatim.openstreetmap.org` | The typed query: a site name or address |
+| CRS fallback | `epsg.io` | The EPSG code — a region, not a site |
+| Icon font | `fonts.googleapis.com` | No model data, but the visitor's IP and usage on every load |
+
+The first three fire from the Information panel without any explicit action:
+opening a georeferenced model and looking at its properties was enough.
+
+**What changed.** `lib/privacy/externalRequests.ts` is a single gate, off unless
+switched on, that all four network paths consult before making a request. It is
+deliberately one switch rather than a flag per feature — a per-feature opt-out
+silently fails to cover whatever gets added next, and this is exactly the kind
+of guarantee that has to hold for cases nobody has thought of yet. It also fails
+closed when storage cannot be read, so consent that could not be recorded is
+never assumed. The map explains why it is blank and offers to load, naming the
+host it would contact.
+
+The icon font is now served from this origin. It is subset to the ~48 code
+points `hierarchy/ifc-icons.ts` actually uses, which is 40 KB rather than the
+3.9 MB of the full variable font, and it is Apache-2.0 so redistribution is
+fine.
+
+Analytics were already sound and are unchanged: PostHog only initialises when
+`VITE_POSTHOG_KEY`/`VITE_POSTHOG_HOST` are set at build time, and a scrubber
+strips file names, model names and paths before anything is sent. A build
+without those variables sends nothing.
+
+Verified with an empty resource-timing log: a fresh load of the viewer now
+makes zero requests to any host other than its own origin.
+
 ## Fixes to the base app
 
 ### Authored elements vanish under Solo / storey isolation

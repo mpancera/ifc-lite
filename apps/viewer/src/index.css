@@ -10,6 +10,35 @@
    dark: Tailwind utilities active, creating a mixed dark/light UI. */
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* Material Symbols, self-hosted. These two rules used to come from the Google
+   Fonts stylesheet; serving the font from this origin removes a third-party
+   request on every load. `font-display: block` rather than `swap` because
+   these glyphs are icons, not text — a fallback rendering would show tofu
+   boxes in the Hierarchy tree instead of an unstyled-but-readable word. */
+@font-face {
+  font-family: 'Material Symbols Outlined';
+  font-style: normal;
+  font-weight: 100 700;
+  font-display: block;
+  src: url('/fonts/material-symbols-outlined.woff2') format('woff2');
+}
+
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-feature-settings: 'liga';
+  -webkit-font-smoothing: antialiased;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    TOKYO NIGHT THEME - Dark Stormy Cyberpunk Vibes
    ═══════════════════════════════════════════════════════════════════════════ */

@@ -21,6 +21,7 @@ import type { CoordinateInfo } from '@ifc-lite/geometry';
 import { lookupEpsgByCode } from '@ifc-lite/data';
 import { getEffectiveHorizontalScale, resolveMapUnitToMetreScale } from './geo-scale';
 import { resolvePrecisionDef } from './precision-grids';
+import { externalRequestsAllowed } from '@/lib/privacy/externalRequests';
 
 export interface LatLon {
   lat: number;
@@ -235,6 +236,10 @@ export function sanitizeProj4(def: string, code?: string | null, datumName?: str
  * Fetch a proj4 definition string from epsg.io (last-resort fallback).
  */
 async function fetchProj4Def(epsgCode: string): Promise<string | null> {
+  // Milder than the position endpoints — an EPSG code narrows a project to a
+  // region, not a site — but still an outbound request, and the bundled index
+  // already covers 7000+ codes, so this only ever fires for exotic ones.
+  if (!externalRequestsAllowed()) return null;
   try {
     const resp = await fetch(`https://epsg.io/${epsgCode}.proj4`);
     if (!resp.ok) return null;
@@ -710,6 +715,11 @@ export async function computeFootprintGeoJSON(
  * Returns height in metres above sea level, or null on failure.
  */
 export async function queryTerrainElevation(latLon: LatLon): Promise<number | null> {
+  // The request parameters ARE the building's position, so this is an outbound
+  // disclosure of exactly the thing a project may not want disclosed. Callers
+  // already handle `null` as "unknown elevation".
+  if (!externalRequestsAllowed()) return null;
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 5000);
   try {

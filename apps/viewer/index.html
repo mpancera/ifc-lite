@@ -184,10 +184,14 @@
   <!-- Web App Manifest (PWA support) -->
   <link rel="manifest" href="/manifest.json">
   
-  <!-- Material Symbols font for IFC class icons -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap">
+  <!-- Material Symbols font for IFC class icons. Served from this origin, not
+       from Google Fonts: a request to a third party on every load leaks the
+       visitor's IP and usage, which rules the app out of environments that
+       require it to stay self-contained. Subset to the ~49 code points
+       `hierarchy/ifc-icons.ts` actually uses — 40 KB instead of 3.9 MB — and
+       preloaded because the Hierarchy panel needs it in the first paint.
+       Apache-2.0, so redistribution is fine. -->
+  <link rel="preload" href="/fonts/material-symbols-outlined.woff2" as="font" type="font/woff2" crossorigin>
 
   <!-- Theme colors -->
   <meta name="theme-color" content="#7aa2f7">
