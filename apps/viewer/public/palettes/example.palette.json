@@ -1,0 +1,59 @@
+{
+  "id": "example-slate",
+  "name": "Example · Slate",
+  "source": "Neutral demonstration palette shipped with the repository. Documents the format; it carries no organisation's identity.",
+  "ui": {
+    "light": {
+      "background": "#FFFFFF",
+      "foreground": "#0F172A",
+      "card": "#FFFFFF",
+      "card-foreground": "#0F172A",
+      "popover": "#FFFFFF",
+      "popover-foreground": "#0F172A",
+      "primary": "#0F766E",
+      "primary-foreground": "#FFFFFF",
+      "secondary": "#F1F5F9",
+      "secondary-foreground": "#0F172A",
+      "muted": "#F1F5F9",
+      "muted-foreground": "#64748B",
+      "accent": "#E2E8F0",
+      "accent-foreground": "#0F172A",
+      "destructive": "#DC2626",
+      "destructive-foreground": "#FFFFFF",
+      "border": "#CBD5E1",
+      "input": "#CBD5E1",
+      "ring": "#0F766E"
+    },
+    "dark": {
+      "background": "#0F172A",
+      "foreground": "#E2E8F0",
+      "card": "#111C33",
+      "card-foreground": "#E2E8F0",
+      "popover": "#152039",
+      "popover-foreground": "#E2E8F0",
+      "primary": "#2DD4BF",
+      "primary-foreground": "#0F172A",
+      "secondary": "#1E293B",
+      "secondary-foreground": "#E2E8F0",
+      "muted": "#1E293B",
+      "muted-foreground": "#94A3B8",
+      "accent": "#134E4A",
+      "accent-foreground": "#E2E8F0",
+      "destructive": "#F87171",
+      "destructive-foreground": "#0F172A",
+      "border": "#334155",
+      "input": "#334155",
+      "ring": "#2DD4BF"
+    }
+  },
+  "dataViz": [
+    "#0F766E",
+    "#1D4ED8",
+    "#B45309",
+    "#7E22CE",
+    "#BE123C",
+    "#047857",
+    "#4338CA",
+    "#A16207"
+  ]
+}

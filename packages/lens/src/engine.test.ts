@@ -158,6 +158,49 @@ describe('evaluateLens', () => {
 // evaluateAutoColorLens
 // ============================================================================
 
+describe('evaluateAutoColorLens palette override', () => {
+  const spec: AutoColorSpec = { source: 'ifcType' };
+
+  it('uses the supplied palette in order, largest group first', () => {
+    const provider = createMockProvider([
+      { id: 1, type: 'IfcWall' },
+      { id: 2, type: 'IfcWall' },
+      { id: 3, type: 'IfcSlab' },
+    ]);
+
+    const result = evaluateAutoColorLens(spec, provider, ['#009999', '#D72339']);
+
+    expect(result.legend.find(e => e.name === 'IfcWall')!.color).toBe('#009999');
+    expect(result.legend.find(e => e.name === 'IfcSlab')!.color).toBe('#D72339');
+  });
+
+  it('continues past the end of a short palette instead of repeating it', () => {
+    // A brand palette is finite; it must not cap how many distinct values can
+    // be shown, and must not reuse a colour that is already taken.
+    const provider = createMockProvider([
+      { id: 1, type: 'IfcWall' },
+      { id: 2, type: 'IfcSlab' },
+      { id: 3, type: 'IfcColumn' },
+    ]);
+
+    const result = evaluateAutoColorLens(spec, provider, ['#009999']);
+    const colors = result.legend.map(e => e.color);
+
+    expect(colors.length).toBe(3);
+    expect(colors[0]).toBe('#009999');
+    expect(new Set(colors).size).toBe(3);
+  });
+
+  it('falls back to the generated sequence when no palette is given', () => {
+    const provider = createMockProvider([{ id: 1, type: 'IfcWall' }]);
+
+    const withNone = evaluateAutoColorLens(spec, provider);
+    const withEmpty = evaluateAutoColorLens(spec, provider, []);
+
+    expect(withEmpty.legend[0].color).toBe(withNone.legend[0].color);
+  });
+});
+
 describe('evaluateAutoColorLens', () => {
   it('should group entities by IFC type and assign distinct colors', () => {
     const provider = createMockProvider([

@@ -127,11 +127,16 @@ export interface AutoColorEvaluationResult extends LensEvaluationResult {
  *
  * @param autoColor - Data source specification
  * @param provider - Data provider for entity access
+ * @param palette - Series colours to use, in order. Omitted (the default), the
+ *   generated golden-angle sequence is used as before. Supplied, it takes over
+ *   for as many distinct values as it covers — a deployment can therefore make
+ *   charts follow its own design system without capping the value count.
  * @returns Color map, legend, and per-value entity IDs
  */
 export function evaluateAutoColorLens(
   autoColor: AutoColorSpec,
   provider: LensDataProvider,
+  palette?: readonly string[],
 ): AutoColorEvaluationResult {
   const startTime = performance.now();
 
@@ -177,7 +182,14 @@ export function evaluateAutoColorLens(
 
   for (let i = 0; i < sortedEntries.length; i++) {
     const [value, entityIds] = sortedEntries[i];
-    const color = uniqueColor(i);
+    // A supplied palette wins for as far as it reaches; beyond that the
+    // generated sequence continues, so a short brand palette never caps how
+    // many distinct values can be shown — it just stops being the source once
+    // exhausted. Indexing from 0 keeps a given value's colour stable whichever
+    // branch it came from.
+    const color = palette && palette.length > 0 && i < palette.length
+      ? palette[i]
+      : uniqueColor(i);
     const ruleId = `auto-${i}`;
     const rgba = hexToRgba(color, 1);
 

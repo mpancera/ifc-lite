@@ -28,6 +28,7 @@ import type { AutoColorEvaluationResult } from '@ifc-lite/lens';
 import { useViewerStore } from '@/store';
 import { posthog } from '@/lib/analytics';
 import { createLensDataProvider } from '@/lib/lens';
+import { activePaletteDataViz } from '@/lib/theme/palette';
 import { useLensDiscovery } from './useLensDiscovery';
 
 export function useLens() {
@@ -81,7 +82,7 @@ export function useLens() {
     // Dispatch: auto-color mode vs. rule-based mode
     const isAutoColor = !!activeLens.autoColor;
     const result = isAutoColor
-      ? evaluateAutoColorLens(activeLens.autoColor!, provider)
+      ? evaluateAutoColorLens(activeLens.autoColor!, provider, activePaletteDataViz())
       : evaluateLens(activeLens, provider);
 
     const { colorMap, hiddenIds, ruleCounts, ruleEntityIds } = result;
