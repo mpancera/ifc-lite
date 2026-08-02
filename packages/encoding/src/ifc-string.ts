@@ -123,6 +123,70 @@ export function decodeIfcString(str: string): string {
 }
 
 /**
+ * Decode the inner text of a quoted ISO-10303-21 string literal (the outer
+ * quotes already stripped) to its Unicode value — the read-side counterpart of
+ * {@link encodeIfcString} plus the `''` doubled-quote rule the tokenizer owns.
+ *
+ * First collapse `''` -> `'`, then resolve the backslash escapes with
+ * {@link decodeIfcString}, which handles `\X\HH`, `\X2\HHHH\X0\`,
+ * `\X4\HHHHHHHH\X0\`, `\S\` and `\Px\`.
+ *
+ * `\\` (one literal backslash, as third-party writers emit it) is resolved by a
+ * left-to-right scan that gives directives precedence over the pair escape: a
+ * naive split at every doubled backslash would consume a directive's closing
+ * `\` when the directive is immediately followed by an escaped backslash
+ * (`\X2\00FC\X0\` + `\\` ends in THREE backslashes, and the split eats the
+ * first two), leaving an unterminated `\X2\` that never decodes. The scan
+ * consumes each whole directive span first, treats `\\` as a literal backslash
+ * only outside a span, and hands the directive text to {@link decodeIfcString}
+ * untouched — which also keeps escaped literal text (`\\X2\\...` means the
+ * characters `\X2\...`) from being mis-decoded as a real `\X2\` directive, and
+ * keeps `C:\\temp` from re-doubling on every round trip ({@link decodeIfcString}
+ * deliberately preserves unknown escapes, so it can't collapse `\\` itself).
+ */
+export function decodeStepStringLiteral(str: string): string {
+  const value = str.replace(/''/g, "'");
+  let out = '';
+  let seg = ''; // pending directive-bearing text, flushed through decodeIfcString
+  let i = 0;
+  while (i < value.length) {
+    if (value[i] === '\\') {
+      // Whole directive spans move into `seg` atomically so their own
+      // backslashes (terminators, \S\ operands) never match the pair escape.
+      if (value.startsWith('\\X2\\', i) || value.startsWith('\\X4\\', i)) {
+        const end = value.indexOf('\\X0\\', i + 4);
+        if (end !== -1) {
+          seg += value.slice(i, end + 4);
+          i = end + 4;
+          continue;
+        }
+      } else if (value.startsWith('\\S\\', i) && i + 3 < value.length) {
+        seg += value.slice(i, i + 4); // \S\ + operand char (may itself be '\')
+        i += 4;
+        continue;
+      } else if (value.startsWith('\\X\\', i)) {
+        seg += value.slice(i, i + 5); // \X\ + two hex digits
+        i += 5;
+        continue;
+      } else if (/^\\P[A-Z]\\/.test(value.slice(i, i + 4))) {
+        seg += value.slice(i, i + 4);
+        i += 4;
+        continue;
+      }
+      if (value[i + 1] === '\\') {
+        out += decodeIfcString(seg) + '\\';
+        seg = '';
+        i += 2;
+        continue;
+      }
+    }
+    seg += value[i];
+    i += 1;
+  }
+  return out + decodeIfcString(seg);
+}
+
+/**
  * Encode a Unicode string to IFC STEP string escapes.
  *
  * - Printable ASCII (32..126) is kept as-is.

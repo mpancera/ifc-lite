@@ -4,9 +4,11 @@
 
 import { describe, expect, it } from 'vitest';
 import { PropertyValueType } from '@ifc-lite/data';
+import { decodeStepStringLiteral } from '@ifc-lite/encoding';
 import {
   assembleStepBlob,
   assembleStepBytes,
+  escapeStepString,
   serializePropertyValue,
   serializeAttributeValue,
   serializeStepValue,
@@ -155,8 +157,10 @@ describe('serializeAttributeValue (string attributes)', () => {
   });
 
   it('escapes quotes and backslashes together', () => {
-    expect(serializeAttributeValue("a'b\\c", stringToken)).toBe("'a''b\\\\c'");
-    expect(serializeAttributeValue("\\'", stringToken)).toBe("'\\\\'''");
+    // A backslash is an ISO-10303-21 escape introducer, so it is encoded as
+    // `\X\5C` — not doubled. Quotes are still doubled.
+    expect(serializeAttributeValue("a'b\\c", stringToken)).toBe("'a''b\\X\\5Cc'");
+    expect(serializeAttributeValue("\\'", stringToken)).toBe("'\\X\\5C'''");
   });
 
   it("treats a value of two literal quote chars ('') as content, not empty", () => {
@@ -177,6 +181,95 @@ describe('serializeAttributeValue (string attributes)', () => {
   it("does not mistake a lone quote char token (') for a quoted string", () => {
     // Malformed 1-char token: falls through to inference, quoting the value.
     expect(serializeAttributeValue('free text', "'")).toBe("'free text'");
+  });
+});
+
+/**
+ * ISO-10303-21 string literals are ASCII-only. Every writer in this package must
+ * emit `\X\` / `\X2\` / `\X4\` escapes rather than raw UTF-8 bytes — German
+ * authored names and property values ("Löschung", "Automation Primäranlagen")
+ * and CSV-imported property data hit this on every export.
+ *
+ * `decodeStepStringLiteral` is the canonical reader (`parseSourceHeader` and
+ * `@ifc-lite/data`'s `parseStepValue` both use it), so the round trips below
+ * prove the escaper against the reader that actually consumes its output.
+ */
+describe('STEP string escaping (non-ASCII)', () => {
+  /** Strip the outer quotes of a STEP literal and decode it back. */
+  const readBack = (literal: string): string =>
+    decodeStepStringLiteral(literal.slice(1, -1));
+
+  it('encodes umlauts as \\X\\ escapes instead of writing raw UTF-8', () => {
+    expect(escapeStepString('Löschung')).toBe('L\\X\\F6schung');
+    expect(escapeStepString('Automation Primäranlagen')).toBe('Automation Prim\\X\\E4ranlagen');
+  });
+
+  it('encodes BMP and non-BMP characters as \\X2\\ / \\X4\\', () => {
+    expect(escapeStepString('Ω')).toBe('\\X2\\03A9\\X0\\');
+    expect(escapeStepString('😀')).toBe('\\X4\\0001F600\\X0\\');
+  });
+
+  it('escapes a literal backslash exactly once (no doubling on top of \\X\\5C)', () => {
+    // The trap: `encodeIfcString` already escapes `\`, so a leftover
+    // `\` -> `\\` doubling would emit `\X\5C\X\5C` for ONE backslash.
+    expect(escapeStepString('C:\\temp')).toBe('C:\\X\\5Ctemp');
+  });
+
+  it('still doubles single quotes and still collapses control characters', () => {
+    expect(escapeStepString("O'Brien")).toBe("O''Brien");
+    expect(escapeStepString('A\r\nB')).toBe('A B');
+  });
+
+  it('emits only printable ASCII for any input', () => {
+    for (const v of ['Löschung', 'Ω 温度', '😀', 'C:\\x', "q'q", 'A\nB']) {
+      expect(escapeStepString(v)).toMatch(/^[\x20-\x7E]*$/);
+    }
+  });
+
+  const cases: Array<[label: string, value: string]> = [
+    ['umlauts', 'Löschung'],
+    ['umlauts in a phrase', 'Automation Primäranlagen'],
+    ['all German umlauts plus sharp s', 'ÄÖÜäöüß'],
+    ['BMP characters', 'Ω 温度センサー'],
+    ['non-BMP emoji', 'Sensor 😀 ok'],
+    ['literal backslash', 'C:\\temp\\modell.ifc'],
+    ['single quote', "O'Brien's Wall"],
+    ['text that looks like a directive', 'a\\X2\\0041\\X0\\b'],
+    ['everything at once', "Löschung 😀 C:\\x 'q' Ω"],
+    ['plain ASCII', 'Basic Wall 200mm'],
+  ];
+
+  for (const [label, value] of cases) {
+    it(`round-trips ${label} through escape -> decode`, () => {
+      expect(decodeStepStringLiteral(escapeStepString(value))).toBe(value);
+    });
+
+    it(`round-trips ${label} through serializeStepValue`, () => {
+      expect(readBack(serializeStepValue(value))).toBe(value);
+    });
+  }
+
+  it('is byte-stable across a second write (a backslash never grows)', () => {
+    const value = 'C:\\temp';
+    const once = escapeStepString(value);
+    expect(decodeStepStringLiteral(once)).toBe(value);
+    expect(escapeStepString(decodeStepStringLiteral(once))).toBe(once);
+  });
+
+  it('round-trips an umlaut through serializePropertyValue (IFCLABEL)', () => {
+    const literal = serializePropertyValue('Löschung', PropertyValueType.Label);
+    expect(literal).toBe("IFCLABEL('L\\X\\F6schung')");
+    expect(readBack(literal.slice('IFCLABEL('.length, -1))).toBe('Löschung');
+  });
+
+  it('round-trips an umlaut through serializeAttributeValue', () => {
+    expect(readBack(serializeAttributeValue('Löschung', "'Old Name'"))).toBe('Löschung');
+  });
+
+  it('round-trips an umlaut through a STRING-typed marker', () => {
+    // IfcLabel bottoms out in STRING, so the inner value is a quoted literal.
+    const token = serializeTypedMarker('IfcLabel', 'Löschung');
+    expect(token).toBe("IFCLABEL('L\\X\\F6schung')");
   });
 });
 

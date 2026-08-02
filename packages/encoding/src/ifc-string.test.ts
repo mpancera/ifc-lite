@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { describe, it, expect } from 'vitest';
-import { decodeIfcString, encodeIfcString } from './ifc-string.js';
+import { decodeIfcString, decodeStepStringLiteral, encodeIfcString } from './ifc-string.js';
 
 describe('decodeIfcString', () => {
   it('returns plain strings unchanged', () => {
@@ -119,5 +119,77 @@ describe('encodeIfcString', () => {
   it('round-trips with decoder for mixed characters', () => {
     const value = 'Brücke Ω 𝄞';
     expect(decodeIfcString(encodeIfcString(value))).toBe(value);
+  });
+
+  it('escapes a literal backslash as \\X\\5C (not a doubled pair)', () => {
+    // The STEP writers rely on this: they must NOT also double `\` themselves,
+    // or a literal backslash would be escaped twice.
+    expect(encodeIfcString('C:\\temp')).toBe('C:\\X\\5Ctemp');
+  });
+
+  it('leaves a single quote alone (the tokenizer owns the `` escape)', () => {
+    expect(encodeIfcString("O'Brien")).toBe("O'Brien");
+  });
+});
+
+/**
+ * encode -> decode round trips over the character classes a German-authored
+ * model actually carries. Every value below must come back byte-identical, so a
+ * STEP writer can escape with `encodeIfcString` and a reader recover the exact
+ * authored string.
+ */
+describe('encodeIfcString/decodeIfcString round trip', () => {
+  const cases: Array<[label: string, value: string]> = [
+    ['umlauts (\\X\\ range)', 'Löschung'],
+    ['umlauts in a phrase', 'Automation Primäranlagen'],
+    ['sharp s and all German umlauts', 'ÄÖÜäöüß'],
+    ['BMP character (\\X2\\ range)', 'Ω 温度センサー'],
+    ['non-BMP emoji (\\X4\\ range)', 'Sensor 😀 ok'],
+    ['literal backslash', 'C:\\temp\\modell.ifc'],
+    ['single quote', "O'Brien's Wall"],
+    ['text that LOOKS like a directive', 'a\\X2\\0041\\X0\\b'],
+    ['everything at once', "Löschung 😀 C:\\x 'q' Ω"],
+    ['plain ASCII is untouched', 'Basic Wall 200mm'],
+  ];
+
+  for (const [label, value] of cases) {
+    it(`round-trips ${label}`, () => {
+      expect(decodeIfcString(encodeIfcString(value))).toBe(value);
+    });
+  }
+
+  it('survives a literal backslash across TWO round trips (no growth)', () => {
+    // Regression guard for the double-escape trap: `encodeIfcString` escapes
+    // backslashes itself, so a caller that also doubles them would turn `\`
+    // into `\\` here — visible as growth on the second pass.
+    const value = 'C:\\temp';
+    const once = encodeIfcString(value);
+    expect(decodeIfcString(once)).toBe(value);
+    expect(encodeIfcString(decodeIfcString(once))).toBe(once);
+  });
+});
+
+describe('decodeStepStringLiteral', () => {
+  it('collapses the doubled-quote escape', () => {
+    expect(decodeStepStringLiteral("O''Brien")).toBe("O'Brien");
+  });
+
+  it('resolves backslash directives', () => {
+    expect(decodeStepStringLiteral('Br\\X2\\00FC\\X0\\cke')).toBe('Brücke');
+    expect(decodeStepStringLiteral('L\\X\\F6schung')).toBe('Löschung');
+  });
+
+  it('resolves the `\\\\` literal-backslash pair third-party writers emit', () => {
+    expect(decodeStepStringLiteral('C:\\\\temp')).toBe('C:\\temp');
+  });
+
+  it('gives a directive span precedence over an adjacent pair escape', () => {
+    // `Tr\X2\00FC\X0\` + `\\` — three raw backslashes in a row. A naive split
+    // at every doubled backslash eats the directive's terminator.
+    expect(decodeStepStringLiteral('Tr\\X2\\00FC\\X0\\\\\\docs')).toBe('Trü\\docs');
+  });
+
+  it('does not mis-decode escaped literal directive text', () => {
+    expect(decodeStepStringLiteral('a\\\\X2\\\\0041\\\\X0\\\\b')).toBe('a\\X2\\0041\\X0\\b');
   });
 });

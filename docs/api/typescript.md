@@ -953,7 +953,7 @@ IFC5 (IFCX) parser: `parseIfcx`, `parseFederatedIfcx`, `composeIfcx`, `detectFor
 
 ## @ifc-lite/encoding
 
-IFC string encoding/decoding and property value parsing: `decodeIfcString`, `encodeIfcString`, `parsePropertyValue`.
+IFC string encoding/decoding and property value parsing: `decodeIfcString`, `decodeStepStringLiteral`, `encodeIfcString`, `parsePropertyValue`.
 
 ## @ifc-lite/cache
 

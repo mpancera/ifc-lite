@@ -13,6 +13,7 @@ npm install @ifc-lite/encoding
 ```ts
 import {
   decodeIfcString,
+  decodeStepStringLiteral,
   encodeIfcString,
   generateIfcGuid,
   ifcGuidToUuid,
@@ -22,6 +23,9 @@ import {
 decodeIfcString('Gew\\X2\\00E4\\X0\\chshaus'); // 'Gewächshaus' (real umlaut)
 encodeIfcString('Tür');                   // 'T\\X\\FCr'
 
+// Whole literal, outer quotes stripped: also collapses '' and the \\ pair.
+decodeStepStringLiteral("O''Brien C:\\\\temp"); // "O'Brien C:\temp"
+
 const guid = generateIfcGuid();  // 22-char IFC GlobalId
 const uuid = ifcGuidToUuid(guid); // standard UUID form
 
@@ -30,7 +34,8 @@ parsePropertyValue(['IFCBOOLEAN', '.T.']); // { displayValue: 'True', ifcType: .
 
 ## Exports
 
-- `decodeIfcString` / `encodeIfcString`: STEP `\X2\`, `\X\`, `\S\` escape handling
+- `decodeIfcString` / `encodeIfcString`: STEP `\X2\`, `\X\`, `\X4\`, `\S\` escape handling
+- `decodeStepStringLiteral`: decode a whole quoted STEP literal's inner text — the `''` doubled quote, every backslash directive, and the `\\` literal-backslash pair (the exact inverse of what the ifc-lite STEP writers emit)
 - `generateIfcGuid`, `generateUuid`: new identifiers
 - `uuidToIfcGuid`, `ifcGuidToUuid`: convert between UUIDs and 22-char IFC GUIDs
 - `isValidIfcGuid`, `isValidUuid`: validation

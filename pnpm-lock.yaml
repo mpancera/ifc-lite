@@ -831,6 +831,10 @@ importers:
         version: 5.9.3
 
   packages/data:
+    dependencies:
+      '@ifc-lite/encoding':
+        specifier: workspace:^
+        version: link:../encoding
     devDependencies:
       '@types/node':
         specifier: ^26.1.1

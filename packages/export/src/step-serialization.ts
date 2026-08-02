@@ -11,6 +11,7 @@
 
 import { serializeValue, SCHEMA_REGISTRY, type IfcAttributeValue } from '@ifc-lite/parser';
 import { PropertyValueType, QuantityType, formatStepReal } from '@ifc-lite/data';
+import { encodeIfcString } from '@ifc-lite/encoding';
 
 /** EXPRESS base primitives a defined type ultimately resolves to. */
 const EXPRESS_PRIMITIVES = new Set(['BOOLEAN', 'LOGICAL', 'INTEGER', 'REAL', 'NUMBER', 'STRING', 'BINARY']);
@@ -96,18 +97,34 @@ export function serializeTypedMarker(type: string, value: string | number | bool
 }
 
 /**
- * Escape a string for STEP format (backslash and single-quote escaping).
+ * Escape a string for STEP format.
  *
- * Control characters (CR/LF and other C0 codes) are collapsed to a single
- * space so every generated STEP entity stays on one physical line and
- * round-trips through the line-oriented merge/convert paths.
+ * ISO-10303-21 string literals are ASCII-only, so everything outside printable
+ * ASCII goes through {@link encodeIfcString} (`ö` -> `\X\F6`, `Ω` ->
+ * `\X2\03A9\X0\`, `😀` -> `\X4\0001F600\X0\`). Writing raw UTF-8 instead — as
+ * this did before — produces a file that is not a conforming STEP literal, which
+ * matters for every umlaut in a German-authored name or property value.
+ *
+ * Order matters:
+ * - Control characters (CR/LF and other C0 codes plus DEL) are collapsed to a
+ *   single space FIRST, so every generated STEP entity stays on one physical
+ *   line and round-trips through the line-oriented merge/convert paths.
+ * - `encodeIfcString` escapes the literal backslash itself (`\` -> `\X\5C`), so
+ *   there is deliberately NO separate `\` -> `\\` doubling here; adding one back
+ *   would double-escape (either mangling the payloads `encodeIfcString` emits,
+ *   or turning one literal backslash into two).
+ * - The `''` doubling runs LAST: `encodeIfcString` leaves `'` (printable ASCII)
+ *   untouched and never emits a quote inside its own escapes, so doubling
+ *   afterwards can only ever hit quotes that came from the input.
+ *
+ * `decodeStepStringLiteral` (`@ifc-lite/encoding`) is the exact inverse; it is
+ * what `parseSourceHeader` and `@ifc-lite/data`'s `parseStepValue` read with.
+ * Kept byte-for-byte in step with the private escaper in
+ * `@ifc-lite/data`'s `step-serializers.ts` (that package cannot import this one).
  */
 export function escapeStepString(str: string): string {
-  return str
-    .replace(/\\/g, '\\\\')
-    .replace(/'/g, "''")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\x00-\x1F\x7F]+/g, ' ');
+  // eslint-disable-next-line no-control-regex
+  return encodeIfcString(str.replace(/[\x00-\x1F\x7F]+/g, ' ')).replace(/'/g, "''");
 }
 
 /**

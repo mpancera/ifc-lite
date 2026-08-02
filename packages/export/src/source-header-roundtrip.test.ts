@@ -207,6 +207,22 @@ END-ISO-10303-21;`;
     expect(out.author).toEqual(['Trümpler']);
   });
 
+  it('writes an authored umlaut as a STEP escape, not raw UTF-8, and reads it back', () => {
+    // The German-authoring case: names like these used to land in the file as
+    // raw UTF-8 bytes, which is not a conforming ISO-10303-21 string literal.
+    const opts = { schema: 'IFC4', timeStamp: 'TS', filename: 'f.ifc' } as const;
+    const authored = ['Löschung', 'Automation Primäranlagen'];
+    const h1 = generateHeader({ ...opts, author: authored });
+    expect(h1).toContain("('L\\X\\F6schung','Automation Prim\\X\\E4ranlagen')");
+    // Nothing outside printable ASCII reaches the file.
+    expect(h1.replace(/\n/g, '')).toMatch(/^[\x20-\x7E]*$/);
+
+    const p1 = parseSourceHeader(new TextEncoder().encode(h1));
+    expect(p1!.author).toEqual(authored);
+    // And re-writing what we read is byte-stable.
+    expect(generateHeader({ ...opts, author: p1!.author })).toBe(h1);
+  });
+
   it('collapses a newline in a header value to a space (no split record)', () => {
     const header = generateHeader({ schema: 'IFC4', author: ['A\nB'], timeStamp: 'TS' });
     const parsed = parseSourceHeader(new TextEncoder().encode(header));
@@ -220,7 +236,11 @@ END-ISO-10303-21;`;
     // on every round trip (`C:\\temp`, `C:\\\\temp`, ...).
     const opts = { schema: 'IFC4', timeStamp: 'TS', filename: 'f.ifc' } as const;
     const h1 = generateHeader({ ...opts, author: ['C:\\temp'] });
-    expect(h1).toContain("'C:\\\\temp'"); // stored escaped, exactly one doubling
+    // Stored as the ISO-10303-21 escape for U+005C, applied exactly once. (The
+    // writer used to emit the `\\` pair here; both forms read back as one
+    // backslash, but `\X\5C` is what `encodeIfcString` produces now that the
+    // escaper routes every non-plain-ASCII character through it.)
+    expect(h1).toContain("'C:\\X\\5Ctemp'");
 
     const p1 = parseSourceHeader(new TextEncoder().encode(h1));
     expect(p1!.author).toEqual(['C:\\temp']);

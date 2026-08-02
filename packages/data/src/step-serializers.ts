@@ -14,6 +14,8 @@
  * re-exports.
  */
 
+import { decodeStepStringLiteral, encodeIfcString } from '@ifc-lite/encoding';
+
 /**
  * STEP value types
  */
@@ -173,18 +175,31 @@ export function serializeValue(value: StepValue): string {
 /**
  * Escape a string for STEP format.
  *
- * Backslash and single-quote are doubled per ISO-10303-21. Control characters
- * (CR/LF and other C0 codes plus DEL) are collapsed to a single space so a
- * value can never inject a physical line break into the line-oriented STEP
- * output (matching the export package's escaper) — a raw newline in a header
- * or attribute value would otherwise split one record across two lines.
+ * ISO-10303-21 string literals are ASCII-only, so everything outside printable
+ * ASCII goes through {@link encodeIfcString} (`ö` -> `\X\F6`, `Ω` ->
+ * `\X2\03A9\X0\`, `😀` -> `\X4\0001F600\X0\`). Writing raw UTF-8 instead — as
+ * this did before — produces a file that is not a conforming STEP literal, which
+ * matters for every umlaut in a German-authored name or property value.
+ *
+ * Order matters:
+ * - Control characters (CR/LF and other C0 codes plus DEL) are collapsed to a
+ *   single space FIRST, so a value can never inject a physical line break into
+ *   the line-oriented STEP output (matching the export package's escaper) — a
+ *   raw newline in a header or attribute value would otherwise split one record
+ *   across two lines.
+ * - `encodeIfcString` escapes the literal backslash itself (`\` -> `\X\5C`), so
+ *   there is deliberately NO separate `\` -> `\\` doubling here; adding one back
+ *   would double-escape (either mangling the payloads `encodeIfcString` emits,
+ *   or turning one literal backslash into two).
+ * - The `''` doubling runs LAST: `encodeIfcString` leaves `'` (printable ASCII)
+ *   untouched and never emits a quote inside its own escapes, so doubling
+ *   afterwards can only ever hit quotes that came from the input.
+ *
+ * {@link unescapeStepString} is the exact inverse.
  */
 function escapeStepString(str: string): string {
-  return str
-    .replace(/\\/g, '\\\\')  // Backslash
-    .replace(/'/g, "''")     // Single quote
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\x00-\x1F\x7F]+/g, ' '); // Collapse control chars
+  // eslint-disable-next-line no-control-regex
+  return encodeIfcString(str.replace(/[\x00-\x1F\x7F]+/g, ' ')).replace(/'/g, "''");
 }
 
 /**
@@ -373,10 +388,15 @@ function parseStepList(str: string): StepValue[] {
 }
 
 /**
- * Unescape a STEP string
+ * Unescape a STEP string — the inverse of {@link escapeStepString}.
+ *
+ * Delegates to the canonical {@link decodeStepStringLiteral}, which collapses
+ * `''` and resolves every ISO-10303-21 backslash escape (`\X\`, `\X2\`, `\X4\`,
+ * `\S\`, `\Px\`, and the `\\` literal-backslash pair third-party writers emit).
+ * The previous `''`/`\\`-only regex pair left `\X2\00FC\X0\` as literal text, so
+ * once {@link escapeStepString} started encoding non-ASCII this pair would no
+ * longer round-trip.
  */
 function unescapeStepString(str: string): string {
-  return str
-    .replace(/''/g, "'")
-    .replace(/\\\\/g, '\\');
+  return decodeStepStringLiteral(str);
 }

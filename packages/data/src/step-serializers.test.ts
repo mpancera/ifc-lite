@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { describe, it, expect } from 'vitest';
-import { formatStepReal, serializeValue, generateHeader } from './step-serializers.js';
+import { formatStepReal, serializeValue, generateHeader, parseStepValue } from './step-serializers.js';
 
 /** A conforming STEP REAL: mantissa carries a decimal point, exponent (if any)
  *  is uppercase `E`. */
@@ -72,6 +72,90 @@ describe('serializeValue (number)', () => {
     expect(serializeValue(NaN)).toBe('$');
     expect(serializeValue(Infinity)).toBe('$');
     expect(serializeValue(-Infinity)).toBe('$');
+  });
+});
+
+/**
+ * ISO-10303-21 string literals are ASCII-only. Non-ASCII must leave the
+ * serializer as `\X\` / `\X2\` / `\X4\` escapes, never as raw UTF-8 bytes —
+ * German-authored names and property values ("Löschung", "Automation
+ * Primäranlagen") hit this on every export.
+ */
+describe('serializeValue (string escaping)', () => {
+  it('encodes umlauts as \\X\\ escapes instead of writing raw UTF-8', () => {
+    expect(serializeValue('Löschung')).toBe("'L\\X\\F6schung'");
+    expect(serializeValue('Automation Primäranlagen')).toBe("'Automation Prim\\X\\E4ranlagen'");
+  });
+
+  it('encodes BMP and non-BMP characters as \\X2\\ / \\X4\\', () => {
+    expect(serializeValue('Ω')).toBe("'\\X2\\03A9\\X0\\'");
+    expect(serializeValue('😀')).toBe("'\\X4\\0001F600\\X0\\'");
+  });
+
+  it('escapes a literal backslash exactly once (no doubling on top of \\X\\5C)', () => {
+    // The trap: `encodeIfcString` already escapes `\`, so a leftover
+    // `\` -> `\\` doubling would emit `\X\5C\X\5C` for ONE backslash.
+    expect(serializeValue('C:\\temp')).toBe("'C:\\X\\5Ctemp'");
+  });
+
+  it('doubles single quotes and leaves plain ASCII alone', () => {
+    expect(serializeValue("O'Brien")).toBe("'O''Brien'");
+    expect(serializeValue('Basic Wall 200mm')).toBe("'Basic Wall 200mm'");
+  });
+
+  it('emits only ASCII for any input', () => {
+    for (const v of ['Löschung', 'Ω 温度', '😀', 'C:\\x', "q'q"]) {
+      // eslint-disable-next-line no-control-regex
+      expect(serializeValue(v)).toMatch(/^[\x20-\x7E]*$/);
+    }
+  });
+});
+
+describe('serializeValue/parseStepValue string round trip', () => {
+  const cases: Array<[label: string, value: string]> = [
+    ['umlauts', 'Löschung'],
+    ['umlauts in a phrase', 'Automation Primäranlagen'],
+    ['all German umlauts plus sharp s', 'ÄÖÜäöüß'],
+    ['BMP characters', 'Ω 温度センサー'],
+    ['non-BMP emoji', 'Sensor 😀 ok'],
+    ['literal backslash', 'C:\\temp\\modell.ifc'],
+    ['single quote', "O'Brien's Wall"],
+    ['text that looks like a directive', 'a\\X2\\0041\\X0\\b'],
+    ['everything at once', "Löschung 😀 C:\\x 'q' Ω"],
+    ['plain ASCII', 'Basic Wall 200mm'],
+  ];
+
+  for (const [label, value] of cases) {
+    it(`round-trips ${label}`, () => {
+      expect(parseStepValue(serializeValue(value))).toBe(value);
+    });
+  }
+
+  it('is byte-stable across a second write (a backslash never grows)', () => {
+    const value = 'C:\\temp';
+    const once = serializeValue(value);
+    expect(parseStepValue(once)).toBe(value);
+    expect(serializeValue(parseStepValue(once) as string)).toBe(once);
+  });
+
+  it('still reads the `\\\\` pair a third-party writer emits', () => {
+    expect(parseStepValue("'C:\\\\temp'")).toBe('C:\\temp');
+  });
+});
+
+describe('generateHeader string escaping', () => {
+  it('encodes umlauts in header fields as \\X\\ escapes', () => {
+    const header = generateHeader({
+      schema: 'IFC4',
+      author: ['Trümpler'],
+      organization: ['Büro Süd'],
+      timeStamp: 'TS',
+    });
+    expect(header).toContain("('Tr\\X\\FCmpler')");
+    expect(header).toContain("('B\\X\\FCro S\\X\\FCd')");
+    // Nothing outside printable ASCII survives into the file.
+    // eslint-disable-next-line no-control-regex
+    expect(header.replace(/\n/g, '')).toMatch(/^[\x20-\x7E]*$/);
   });
 });
 
