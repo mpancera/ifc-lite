@@ -51,6 +51,17 @@ export interface LibraryElementInStoreParams {
   Name?: string;
   Description?: string;
   Tag?: string;
+  /**
+   * Spatial element the new element is contained in — typically the
+   * `IfcSpace` enclosing `Position`. Defaults to `anchor.storeyId`.
+   *
+   * IFC allows an element to be contained directly in an `IfcSpace` rather
+   * than its storey, and an element is contained in exactly ONE spatial
+   * element; the storey is still reached transitively through the space. A
+   * device in a room is more useful stated against the room, which is what
+   * makes "which detectors are in this room" answerable from the file alone.
+   */
+  ContainerId?: number;
 }
 
 export interface LibraryElementBuildResult {
@@ -61,6 +72,8 @@ export interface LibraryElementBuildResult {
   shapeRepId: number;
   productShapeId: number;
   relContainedId: number;
+  /** The spatial element the element was contained in (space, else storey). */
+  containerId: number;
 }
 
 export function addLibraryElementToStore(
@@ -98,7 +111,12 @@ export function addLibraryElementToStore(
   }
 
   const elementId = editor.addEntity(params.IfcEntity, attrs as Parameters<StoreEditor['addEntity']>[1]).expressId;
-  const relContainedId = emitRelContainedInSpatialStructure(editor, anchor.ownerHistoryId, elementId, anchor.storeyId, anchor.guidRandom);
+  // The placement chain above is anchored to the STOREY regardless of the
+  // container: containment states where the element belongs, the placement
+  // states where it sits, and IFC keeps those independent. Re-anchoring the
+  // placement to the space would also require the space's own frame.
+  const containerId = params.ContainerId ?? anchor.storeyId;
+  const relContainedId = emitRelContainedInSpatialStructure(editor, anchor.ownerHistoryId, elementId, containerId, anchor.guidRandom);
 
-  return { elementId, placementId, profileId, solidId, shapeRepId, productShapeId, relContainedId };
+  return { elementId, placementId, profileId, solidId, shapeRepId, productShapeId, relContainedId, containerId };
 }

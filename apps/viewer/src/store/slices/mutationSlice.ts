@@ -55,6 +55,7 @@ import type { MeshData } from '@ifc-lite/geometry';
 import { getEntityBounds, getEntityCenter } from '@/utils/viewportUtils';
 import type { CatalogEntry } from '@/lib/catalog';
 import { disciplineSystemName, findDisciplineSystem } from '@/lib/roles/disciplineRoles';
+import { resolveSpaceForPlacement } from '@/lib/relationships/spaceLookup';
 import { toGlobalIdFromModels } from '../globalId.js';
 import { buildElementMesh, type ElementMeshPayload } from './addElementMeshes.js';
 import type { AddElementType } from './addElementSlice.js';
@@ -2480,7 +2481,15 @@ export const createMutationSlice: StateCreator<
     return runInStoreElementBuilder(
       get, set, modelId, storeyExpressId, ifcParams.IfcEntity.toUpperCase(), `add ${ifcParams.IfcEntity}`,
       (editor, anchor) => {
-        const elementId = addLibraryElementToStore(editor, anchor, ifcParams).elementId;
+        // Contain the element in the room it actually sits in, when the model
+        // has one there. Falls back to the storey (the previous behaviour) for
+        // a corridor, an unmodelled area, or a storey without spaces.
+        const store = get().models.get(modelId)?.ifcDataStore ?? get().ifcDataStore;
+        const spaceId = resolveSpaceForPlacement(store, storeyExpressId, ifcParams.Position);
+        const elementId = addLibraryElementToStore(editor, anchor, {
+          ...ifcParams,
+          ContainerId: spaceId ?? undefined,
+        }).elementId;
 
         // Share one IfcXxxType per catalog product across all its placed
         // instances instead of repeating attributes per instance — find an

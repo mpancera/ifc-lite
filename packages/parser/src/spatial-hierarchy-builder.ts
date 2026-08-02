@@ -136,11 +136,25 @@ export class SpatialHierarchyBuilder {
 
     const { byStorey, byBuilding, bySite, bySpace, storeyElevations, elementToStorey, elementToContainer } = ctx;
 
-    // Pre-build the element -> space lookup for O(1) getContainingSpace.
+    // Pre-build the element -> space lookup for O(1) getContainingSpace, and
+    // in the same pass give space-contained elements their storey.
+    //
+    // `elementToStorey` is filled from storey-like containers only, propagating
+    // through Aggregates. An element contained in an IfcSpace (a detector in a
+    // room, furniture in an office — standard IFC, an element has exactly ONE
+    // container and the storey is reached through the space) therefore had no
+    // storey at all, so "which storey is this on" came back blank for it.
+    // Spaces themselves are already mapped to their storey as spatial children,
+    // so the assignment just carries one level down. Existing entries win, which
+    // keeps direct storey containment authoritative.
     const elementToSpace = new Map<number, number>();
     for (const [spaceId, elementIds] of bySpace) {
+      const spaceStoreyId = elementToStorey.get(spaceId);
       for (const elementId of elementIds) {
         elementToSpace.set(elementId, spaceId);
+        if (spaceStoreyId !== undefined && !elementToStorey.has(elementId)) {
+          elementToStorey.set(elementId, spaceStoreyId);
+        }
       }
     }
 
