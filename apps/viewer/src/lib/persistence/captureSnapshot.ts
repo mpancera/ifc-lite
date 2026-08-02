@@ -11,6 +11,7 @@
 
 import type { MeshData } from '@ifc-lite/geometry';
 import type { MutablePropertyView } from '@ifc-lite/mutations';
+import type { ReferenceModelIndex } from './referenceIndex';
 import {
   SNAPSHOT_VERSION,
   type OverlaySnapshot,
@@ -31,6 +32,11 @@ export interface SnapshotSource {
   meshOf: (expressId: number) => MeshData | undefined;
   /** Spatial element the IFC containment points at, if resolvable. */
   containerOf: (expressId: number) => number | undefined;
+  /**
+   * Record the reference model against the anchors this snapshot leans on.
+   * Optional so capture stays usable without a parsed model.
+   */
+  buildReference?: (anchorExpressIds: Iterable<number>) => ReferenceModelIndex;
 }
 
 export interface CaptureArgs {
@@ -63,10 +69,16 @@ export function captureOverlaySnapshot(args: CaptureArgs): OverlaySnapshot | nul
   // overlay restores as plain entities.
   const placements: SnapshotPlacement[] = [];
   const meshes: SnapshotMesh[] = [];
+  /** Reference entities the work hangs off — the storeys and rooms it anchors to. */
+  const anchorExpressIds = new Set<number>();
   for (const entity of newEntities) {
     const storeyId = source.storeyOf(entity.expressId);
     if (storeyId === undefined) continue;
     const containerId = source.containerOf(entity.expressId);
+    anchorExpressIds.add(storeyId);
+    // An authored container (a space sketched this session) is restored with
+    // the snapshot, so it is not a reference-model anchor.
+    if (containerId !== undefined && !authoredIds.has(containerId)) anchorExpressIds.add(containerId);
     const rawName = entity.attributes[2];
     placements.push({
       expressId: entity.expressId,
@@ -100,7 +112,12 @@ export function captureOverlaySnapshot(args: CaptureArgs): OverlaySnapshot | nul
     if (seenEdited.has(mutation.entityId)) continue;
     seenEdited.add(mutation.entityId);
     const ref = toBaseRef(mutation.entityId);
-    if (ref) editedBaseEntities.push(ref);
+    if (ref) {
+      editedBaseEntities.push(ref);
+      // An edited entity is an anchor too: a correction to a wall is only
+      // meaningful while that wall is the wall it was written against.
+      anchorExpressIds.add(mutation.entityId);
+    }
   }
 
   return {
@@ -113,6 +130,7 @@ export function captureOverlaySnapshot(args: CaptureArgs): OverlaySnapshot | nul
     deleted,
     editedBaseEntities,
     placements,
+    reference: source.buildReference?.(anchorExpressIds),
     meshes,
   };
 }

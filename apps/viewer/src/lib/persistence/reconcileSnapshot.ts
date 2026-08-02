@@ -18,12 +18,19 @@
  *               whatever now holds that express id
  */
 
+import { compareAnchor, type AnchorState } from './referenceIndex';
 import type { OverlaySnapshot, ReconcileItem, ReconcileReport, ReconcileVerdict } from './types';
 
-/** The single lookup reconciliation needs from the newly opened model. */
+/** What reconciliation needs to read from the newly opened model. */
 export interface ReconcileTarget {
   /** Express id for a stable identifier, or -1 when the file has no such entity. */
   expressIdOfGlobalId: (globalId: string) => number;
+  /**
+   * Geometry fingerprint of an entity in the OPEN model, or `null` when it has
+   * none. Optional: without it the check falls back to existence only, and
+   * says so rather than claiming a room is unchanged.
+   */
+  geometryHashOfGlobalId?: (globalId: string) => string | null;
 }
 
 function plural(n: number, one: string, many: string): string {
@@ -70,17 +77,47 @@ export function reconcileSnapshot(
     });
   }
 
-  const placed = { ok: [] as number[], suspect: [] as number[], orphaned: [] as number[] };
+  // Anchors carry the reference model's state at save time, so a room that was
+  // RESHAPED (same GlobalId, new geometry — what an architect actually does)
+  // is caught. Without them only disappearance is detectable.
+  const anchorByGlobalId = new Map(
+    (snapshot.reference?.anchors ?? []).map((a) => [a.globalId, a] as const),
+  );
+  const anchorState = (globalId: string | null): AnchorState => {
+    if (globalId === null) return 'unchanged';
+    if (!exists(globalId)) return 'missing';
+    const anchor = anchorByGlobalId.get(globalId);
+    if (!anchor) return 'unknown';
+    return compareAnchor(anchor, {
+      exists: true,
+      geometryHash: target.geometryHashOfGlobalId?.(globalId) ?? null,
+    });
+  };
+
+  const placed = {
+    ok: [] as number[],
+    reshaped: [] as number[],
+    suspect: [] as number[],
+    orphaned: [] as number[],
+  };
   for (const placement of snapshot.placements) {
     if (!exists(placement.storeyGlobalId)) {
       placed.orphaned.push(placement.expressId);
-    } else if (placement.containerGlobalId !== null && !exists(placement.containerGlobalId)) {
-      // The storey survived but the enclosing room did not — the area around
-      // this element was re-planned.
-      placed.suspect.push(placement.expressId);
-    } else {
-      placed.ok.push(placement.expressId);
+      continue;
     }
+    const state = anchorState(placement.containerGlobalId);
+    if (state === 'missing') placed.suspect.push(placement.expressId);
+    else if (state === 'reshaped') placed.reshaped.push(placement.expressId);
+    else placed.ok.push(placement.expressId);
+  }
+
+  if (placed.reshaped.length > 0) {
+    items.push({
+      verdict: 'suspect',
+      label: `${plural(placed.reshaped.length, 'Bauteil steht', 'Bauteile stehen')} in einem umgebauten Raum`,
+      detail: 'Der Raum existiert noch, wurde aber geändert — Position prüfen',
+      expressIds: placed.reshaped,
+    });
   }
 
   if (placed.ok.length > 0) {
@@ -109,12 +146,23 @@ export function reconcileSnapshot(
   }
 
   const editsOrphaned = snapshot.editedBaseEntities.filter((ref) => !exists(ref.globalId));
-  const editsOk = snapshot.editedBaseEntities.length - editsOrphaned.length;
+  const editsReshaped = snapshot.editedBaseEntities.filter(
+    (ref) => anchorState(ref.globalId) === 'reshaped',
+  );
+  const editsOk = snapshot.editedBaseEntities.length - editsOrphaned.length - editsReshaped.length;
   if (editsOk > 0) {
     items.push({
       verdict: 'ok',
       label: `${plural(editsOk, 'bearbeitetes Bauteil', 'bearbeitete Bauteile')}`,
       detail: 'Bauteil in dieser Version wiedergefunden',
+      expressIds: [],
+    });
+  }
+  if (editsReshaped.length > 0) {
+    items.push({
+      verdict: 'suspect',
+      label: `${plural(editsReshaped.length, 'Korrektur betrifft', 'Korrekturen betreffen')} ein geändertes Bauteil`,
+      detail: 'Das Bauteil existiert noch, wurde aber überarbeitet',
       expressIds: [],
     });
   }

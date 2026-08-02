@@ -131,7 +131,14 @@ export function useOverlayAutosave() {
 
       // No snapshot for these bytes. Any other saved work might still be
       // meaningful for this file, so offer the most recent one that overlaps.
-      const target = makeReconcileTarget(activeStore);
+      // Geometry hashes come from the open model's meshes, so a reshaped room
+      // is detected rather than passing as unchanged on GlobalId alone.
+      const openMeshes = useViewerStore.getState().models.get(activeModelId)?.geometryResult?.meshes ?? [];
+      const target = makeReconcileTarget(
+        activeStore,
+        openMeshes,
+        (expressId) => useViewerStore.getState().toGlobalId(activeModelId, expressId),
+      );
       for (const candidate of await listSnapshots()) {
         if (cancelled) return;
         const report = reconcileSnapshot(candidate, hash, target);

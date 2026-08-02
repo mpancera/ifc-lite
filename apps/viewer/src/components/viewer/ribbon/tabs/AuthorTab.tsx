@@ -9,7 +9,7 @@
  * toolbar (viewer/commenter roles cannot unlock authoring).
  */
 
-import { Library } from 'lucide-react';
+import { FileDiff, Library } from 'lucide-react';
 import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -17,6 +17,7 @@ import { tourAnchor, toolAnchor } from '@/lib/tours/anchors';
 import { BulkPropertyEditor } from '../../BulkPropertyEditor';
 import { DataConnector } from '../../DataConnector';
 import { ProductLibraryPanel } from '../../catalog/ProductLibraryPanel';
+import { ReferenceOverridesPanel } from '../../ReferenceOverridesPanel';
 import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
 import {
   RibbonGroup,
@@ -142,6 +143,15 @@ export function AuthorTab() {
               <RibbonSmallButton
                 icon={ImportData}
                 label="Import data (CSV)"
+                disabled={!ifcDataStore}
+              />
+            }
+          />
+          <ReferenceOverridesPanel
+            trigger={
+              <RibbonSmallButton
+                icon={FileDiff}
+                label="Changes to the reference model"
                 disabled={!ifcDataStore}
               />
             }

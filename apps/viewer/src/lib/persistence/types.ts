@@ -21,6 +21,7 @@
 
 import type { MeshData } from '@ifc-lite/geometry';
 import type { Mutation, NewEntity } from '@ifc-lite/mutations';
+import type { ReferenceModelIndex } from './referenceIndex';
 
 /** Current snapshot format. Bumped when the shape changes incompatibly. */
 export const SNAPSHOT_VERSION = 1;
@@ -75,6 +76,15 @@ export interface OverlaySnapshot {
   editedBaseEntities: SnapshotBaseRef[];
 
   placements: SnapshotPlacement[];
+  /**
+   * The reference model as it stood when this was saved. Existence alone
+   * cannot tell "unchanged" from "re-planned" — an architect who reshapes a
+   * room keeps its GlobalId — so the anchors carry fingerprints too.
+   *
+   * Optional: snapshots written before this existed load without it, and
+   * reconciliation falls back to the existence-only check.
+   */
+  reference?: ReferenceModelIndex;
   /**
    * Preview meshes for authored products, baked in renderer frame. Stored
    * rather than re-derived: duplication clones its source's geometry, which no

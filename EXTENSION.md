@@ -156,6 +156,28 @@ reference into the *source file* also carries its GlobalId. On restore, an edit
 whose entity now sits at a different express id is dropped rather than replayed
 onto whatever occupies the old one.
 
+The snapshot also records the reference model as it stood at save time — every
+GlobalId, plus a geometry fingerprint for the entities the work anchors to.
+Existence alone cannot tell "unchanged" from "re-planned": an architect who
+reshapes a room keeps its GlobalId, which is what GlobalIds are for. Checking
+identity only reports such a room as fine and silently restores an element that
+may now sit inside a new wall. Comparing the anchor's geometry hash turns that
+false pass into a flag. Snapshots written before this exists still load; the
+check then degrades to existence and says so rather than claiming certainty.
+
+### Seeing what was changed on the reference model
+
+When work is additive — elements placed, grouped and typed, with the
+architecture model only referenced — anything that does touch that model is an
+exception worth naming. Those edits previously sat in the same overlay as
+everything else, so a correction to an architect's wall was indistinguishable
+from placing a detector.
+
+`ReferenceOverridesPanel` (Author → Properties) lists them: which entity, which
+field, and the before/after, keyed by GlobalId so an entry survives a re-export.
+Placing an element never appears; editing one that came from the file always
+does. Nothing about how edits are stored changes — this only reads them apart.
+
 Preview meshes are stored rather than re-derived from the parametric input:
 duplication clones its source's geometry, which no parametric record can
 reproduce. `MeshData` is typed arrays and numbers, so structured clone persists

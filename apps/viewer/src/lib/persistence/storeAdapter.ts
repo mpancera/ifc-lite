@@ -13,6 +13,7 @@ import type { MutablePropertyView } from '@ifc-lite/mutations';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import type { SnapshotSource } from './captureSnapshot';
 import type { ReconcileTarget } from './reconcileSnapshot';
+import { buildReferenceIndex } from './referenceIndex';
 
 /**
  * The spatial element an authored element was contained in, read back off the
@@ -58,6 +59,9 @@ export function makeSnapshotSource(args: SnapshotSourceArgs): SnapshotSource {
     typeNameOf: (expressId) => typeByExpressId.get(expressId) ?? '',
     meshOf: (expressId) => meshByGlobalId.get(toGlobalId(expressId)),
     containerOf: (expressId) => overlayContainerOf(view, expressId),
+    buildReference: (anchorExpressIds) => buildReferenceIndex({
+      store, meshes, toGlobalId, anchorExpressIds,
+    }),
   };
 }
 
@@ -66,8 +70,29 @@ export function makeSnapshotSource(args: SnapshotSourceArgs): SnapshotSource {
  * whether saved work still applies, so a store without the lookup must report
  * "not found" rather than appear to match everything.
  */
-export function makeReconcileTarget(store: IfcDataStore): ReconcileTarget {
+export function makeReconcileTarget(
+  store: IfcDataStore,
+  meshes: readonly MeshData[] = [],
+  toGlobalId: (expressId: number) => number = (id) => id,
+): ReconcileTarget {
+  const expressIdOfGlobalId = (globalId: string) =>
+    store.entities.getExpressIdByGlobalId?.(globalId) ?? -1;
+
+  const geometryByFederatedId = new Map<number, bigint>();
+  for (const mesh of meshes) {
+    if (mesh.geometryHash === undefined) continue;
+    if (!geometryByFederatedId.has(mesh.expressId)) {
+      geometryByFederatedId.set(mesh.expressId, mesh.geometryHash);
+    }
+  }
+
   return {
-    expressIdOfGlobalId: (globalId) => store.entities.getExpressIdByGlobalId?.(globalId) ?? -1,
+    expressIdOfGlobalId,
+    geometryHashOfGlobalId: (globalId) => {
+      const expressId = expressIdOfGlobalId(globalId);
+      if (expressId < 0) return null;
+      const hash = geometryByFederatedId.get(toGlobalId(expressId));
+      return hash === undefined ? null : hash.toString();
+    },
   };
 }

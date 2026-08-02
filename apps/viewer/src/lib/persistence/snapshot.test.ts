@@ -71,12 +71,25 @@ function authorSession() {
   const containers = new Map<number, number>([[inRoom, ROOM], [inCorridor, STOREY]]);
   const products = new Set([inRoom, inCorridor]);
 
+  const globalIdOf = (id: number) =>
+    ({ [STOREY]: GID.storey, [ROOM]: GID.room, [OTHER_ROOM]: GID.otherRoom, [EXISTING_WALL]: GID.wall } as Record<number, string>)[id] ?? '';
+
   const source: SnapshotSource = {
-    globalIdOf: (id) => ({ [STOREY]: GID.storey, [ROOM]: GID.room, [OTHER_ROOM]: GID.otherRoom, [EXISTING_WALL]: GID.wall } as Record<number, string>)[id] ?? '',
+    globalIdOf,
     storeyOf: (id) => (products.has(id) ? STOREY : undefined),
     typeNameOf: () => 'IfcSensor',
     meshOf: (id) => (products.has(id) ? fakeMesh(id) : undefined),
     containerOf: (id) => containers.get(id),
+    buildReference: (anchorIds) => ({
+      globalIds: [GID.storey, GID.room, GID.otherRoom, GID.wall],
+      anchors: [...anchorIds].map((id) => ({
+        globalId: globalIdOf(id),
+        ifcType: id === ROOM ? 'IfcSpace' : 'IfcBuildingStorey',
+        name: '',
+        // Only rooms carry geometry in this fixture; a storey has no mesh.
+        geometryHash: id === ROOM ? 'room-shape-v1' : id === EXISTING_WALL ? 'wall-shape-v1' : null,
+      })),
+    }),
   };
 
   return { view, editor, typeId, inRoom, inCorridor, source };
@@ -91,10 +104,12 @@ function capture() {
   return { ...s, snapshot: snapshot! };
 }
 
-/** A file where every original entity is still present. */
+/** A file where every original entity is still present, and unchanged. */
 const unchangedFile = {
   expressIdOfGlobalId: (gid: string) =>
     ({ [GID.storey]: STOREY, [GID.room]: ROOM, [GID.otherRoom]: OTHER_ROOM, [GID.wall]: EXISTING_WALL } as Record<string, number>)[gid] ?? -1,
+  geometryHashOfGlobalId: (gid: string) =>
+    gid === GID.room ? 'room-shape-v1' : gid === GID.wall ? 'wall-shape-v1' : null,
 };
 
 test('capture: an untouched overlay produces no snapshot', () => {
@@ -170,6 +185,35 @@ test('reconcile: an element whose room is gone is suspect, not discarded', () =>
   // The detector in the corridor is unaffected by a room being re-planned.
   const ok = report.items.filter((i) => i.verdict === 'ok').flatMap((i) => i.expressIds);
   assert.ok(ok.includes(inCorridor));
+});
+
+test('reconcile: a room that kept its id but was reshaped is flagged', () => {
+  // The whole point of holding the reference model. Without its fingerprint
+  // this reads as "room still there → ok" and quietly restores a detector that
+  // may now sit inside a new wall.
+  const { snapshot, inRoom } = capture();
+  const roomReshaped = {
+    ...unchangedFile,
+    geometryHashOfGlobalId: (gid: string) =>
+      gid === GID.room ? 'room-shape-v2' : unchangedFile.geometryHashOfGlobalId(gid),
+  };
+
+  const report = reconcileSnapshot(snapshot, 'hash-v2', roomReshaped);
+  const suspect = report.items.find((i) => i.verdict === 'suspect')!;
+
+  assert.ok(suspect, 'a reshaped room must not pass as unchanged');
+  assert.deepEqual(suspect.expressIds, [inRoom]);
+  assert.ok(suspect.label.includes('umgebauten Raum'));
+});
+
+test('reconcile: without a reference index the check degrades to existence only', () => {
+  // Snapshots written before the reference index existed must still load.
+  const { snapshot, inRoom } = capture();
+  const legacy = { ...snapshot, reference: undefined };
+
+  const report = reconcileSnapshot(legacy, 'hash-v2', unchangedFile);
+  const ok = report.items.filter((i) => i.verdict === 'ok').flatMap((i) => i.expressIds);
+  assert.ok(ok.includes(inRoom));
 });
 
 test('reconcile: an element whose storey is gone is orphaned', () => {
