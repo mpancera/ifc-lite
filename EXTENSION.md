@@ -130,6 +130,27 @@ per element.
   products only — see the doc comment in `lib/catalog/projectProducts.ts`
   for what "any Type already in the source file" would additionally need.
 
+### Loadable colour palettes
+
+A deployment that is not stock ifclite should be recognisable as such at a
+glance — someone who uses both needs to know which one they are in before they
+click anything. Type and layout stay put; only colour changes.
+
+Palettes are data, loaded at runtime and never compiled in, so no
+organisation's brand colours enter this repository. The built-in default is
+ifclite's own palette, unchanged; `apps/viewer/public/palettes/example.palette.json`
+documents the format. View → Interface → "Colour palette" loads one or returns
+to the default.
+
+Two independent parts, because they answer to different rules: `ui` for chrome,
+which needs contrast, and `dataViz` for Lens series colours, which need mutual
+distinguishability. Colours are written as inline custom properties with
+`important` priority — the built-in dark theme declares its own with
+`!important`, so a plain inline property would lose and dark mode would
+silently ignore the palette. `evaluateAutoColorLens` takes an optional palette
+that covers as many distinct values as it has colours, with the generated
+sequence continuing beyond it so a finite palette never caps a lens.
+
 ### Authoring survives a reload
 
 Everything authored in a session lived in the mutation overlay, which is memory
