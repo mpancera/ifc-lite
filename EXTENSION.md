@@ -74,6 +74,30 @@ per element.
   same `IfcTypeObject`/`IfcRelDefinesByType` mechanism ifclite's own parser
   already resolves onto instances.
 
+### Company catalog import + Type-sharing across placements
+
+- **`apps/viewer/src/lib/catalog/fileImportCatalogProvider.ts`** +
+  **`idbCatalogStorage.ts`** — a second `CatalogProvider` that reads a JSON
+  catalog file the user picks via the browser's file dialog, validates each
+  entry, and persists it in IndexedDB (never bundled in the repo, never
+  leaves the browser). `useCatalogEntries()` prefers an imported catalog over
+  the built-in example one whenever entries have been imported, and exposes
+  which source is active so the UI can say so.
+- **`addLibraryElement` (`apps/viewer/src/store/slices/mutationSlice.ts`)** —
+  placing a second instance of the same catalog product now reuses the
+  existing `IfcXxxType` (matched by its `Tag`) instead of creating a
+  duplicate Type per instance, linked via `IfcRelDefinesByType` — the
+  Type/Instance mechanism `library-type.ts` introduced is now actually
+  exercised by normal placement, not just available.
+- **Product Library panel** (`apps/viewer/src/components/viewer/catalog/`,
+  ribbon: Author → Create → "Product Library") — a dedicated dialog with two
+  tabs: **Firmenbibliothek** (table of the active catalog, plus the
+  import/reset controls) and **Projekt-Produkte** (one row per shared Type
+  actually placed in the current model, expandable to its instances; click
+  an instance to select it in 3D). Deliberately scoped to catalog-placed
+  products only — see the doc comment in `lib/catalog/projectProducts.ts`
+  for what "any Type already in the source file" would additionally need.
+
 ### F5 groundwork (not yet wired into authoring)
 
 Two isolated, tested utilities for a "place an element into whichever

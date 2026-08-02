@@ -13,8 +13,8 @@
  * elements in a row; Esc returns to the select tool.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Box, Cog, DoorOpen, Home, Layers, Library, Minus, Search, Siren, Square, SquareDashedBottom, Upload, Wand2, X } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Box, Cog, DoorOpen, Home, Layers, Library, Minus, Search, Siren, Square, SquareDashedBottom, Wand2, X } from 'lucide-react';
 import { toast } from '@/components/ui/toast';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -31,7 +31,8 @@ import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
 import { EntityNode } from '@ifc-lite/query';
 import type { AddElementType } from '@/store/slices/addElementSlice';
-import { useCatalogEntries, fileImportProvider, type CatalogEntry } from '@/lib/catalog';
+import { useCatalogEntries, type CatalogEntry } from '@/lib/catalog';
+import { CatalogImportControls } from './catalog/CatalogImportControls';
 
 interface ElementOption {
   type: AddElementType;
@@ -824,8 +825,6 @@ function LibrarySection({ selection, onSelect, params, onParamsChange }: Library
   const { entries, source, refresh } = useCatalogEntries();
   const [search, setSearch] = useState('');
   const [discipline, setDiscipline] = useState<'all' | CatalogEntry['discipline']>('all');
-  const [importing, setImporting] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -835,30 +834,6 @@ function LibrarySection({ selection, onSelect, params, onParamsChange }: Library
       return e.label.toLowerCase().includes(q) || e.category.toLowerCase().includes(q);
     });
   }, [entries, search, discipline]);
-
-  const handleImportFile = async (file: File) => {
-    setImporting(true);
-    try {
-      const result = await fileImportProvider.importFromFile(file);
-      refresh();
-      if (result.errors.length > 0) {
-        toast.error(`Imported ${result.entries.length} element(s), skipped ${result.errors.length} invalid row(s) — see console.`);
-        console.warn('[catalog import] skipped rows:', result.errors);
-      } else {
-        toast.success(`Imported ${result.entries.length} element(s) into the library.`);
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to import catalog file.');
-    } finally {
-      setImporting(false);
-    }
-  };
-
-  const handleResetToSeed = async () => {
-    await fileImportProvider.clear();
-    refresh();
-    toast.info('Reverted to the built-in example library.');
-  };
 
   return (
     <section className="space-y-2 pt-1">
@@ -871,41 +846,7 @@ function LibrarySection({ selection, onSelect, params, onParamsChange }: Library
         </span>
       </div>
 
-      <div className="flex gap-1">
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="application/json,.json"
-          className="hidden"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            e.target.value = '';
-            if (file) void handleImportFile(file);
-          }}
-        />
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={importing}
-          onClick={() => fileInputRef.current?.click()}
-          className="h-7 flex-1 text-[10px] font-mono gap-1"
-        >
-          <Upload className="h-3 w-3" />
-          {importing ? 'Importing…' : 'Import Firmenbibliothek (JSON)'}
-        </Button>
-        {source === 'file-import' && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => void handleResetToSeed()}
-            className="h-7 text-[10px] font-mono"
-          >
-            Reset
-          </Button>
-        )}
-      </div>
+      <CatalogImportControls source={source} onImported={refresh} />
 
       <div className="relative">
         <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-zinc-400" />
