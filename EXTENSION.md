@@ -130,6 +130,33 @@ per element.
   products only — see the doc comment in `lib/catalog/projectProducts.ts`
   for what "any Type already in the source file" would additionally need.
 
+### Elements contained in a space have no storey
+
+`SpatialHierarchy.elementToStorey` was populated from storey-like containers
+only, propagating through `Aggregates`. An element contained in an `IfcSpace`
+— a device in a room, furniture in an office, all ordinary IFC, since an
+element has exactly one container and reaches its storey through the space —
+therefore had no storey assignment at all, and every "which storey is this on"
+lookup came back blank for it: the Storey column of a schedule, level offsets,
+search filters. Spaces are already mapped to their storey as spatial children,
+so the assignment now carries one level down, guarded so direct storey
+containment still wins. `elementToContainer` keeps reporting the space as the
+element's actual container. Affects any file that contains elements in rooms.
+
+### Room containment for placed elements
+
+An element placed inside a room is now contained in that `IfcSpace` rather
+than in the storey — what makes "which devices are in this room" answerable
+from the file instead of by re-deriving it from coordinates. Placement outside
+any modelled space falls back to the storey exactly as before.
+
+Containment and placement stay independent: the placement chain remains
+anchored to the storey, since containment states where an element belongs and
+the placement states where it sits. `addLibraryElementToStore` takes an
+optional `ContainerId` for this; `apps/viewer/src/lib/relationships/spaceLookup.ts`
+caches each model's space footprints against the store object, so a placement
+click doesn't re-read every space out of the STEP source.
+
 ### Discipline roles — grouping placed elements into installations
 
 A trade planner does not place loose devices, they build a system. Picking a
