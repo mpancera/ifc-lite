@@ -130,6 +130,37 @@ per element.
   products only — see the doc comment in `lib/catalog/projectProducts.ts`
   for what "any Type already in the source file" would additionally need.
 
+### Authoring survives a reload
+
+Everything authored in a session lived in the mutation overlay, which is memory
+only: closing the tab lost it unless the model had been exported. Sessions are
+now mirrored to IndexedDB on every committed edit (debounced), and restored on
+load. Entirely local — nothing is uploaded.
+
+Snapshots are keyed by the source file's SHA-256, not its name, because a name
+says nothing about content: two revisions ship under the same file name all the
+time, and restoring one revision's work onto another silently reattaches edits
+to the wrong entities.
+
+- **Same bytes** → restored without asking. That case is a recovered tab, not a
+  decision worth interrupting someone for.
+- **A different version of the file** → nothing is applied. The snapshot is
+  reconciled against what is now open and the result is shown first
+  (`RestoreSessionDialog`): what still fits, what sits in an area that changed,
+  and what refers to entities the file no longer has. Declining a part leaves
+  the snapshot intact rather than discarding it.
+
+Entity references are stored twice for exactly that reason. Express ids are what
+the overlay uses, but they are assigned per export and are not stable, so every
+reference into the *source file* also carries its GlobalId. On restore, an edit
+whose entity now sits at a different express id is dropped rather than replayed
+onto whatever occupies the old one.
+
+Preview meshes are stored rather than re-derived from the parametric input:
+duplication clones its source's geometry, which no parametric record can
+reproduce. `MeshData` is typed arrays and numbers, so structured clone persists
+it as-is.
+
 ### Elements contained in a space have no storey
 
 `SpatialHierarchy.elementToStorey` was populated from storey-like containers
