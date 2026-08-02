@@ -13,4 +13,10 @@ export type {
   CatalogTechnicalData,
 } from './types.js';
 export { LocalSeedCatalogProvider } from './localSeedCatalog.js';
-export { useCatalogEntries } from './useCatalog.js';
+export { useCatalogEntries, fileImportProvider, type UseCatalogEntriesResult } from './useCatalog.js';
+export {
+  FileImportCatalogProvider,
+  parseCatalogImport,
+  type CatalogImportResult,
+  type CatalogImportError,
+} from './fileImportCatalogProvider.js';

@@ -19,8 +19,15 @@
  * `provenance` records where an entry actually came from today.
  */
 
-/** Where a catalog came from — used for both entries and providers. */
-export type CatalogSourceKind = 'local-seed' | 'aas';
+/**
+ * Where a catalog came from — used for both entries and providers.
+ * `local-seed`: the small generic demo catalog bundled with this app.
+ * `file-import`: a real catalog the user loaded from a local JSON file
+ * (never bundled/committed — see `FileImportCatalogProvider`).
+ * `aas`: a live Asset Administration Shell registry — not implemented
+ * yet, reserved so entries don't need reshaping once it is.
+ */
+export type CatalogSourceKind = 'local-seed' | 'file-import' | 'aas';
 
 export interface CatalogProvenance {
   source: CatalogSourceKind;
