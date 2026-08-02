@@ -33,6 +33,7 @@ import { useLensDiscovery } from './useLensDiscovery';
 export function useLens() {
   const activeLensId = useViewerStore((s) => s.activeLensId);
   const savedLenses = useViewerStore((s) => s.savedLenses);
+  const mutationVersion = useViewerStore((s) => s.mutationVersion);
 
   // Derive the active lens object — only re-evaluates when activeLensId or
   // the active lens entry itself changes, not when unrelated lenses are edited.
@@ -68,13 +69,14 @@ export function useLens() {
 
     // Read data sources from getState() — NOT subscribed, so model loading
     // doesn't trigger re-evaluation
-    const { models, ifcDataStore } = useViewerStore.getState();
+    const { models, ifcDataStore, mutationViews } = useViewerStore.getState();
     if (models.size === 0 && !ifcDataStore) return;
 
+    const isReapply = prevLensIdRef.current === activeLensId;
     prevLensIdRef.current = activeLensId;
 
     // Create data provider and evaluate lens using @ifc-lite/lens package
-    const provider = createLensDataProvider(models, ifcDataStore);
+    const provider = createLensDataProvider(models, ifcDataStore, mutationViews);
 
     // Dispatch: auto-color mode vs. rule-based mode
     const isAutoColor = !!activeLens.autoColor;
@@ -111,14 +113,21 @@ export function useLens() {
       useViewerStore.getState().setPendingColorUpdates(colorMap);
     }
 
-    posthog.capture('lens_applied', {
-      mode: isAutoColor ? 'auto_color' : 'rules',
-      rule_count: activeLens.rules.length,
-      auto_color_source: isAutoColor ? activeLens.autoColor?.source : undefined,
-      matched_entity_count: colorMap.size,
-      hidden_entity_count: hiddenIds.size,
-    });
-  }, [activeLensId, activeLens]);
+    // Only report an actual activation. A re-run triggered by an authoring edit
+    // is the same applied lens, and counting those would inflate the metric
+    // once per edit for as long as a lens stays on.
+    if (!isReapply) {
+      posthog.capture('lens_applied', {
+        mode: isAutoColor ? 'auto_color' : 'rules',
+        rule_count: activeLens.rules.length,
+        auto_color_source: isAutoColor ? activeLens.autoColor?.source : undefined,
+        matched_entity_count: colorMap.size,
+        hidden_entity_count: hiddenIds.size,
+      });
+    }
+    // mutationVersion bumps on every committed authoring edit — the signal that
+    // recolours a live lens (issue: colours went stale after editing a value).
+  }, [activeLensId, activeLens, mutationVersion]);
 
   return {
     activeLensId,

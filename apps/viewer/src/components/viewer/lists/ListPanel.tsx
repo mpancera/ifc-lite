@@ -41,6 +41,7 @@ import {
   createListDataProvider,
 } from '@/lib/lists';
 import type { ListDefinition, ListResult, ListDataProvider, ListGrouping } from '@/lib/lists';
+import { withMutationOverlay } from '@/lib/lists/mutationOverlayProvider';
 import { mergeResultColumns } from '@/lib/lists/merge-result-columns';
 import { extractProjectUnits, ProjectUnits, type IfcDataStore } from '@ifc-lite/parser';
 import { ListBuilder } from './ListBuilder';
@@ -88,25 +89,42 @@ export function ListPanel({ onClose }: ListPanelProps) {
   const zoneAssignments = useViewerStore((s) => s.zoneAssignments);
   const toGlobalId = useViewerStore((s) => s.toGlobalId);
 
+  // Authoring done this session lives in the mutation overlay, not in the
+  // parsed store the list provider reads, so each provider is wrapped to merge
+  // it (see `withMutationOverlay`). `mutationVersion` bumps on every edit and
+  // is what rebuilds the providers so a list re-run reflects the current state.
+  const mutationViews = useViewerStore((s) => s.mutationViews);
+  const mutationVersion = useViewerStore((s) => s.mutationVersion);
+
   // Build the {modelId, provider} pairs in a single pass so the two
   // arrays can never drift out of alignment (skipping a model without
   // an ifcDataStore must not shift every later model's provider index).
   const modelProviderPairs = useMemo(() => {
     const pairs: Array<{ modelId: string; provider: ListDataProvider; store: IfcDataStore }> = [];
+    // Authoring an element also creates its placement/profile/solid/shape-rep
+    // entities. Only the product itself is registered against a storey, so
+    // that registry is the row filter — the plumbing must not become rows.
+    const overlayFor = (modelId: string, store: IfcDataStore, provider: ListDataProvider) =>
+      withMutationOverlay(provider, mutationViews.get(modelId), {
+        isRowEntity: (expressId) => store.spatialHierarchy?.elementToStorey.has(expressId) ?? false,
+      });
     if (models.size > 0) {
       for (const [modelId, model] of models) {
         // Skip native-metadata models — they don't have a parsed
         // IfcDataStore, so the list provider can't query them.
         if (!model.ifcDataStore) continue;
         const zoneContext = { zoneSets, zoneAssignments, toGlobalId: (expressId: number) => toGlobalId(modelId, expressId) };
-        pairs.push({ modelId, provider: createListDataProvider(model.ifcDataStore, model.name, zoneContext), store: model.ifcDataStore });
+        const provider = createListDataProvider(model.ifcDataStore, model.name, zoneContext);
+        pairs.push({ modelId, provider: overlayFor(modelId, model.ifcDataStore, provider), store: model.ifcDataStore });
       }
     } else if (ifcDataStore) {
       const zoneContext = { zoneSets, zoneAssignments, toGlobalId: (expressId: number) => toGlobalId('default', expressId) };
-      pairs.push({ modelId: 'default', provider: createListDataProvider(ifcDataStore, '', zoneContext), store: ifcDataStore });
+      const provider = createListDataProvider(ifcDataStore, '', zoneContext);
+      pairs.push({ modelId: 'default', provider: overlayFor('default', ifcDataStore, provider), store: ifcDataStore });
     }
     return pairs;
-  }, [models, ifcDataStore, zoneSets, zoneAssignments, toGlobalId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mutationVersion is the edit signal
+  }, [models, ifcDataStore, zoneSets, zoneAssignments, toGlobalId, mutationViews, mutationVersion]);
 
   const allProviders = useMemo(() => modelProviderPairs.map((p) => p.provider), [modelProviderPairs]);
   const allStores = useMemo(() => modelProviderPairs.map((p) => p.store), [modelProviderPairs]);

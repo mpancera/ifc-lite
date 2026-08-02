@@ -58,6 +58,7 @@ import { GeoreferencingPanel } from './properties/GeoreferencingPanel';
 import { RawStepCard } from './properties/RawStepCard';
 import { UnitDisplayControl } from './properties/UnitDisplayControl';
 import { TOUR_ANCHORS, tourAnchor } from '@/lib/tours/anchors';
+import { resolveOverlayDefiningTypeId } from '@/lib/mutations/overlayTypeLink';
 
 /** IFC material *definition* classes selectable from the Materials tab. */
 const MATERIAL_DEF_TYPES = new Set([
@@ -866,17 +867,11 @@ export function PropertiesPanel() {
     // instance until an export+reparse round-trip. Fall back to scanning the
     // mutation overlay directly for the same relationship.
     if (!result && mutationView) {
-      for (const entity of mutationView.getNewEntities()) {
-        if (entity.type !== 'IfcRelDefinesByType') continue;
-        const related = entity.attributes[4];
-        if (!Array.isArray(related) || !related.includes(`#${selectedEntity.expressId}`)) continue;
-        const typeRef = entity.attributes[5];
-        const typeId = typeof typeRef === 'string' ? Number(typeRef.replace('#', '')) : NaN;
-        if (Number.isNaN(typeId)) continue;
+      const typeId = resolveOverlayDefiningTypeId(mutationView, selectedEntity.expressId);
+      if (typeId !== null) {
         const typeEntity = mutationView.getNewEntities().find((e) => e.expressId === typeId);
         const typeName = typeof typeEntity?.attributes?.[2] === 'string' ? typeEntity.attributes[2] : (typeEntity?.type ?? 'Type');
         result = { typeId, typeName, properties: [] };
-        break;
       }
     }
 

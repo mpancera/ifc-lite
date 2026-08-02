@@ -23,17 +23,20 @@ import { createLensDataProvider } from '@/lib/lens';
 export function useLensDiscovery(): void {
   const modelCount = useViewerStore((s) => s.models.size);
   const ifcDataStore = useViewerStore((s) => s.ifcDataStore);
+  const mutationVersion = useViewerStore((s) => s.mutationVersion);
   const setDiscoveredLensData = useViewerStore((s) => s.setDiscoveredLensData);
 
   useEffect(() => {
-    const { models, ifcDataStore: ds } = useViewerStore.getState();
+    const { models, ifcDataStore: ds, mutationViews } = useViewerStore.getState();
     if (models.size === 0 && !ds) {
       setDiscoveredLensData(null);
       return;
     }
 
-    // Instant: just reads type names from entity arrays, no STEP parsing
-    const provider = createLensDataProvider(models, ds);
+    // Instant: just reads type names from entity arrays, no STEP parsing.
+    // The overlay is included so a class only present as authored elements
+    // (an IfcSensor placed this session) is offered as a lens target.
+    const provider = createLensDataProvider(models, ds, mutationViews);
     const classes = discoverClasses(provider);
     setDiscoveredLensData({
       classes,
@@ -42,5 +45,5 @@ export function useLensDiscovery(): void {
       classificationSystems: null, // lazy — discovered on-demand
       materials: null,       // lazy — discovered on-demand
     });
-  }, [modelCount, ifcDataStore, setDiscoveredLensData]);
+  }, [modelCount, ifcDataStore, mutationVersion, setDiscoveredLensData]);
 }

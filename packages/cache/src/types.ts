@@ -85,7 +85,16 @@ export const MAGIC = 0x4C434649; // "IFCL" in little-endian
  *   deserialize) and is the on-disk foundation for evict-to-disk residency.
  *   Per-mesh record layout inside a chunk is UNCHANGED from v12.
  */
-export const FORMAT_VERSION = 13;
+/**
+ * v13→v14: `IfcTypeEnum` gained the curated IFC4.3 class catalogue (ids 321+).
+ * The byte layout is unchanged, but the MEANING of stored `typeEnum` values
+ * shifted: a class now in the enum (IfcSensor, IfcAlarm, the MEP/distribution
+ * family, …) was written as `Unknown` (9999) by a v13 writer, so restoring a
+ * v13 cache would leave those entities unreachable via `getByType` and showing
+ * the raw uppercase STEP keyword as their class name. The bump invalidates
+ * pre-catalogue caches so they re-parse and bucket into the real enum member.
+ */
+export const FORMAT_VERSION = 14;
 
 /** Geometry chunking parameters (v13+). Grouping is a WRITE-side layout
  *  policy: readers only trust the directory, so these can change without a

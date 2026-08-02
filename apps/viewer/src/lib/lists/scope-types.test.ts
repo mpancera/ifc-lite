@@ -57,10 +57,10 @@ describe('collectScopeTypes (#1662)', () => {
   it('excludes non-element records: type objects, relationships, and unmapped classes', () => {
     const store = makeStore([
       [1, 'IFCWALL', true],
-      [2, 'IFCWALLTYPE', false, true],   // type object → excluded
-      [3, 'IFCRELAGGREGATES'],           // relationship → excluded
-      [4, 'IFCSANITARYTERMINAL', true],  // no distinct enum (Unknown) → excluded
-      [5, 'IFCSITE'],                    // spatial structure → offered
+      [2, 'IFCWALLTYPE', false, true],      // type object → excluded
+      [3, 'IFCRELAGGREGATES'],              // relationship → excluded
+      [4, 'IFCPERFORMANCEHISTORY', true],   // no distinct enum (Unknown) → excluded
+      [5, 'IFCSITE'],                       // spatial structure → offered
     ]);
 
     const types = new Set(collectScopeTypes([store]).map((o) => o.type));
@@ -71,6 +71,23 @@ describe('collectScopeTypes (#1662)', () => {
     assert.ok(!types.has(IfcTypeEnum.Unknown), 'unmapped classes are never offered');
     // Exactly the two list-able classes, nothing leaked in.
     assert.strictEqual(types.size, 2);
+  });
+
+  it('offers installation classes once they carry a distinct enum', () => {
+    // These used to collapse into `Unknown` and were dropped by the exclusion
+    // above; they are real, geometry-bearing elements and belong in the scope
+    // selector like any other class present in the model.
+    const store = makeStore([
+      [1, 'IFCSENSOR', true],
+      [2, 'IFCALARM', true],
+      [3, 'IFCSANITARYTERMINAL', true],
+    ]);
+
+    const types = new Set(collectScopeTypes([store]).map((o) => o.type));
+    assert.ok(types.has(IfcTypeEnum.IfcSensor), 'IfcSensor must be offered');
+    assert.ok(types.has(IfcTypeEnum.IfcAlarm), 'IfcAlarm must be offered');
+    assert.ok(types.has(IfcTypeEnum.IfcSanitaryTerminal), 'IfcSanitaryTerminal must be offered');
+    assert.ok(!types.has(IfcTypeEnum.Unknown));
   });
 
   it('counts one entry per enum even when several STEP names share it', () => {

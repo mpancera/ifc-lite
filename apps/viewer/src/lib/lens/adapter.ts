@@ -11,6 +11,7 @@
  */
 
 import type { LensDataProvider, PropertySetInfo, ClassificationInfo } from '@ifc-lite/lens';
+import type { MutablePropertyView } from '@ifc-lite/mutations';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import { RelationshipType } from '@ifc-lite/data';
 import {
@@ -23,6 +24,7 @@ import {
   extractAllMaterialsOnDemand,
 } from '@ifc-lite/parser';
 import { resolveEntityPredefinedType } from '@/lib/entity-predefined-type';
+import { resolveOverlayDefiningTypeId } from '@/lib/mutations/overlayTypeLink';
 import { lensMaterialNames } from '@/lib/lens-material-names';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import type { FederatedModel } from '@/store/types';
@@ -46,15 +48,32 @@ function computeMaxExpressId(dataStore: IfcDataStore): number {
   return max;
 }
 
+/** An authored entity the overlay contributes, indexed by federated global id. */
+interface OverlayEntity {
+  type: string;
+  attributes: unknown[];
+  modelId: string;
+  expressId: number;
+}
+
+/** Positional index of each named attribute in an `IfcRoot`-derived entity. */
+const OVERLAY_ATTR_INDEX: Record<string, number> = {
+  GlobalId: 0, Name: 2, Description: 3, ObjectType: 4, Tag: 7,
+};
+
 /**
  * Create a LensDataProvider for the viewer's federated models.
  *
  * @param models - Loaded federated models (may be empty in legacy mode)
  * @param legacyDataStore - Single-model data store (fallback)
+ * @param mutationViews - Per-model authoring overlays. Supplied, elements
+ *   placed and attributes edited this session take part in colouring; omitted,
+ *   the provider reads the parsed file exactly as before.
  */
 export function createLensDataProvider(
   models: Map<string, FederatedModel>,
   legacyDataStore: IfcDataStore | null,
+  mutationViews?: Map<string, MutablePropertyView>,
 ): LensDataProvider {
   // Build a flat array for fast iteration
   const entries: ModelEntry[] = [];
@@ -80,13 +99,91 @@ export function createLensDataProvider(
     });
   }
 
+  // ── Authoring overlay ──
+  // Elements placed and attributes edited this session live in the mutation
+  // overlay, not in the parsed store the rest of this adapter reads. Index them
+  // by federated global id once, so every accessor below is an O(1) lookup.
+  const overlayById = new Map<number, OverlayEntity>();
+  const overlayTombstones = new Set<number>();
+  const offsets = new Map(entries.map((entry) => [entry.id, { idOffset: entry.idOffset }]));
+  if (mutationViews) {
+    for (const entry of entries) {
+      const view = mutationViews.get(entry.id);
+      if (!view) continue;
+      const toGlobal = (expressId: number) => toGlobalIdFromModels(offsets, entry.id, expressId);
+      // Authoring an element also creates its placement/profile/solid entities.
+      // Only the product is registered against a storey, and only products may
+      // reach the colour map — otherwise auto-colour legend counts are inflated
+      // by geometry plumbing that never renders.
+      const isProduct = (expressId: number) =>
+        entry.ifcDataStore.spatialHierarchy?.elementToStorey.has(expressId) ?? false;
+      for (const entity of view.getNewEntities()) {
+        if (!isProduct(entity.expressId)) continue;
+        overlayById.set(toGlobal(entity.expressId), {
+          type: entity.type,
+          attributes: entity.attributes,
+          modelId: entry.id,
+          expressId: entity.expressId,
+        });
+      }
+      for (const expressId of view.getTombstones()) overlayTombstones.add(toGlobal(expressId));
+    }
+  }
+
+  /**
+   * An entity's own property sets, with authored ones merged in.
+   * `MutablePropertyView.getForEntity` already returns base ∪ overlay (its base
+   * extractor is wired to the same on-demand path), so it replaces the plain
+   * extractor wholesale rather than layering on top of it.
+   */
+  function instancePropertySets(entry: ModelEntry, expressId: number): PropertySetInfo[] {
+    const view = mutationViews?.get(entry.id);
+    if (view) return view.getForEntity(expressId) as PropertySetInfo[];
+    return extractPropertiesOnDemand(entry.ifcDataStore, expressId) as PropertySetInfo[];
+  }
+
+  /**
+   * Property sets on the `IfcXxxType` an element was typed by THIS session.
+   * The parsed store's relationship graph is built once at load, so an
+   * `IfcRelDefinesByType` authored now is invisible to `extractTypeProperties-
+   * OnDemand` and the type's defaults (a catalogue product's technical data)
+   * would never reach the occurrence.
+   */
+  function overlayTypePropertySets(entry: ModelEntry, expressId: number): PropertySetInfo[] {
+    const view = mutationViews?.get(entry.id);
+    const typeId = resolveOverlayDefiningTypeId(view, expressId);
+    return typeId === null ? [] : (view!.getForEntity(typeId) as PropertySetInfo[]);
+  }
+
+  /** The overlay's value for a named attribute, or `undefined` to fall through. */
+  function overlayAttribute(globalId: number, attrName: string): string | undefined {
+    const resolved = resolveGlobalId(globalId, entries);
+    const view = resolved ? mutationViews?.get(resolved.entry.id) : undefined;
+    if (resolved && view) {
+      for (const m of view.getAttributeMutationsForEntity(resolved.expressId)) {
+        if (m.name === attrName) return m.value || undefined;
+      }
+    }
+    const authored = overlayById.get(globalId);
+    if (!authored) return undefined;
+    if (attrName === 'Type') return authored.type;
+    if (attrName === 'PredefinedType') {
+      const last = authored.attributes[authored.attributes.length - 1];
+      return typeof last === 'string' && /^\.[A-Z0-9_]+\.$/.test(last) ? last.slice(1, -1) : undefined;
+    }
+    const index = OVERLAY_ATTR_INDEX[attrName];
+    if (index === undefined) return undefined;
+    const raw = authored.attributes[index];
+    return typeof raw === 'string' && raw ? raw : undefined;
+  }
+
   return {
     getEntityCount(): number {
       let count = 0;
       for (const entry of entries) {
         count += entry.ifcDataStore.entities?.count ?? 0;
       }
-      return count;
+      return count + overlayById.size;
     },
 
     forEachEntity(callback: (globalId: number, modelId: string) => void): void {
@@ -96,12 +193,17 @@ export function createLensDataProvider(
         if (!entities) continue;
         for (let i = 0; i < entities.count; i++) {
           const expressId = entities.expressId[i];
-          callback(toGlobalIdFromModels(models, entry.id, expressId), entry.id);
+          const globalId = toGlobalIdFromModels(models, entry.id, expressId);
+          if (overlayTombstones.has(globalId)) continue;
+          callback(globalId, entry.id);
         }
       }
+      for (const [globalId, authored] of overlayById) callback(globalId, authored.modelId);
     },
 
     getEntityType(globalId: number): string | undefined {
+      const authored = overlayById.get(globalId);
+      if (authored) return authored.type;
       const resolved = resolveGlobalId(globalId, entries);
       if (!resolved) return undefined;
       return resolved.entry.ifcDataStore.entities?.getTypeName?.(resolved.expressId);
@@ -120,7 +222,7 @@ export function createLensDataProvider(
       // On-demand extraction path: pre-built table is empty for client-parsed
       // stores, so iterate the same psets we expose via getPropertySets.
       if (store.onDemandPropertyMap && store.source?.length > 0) {
-        const instancePsets = extractPropertiesOnDemand(store, id);
+        const instancePsets = instancePropertySets(resolved.entry, id);
         for (const pset of instancePsets) {
           if (pset.name !== propertySetName) continue;
           for (const prop of pset.properties) {
@@ -129,13 +231,14 @@ export function createLensDataProvider(
         }
         // Fall through to type-inherited psets (Pset_*Common is typically
         // attached to IfcSpaceType / IfcWallType, not the instance).
-        const typeProps = extractTypePropertiesOnDemand(store, id);
-        if (typeProps) {
-          for (const pset of typeProps.properties) {
-            if (pset.name !== propertySetName) continue;
-            for (const prop of pset.properties) {
-              if (prop.name === propertyName) return prop.value;
-            }
+        const typeProps = extractTypePropertiesOnDemand(store, id)?.properties ?? [];
+        const inherited = typeProps.length > 0
+          ? (typeProps as PropertySetInfo[])
+          : overlayTypePropertySets(resolved.entry, id);
+        for (const pset of inherited) {
+          if (pset.name !== propertySetName) continue;
+          for (const prop of pset.properties) {
+            if (prop.name === propertyName) return prop.value;
           }
         }
         return undefined;
@@ -154,16 +257,19 @@ export function createLensDataProvider(
       // server-parsed. Mirror the quantity path and use the on-demand extractor,
       // which itself falls back to the eager table when no on-demand map exists.
       if (store.onDemandPropertyMap && store.source?.length > 0) {
-        const instancePsets = extractPropertiesOnDemand(store, id) as PropertySetInfo[];
+        const instancePsets = instancePropertySets(resolved.entry, id);
         // Merge type-inherited psets (Pset_*Common lives on the type entity
         // for occurrences). Instance psets take precedence on name conflict.
-        const typeProps = extractTypePropertiesOnDemand(store, id);
-        if (!typeProps || typeProps.properties.length === 0) return instancePsets;
+        const typeProps = extractTypePropertiesOnDemand(store, id)?.properties ?? [];
+        const inherited = typeProps.length > 0
+          ? (typeProps as PropertySetInfo[])
+          : overlayTypePropertySets(resolved.entry, id);
+        if (inherited.length === 0) return instancePsets;
 
         const seen = new Set(instancePsets.map((p) => p.name));
         const merged = instancePsets.slice();
-        for (const pset of typeProps.properties) {
-          if (!seen.has(pset.name)) merged.push(pset as PropertySetInfo);
+        for (const pset of inherited) {
+          if (!seen.has(pset.name)) merged.push(pset);
         }
         return merged;
       }
@@ -174,6 +280,12 @@ export function createLensDataProvider(
     },
 
     getEntityAttribute(globalId: number, attrName: string): string | undefined {
+      // An edited or authored value wins; everything else falls through to the
+      // parsed file, so an unedited model reads exactly as it did before.
+      const fromOverlay = overlayAttribute(globalId, attrName);
+      if (fromOverlay !== undefined) return fromOverlay;
+      if (overlayById.has(globalId)) return undefined;
+
       const resolved = resolveGlobalId(globalId, entries);
       if (!resolved) return undefined;
       const store = resolved.entry.ifcDataStore;
