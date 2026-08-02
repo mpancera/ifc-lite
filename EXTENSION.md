@@ -27,6 +27,21 @@ isolation set.
 Fixed by writing both representations. Regression test added in
 `spatialHierarchy.test.ts`.
 
+### Type-level properties invisible for entities authored this session
+
+`extractTypePropertiesOnDemand`/`extractTypeQuantitiesOnDemand`
+(`packages/parser/src/on-demand-extractors.ts`) resolve an instance's
+`IfcRelDefinesByType` link from the parsed file's static relationship
+graph only. An instance typed via a relationship authored during the
+current session (not present at parse time) resolved to "no property
+sets" in the Properties panel until an export+reparse round-trip.
+Added an overlay fallback scoped to `PropertiesPanel.tsx`'s
+`typeProperties` lookup. The same underlying gap likely affects the
+extractors' other consumers (Lists, Lens, LLM context) — not fixed
+there yet, each reads the parsed store directly rather than merging
+the mutation overlay, so this is probably one instance of a broader
+pattern worth a proper fix upstream.
+
 ## New features
 
 ### Element Library ("Library" type in Add Element)
@@ -52,6 +67,12 @@ per element.
   replaces one fixed chip per type; picking an entry drives the same
   click-to-place / hover-ghost / undo-redo flow every other Add Element type
   already has.
+- **`packages/create/src/in-store/library-type.ts`** — `addLibraryTypeToStore` +
+  `emitRelDefinesByType`: catalog products carry their default attributes on a
+  shared `IfcXxxType` (one per product, reused across placements — matched by
+  a `Tag` convention) instead of repeating them on every instance, using the
+  same `IfcTypeObject`/`IfcRelDefinesByType` mechanism ifclite's own parser
+  already resolves onto instances.
 
 ### F5 groundwork (not yet wired into authoring)
 
