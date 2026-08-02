@@ -27,6 +27,38 @@ isolation set.
 Fixed by writing both representations. Regression test added in
 `spatialHierarchy.test.ts`.
 
+### Lists and Lens do not see the authoring overlay
+
+Elements placed and attributes edited during a session live in the mutation
+overlay; `@ifc-lite/lists` and the Lens data provider read only the store
+parsed at load. A schedule or a colour rule therefore showed the file as it was
+opened — authored elements were missing entirely, and edited values stayed
+stale until an export + reparse round-trip. Lens additionally never
+re-evaluated on an edit, so colours went stale even where the data was
+reachable.
+
+Fixed viewer-side, leaving `@ifc-lite/lists` unaware of the overlay:
+`lib/lists/mutationOverlayProvider.ts` decorates a `ListDataProvider`
+(authored elements become rows, deleted ones stop being rows, edited attributes
+win), `lib/lens/adapter.ts` takes an optional overlay for the same merge, and
+`useLens` / `useLensDiscovery` re-evaluate on `mutationVersion`. Wrapping is a
+no-op for an unedited model. Only products reach rows and the colour map:
+authoring an element also creates its placement/profile/solid entities, so both
+call sites filter by the storey registry rather than surfacing raw overlay
+contents.
+
+### Installation classes collapsed into `IfcTypeEnum.Unknown`
+
+`IfcTypeEnum` (`@ifc-lite/data`) covered a hand-picked set of classes. Anything
+outside it — `IfcSensor`, `IfcAlarm`, `IfcAudioVisualAppliance`, the wider
+MEP/distribution family, the IFC4.3 infrastructure classes — resolved to
+`Unknown`. Two consequences: `getByType` could not target those classes at all,
+so a class-scoped list or query silently returned nothing, and `getTypeName`
+fell back to the raw uppercase STEP keyword, showing `IFCSENSOR` instead of
+`IfcSensor`. The enum now carries a curated IFC4.3 class catalogue (131 added
+members, ids 321+, existing values unchanged). `@ifc-lite/cache` bumps
+`FORMAT_VERSION` 13 → 14, since a v13 writer stored these classes as `Unknown`.
+
 ### Type-level properties invisible for entities authored this session
 
 `extractTypePropertiesOnDemand`/`extractTypeQuantitiesOnDemand`
@@ -97,6 +129,26 @@ per element.
   an instance to select it in 3D). Deliberately scoped to catalog-placed
   products only — see the doc comment in `lib/catalog/projectProducts.ts`
   for what "any Type already in the source file" would additionally need.
+
+### Discipline roles — grouping placed elements into installations
+
+A trade planner does not place loose devices, they build a system. Picking a
+discipline role in the Add Element panel makes that explicit: while one is
+active, every element placed from the catalogue also joins that installation's
+`IfcDistributionSystem` via `IfcRelAssignsToGroup`. "Standard" (the default)
+groups nothing and leaves placement exactly as it was.
+
+- **`apps/viewer/src/lib/roles/disciplineRoles.ts`** — roles are data, not code
+  paths; adding a trade or a system inside one is a new entry, nothing else.
+- **`packages/create/src/in-store/distribution-system.ts`** —
+  `addDistributionSystemToStore`, `emitRelAssignsToGroup`, and
+  `findDistributionSystem`, which matches an already-authored system by
+  `PredefinedType` **and** `ObjectType` so one system is reused across
+  placements. Both parts matter: several distinct installations share one
+  `IfcDistributionSystemEnum` value, and only `ObjectType` separates them.
+
+Grouping is independent of spatial containment, so an element keeps the storey
+placement its builder emitted.
 
 ### F5 groundwork (not yet wired into authoring)
 
