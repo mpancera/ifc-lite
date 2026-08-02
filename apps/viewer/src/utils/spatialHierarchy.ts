@@ -234,7 +234,10 @@ export function buildSpatialAncestryIndex(
  *   - A spatial-structure element (IfcSpace / IfcSpatialZone, linked by
  *     IfcRelAggregates) becomes a child NODE of the storey.
  *   - Any other element (slab / wall / … linked by IfcRelContainedInSpatialStructure)
- *     joins the storey's contained-element list (what the tree reads via byStorey).
+ *     joins the storey's contained-element list in BOTH representations:
+ *     the flat `byStorey` map (what the Hierarchy tree UI reads) and the
+ *     storey tree node's own `elements` array (what storey isolation /
+ *     Solo mode reads, via `collectSpatialSubtreeElementsWithIfcSpace`).
  * Idempotent. A later export+reparse rebuilds the hierarchy from the real
  * relationships, so this is purely the live-session bridge.
  */
@@ -268,6 +271,16 @@ export function registerAuthoredElement(
     if (!existing.includes(entityId)) existing.push(entityId);
   } else {
     hierarchy.byStorey.set(storeyExpressId, [entityId]);
+  }
+
+  // `byStorey` is what the Hierarchy tree UI reads, but storey isolation
+  // (Solo mode / `collectSpatialSubtreeElementsWithIfcSpace`) walks the
+  // tree NODE's own `elements` array instead — a separate representation
+  // of the same containment that this used to leave out of sync, so an
+  // authored element would show in the tree but vanish under Solo.
+  const storeyNode = findSpatialNode(hierarchy.project, storeyExpressId);
+  if (storeyNode && !storeyNode.elements.includes(entityId)) {
+    storeyNode.elements.push(entityId);
   }
 }
 

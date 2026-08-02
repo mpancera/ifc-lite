@@ -50,6 +50,17 @@ describe('registerAuthoredElement', () => {
     assert.deepEqual(h.getStoreyElements(4), [60], 'slab joins the storey contained list');
   });
 
+  it('also adds a contained element to the storey tree node (not just byStorey), so Solo/storey isolation sees it', () => {
+    // Regression: registerAuthoredElement used to only update the flat
+    // `byStorey` map. Storey isolation (Solo mode) walks the tree node's
+    // own `elements` array via collectSpatialSubtreeElementsWithIfcSpace,
+    // which stayed empty — an authored element (wall, door, sensor, …)
+    // would show in the Hierarchy tree but silently disappear under Solo.
+    const h = baseHierarchy();
+    registerAuthoredElement(h, 4, 60, 'IFCSLAB', 'Floor');
+    assert.deepEqual(storeyNodeOf(h).elements, [60]);
+  });
+
   it('is idempotent for repeated registration', () => {
     const h = baseHierarchy();
     registerAuthoredElement(h, 4, 50, 'IFCSPACE', 'Kitchen');
