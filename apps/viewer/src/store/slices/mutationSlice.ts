@@ -56,6 +56,7 @@ import { getEntityBounds, getEntityCenter } from '@/utils/viewportUtils';
 import type { CatalogEntry } from '@/lib/catalog';
 import { disciplineSystemName, findDisciplineSystem } from '@/lib/roles/disciplineRoles';
 import { resolveSpaceForPlacement } from '@/lib/relationships/spaceLookup';
+import { overlayContainerOf } from '@/lib/persistence/storeAdapter';
 import { toGlobalIdFromModels } from '../globalId.js';
 import { buildElementMesh, type ElementMeshPayload } from './addElementMeshes.js';
 import type { AddElementType } from './addElementSlice.js';
@@ -1002,7 +1003,14 @@ function runInStoreElementBuilder(
     // name ("Space 1") rather than falling back to the type.
     const rawName = editor.getNewEntity(entityId)?.attributes?.[2];
     const name = typeof rawName === 'string' ? rawName : '';
-    registerAuthoredElement(dataStore.spatialHierarchy, storeyExpressId, entityId, ifcType, name);
+    // The builder may have contained the element in the room enclosing it
+    // rather than in the storey; read that back so the hierarchy agrees with
+    // what the IFC actually says.
+    const view = get().mutationViews.get(modelId);
+    const containerId = view ? overlayContainerOf(view, entityId) : undefined;
+    registerAuthoredElement(
+      dataStore.spatialHierarchy, storeyExpressId, entityId, ifcType, name, containerId,
+    );
   }
 
   // Build a renderer-frame mesh for the new element so it appears in

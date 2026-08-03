@@ -593,3 +593,64 @@ describe('rebuildOnDemandMaps', () => {
     assert.deepEqual(onDemandMaterialMap.get(7), [62]);
   });
 });
+
+describe('registerAuthoredElement · room containment', () => {
+  /** Project → Site → Building → Storey(4), plus an authored room on it. */
+  function hierarchyWithRoom() {
+    const strings = new StringTable();
+    const entities = new EntityTableBuilder(4, strings);
+    entities.add(1, 'IFCPROJECT', 'p0', 'Project', '', '');
+    entities.add(2, 'IFCSITE', 's0', 'Site', '', '');
+    entities.add(3, 'IFCBUILDING', 'b0', 'Building', '', '');
+    entities.add(4, 'IFCBUILDINGSTOREY', 'st0', 'Level 1', '', '');
+    const rels = new RelationshipGraphBuilder();
+    rels.addEdge(1, 2, RelationshipType.Aggregates, 100);
+    rels.addEdge(2, 3, RelationshipType.Aggregates, 101);
+    rels.addEdge(3, 4, RelationshipType.Aggregates, 102);
+    const h = rebuildSpatialHierarchy(entities.build(), rels.build());
+    assert.ok(h);
+    // The room itself is authored, which is also how it gets a bySpace entry.
+    registerAuthoredElement(h, 4, 60, 'IFCSPACE', 'Kitchen');
+    return h;
+  }
+
+  it('records the room when containment points at one', () => {
+    // Without this, "which room is this device in" is unanswerable for anything
+    // authored this session: the IFC says the room, the hierarchy said the storey.
+    const h = hierarchyWithRoom();
+    registerAuthoredElement(h, 4, 900, 'IFCSENSOR', 'Melder', 60);
+
+    assert.equal(h.elementToContainer?.get(900), 60);
+    assert.ok(h.bySpace.get(60)?.includes(900));
+  });
+
+  it('still resolves the storey for a room-contained element', () => {
+    const h = hierarchyWithRoom();
+    registerAuthoredElement(h, 4, 900, 'IFCSENSOR', 'Melder', 60);
+
+    assert.equal(h.elementToStorey.get(900), 4);
+  });
+
+  it('records no container when the element sits directly on the storey', () => {
+    const h = hierarchyWithRoom();
+    registerAuthoredElement(h, 4, 901, 'IFCSENSOR', 'Melder', 4);
+
+    assert.equal(h.elementToContainer?.get(901), undefined);
+  });
+
+  it('omitting the container keeps the previous behaviour', () => {
+    const h = hierarchyWithRoom();
+    registerAuthoredElement(h, 4, 902, 'IFCSENSOR', 'Melder');
+
+    assert.equal(h.elementToContainer?.get(902), undefined);
+    assert.equal(h.elementToStorey.get(902), 4);
+  });
+
+  it('is idempotent', () => {
+    const h = hierarchyWithRoom();
+    registerAuthoredElement(h, 4, 900, 'IFCSENSOR', 'Melder', 60);
+    registerAuthoredElement(h, 4, 900, 'IFCSENSOR', 'Melder', 60);
+
+    assert.deepEqual(h.bySpace.get(60), [900]);
+  });
+});

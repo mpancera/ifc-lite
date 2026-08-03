@@ -12,6 +12,7 @@ import {
   IfcTypeEnum,
   RelationshipType,
   isBuildingLikeSpatialType,
+  isSpaceLikeSpatialType,
   type SpatialHierarchy,
   type SpatialNode,
   type EntityTable,
@@ -38,6 +39,19 @@ export function rebuildSpatialHierarchy(
 }
 
 /** Depth-first search for a spatial node by express id. */
+/**
+ * Is this container a room (or zone) rather than a storey?
+ *
+ * A parsed space always has a `bySpace` entry, so the check only matters for a
+ * space authored THIS session, which has none yet. Resolved off the spatial
+ * tree rather than the entity table because an authored space is a tree node
+ * before it is anything else.
+ */
+function isSpaceLike(hierarchy: SpatialHierarchy, expressId: number): boolean {
+  const node = findSpatialNode(hierarchy.project, expressId);
+  return node !== null && isSpaceLikeSpatialType(node.type);
+}
+
 function findSpatialNode(node: SpatialNode, expressId: number): SpatialNode | null {
   if (node.expressId === expressId) return node;
   for (const child of node.children) {
@@ -247,8 +261,25 @@ export function registerAuthoredElement(
   entityId: number,
   ifcTypeName: string,
   name: string,
+  containerExpressId?: number,
 ): void {
   hierarchy.elementToStorey.set(entityId, storeyExpressId);
+
+  // The IFC containment may point at a ROOM rather than the storey. Recording
+  // only the storey leaves "which room is this in" unanswerable for anything
+  // authored this session — the containment says one thing and the hierarchy
+  // another — which is what "the room a device sits in" has to read.
+  if (containerExpressId !== undefined && containerExpressId !== storeyExpressId) {
+    if (!hierarchy.elementToContainer) hierarchy.elementToContainer = new Map();
+    hierarchy.elementToContainer.set(entityId, containerExpressId);
+
+    const roomElements = hierarchy.bySpace.get(containerExpressId);
+    if (roomElements) {
+      if (!roomElements.includes(entityId)) roomElements.push(entityId);
+    } else if (isSpaceLike(hierarchy, containerExpressId)) {
+      hierarchy.bySpace.set(containerExpressId, [entityId]);
+    }
+  }
 
   const upper = ifcTypeName.toUpperCase();
   if (upper === 'IFCSPACE' || upper === 'IFCSPATIALZONE') {
