@@ -276,6 +276,56 @@ optional `ContainerId` for this; `apps/viewer/src/lib/relationships/spaceLookup.
 caches each model's space footprints against the store object, so a placement
 click doesn't re-read every space out of the STEP source.
 
+### Rule-driven property values
+
+An asset identifier is derived, not typed: building, storey, room, product
+type, instance tag, joined by separators. Typing it by hand is where
+transcription errors come from, and retyping it when a room number changes is
+worse.
+
+`apps/viewer/src/lib/smartProperties/` evaluates rules made of segments, each
+carrying a separator, a value source (`IfcSite` / `IfcBuilding` /
+`IfcBuildingStorey` / `IfcSpace` / `IfcEntity` / `IfcEntityType` and a field)
+and — the part that matters — what to do when that source is empty. Real models
+are incomplete: a device in a corridor has no room, a type may have no tag.
+
+- `omit` drops the segment **and** the separator before it. Keeping the
+  separator yields `50266.E00._smoke-detector`, which reads as a defect rather
+  than as an element that legitimately sits in a corridor.
+- `alternative` substitutes another source, so an element placed without a
+  shared type still yields something recognisable instead of a hole.
+- `warn` reports rather than shortens: an element with no storey is a modelling
+  problem, and a silently shorter identifier still looks plausible.
+
+Rules run after the element is registered in the spatial hierarchy, not inside
+the builder — storey and room only resolve once it is registered, so evaluating
+earlier would silently produce the fallback for every spatial segment. The
+result is written into a real property set, so it reaches schedules, Lens, the
+properties panel and the export without any of them knowing rules exist.
+
+Engine only so far: rules are defined in code, and the shipped default builds
+an `AssetIdentifier` into `Pset_ConstructionOccurence` (buildingSMART publishes
+that pset with a single "r" — spelling it correctly misses the standard set).
+
+### Roles decide what may be changed
+
+A discipline role adds to the reference model: devices, systems, the data that
+hangs off them. It does not redraw the architect's walls. With a role active,
+every edit to an entity that came from the file is refused — attributes,
+properties, quantities, retype, delete, move, rotate. Encoded as a rule rather
+than a convention, an accidental edit is caught where it happens instead of
+surfacing later as an unexplained difference in a model somebody else owns.
+
+The Standard role keeps full access, because correcting the reference IS
+sometimes the job — unmaintained room numbers, a wrong classification — and
+that wants a mode chosen on purpose. Ownership comes from the authoring overlay
+rather than express-id ranges: an id above the file's watermark is a good hint
+but stops being a guarantee once a session snapshot restores ids allocated
+earlier.
+
+Because it gates editing, the role is visible: File → Settings → Discipline
+role, plus the status bar, and the choice persists.
+
 ### Discipline roles — grouping placed elements into installations
 
 A trade planner does not place loose devices, they build a system. Picking a
