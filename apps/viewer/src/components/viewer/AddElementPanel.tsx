@@ -34,7 +34,6 @@ import { useIfc } from '@/hooks/useIfc';
 import { EntityNode } from '@ifc-lite/query';
 import type { AddElementType } from '@/store/slices/addElementSlice';
 import { useCatalogEntries, type CatalogEntry } from '@/lib/catalog';
-import { DISCIPLINE_ROLES, STANDARD_ROLE_ID, findDisciplineSystem } from '@/lib/roles/disciplineRoles';
 import { CatalogImportControls } from './catalog/CatalogImportControls';
 
 interface ElementOption {
@@ -58,6 +57,19 @@ const ELEMENT_OPTIONS: ElementOption[] = [
   { type: 'member', label: 'Member', Icon: Cog, hint: 'Generic structural member (brace, post, strut). Click Start, then End. Pick PredefinedType to set role.' },
   { type: 'sensor', label: 'Sensor', Icon: Siren, hint: 'Single click to drop a small MEP device (e.g. a fire detector). Emits IfcSensor — pick PredefinedType below.' },
   { type: 'library', label: 'Library', Icon: Library, hint: 'Pick an installation element from the catalog below, then click in 3D to place it.' },
+];
+
+/**
+ * How the type list is grouped in the dropdown. Ordered by what a session
+ * usually starts from rather than alphabetically: installations first, because
+ * that is the work this fork exists for; the structural set below, because a
+ * discipline planner rarely draws it.
+ */
+const ELEMENT_GROUPS: ReadonlyArray<{ label: string; types: AddElementType[] }> = [
+  { label: 'Installation', types: ['library', 'sensor'] },
+  { label: 'Räume', types: ['space'] },
+  { label: 'Bauteile', types: ['wall', 'slab', 'roof', 'plate', 'column', 'beam', 'member'] },
+  { label: 'Öffnungen', types: ['door', 'window'] },
 ];
 
 interface StoreyOption {
@@ -194,30 +206,39 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
           <Label className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
             Type
           </Label>
-          <div className="grid grid-cols-3 gap-1">
-            {ELEMENT_OPTIONS.map(({ type, label, Icon }) => {
-              const selected = addElementType === type;
-              return (
-                <button
-                  key={type}
-                  type="button"
-                  onClick={() => setAddElementType(type)}
-                  aria-pressed={selected}
-                  className={[
-                    'flex items-center justify-center gap-1 h-8 px-1.5 rounded-sm text-[10px] font-mono uppercase tracking-wide',
-                    'border transition-colors',
-                    'outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-1 focus-visible:ring-offset-background',
-                    selected
-                      ? 'bg-emerald-500 border-emerald-500 text-white hover:bg-emerald-600'
-                      : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-200 hover:border-emerald-300 dark:hover:border-emerald-800',
-                  ].join(' ')}
-                >
-                  <Icon className="h-3 w-3 shrink-0" />
-                  <span className="truncate">{label}</span>
-                </button>
-              );
-            })}
-          </div>
+          {/* A dropdown rather than a chip per type: twelve chips cost four rows
+              of a panel that also has to show dimensions, storey and (for the
+              catalogue) a searchable list. Grouped so the list stays scannable
+              — an alphabetical twelve reads as an undifferentiated wall. */}
+          <Select value={addElementType} onValueChange={(v) => setAddElementType(v as AddElementType)}>
+            <SelectTrigger className="h-8 font-mono text-xs">
+              <span className="flex items-center gap-1.5 min-w-0">
+                <activeOption.Icon className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">{activeOption.label}</span>
+              </span>
+            </SelectTrigger>
+            <SelectContent>
+              {ELEMENT_GROUPS.map((group) => (
+                <SelectGroup key={group.label}>
+                  <SelectLabel className="font-mono text-[10px] uppercase tracking-wider">
+                    {group.label}
+                  </SelectLabel>
+                  {group.types.map((type) => {
+                    const option = ELEMENT_OPTIONS.find((o) => o.type === type);
+                    if (!option) return null;
+                    return (
+                      <SelectItem key={type} value={type} className="font-mono text-xs">
+                        <span className="flex items-center gap-1.5">
+                          <option.Icon className="h-3.5 w-3.5 shrink-0" />
+                          {option.label}
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectGroup>
+              ))}
+            </SelectContent>
+          </Select>
           <p className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400 leading-snug pt-1">
             {activeOption.hint}
           </p>
@@ -293,10 +314,6 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
             </div>
           </section>
         )}
-
-        {/* Discipline role — only meaningful for catalogue elements, which are
-            what an installation system groups. */}
-        {addElementType === 'library' && <DisciplineRoleSection />}
 
         {/* Library browser — replaces the generic dimensions section for the 'library' type */}
         {addElementType === 'library' && (
@@ -444,50 +461,6 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
 
 function distance2D(a: { x: number; y: number }, b: { x: number; y: number }): number {
   return Math.hypot(b.x - a.x, b.y - a.y);
-}
-
-/**
- * Picks the installation being authored. On "Standard" nothing is grouped and
- * placement behaves exactly as it did before roles existed; on any other
- * choice each placed element also joins that role's `IfcDistributionSystem`.
- */
-function DisciplineRoleSection() {
-  const activeDisciplineSystemId = useViewerStore((s) => s.activeDisciplineSystemId);
-  const setActiveDisciplineSystemId = useViewerStore((s) => s.setActiveDisciplineSystemId);
-  const active = findDisciplineSystem(activeDisciplineSystemId);
-
-  return (
-    <section className="space-y-1.5">
-      <Label className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-        Fachrolle
-      </Label>
-      <Select value={activeDisciplineSystemId} onValueChange={setActiveDisciplineSystemId}>
-        <SelectTrigger className="h-8 font-mono text-xs">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value={STANDARD_ROLE_ID} className="font-mono text-xs">
-            Standard (keine Anlage)
-          </SelectItem>
-          {DISCIPLINE_ROLES.map((role) => (
-            <SelectGroup key={role.id}>
-              <SelectLabel className="font-mono text-[10px] uppercase tracking-wider">{role.label}</SelectLabel>
-              {role.systems.map((system) => (
-                <SelectItem key={system.id} value={system.id} className="font-mono text-xs">
-                  {system.label}
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          ))}
-        </SelectContent>
-      </Select>
-      <p className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400">
-        {active
-          ? `Platzierte Bauteile werden IfcDistributionSystem.${active.predefinedType} (${active.objectType}) zugewiesen.`
-          : 'Bauteile werden keiner Anlage zugewiesen.'}
-      </p>
-    </section>
-  );
 }
 
 interface ModeChipProps {
