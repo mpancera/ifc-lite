@@ -7,12 +7,11 @@
  * (Cesium / sun / SpaceMouse), and interface options.
  */
 
-import { Globe2, MousePointerClick, Move, Palette, PanelTop, } from 'lucide-react';
+import { Globe2, MousePointerClick, Move, PanelTop, } from 'lucide-react';
 import { TopView, BottomView, FrontView, BackView, LeftView, RightView, ZoomIn, ZoomOut, IsometricView, Orthographic, Viewpoint, SpaceMouse, Lighting, FitAll, RotateLeft, RotateRight } from '@/icons';
 import { useViewerStore } from '@/store';
 import { goHomeFromStore } from '@/store/homeView';
 import { TOUR_ANCHORS, tourAnchor } from '@/lib/tours/anchors';
-import { ColorPalettePanel } from '../../ColorPalettePanel';
 import {
   RibbonGroup,
   RibbonGroupDivider,
@@ -215,15 +214,6 @@ export function ViewTab() {
             tooltip="Switch back to the classic single-strip toolbar (remembered on this browser)"
             onClick={() => setToolbarStyle('classic')}
             {...tourAnchor(TOUR_ANCHORS.ribbonClassicSwitch)}
-          />
-          <ColorPalettePanel
-            trigger={
-              <RibbonSmallButton
-                icon={Palette}
-                label="Colour palette"
-                tooltip="Load a colour palette, or return to the built-in one"
-              />
-            }
           />
         </RibbonSmallStack>
       </RibbonGroup>

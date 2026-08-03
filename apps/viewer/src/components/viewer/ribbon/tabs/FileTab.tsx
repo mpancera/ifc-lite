@@ -8,6 +8,7 @@
  */
 
 import React from 'react';
+import { Palette, ShieldCheck } from 'lucide-react';
 import { AddFile, Loading, OpenFile, Refresh, Screenshot, FileCsv, FileIfc, FileGlb, FileKmz, FileJson, FileHbjson, Share, CollabsRoom } from '@/icons';
 import {
   DropdownMenu,
@@ -23,6 +24,8 @@ import { ExportDialog } from '../../ExportDialog';
 import { GLBExportDialog } from '../../GLBExportDialog';
 import { KmzExportDialog } from '../../KmzExportDialog';
 import { HbjsonExportDialog } from '../../HbjsonExportDialog';
+import { ColorPalettePanel } from '../../ColorPalettePanel';
+import { DataPrivacyPanel } from '../../DataPrivacyPanel';
 import type { FileCommands } from '../../toolbar/useFileCommands';
 import { useExportCommands } from '../../toolbar/useExportCommands';
 import {
@@ -170,6 +173,34 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
           </RibbonGroup>
         </>
       )}
+
+      <RibbonGroupDivider />
+
+      {/* Application-wide preferences. Deliberately here rather than in View:
+          these outlive a viewing session and are not about what is on screen.
+          Further settings topics are meant to join this group. */}
+      <RibbonGroup label="Settings">
+        <RibbonSmallStack>
+          <ColorPalettePanel
+            trigger={
+              <RibbonSmallButton
+                icon={Palette}
+                label="Colour palette"
+                tooltip="Load a colour palette, or return to the built-in one"
+              />
+            }
+          />
+          <DataPrivacyPanel
+            trigger={
+              <RibbonSmallButton
+                icon={ShieldCheck}
+                label="Data privacy"
+                tooltip="Control whether the app may contact third-party services"
+              />
+            }
+          />
+        </RibbonSmallStack>
+      </RibbonGroup>
     </>
   );
 }

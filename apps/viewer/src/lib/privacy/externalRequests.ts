@@ -54,4 +54,5 @@ export const EXTERNAL_ENDPOINTS: ReadonlyArray<{ host: string; purpose: string }
   { host: 'nominatim.openstreetmap.org', purpose: 'Ortssuche (Adresse → Koordinate)' },
   { host: 'api.open-meteo.com', purpose: 'Geländehöhe an der Gebäudeposition' },
   { host: 'epsg.io', purpose: 'CRS-Definition für exotische EPSG-Codes (Fallback)' },
+  { host: 'api.bsdd.buildingsmart.org', purpose: 'bSDD-Klassifikationssuche' },
 ];

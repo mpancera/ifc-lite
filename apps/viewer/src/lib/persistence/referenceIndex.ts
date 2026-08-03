@@ -22,6 +22,7 @@
  * the STEP source, so it can run on every save.
  */
 
+import { IfcTypeEnum } from '@ifc-lite/data';
 import type { MeshData } from '@ifc-lite/geometry';
 import type { IfcDataStore } from '@ifc-lite/parser';
 
@@ -39,11 +40,29 @@ export interface ReferenceAnchor {
   geometryHash: string | null;
 }
 
+/**
+ * Which project the reference model belongs to.
+ *
+ * `IfcProject.GlobalId` is issued once and carried through every export of
+ * that project, which makes it the one field that distinguishes "a newer
+ * version of what I was working on" from "a different building entirely".
+ * Without it, saved work looks partly applicable to any file at all: a product
+ * type and its system reference nothing in the architecture model, so they
+ * always survive reconciliation and always suggest there is something to
+ * restore.
+ */
+export interface ReferenceProject {
+  globalId: string;
+  name: string;
+}
+
 export interface ReferenceModelIndex {
   /** Every GlobalId present in the reference model at save time. */
   globalIds: string[];
   /** The entities this snapshot anchors to, with their fingerprints. */
   anchors: ReferenceAnchor[];
+  /** Identity of the project this was authored against. */
+  project?: ReferenceProject;
 }
 
 export interface BuildReferenceIndexArgs {
@@ -91,7 +110,40 @@ export function buildReferenceIndex(args: BuildReferenceIndexArgs): ReferenceMod
     });
   }
 
-  return { globalIds, anchors };
+  return { globalIds, anchors, project: readProject(store) };
+}
+
+/** Identity of the file's `IfcProject`, or `undefined` when it has none. */
+export function readProject(store: IfcDataStore): ReferenceProject | undefined {
+  const ids = store.entities.getByType(IfcTypeEnum.IfcProject);
+  if (ids.length === 0) return undefined;
+  const globalId = store.entities.getGlobalId(ids[0]) || '';
+  if (!globalId) return undefined;
+  return { globalId, name: store.entities.getName(ids[0]) || '' };
+}
+
+/**
+ * Is the open file a version of the project this snapshot was authored
+ * against?
+ *
+ * Answered on `IfcProject.GlobalId`, which an authoring tool carries across
+ * exports of the same project. When either side has no project identity — an
+ * older snapshot, or a file without an `IfcProject` — fall back to asking
+ * whether the storeys the work is anchored to are present: work that fits
+ * nowhere in this file is not worth offering, and work that fits everywhere
+ * was never anchored to begin with.
+ */
+export function isSameProject(
+  reference: ReferenceModelIndex | undefined,
+  current: ReferenceProject | undefined,
+  anchorExists: (globalId: string) => boolean,
+): boolean {
+  const saved = reference?.project;
+  if (saved && current) return saved.globalId === current.globalId;
+
+  const anchors = reference?.anchors ?? [];
+  if (anchors.length === 0) return false;
+  return anchors.some((anchor) => anchorExists(anchor.globalId));
 }
 
 /** How an anchor compares to the model that is now open. */

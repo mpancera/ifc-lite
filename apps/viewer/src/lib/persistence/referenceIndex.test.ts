@@ -40,3 +40,51 @@ test('a one-sided geometry hash reports unknown rather than guessing', () => {
   assert.equal(compareAnchor(room, { exists: true, geometryHash: null }), 'unknown');
   assert.equal(compareAnchor(storey, { exists: true, geometryHash: '5' }), 'unknown');
 });
+
+// ── project identity ──
+
+import { isSameProject } from './referenceIndex.js';
+import type { ReferenceModelIndex } from './referenceIndex.js';
+
+const PROJECT_A = { globalId: 'gid-project-A', name: 'MOD' };
+const PROJECT_B = { globalId: 'gid-project-B', name: 'Anderes Haus' };
+
+function indexFor(project: typeof PROJECT_A | undefined, anchors: string[] = ['gid-storey']): ReferenceModelIndex {
+  return {
+    globalIds: anchors,
+    anchors: anchors.map((globalId) => ({
+      globalId, ifcType: 'IfcBuildingStorey', name: '', geometryHash: null,
+    })),
+    project,
+  };
+}
+
+const allAnchorsPresent = () => true;
+const noAnchorsPresent = () => false;
+
+test('a newer version of the same project matches', () => {
+  assert.equal(isSameProject(indexFor(PROJECT_A), PROJECT_A, allAnchorsPresent), true);
+});
+
+test('a different project does not match, even with everything else intact', () => {
+  // The case that made the prompt appear for every file: product types and
+  // systems reference nothing in the architecture model, so reconciliation
+  // alone always finds something that "still applies".
+  assert.equal(isSameProject(indexFor(PROJECT_A), PROJECT_B, allAnchorsPresent), false);
+});
+
+test('a snapshot without project identity falls back to its anchors', () => {
+  // Older snapshots predate the project field and must still be offerable.
+  assert.equal(isSameProject(indexFor(undefined), PROJECT_A, allAnchorsPresent), true);
+  assert.equal(isSameProject(indexFor(undefined), PROJECT_A, noAnchorsPresent), false);
+});
+
+test('a file without an IfcProject falls back to anchors too', () => {
+  assert.equal(isSameProject(indexFor(PROJECT_A), undefined, allAnchorsPresent), true);
+  assert.equal(isSameProject(indexFor(PROJECT_A), undefined, noAnchorsPresent), false);
+});
+
+test('a snapshot with neither identity nor anchors is never offered', () => {
+  assert.equal(isSameProject(indexFor(undefined, []), undefined, allAnchorsPresent), false);
+  assert.equal(isSameProject(undefined, PROJECT_A, allAnchorsPresent), false);
+});

@@ -26,6 +26,7 @@ import { loadSnapshot, saveSnapshot, deleteSnapshot, listSnapshots } from '@/lib
 import { reconcileSnapshot, undisputedExpressIds } from '@/lib/persistence/reconcileSnapshot';
 import { restoreOverlaySnapshot } from '@/lib/persistence/restoreSnapshot';
 import { makeReconcileTarget, makeSnapshotSource } from '@/lib/persistence/storeAdapter';
+import { isSameProject, readProject } from '@/lib/persistence/referenceIndex';
 import type { OverlaySnapshot, ReconcileReport } from '@/lib/persistence/types';
 
 /** Long enough that click-place-click-place is one write, short enough that a
@@ -139,11 +140,19 @@ export function useOverlayAutosave() {
         openMeshes,
         (expressId) => useViewerStore.getState().toGlobalId(activeModelId, expressId),
       );
+      // Only a version of the SAME project is worth offering. Asking whether
+      // "anything applies" cannot decide this: a product type and its system
+      // reference nothing in the architecture model, so they survive
+      // reconciliation against any file whatsoever and every unrelated model
+      // would raise the prompt.
+      const openProject = readProject(activeStore);
       for (const candidate of await listSnapshots()) {
         if (cancelled) return;
+        if (!isSameProject(candidate.reference, openProject, (globalId) => (
+          target.expressIdOfGlobalId(globalId) >= 0
+        ))) continue;
+
         const report = reconcileSnapshot(candidate, hash, target);
-        const anythingApplies = report.items.some((i) => i.verdict !== 'orphaned');
-        if (!anythingApplies) continue;
         setPendingRestore({ snapshot: candidate, report, modelId: activeModelId });
         settled = true;
         return;

@@ -15,6 +15,8 @@
 // Proxy through our own origin to avoid CORS issues.
 // In dev Vite proxies /api/bsdd → https://api.bsdd.buildingsmart.org,
 // in production Vercel rewrites do the same.
+import { externalRequestsAllowed } from '@/lib/privacy/externalRequests';
+
 const BSDD_API = '/api/bsdd';
 const IFC_DICTIONARY_URI =
   'https://identifier.buildingsmart.org/uri/buildingsmart/ifc/4.3';
@@ -90,6 +92,16 @@ function setCache(key: string, data: BsddClassInfo) {
 // ---------------------------------------------------------------------------
 
 async function fetchJson<T>(url: string): Promise<T> {
+  // Routed through this origin, but the request still reaches buildingSMART —
+  // and the query is the IFC class being looked up, which says what is being
+  // planned. Unlike the map, nothing here fires on its own; it takes an
+  // explicit lookup. Gated all the same, so the guarantee is "no third party",
+  // not "no third party except the ones that felt harmless".
+  if (!externalRequestsAllowed()) {
+    throw new Error(
+      'bSDD lookups are off: external requests are disabled. Enable them under File › Settings › Data privacy.',
+    );
+  }
   const res = await fetch(url, {
     headers: { Accept: 'application/json' },
   });
