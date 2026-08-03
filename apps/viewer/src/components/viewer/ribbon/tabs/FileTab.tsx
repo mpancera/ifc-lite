@@ -8,7 +8,7 @@
  */
 
 import React from 'react';
-import { Palette, ShieldCheck } from 'lucide-react';
+import { HardHat, Palette, ShieldCheck } from 'lucide-react';
 import { AddFile, Loading, OpenFile, Refresh, Screenshot, FileCsv, FileIfc, FileGlb, FileKmz, FileJson, FileHbjson, Share, CollabsRoom } from '@/icons';
 import {
   DropdownMenu,
@@ -26,6 +26,7 @@ import { KmzExportDialog } from '../../KmzExportDialog';
 import { HbjsonExportDialog } from '../../HbjsonExportDialog';
 import { ColorPalettePanel } from '../../ColorPalettePanel';
 import { DataPrivacyPanel } from '../../DataPrivacyPanel';
+import { DisciplineRolePanel } from '../../DisciplineRolePanel';
 import type { FileCommands } from '../../toolbar/useFileCommands';
 import { useExportCommands } from '../../toolbar/useExportCommands';
 import {
@@ -196,6 +197,15 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
                 icon={ShieldCheck}
                 label="Data privacy"
                 tooltip="Control whether the app may contact third-party services"
+              />
+            }
+          />
+          <DisciplineRolePanel
+            trigger={
+              <RibbonSmallButton
+                icon={HardHat}
+                label="Discipline role"
+                tooltip="Which installation new elements join, and whether the reference model may be changed"
               />
             }
           />

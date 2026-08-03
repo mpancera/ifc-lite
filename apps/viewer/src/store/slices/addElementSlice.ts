@@ -20,7 +20,22 @@
 
 import { type StateCreator } from 'zustand';
 import type { CatalogEntry } from '@/lib/catalog';
-import { STANDARD_ROLE_ID } from '@/lib/roles/disciplineRoles';
+import { STANDARD_ROLE_ID, findDisciplineSystem } from '@/lib/roles/disciplineRoles';
+
+const ROLE_STORAGE_KEY = 'ifclite.authoring.discipline-role';
+
+/** Last chosen role, or Standard. An unknown id (a role since removed from the
+ *  catalogue) falls back rather than leaving authoring in a mode nothing
+ *  describes. */
+function readStoredRole(): string {
+  try {
+    const stored = window.localStorage.getItem(ROLE_STORAGE_KEY);
+    if (stored && (stored === STANDARD_ROLE_ID || findDisciplineSystem(stored))) return stored;
+  } catch {
+    // Storage blocked; fall through to the default.
+  }
+  return STANDARD_ROLE_ID;
+}
 
 export type AddElementType =
   | 'wall'
@@ -276,9 +291,19 @@ export const createAddElementSlice: StateCreator<AddElementSlice, [], [], AddEle
   addElementSlabMode: 'rectangle',
   addElementPendingPoints: [],
   addElementHoverPoint: null,
-  activeDisciplineSystemId: STANDARD_ROLE_ID,
+  activeDisciplineSystemId: readStoredRole(),
 
-  setActiveDisciplineSystemId: (activeDisciplineSystemId) => set({ activeDisciplineSystemId }),
+  setActiveDisciplineSystemId: (activeDisciplineSystemId) => {
+    // Persisted because the role now decides what may be edited, not just how
+    // placements are grouped: silently reverting to Standard on reload would
+    // hand back write access to the reference model without anyone asking.
+    try {
+      window.localStorage.setItem(ROLE_STORAGE_KEY, activeDisciplineSystemId);
+    } catch {
+      // Storage blocked — the choice still applies for this session.
+    }
+    set({ activeDisciplineSystemId });
+  },
   setAddElementType: (addElementType) =>
     // Switching types resets the pending-click queue — a wall's start
     // doesn't make sense as a slab's first corner. Hover is cleared

@@ -55,6 +55,7 @@ import type { MeshData } from '@ifc-lite/geometry';
 import { getEntityBounds, getEntityCenter } from '@/utils/viewportUtils';
 import type { CatalogEntry } from '@/lib/catalog';
 import { disciplineSystemName, findDisciplineSystem } from '@/lib/roles/disciplineRoles';
+import { mayEditEntity, type EditPermission } from '@/lib/roles/roleGuard';
 import { resolveSpaceForPlacement } from '@/lib/relationships/spaceLookup';
 import { overlayContainerOf } from '@/lib/persistence/storeAdapter';
 import { toGlobalIdFromModels } from '../globalId.js';
@@ -398,6 +399,17 @@ export interface MutationSlice {
    * Returns true if the entity was known to the store or overlay.
    */
   removeEntity: (modelId: string, expressId: number, opts?: { mirror?: boolean }) => boolean;
+  /**
+   * Whether the active discipline role may change this entity.
+   *
+   * A role authors a discipline model: it adds. Anything it did not create
+   * belongs to the reference model and is refused, so an accidental edit is
+   * caught where it happens instead of surfacing later as an unexplained
+   * difference in somebody else's model. The Standard role keeps full access —
+   * correcting the reference IS sometimes the job, and that wants a mode chosen
+   * on purpose. Refusing returns the reason so callers can say why.
+   */
+  canAuthorOn: (modelId: string, expressId: number) => EditPermission;
   /**
    * Translate an IfcProduct by a storey-local delta (IFC Z-up). Walks
    * the placement chain to the terminal `IfcCartesianPoint` and writes
@@ -1223,6 +1235,7 @@ export const createMutationSlice: StateCreator<
 
   // Property Mutations
   setProperty: (modelId, entityId, psetName, propName, value, valueType = PropertyValueType.String) => {
+    if (!get().canAuthorOn(modelId, entityId).allowed) return null;
     // Collab role gate BEFORE the local commit: in a shared session only
     // editor/admin may write. Gating here (not just at the mirror) keeps the
     // local view/undo/dirty state consistent with what actually syncs — a
@@ -1265,6 +1278,7 @@ export const createMutationSlice: StateCreator<
   },
 
   deleteProperty: (modelId, entityId, psetName, propName) => {
+    if (!get().canAuthorOn(modelId, entityId).allowed) return null;
     // Collab role gate before the local commit — see setProperty.
     if (!get().canCollabEdit()) return null;
     const view = get().mutationViews.get(modelId);
@@ -1301,6 +1315,7 @@ export const createMutationSlice: StateCreator<
   },
 
   createPropertySet: (modelId, entityId, psetName, properties) => {
+    if (!get().canAuthorOn(modelId, entityId).allowed) return null;
     // Collab role gate before the local commit — see setProperty. (Pset
     // creation isn't mirrored yet, which is all the more reason a read-only
     // role must not accumulate local-only psets in a shared session.)
@@ -1333,6 +1348,7 @@ export const createMutationSlice: StateCreator<
   },
 
   deletePropertySet: (modelId, entityId, psetName) => {
+    if (!get().canAuthorOn(modelId, entityId).allowed) return null;
     const view = get().mutationViews.get(modelId);
     if (!view) return null;
 
@@ -1362,6 +1378,7 @@ export const createMutationSlice: StateCreator<
 
   // Quantity Mutations
   setQuantity: (modelId, entityId, qsetName, quantName, value, quantityType = QuantityType.Count, unit) => {
+    if (!get().canAuthorOn(modelId, entityId).allowed) return null;
     const view = get().mutationViews.get(modelId);
     if (!view) return null;
 
@@ -1390,6 +1407,7 @@ export const createMutationSlice: StateCreator<
   },
 
   createQuantitySet: (modelId, entityId, qsetName, quantities) => {
+    if (!get().canAuthorOn(modelId, entityId).allowed) return null;
     const view = get().mutationViews.get(modelId);
     if (!view) return null;
 
@@ -1419,6 +1437,7 @@ export const createMutationSlice: StateCreator<
 
   // Attribute Mutations
   setAttribute: (modelId, entityId, attrName, value, oldValue) => {
+    if (!get().canAuthorOn(modelId, entityId).allowed) return null;
     // Collab role gate before the local commit — see setProperty.
     if (!get().canCollabEdit()) return null;
     const view = get().mutationViews.get(modelId);
@@ -1455,6 +1474,7 @@ export const createMutationSlice: StateCreator<
 
   // Entity retype (reassign class)
   setEntityType: (modelId, entityId, newType, predefinedType) => {
+    if (!get().canAuthorOn(modelId, entityId).allowed) return null;
     const view = get().mutationViews.get(modelId);
     if (!view) return null;
 
@@ -1496,6 +1516,7 @@ export const createMutationSlice: StateCreator<
 
   // Store-Level Mutations
   setPositionalAttribute: (modelId, entityId, index, value) => {
+    if (!get().canAuthorOn(modelId, entityId).allowed) return null;
     const view = get().mutationViews.get(modelId);
     if (!view) return null;
 
@@ -1561,6 +1582,8 @@ export const createMutationSlice: StateCreator<
   },
 
   translateEntity: (modelId, expressId, delta, batchId) => {
+    const rolePermission = get().canAuthorOn(modelId, expressId);
+    if (!rolePermission.allowed) return { ok: false, reason: rolePermission.reason };
     // Collab role gate: in a shared session only editor/admin may move geometry
     // (single-user sessions have role === null → allowed).
     if (!get().canCollabEdit()) {
@@ -1630,6 +1653,8 @@ export const createMutationSlice: StateCreator<
   },
 
   setEntityPosition: (modelId, expressId, position) => {
+    const rolePermission = get().canAuthorOn(modelId, expressId);
+    if (!rolePermission.allowed) return { ok: false, reason: rolePermission.reason };
     if (!get().canCollabEdit()) {
       return { ok: false, reason: 'Editing is disabled for your role in this shared session' };
     }
@@ -1686,6 +1711,8 @@ export const createMutationSlice: StateCreator<
   },
 
   rotateEntity: (modelId, expressId, deltaYaw) => {
+    const rolePermission = get().canAuthorOn(modelId, expressId);
+    if (!rolePermission.allowed) return { ok: false, reason: rolePermission.reason };
     if (!get().canCollabEdit()) {
       return { ok: false, reason: 'Editing is disabled for your role in this shared session' };
     }
@@ -2274,7 +2301,27 @@ export const createMutationSlice: StateCreator<
     };
   },
 
+  canAuthorOn: (modelId, expressId) => {
+    const activeSystemId = get().activeDisciplineSystemId;
+    const system = findDisciplineSystem(activeSystemId);
+    // Standard permits everything, so skip the ownership lookup entirely —
+    // this runs ahead of every mutation, and the answer cannot change it.
+    if (!system) return { allowed: true };
+
+    // "Authored" is decided by the overlay, not by express-id ranges: an id
+    // above the file's watermark is a good hint but not a guarantee once
+    // snapshots restore ids allocated in an earlier session. Called
+    // defensively because callers may hold a partial view.
+    const view = get().mutationViews.get(modelId);
+    return mayEditEntity({
+      activeSystemId,
+      isAuthored: view?.getNewEntity?.(expressId) != null,
+      roleLabel: disciplineSystemName(system),
+    });
+  },
+
   removeEntity: (modelId, expressId, opts) => {
+    if (!get().canAuthorOn(modelId, expressId).allowed) return false;
     if (!get().canCollabEdit()) return false;
     const view = get().mutationViews.get(modelId);
     if (!view) return false;

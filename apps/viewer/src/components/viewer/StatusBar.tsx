@@ -3,17 +3,19 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { useMemo, useState, useEffect } from 'react';
-import { Boxes, Triangle, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { Boxes, Triangle, CheckCircle2, AlertCircle, Loader2, Lock } from 'lucide-react';
 import { Separator } from '@/components/ui/separator';
 import { formatNumber, formatBytes } from '@/lib/utils';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
+import { findDisciplineSystem } from '@/lib/roles/disciplineRoles';
 import { useWebGPU } from '@/hooks/useWebGPU';
 import { FlavorIndicator } from '@/components/extensions/FlavorIndicator';
 import { FlavorDialog } from '@/components/extensions/FlavorDialog';
 
 export function StatusBar() {
   const { loading, geometryResult, ifcDataStore } = useIfc();
+  const activeRole = findDisciplineSystem(useViewerStore((s) => s.activeDisciplineSystemId));
   const progress = useViewerStore((s) => s.progress);
   const error = useViewerStore((s) => s.error);
   const selectedStoreys = useViewerStore((s) => s.selectedStoreys);
@@ -133,6 +135,19 @@ export function StatusBar() {
           >
             Cancel
           </button>
+        )}
+        {/* Which discipline role is active, and therefore whether the reference
+            model is writable. Shown here rather than only in Settings because it
+            changes what an edit will DO — that has to be visible while working,
+            not only while configuring. */}
+        {activeRole && (
+          <span
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-700 dark:text-emerald-400 text-[10px]"
+            title="Referenzmodell geschützt — nur Ergänzungen. Umschalten unter File › Settings › Discipline role."
+          >
+            <Lock className="h-2.5 w-2.5" />
+            {activeRole.label}
+          </span>
         )}
       </div>
 
