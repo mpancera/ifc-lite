@@ -217,6 +217,22 @@ const appVersion = viewerPkg.version || rootPkg.version;
 const buildSha = (process.env.VERCEL_GIT_COMMIT_SHA || process.env.GITHUB_SHA || 'dev').slice(0, 12);
 
 export default defineConfig({
+  // Where the app will be served from. Root by default, which is what a
+  // dedicated host wants. Set `VITE_BASE_PATH` when it lives under a path
+  // instead — internal web space is normally a subdirectory, and without this
+  // every asset URL points at the server root and the app loads a blank page.
+  //
+  // Read from the environment rather than passed as `--base` because that flag
+  // is rewritten into a Windows path by Git Bash's MSYS layer (a `/apps/x/`
+  // argument arrives as `/Program Files/Git/apps/x/`), which produces a build
+  // that looks fine until you open it.
+  //
+  //   VITE_BASE_PATH=/apps/ifclite/ pnpm --filter @ifc-lite/viewer build
+  //
+  // A trailing slash is required by Vite; it is added here if forgotten.
+  base: process.env.VITE_BASE_PATH
+    ? (process.env.VITE_BASE_PATH.endsWith('/') ? process.env.VITE_BASE_PATH : `${process.env.VITE_BASE_PATH}/`)
+    : '/',
   plugins: [
     react(),
     Icons({
