@@ -58,6 +58,7 @@ import { disciplineSystemName, findDisciplineSystem } from '@/lib/roles/discipli
 import { mayEditEntity, type EditPermission } from '@/lib/roles/roleGuard';
 import { resolveSpaceForPlacement } from '@/lib/relationships/spaceLookup';
 import { overlayContainerOf } from '@/lib/persistence/storeAdapter';
+import { applySmartPropertyRules } from '@/lib/smartProperties/applyRules';
 import { toGlobalIdFromModels } from '../globalId.js';
 import { buildElementMesh, type ElementMeshPayload } from './addElementMeshes.js';
 import type { AddElementType } from './addElementSlice.js';
@@ -963,6 +964,38 @@ function rollbackOverlayCreate(
  * builder → push a CREATE_ENTITY undo entry → mark dirty + bump version)
  * without copy-pasting that block per element type.
  */
+/**
+ * Fill rule-driven properties for a freshly placed element.
+ *
+ * Written straight onto the view rather than through `setProperty`, so the
+ * property is part of the SAME undo step as the placement: undoing a drop that
+ * also stamped an identifier should not leave the identifier behind.
+ *
+ * Failures are swallowed deliberately — a rule that cannot resolve must never
+ * cost the user the element they just placed.
+ */
+function applySmartProperties(
+  get: () => ViewerState,
+  modelId: string,
+  expressId: number,
+  ifcClass: string,
+): void {
+  const store = get().models.get(modelId)?.ifcDataStore;
+  const view = get().mutationViews.get(modelId);
+  if (!store || !view) return;
+
+  try {
+    applySmartPropertyRules({
+      store, view, expressId, ifcClass,
+      write: (pset, property, value) => {
+        view.setProperty(expressId, pset, property, value, PropertyValueType.String);
+      },
+    });
+  } catch (err) {
+    console.warn('[smartProperties] rule evaluation failed:', err);
+  }
+}
+
 function runInStoreElementBuilder(
   get: () => ViewerState,
   set: (partial: Partial<ViewerState> | ((s: ViewerState) => Partial<ViewerState>)) => void,
@@ -1023,6 +1056,12 @@ function runInStoreElementBuilder(
     registerAuthoredElement(
       dataStore.spatialHierarchy, storeyExpressId, entityId, ifcType, name, containerId,
     );
+
+    // Rule-driven properties run HERE, after registration: they read the
+    // storey and the room, which only resolve once the element is in the
+    // hierarchy. Evaluating inside the builder would silently produce the
+    // fallback for every spatial segment.
+    applySmartProperties(get, modelId, entityId, ifcType);
   }
 
   // Build a renderer-frame mesh for the new element so it appears in
