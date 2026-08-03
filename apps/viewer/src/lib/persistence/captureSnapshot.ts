@@ -28,7 +28,19 @@ export interface SnapshotSource {
   storeyOf: (expressId: number) => number | undefined;
   /** IFC class of an authored element, for the hierarchy rebuild. */
   typeNameOf: (expressId: number) => string;
-  /** Preview mesh of an authored element, if it has one. */
+  /**
+   * Preview mesh of an authored element, if it has one.
+   *
+   * Moves need no special handling here, which is not obvious: `translateEntity`
+   * rewrites the IFC coordinate and hands the renderer a delta, and reading the
+   * mesh immediately afterwards still shows the OLD position — the renderer
+   * applies the shift to the shared buffer on the next frame. By the time a
+   * debounced capture runs, the mesh holds the moved position, so passing it
+   * through is correct. Offsetting it here as well double-counts the move and
+   * restores the element at twice the distance (measured: a 5 m move stored as
+   * 10 m). The positional mutation is replayed independently, so data and
+   * geometry agree either way.
+   */
   meshOf: (expressId: number) => MeshData | undefined;
   /** Spatial element the IFC containment points at, if resolvable. */
   containerOf: (expressId: number) => number | undefined;
