@@ -31,6 +31,8 @@ import { posthog } from '@/lib/analytics';
 import { cn } from '@/lib/utils';
 import { columnToAutoColor } from '@/lib/lists/columnToAutoColor';
 import { AUTO_COLOR_FROM_LIST_ID } from '@/store/slices/lensSlice';
+import { useListCellEdit } from '@/hooks/useListCellEdit';
+import { useEditableListGrid, type EditableListGrid } from './useEditableListGrid';
 import { ColumnHeaderMenu } from './ColumnHeaderMenu';
 import { ListGroupingBar } from './ListGroupingBar';
 import { ListScheduleTable } from './ListScheduleTable';
@@ -54,9 +56,12 @@ interface ListResultsTableProps {
    *  `resolveListColumnUnits`, the same resolver `buildExportModel` uses, so
    *  the on-screen table and the export can never disagree. */
   modelUnits: Map<string, ProjectUnits>;
+  /** Turn the grid into a spreadsheet: cells become typeable, copy/paste works,
+   *  and committed values are written to the mutation overlay. */
+  editable?: boolean;
 }
 
-export function ListResultsTable({ result, listName, grouping, onGroupingChange, modelUnits }: ListResultsTableProps) {
+export function ListResultsTable({ result, listName, grouping, onGroupingChange, modelUnits, editable = false }: ListResultsTableProps) {
   const unitDisplayOverrides = useViewerStore((s) => s.unitDisplayOverrides);
   const parentRef = useRef<HTMLDivElement>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -196,6 +201,35 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
       groupKeys: [],
     };
   }, [isGrouped, displayRows, columns, groupColumnIds, sumColumnIds, expandedGroups, sortCol, sortDir]);
+
+  // ── Editable mode ──
+  // Addressing is by ROW index over the rows only: `items` interleaves group
+  // headers, and a paste that counted those would land its values one row off
+  // for every group it crossed.
+  const { editRows, rowIdxOfItem } = useMemo(() => {
+    const rows: ListRow[] = [];
+    const perItem = new Array<number>(items.length).fill(-1);
+    items.forEach((item, i) => {
+      if (item.kind !== 'row') return;
+      perItem[i] = rows.length;
+      rows.push(item.row);
+    });
+    return { editRows: rows, rowIdxOfItem: perItem };
+  }, [items]);
+
+  const { commitCell } = useListCellEdit();
+  const displayedValue = useCallback((rowIdx: number, colIdx: number) => {
+    const row = editRows[rowIdx];
+    if (!row) return null;
+    const patched = gridRef.current?.patchFor(row, colIdx);
+    return patched !== undefined ? patched : row.values[colIdx];
+    // `gridRef` is filled in immediately below; reading it through a ref keeps
+    // this callback out of the hook's own dependency cycle.
+  }, [editRows]);
+
+  const grid = useEditableListGrid({ enabled: editable, rows: editRows, columns, displayedValue, commitCell });
+  const gridRef = useRef<EditableListGrid | null>(null);
+  gridRef.current = grid;
 
   const columnWidths = useMemo(
     () => columns.map((c, i) => widthOverrides[c.id] ?? autoColumnWidth(c.label ?? c.propertyName, result.rows, i)),
@@ -389,8 +423,29 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
         />
       )}
 
+      {/* A refusal or a paste summary. Dismissible, and replaced rather than
+          stacked — only the most recent one is actionable. */}
+      {editable && grid.notice && (
+        <div
+          className="flex items-start gap-2 border-b border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-900 dark:text-amber-200"
+          role="status"
+        >
+          <span className="flex-1">{grid.notice}</span>
+          <button className="shrink-0 underline" onClick={grid.clearNotice}>schliessen</button>
+        </div>
+      )}
+
       {/* Table */}
-      <div ref={parentRef} className="flex-1 overflow-auto min-h-0">
+      <div
+        ref={parentRef}
+        className="flex-1 overflow-auto min-h-0"
+        // The grid owns arrows, Enter, Delete and printable keys while a cell
+        // is active; `tabIndex` is what lets it receive them at all.
+        tabIndex={editable ? 0 : undefined}
+        onKeyDown={editable ? (e) => { if (grid.handleKeyDown(e)) e.stopPropagation(); } : undefined}
+        onCopy={editable ? grid.handleCopy : undefined}
+        onPaste={editable ? grid.handlePaste : undefined}
+      >
       {scheduleMode ? (
         <ListScheduleTable
           scheduleRows={scheduleRows}
@@ -504,6 +559,7 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
               const row = item.row;
               const globalId = toGlobalIdFromModels(models, row.modelId, row.entityId);
               const isSelected = selectedEntityIds.has(globalId) || globalId === selectedEntityId;
+              const rowIdx = rowIdxOfItem[vRow.index];
               return (
                 <div
                   key={vRow.key}
@@ -511,17 +567,55 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
                   style={{ transform }}
                   onClick={(e) => handleRowClick(row, e)}
                 >
-                  {row.values.map((value, colIdx) => (
-                    <div
-                      key={colIdx}
-                      className={cn('border-r border-border/20 px-2 py-1 text-xs truncate shrink-0', numericCols[colIdx] && 'text-right font-mono tabular-nums')}
-                      // Member rows sit one indent step past the deepest group header.
-                      style={{ width: columnWidths[colIdx], ...(isGrouped && colIdx === 0 ? { paddingLeft: 8 + groupColumnIds.length * 16 } : undefined) }}
-                      title={value !== null ? String(value) : ''}
-                    >
-                      {formatCellValue(value)}
-                    </div>
-                  ))}
+                  {row.values.map((value, colIdx) => {
+                    // A patch is the raw text the user committed; the executed
+                    // value keeps its engine type until the next Run.
+                    const patched = editable ? grid.patchFor(row, colIdx) : undefined;
+                    const shown = patched !== undefined ? String(patched) : value;
+                    const isActive = editable && grid.active?.rowIdx === rowIdx
+                      && grid.active?.colIdx === colIdx;
+                    const isOpen = isActive && grid.editing;
+                    return (
+                      <div
+                        key={colIdx}
+                        className={cn(
+                          'border-r border-border/20 px-2 py-1 text-xs truncate shrink-0',
+                          numericCols[colIdx] && 'text-right font-mono tabular-nums',
+                          // An edited cell stays marked until the next Run, so
+                          // what you changed is visible among what you did not.
+                          patched !== undefined && 'bg-amber-500/10',
+                          isActive && !isOpen && 'ring-1 ring-inset ring-primary',
+                          editable && grid.editableColumns[colIdx] && 'cursor-text',
+                        )}
+                        // Member rows sit one indent step past the deepest group header.
+                        style={{ width: columnWidths[colIdx], ...(isGrouped && colIdx === 0 ? { paddingLeft: 8 + groupColumnIds.length * 16 } : undefined) }}
+                        title={shown !== null && shown !== undefined ? String(shown) : ''}
+                        onClick={editable ? (e) => { e.stopPropagation(); handleRowClick(row, e); grid.selectCell({ rowIdx, colIdx }); } : undefined}
+                        onDoubleClick={editable ? (e) => { e.stopPropagation(); grid.beginEdit({ rowIdx, colIdx }); } : undefined}
+                      >
+                        {isOpen ? (
+                          <input
+                            autoFocus
+                            className="w-full bg-background outline-none ring-1 ring-primary px-0.5 text-xs"
+                            value={grid.draft ?? ''}
+                            onChange={(e) => grid.setDraft(e.target.value)}
+                            onBlur={(e) => grid.commitDraft(e.target.value, 'none')}
+                            onClick={(e) => e.stopPropagation()}
+                            // The open editor owns these keys; the container
+                            // handler stands down while a cell is open, so one
+                            // keystroke can never be committed twice.
+                            onKeyDown={(e) => {
+                              if (e.key !== 'Enter' && e.key !== 'Tab' && e.key !== 'Escape') return;
+                              e.preventDefault();
+                              e.stopPropagation();
+                              if (e.key === 'Escape') grid.cancelEdit();
+                              else grid.commitDraft(e.currentTarget.value, e.key === 'Tab' ? 'right' : 'down');
+                            }}
+                          />
+                        ) : formatCellValue(shown)}
+                      </div>
+                    );
+                  })}
                 </div>
               );
             })}

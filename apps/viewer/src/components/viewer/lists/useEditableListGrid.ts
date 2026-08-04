@@ -1,0 +1,257 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/**
+ * The spreadsheet behaviour of the editable list: an active cell, typing into
+ * it, and copy/paste across a rectangle.
+ *
+ * Two things are worth knowing about the design.
+ *
+ * **Committed values are patched in, not re-queried.** Re-running the list after
+ * every keystroke would be correct and unusable: the row would re-sort and
+ * re-group under the cursor, so the next cell you meant to type into is no
+ * longer where you are looking. Instead a committed value is remembered by
+ * `modelId:entityId:column` and painted over the executed result. The overlay is
+ * the source of truth either way — the next explicit Run reconciles everything,
+ * including values that changed as a *consequence* (a Smart Property that
+ * depends on the cell just edited).
+ *
+ * **Row indices are display indices.** Paste lands where the user is looking,
+ * which is the sorted and grouped order, not the order the engine returned.
+ */
+
+import { useCallback, useMemo, useRef, useState } from 'react';
+import type { ColumnDefinition, ListRow } from '@ifc-lite/lists';
+import { cellEditability } from '@/lib/lists/editTarget';
+import {
+  describePastePlan, parseClipboardGrid, planPaste, serializeClipboardGrid,
+} from '@/lib/lists/clipboardGrid';
+import type { CellEditRequest, CellEditResult } from '@/hooks/useListCellEdit';
+
+export interface CellAddress { rowIdx: number; colIdx: number }
+
+type CommitCell = (request: CellEditRequest) => CellEditResult;
+
+function patchKey(row: ListRow, colIdx: number): string {
+  return `${row.modelId}:${row.entityId}:${colIdx}`;
+}
+
+export interface EditableListGrid {
+  active: CellAddress | null;
+  editing: boolean;
+  /** Per column, whether it accepts input — drives the cursor and the styling. */
+  editableColumns: boolean[];
+  /** Draft text while a cell is open; `null` when nothing is being edited. */
+  draft: string | null;
+  /** Last refusal or paste summary, for the caller to surface. */
+  notice: string | null;
+  clearNotice: () => void;
+  /** Committed value for this cell, or `undefined` to show the executed one. */
+  patchFor: (row: ListRow, colIdx: number) => unknown;
+  beginEdit: (address: CellAddress, seed?: string) => void;
+  setDraft: (text: string) => void;
+  cancelEdit: () => void;
+  /**
+   * Commit `text` into the active cell; `advance` moves on afterwards.
+   *
+   * The text is passed in rather than read from state on purpose: the open
+   * editor is the only thing that knows the current keystroke, and reading it
+   * back through a ref meant a second handler firing on the same key could
+   * commit a value that was already one render stale.
+   */
+  commitDraft: (text: string, advance?: 'down' | 'right' | 'none') => void;
+  selectCell: (address: CellAddress) => void;
+  /** Handles the keys a grid owns; returns whether it consumed the event. */
+  handleKeyDown: (event: React.KeyboardEvent) => boolean;
+  /** Wired to the container's onCopy/onPaste. */
+  handleCopy: (event: React.ClipboardEvent) => void;
+  handlePaste: (event: React.ClipboardEvent) => void;
+}
+
+export interface EditableListGridOptions {
+  enabled: boolean;
+  /** Rows in display order — sorted, grouped, filtered. */
+  rows: ListRow[];
+  columns: ColumnDefinition[];
+  /** The value shown in a cell right now, patches included. */
+  displayedValue: (rowIdx: number, colIdx: number) => unknown;
+  commitCell: CommitCell;
+}
+
+export function useEditableListGrid(options: EditableListGridOptions): EditableListGrid {
+  const { enabled, rows, columns, displayedValue, commitCell } = options;
+
+  const [active, setActive] = useState<CellAddress | null>(null);
+  const [draft, setDraftState] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [patches, setPatches] = useState<Map<string, unknown>>(() => new Map());
+  // Read inside callbacks that must not re-create on every keystroke.
+  // Mirrors `draft`, but written eagerly by the actions above so callbacks can
+  // ask "is a cell open" without waiting for a render.
+  const draftRef = useRef<string | null>(null);
+
+  /** Per column: the write target, or the reason there is none. Computed once
+   *  so the render path never re-derives the rules per cell. */
+  const columnRules = useMemo(() => columns.map((column) => cellEditability(column)), [columns]);
+  const editableCols = useMemo(() => columnRules.map((rule) => rule.editable), [columnRules]);
+
+  const patchFor = useCallback(
+    (row: ListRow, colIdx: number) => patches.get(patchKey(row, colIdx)),
+    [patches]);
+
+  const clearNotice = useCallback(() => setNotice(null), []);
+
+  const selectCell = useCallback((address: CellAddress) => {
+    setActive(address);
+    setDraftState(null);
+  }, []);
+
+  const beginEdit = useCallback((address: CellAddress, seed?: string) => {
+    if (!enabled) return;
+    const rule = columnRules[address.colIdx];
+    if (!rule || !rule.editable) {
+      // Say why rather than doing nothing — a cell that ignores a double-click
+      // is indistinguishable from a broken one.
+      setActive(address);
+      setNotice(rule ? rule.reason : null);
+      return;
+    }
+    setActive(address);
+    const current = displayedValue(address.rowIdx, address.colIdx);
+    const opening = seed ?? (current === null || current === undefined ? '' : String(current));
+    // Set the ref alongside the state so the "is a cell open" guard is true
+    // immediately, not one render later.
+    draftRef.current = opening;
+    setDraftState(opening);
+  }, [enabled, columnRules, displayedValue]);
+
+  const setDraft = useCallback((text: string) => { draftRef.current = text; setDraftState(text); }, []);
+  const cancelEdit = useCallback(() => { draftRef.current = null; setDraftState(null); }, []);
+
+  /** Write one cell and remember what it now shows. Returns success. */
+  const writeCell = useCallback((rowIdx: number, colIdx: number, raw: string): boolean => {
+    const row = rows[rowIdx];
+    const column = columns[colIdx];
+    if (!row || !column) return false;
+
+    const result = commitCell({
+      modelId: row.modelId,
+      entityId: row.entityId,
+      column,
+      raw,
+      previous: displayedValue(rowIdx, colIdx),
+    });
+
+    if (!result.ok) {
+      setNotice(result.reason);
+      return false;
+    }
+    if (result.changed) {
+      setPatches((prev) => new Map(prev).set(patchKey(row, colIdx), raw));
+    }
+    return true;
+  }, [rows, columns, commitCell, displayedValue]);
+
+  const commitDraft = useCallback((text: string, advance: 'down' | 'right' | 'none' = 'down') => {
+    const address = active;
+    // Closing first makes a second delivery of the same key a no-op rather
+    // than a second write.
+    if (draftRef.current === null) return;
+    draftRef.current = null;
+    setDraftState(null);
+    if (!address) return;
+
+    writeCell(address.rowIdx, address.colIdx, text);
+
+    if (advance === 'down' && address.rowIdx + 1 < rows.length) {
+      setActive({ rowIdx: address.rowIdx + 1, colIdx: address.colIdx });
+    } else if (advance === 'right' && address.colIdx + 1 < columns.length) {
+      setActive({ rowIdx: address.rowIdx, colIdx: address.colIdx + 1 });
+    }
+  }, [active, rows.length, columns.length, writeCell]);
+
+  const move = useCallback((dRow: number, dCol: number) => {
+    setActive((current) => {
+      if (!current) return current;
+      return {
+        rowIdx: Math.min(Math.max(current.rowIdx + dRow, 0), Math.max(rows.length - 1, 0)),
+        colIdx: Math.min(Math.max(current.colIdx + dCol, 0), Math.max(columns.length - 1, 0)),
+      };
+    });
+  }, [rows.length, columns.length]);
+
+  const handleKeyDown = useCallback((event: React.KeyboardEvent): boolean => {
+    if (!enabled || !active) return false;
+
+    // While a cell is open the editor input owns its own keys — see the
+    // `onKeyDown` there. Handling them here as well meant one keystroke could
+    // be delivered twice.
+    if (draftRef.current !== null) return false;
+
+    switch (event.key) {
+      case 'ArrowDown': move(1, 0); return true;
+      case 'ArrowUp': move(-1, 0); return true;
+      case 'ArrowRight': move(0, 1); return true;
+      case 'ArrowLeft': move(0, -1); return true;
+      case 'Enter':
+      case 'F2':
+        beginEdit(active); return true;
+      case 'Delete':
+      case 'Backspace':
+        if (editableCols[active.colIdx]) writeCell(active.rowIdx, active.colIdx, '');
+        return true;
+      default:
+        break;
+    }
+
+    // Typing a printable character replaces the cell, the way a spreadsheet
+    // does — no need to open the editor first.
+    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      beginEdit(active, event.key);
+      return true;
+    }
+    return false;
+  }, [enabled, active, commitDraft, cancelEdit, move, beginEdit, editableCols, writeCell]);
+
+  const handleCopy = useCallback((event: React.ClipboardEvent) => {
+    if (!enabled || !active) return;
+    const value = displayedValue(active.rowIdx, active.colIdx);
+    event.clipboardData.setData(
+      'text/plain',
+      serializeClipboardGrid([[value === null || value === undefined ? '' : String(value)]]),
+    );
+    event.preventDefault();
+  }, [enabled, active, displayedValue]);
+
+  const handlePaste = useCallback((event: React.ClipboardEvent) => {
+    if (!enabled || !active) return;
+    const text = event.clipboardData.getData('text/plain');
+    if (!text) return;
+    event.preventDefault();
+
+    const plan = planPaste({
+      grid: parseClipboardGrid(text),
+      anchorRow: active.rowIdx,
+      anchorCol: active.colIdx,
+      rowCount: rows.length,
+      colCount: columns.length,
+      isEditableColumn: (colIdx) => editableCols[colIdx] ?? false,
+    });
+
+    let written = 0;
+    for (const cell of plan.cells) {
+      if (writeCell(cell.rowIdx, cell.colIdx, cell.value)) written++;
+    }
+
+    const summary = describePastePlan(plan);
+    if (summary) setNotice(summary);
+    else if (written > 0) setNotice(`${written} Werte übernommen.`);
+  }, [enabled, active, rows.length, columns.length, editableCols, writeCell]);
+
+  return {
+    active, editing: draft !== null, editableColumns: editableCols, draft, notice, clearNotice,
+    patchFor, beginEdit, setDraft, cancelEdit, commitDraft, selectCell,
+    handleKeyDown, handleCopy, handlePaste,
+  };
+}

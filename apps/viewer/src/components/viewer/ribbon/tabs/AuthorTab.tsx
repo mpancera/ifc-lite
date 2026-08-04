@@ -9,7 +9,7 @@
  * toolbar (viewer/commenter roles cannot unlock authoring).
  */
 
-import { FileDiff, Library, Wand2 } from 'lucide-react';
+import { FileDiff, Library, Table2, Wand2 } from 'lucide-react';
 import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -55,7 +55,22 @@ export function AuthorTab() {
   const canUndo = canEditInSession && activeModelId !== null && (undoStacks.get(activeModelId)?.length ?? 0) > 0;
   const canRedo = canEditInSession && activeModelId !== null && (redoStacks.get(activeModelId)?.length ?? 0) > 0;
 
-  const { activeWorkspacePanels, handleToggleRightPanel } = useWorkspacePanelControls();
+  const { activeWorkspacePanels, handleToggleRightPanel, handleToggleBottomPanel } = useWorkspacePanelControls();
+  const listEditMode = useViewerStore((s) => s.listEditMode);
+  const setListEditMode = useViewerStore((s) => s.setListEditMode);
+
+  /**
+   * Same Lists panel as under Analyze, opened in edit mode.
+   *
+   * Deliberately not a second panel: a separate editable copy would drift from
+   * the read-only one, and the saved lists, the columns and the grouping are
+   * the same objects either way. What changes is whether cells accept typing.
+   */
+  const openListEdit = () => {
+    const wasEditing = listEditMode && activeWorkspacePanels.has('list');
+    setListEditMode(!wasEditing);
+    if (!activeWorkspacePanels.has('list')) handleToggleBottomPanel('list');
+  };
 
   return (
     <>
@@ -152,6 +167,15 @@ export function AuthorTab() {
               disabled={!ifcDataStore}
             />
           }
+        />
+        <RibbonLargeButton
+          icon={Table2}
+          label="List Edit"
+          tooltip="Die Liste als Tabelle bearbeiten — Zellen tippen, Copy & Paste wie in Excel"
+          disabled={!ifcDataStore}
+          active={listEditMode && activeWorkspacePanels.has('list')}
+          className={listEditMode && activeWorkspacePanels.has('list') ? EDIT_ACTIVE_CLASS : undefined}
+          onClick={openListEdit}
         />
         <RibbonSmallStack>
           <DataConnector

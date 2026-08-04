@@ -60,6 +60,7 @@ export function ListPanel({ onClose }: ListPanelProps) {
 
   const listDefinitions = useViewerStore((s) => s.listDefinitions);
   const activeListId = useViewerStore((s) => s.activeListId);
+  const listEditMode = useViewerStore((s) => s.listEditMode);
   const listResult = useViewerStore((s) => s.listResult);
   const listExecuting = useViewerStore((s) => s.listExecuting);
   const addListDefinition = useViewerStore((s) => s.addListDefinition);
@@ -351,6 +352,7 @@ export function ListPanel({ onClose }: ListPanelProps) {
           grouping={editingList?.grouping}
           onGroupingChange={handleGroupingFromTable}
           modelUnits={modelUnits}
+          editable={listEditMode}
         />
       )}
 
