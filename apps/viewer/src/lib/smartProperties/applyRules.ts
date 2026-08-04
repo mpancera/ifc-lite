@@ -14,7 +14,7 @@
 
 import type { MutablePropertyView } from '@ifc-lite/mutations';
 import type { IfcDataStore } from '@ifc-lite/parser';
-import { DEFAULT_SMART_PROPERTY_RULES } from './defaultRules';
+import { activeRules } from './activeRules';
 import { evaluateRule, ruleApplies } from './evaluate';
 import { makeModelResolver } from './modelResolver';
 import { makeModelCounterResolver } from './modelCounter';
@@ -48,7 +48,7 @@ export interface ApplyRulesArgs {
  * because it looks maintained.
  */
 export function applySmartPropertyRules(args: ApplyRulesArgs): AppliedRule[] {
-  const rules = args.rules ?? DEFAULT_SMART_PROPERTY_RULES;
+  const rules = args.rules ?? activeRules();
   const applicable = rules.filter((rule) => ruleApplies(rule, args.ifcClass));
   if (applicable.length === 0) return [];
 

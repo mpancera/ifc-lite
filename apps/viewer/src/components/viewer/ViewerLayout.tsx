@@ -15,6 +15,7 @@ import { AddElementPanel } from './AddElementPanel';
 import { StatusBar } from './StatusBar';
 import { ViewportContainer } from './ViewportContainer';
 import { ColorPaletteMount } from './ColorPaletteMount';
+import { SmartPropertyRulesMount } from './SmartPropertyRulesMount';
 import { KeyboardShortcutsDialog, useKeyboardShortcutsDialog, type InfoDialogTab } from './KeyboardShortcutsDialog';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { useActionLogger } from '@/hooks/useActionLogger';
@@ -346,6 +347,7 @@ export function ViewerLayout() {
   return (
     <TooltipProvider delayDuration={300}>
       <ColorPaletteMount />
+      <SmartPropertyRulesMount />
       <div className="flex flex-col h-screen h-[100dvh] w-screen overflow-hidden bg-background text-foreground">
         {safeMode && (
           <div className="flex items-center gap-2 border-b border-amber-500/40 bg-amber-500/10 px-3 py-1 text-[11px] text-amber-700 dark:text-amber-300">

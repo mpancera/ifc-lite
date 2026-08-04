@@ -23,7 +23,7 @@
 
 import type { MutablePropertyView } from '@ifc-lite/mutations';
 import type { IfcDataStore } from '@ifc-lite/parser';
-import { DEFAULT_SMART_PROPERTY_RULES } from './defaultRules';
+import { activeRules } from './activeRules';
 import { evaluateRule, ruleApplies } from './evaluate';
 import { makeModelCounterResolver } from './modelCounter';
 import { makeModelResolver } from './modelResolver';
@@ -73,7 +73,7 @@ export interface PlanArgs {
  * change is worth a re-render — and so this stays testable without a store.
  */
 export function planReevaluation(args: PlanArgs): ReevaluationPlan {
-  const rules = args.rules ?? DEFAULT_SMART_PROPERTY_RULES;
+  const rules = args.rules ?? activeRules();
   const resolve = makeModelResolver({ store: args.store, view: args.view });
   const writes: PendingWrite[] = [];
   let considered = 0;
@@ -115,7 +115,7 @@ export function planReevaluation(args: PlanArgs): ReevaluationPlan {
 
 /** Property names a rule owns, so the UI can mark them as not hand-editable. */
 export function ruleManagedProperties(
-  rules: readonly SmartPropertyRule[] = DEFAULT_SMART_PROPERTY_RULES,
+  rules: readonly SmartPropertyRule[] = activeRules(),
 ): ReadonlySet<string> {
   const managed = new Set<string>();
   for (const rule of rules) {

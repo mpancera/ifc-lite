@@ -9,7 +9,7 @@
  * toolbar (viewer/commenter roles cannot unlock authoring).
  */
 
-import { FileDiff, Library } from 'lucide-react';
+import { FileDiff, Library, Wand2 } from 'lucide-react';
 import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -18,6 +18,7 @@ import { BulkPropertyEditor } from '../../BulkPropertyEditor';
 import { DataConnector } from '../../DataConnector';
 import { ProductLibraryPanel } from '../../catalog/ProductLibraryPanel';
 import { ReferenceOverridesPanel } from '../../ReferenceOverridesPanel';
+import { SmartPropertyPanel } from '../../SmartPropertyPanel';
 import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
 import {
   RibbonGroup,
@@ -143,6 +144,16 @@ export function AuthorTab() {
               <RibbonSmallButton
                 icon={ImportData}
                 label="Import data (CSV)"
+                disabled={!ifcDataStore}
+              />
+            }
+          />
+          <SmartPropertyPanel
+            trigger={
+              <RibbonSmallButton
+                icon={Wand2}
+                label="Smart Property"
+                tooltip="Rules that build a property value from the model around an element"
                 disabled={!ifcDataStore}
               />
             }
