@@ -294,13 +294,43 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
   const gridRef = useRef<EditableListGrid | null>(null);
   gridRef.current = grid;
 
-  // A fill drag can end anywhere — off the last row, outside the panel — so the
-  // release is caught on the window rather than on a cell.
+  // A fill drag is tracked on the WINDOW, by hit-testing the row under the
+  // pointer, rather than by each cell reporting that the mouse entered it.
+  // Per-cell hover misses a fast drag that skips between cells, and stops
+  // reporting entirely once the pointer leaves the row area — which is exactly
+  // where someone drags when they mean "all the way down". The release is
+  // caught here too, since a drag can end anywhere.
   useEffect(() => {
     if (!editable) return;
+    const rowUnder = (x: number, y: number): number | null => {
+      const el = document.elementFromPoint(x, y);
+      const cell = el?.closest<HTMLElement>('[data-fill-row]');
+      if (!cell) return null;
+      const idx = Number(cell.dataset.fillRow);
+      return Number.isInteger(idx) ? idx : null;
+    };
+    const onMove = (event: MouseEvent) => {
+      if (!gridRef.current?.isFillDragActive()) return;
+      const rowIdx = rowUnder(event.clientX, event.clientY);
+      if (rowIdx !== null) gridRef.current.extendFill(rowIdx);
+    };
+    const onDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest?.('[data-fill-handle]')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      gridRef.current?.beginFill();
+    };
     const onUp = () => gridRef.current?.endFill();
+    // Capture, so the drag starts before whichever ancestor swallows mousedown.
+    window.addEventListener('mousedown', onDown, true);
+    window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
-    return () => window.removeEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousedown', onDown, true);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
   }, [editable]);
 
   const columnWidths = useMemo(
@@ -716,7 +746,7 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
                           grid.selectCell({ rowIdx, colIdx }, e.shiftKey);
                         } : undefined}
                         onDoubleClick={editable ? (e) => { e.stopPropagation(); grid.beginEdit({ rowIdx, colIdx }); } : undefined}
-                        onMouseEnter={editable ? () => grid.extendFill(rowIdx) : undefined}
+                        data-fill-row={editable ? rowIdx : undefined}
                       >
                         {isOpen ? (
                           <input
@@ -743,8 +773,17 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
                             role="button"
                             aria-label="Wert nach unten ausfüllen"
                             title="Nach unten ziehen, um den Wert zu wiederholen"
-                            className="absolute -bottom-[3px] -right-[3px] h-2 w-2 cursor-crosshair rounded-[1px] bg-primary ring-1 ring-background"
-                            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); grid.beginFill(); }}
+                            // Inside the cell box, not overhanging it: the cell
+                            // clips (`truncate` is overflow-hidden), so a handle
+                            // sitting proud of the corner is invisible AND
+                            // unclickable — the mousedown lands on the row behind.
+                            className="absolute bottom-0 right-0 h-2 w-2 cursor-crosshair rounded-[1px] bg-primary ring-1 ring-background"
+                            // The drag starts from a window-level capture
+                            // listener (see the effect above), not from a
+                            // handler here: an ancestor consumes mousedown
+                            // during CAPTURE, before it can reach this element
+                            // at all, so nothing bound at the target would run.
+                            data-fill-handle=""
                             onClick={(e) => e.stopPropagation()}
                             onDoubleClick={(e) => e.stopPropagation()}
                           />

@@ -95,6 +95,16 @@ export interface EditableListGrid {
   // ── Fill handle ──
   /** Rows the in-progress fill drag would write, or `null` when idle. */
   fillPreview: CellRange | null;
+  /** Whether a fill drag is in progress — for rendering. */
+  isFilling: boolean;
+  /**
+   * Whether a drag is running RIGHT NOW, read from a ref.
+   *
+   * `isFilling` is derived from state, so it is still false for the pointer
+   * events that arrive in the same tick as the mousedown — which is exactly
+   * the start of every drag. A window-level move handler has to ask this.
+   */
+  isFillDragActive: () => boolean;
   /** Grab the handle at the bottom-right of the selection. */
   beginFill: () => void;
   /** Drag reached this row. */
@@ -303,6 +313,9 @@ export function useEditableListGrid(options: EditableListGridOptions): EditableL
     setFillToRow(range.toRow);
   }, [enabled, range]);
 
+  const isFilling = fillSource !== null;
+  const isFillDragActive = useCallback(() => fillSourceRef.current !== null, []);
+
   const extendFill = useCallback((rowIdx: number) => {
     // Every cell reports hover; only a running drag cares.
     const source = fillSourceRef.current;
@@ -392,7 +405,7 @@ export function useEditableListGrid(options: EditableListGridOptions): EditableL
   }, [enabled, range, rows.length, columns.length, editableCols, writeCell]);
 
   return {
-    active, range, editing: draft !== null, editableColumns: editableCols, draft, notice, clearNotice,
+    active, range, editing: draft !== null, isFilling, isFillDragActive, editableColumns: editableCols, draft, notice, clearNotice,
     patchFor, beginEdit, setDraft, cancelEdit, commitDraft, selectCell,
     handleKeyDown, handleCopy, handlePaste,
     fillPreview, beginFill, extendFill, endFill,
