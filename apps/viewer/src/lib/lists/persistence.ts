@@ -11,11 +11,37 @@ import { downloadFile, sanitizeFilename } from '../export/download.js';
 
 const STORAGE_KEY = 'ifc-lite-lists';
 
+/**
+ * Bring a stored definition up to date with headings that have since been
+ * renamed.
+ *
+ * A saved list carries its own `label` per column, so a list authored before a
+ * rename keeps showing the old heading forever — two lists over the same data
+ * disagreeing about what a column is called. Only a label that still equals the
+ * OLD default is rewritten; anything the author typed themselves is theirs and
+ * is left alone.
+ *
+ * `propertyName` is the stored contract the engine resolves against and never
+ * changes here — this is presentation only.
+ */
+export function migrateListDefinition(definition: ListDefinition): ListDefinition {
+  let changed = false;
+  const columns = definition.columns.map((column) => {
+    if (column.source === 'spatial' && column.propertyName === 'Container'
+      && (column.label === undefined || column.label === 'Container')) {
+      changed = true;
+      return { ...column, label: 'Contained in' };
+    }
+    return column;
+  });
+  return changed ? { ...definition, columns } : definition;
+}
+
 export function loadListDefinitions(): ListDefinition[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
-    return JSON.parse(raw) as ListDefinition[];
+    return (JSON.parse(raw) as ListDefinition[]).map(migrateListDefinition);
   } catch {
     return [];
   }
@@ -49,7 +75,7 @@ export function importListDefinition(file: File): Promise<ListDefinition> {
         def.id = crypto.randomUUID();
         def.createdAt = Date.now();
         def.updatedAt = Date.now();
-        resolve(def);
+        resolve(migrateListDefinition(def));
       } catch {
         reject(new Error('Failed to parse list definition file'));
       }
