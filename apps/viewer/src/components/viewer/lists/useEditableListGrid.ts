@@ -287,15 +287,18 @@ export function useEditableListGrid(options: EditableListGridOptions): EditableL
   }, [enabled, range, displayedValue]);
 
   const handlePaste = useCallback((event: React.ClipboardEvent) => {
-    if (!enabled || !active) return;
+    if (!enabled || !range) return;
     const text = event.clipboardData.getData('text/plain');
     if (!text) return;
     event.preventDefault();
 
+    // The SELECTION is the target, not the cell the selection happens to end
+    // on. Anchoring at `active` put a paste at the corner the range was dragged
+    // to — below and right of what was marked — and a single copied value
+    // reached one cell instead of filling the block.
     const plan = planPaste({
       grid: parseClipboardGrid(text),
-      anchorRow: active.rowIdx,
-      anchorCol: active.colIdx,
+      target: range,
       rowCount: rows.length,
       colCount: columns.length,
       isEditableColumn: (colIdx) => editableCols[colIdx] ?? false,
@@ -309,7 +312,7 @@ export function useEditableListGrid(options: EditableListGridOptions): EditableL
     const summary = describePastePlan(plan);
     if (summary) setNotice(summary);
     else if (written > 0) setNotice(`${written} Werte übernommen.`);
-  }, [enabled, active, rows.length, columns.length, editableCols, writeCell]);
+  }, [enabled, range, rows.length, columns.length, editableCols, writeCell]);
 
   return {
     active, range, editing: draft !== null, editableColumns: editableCols, draft, notice, clearNotice,

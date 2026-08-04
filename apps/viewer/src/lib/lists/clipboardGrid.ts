@@ -44,18 +44,35 @@ export interface PastePlan {
   skippedReadOnly: number;
 }
 
+export interface PasteTarget {
+  fromRow: number; toRow: number; fromCol: number; toCol: number;
+}
+
 export interface PastePlanRequest {
   grid: readonly (readonly string[])[];
-  anchorRow: number;
-  anchorCol: number;
+  /** The selected rectangle. A single selected cell is a 1×1 target. */
+  target: PasteTarget;
   rowCount: number;
   colCount: number;
   /** Whether the column at this index accepts writes. */
   isEditableColumn: (colIdx: number) => boolean;
 }
 
+/** Widest row in a ragged clipboard rectangle. */
+function widestRow(grid: readonly (readonly string[])[]): number {
+  return grid.reduce((widest, row) => Math.max(widest, row.length), 0);
+}
+
 /**
- * What pasting this clipboard at this anchor would change.
+ * What pasting this clipboard onto this selection would change.
+ *
+ * The selection decides the extent, the way a spreadsheet does:
+ *
+ *   - Onto a single cell, the clipboard paints its own rectangle from there.
+ *     Copy a column of 40 values, click one cell, paste — 40 rows change.
+ *   - Onto a larger selection, the clipboard REPEATS to fill it. That is what
+ *     makes "one value into every selected cell" work, and it generalises: a
+ *     copied pair of values tiles down a selection of six.
  *
  * Anything past the last row or column is dropped rather than growing the
  * table: a list is a view onto elements that already exist, so there is no
@@ -63,21 +80,30 @@ export interface PastePlanRequest {
  * out-of-range ones so the UI can tell the two apart — "3 cells outside the
  * table" and "3 cells in columns that cannot be written" call for different
  * corrections.
- *
- * A single copied cell fills the whole width the clipboard would have covered
- * only if the caller passes a 1×1 grid and handles repetition itself; this
- * function pastes exactly what it is given.
  */
 export function planPaste(request: PastePlanRequest): PastePlan {
   const cells: PasteCell[] = [];
   let skippedOutOfRange = 0;
   let skippedReadOnly = 0;
 
-  for (let r = 0; r < request.grid.length; r++) {
-    const rowIdx = request.anchorRow + r;
-    const source = request.grid[r];
-    for (let c = 0; c < source.length; c++) {
-      const colIdx = request.anchorCol + c;
+  const gridRows = request.grid.length;
+  const gridCols = widestRow(request.grid);
+  if (gridRows === 0 || gridCols === 0) {
+    return { cells, skippedOutOfRange, skippedReadOnly };
+  }
+
+  const selectedRows = request.target.toRow - request.target.fromRow + 1;
+  const selectedCols = request.target.toCol - request.target.fromCol + 1;
+  const spanRows = Math.max(selectedRows, gridRows);
+  const spanCols = Math.max(selectedCols, gridCols);
+
+  for (let r = 0; r < spanRows; r++) {
+    const rowIdx = request.target.fromRow + r;
+    // Modulo per row, not over a padded rectangle: a ragged clipboard (rows of
+    // different width) repeats each row across its own length.
+    const source = request.grid[r % gridRows];
+    for (let c = 0; c < spanCols; c++) {
+      const colIdx = request.target.fromCol + c;
       if (rowIdx >= request.rowCount || colIdx >= request.colCount) {
         skippedOutOfRange++;
         continue;
@@ -86,7 +112,7 @@ export function planPaste(request: PastePlanRequest): PastePlan {
         skippedReadOnly++;
         continue;
       }
-      cells.push({ rowIdx, colIdx, value: source[c] });
+      cells.push({ rowIdx, colIdx, value: source[c % source.length] });
     }
   }
 
