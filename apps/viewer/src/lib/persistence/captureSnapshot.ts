@@ -11,6 +11,7 @@
 
 import type { MeshData } from '@ifc-lite/geometry';
 import type { MutablePropertyView } from '@ifc-lite/mutations';
+import { collapseMutations, warnIfImplausible } from './collapseMutations';
 import type { ReferenceModelIndex } from './referenceIndex';
 import {
   SNAPSHOT_VERSION,
@@ -68,7 +69,11 @@ export function captureOverlaySnapshot(args: CaptureArgs): OverlaySnapshot | nul
   const { view, source, sourceHash, modelName } = args;
 
   const newEntities = view.getNewEntities();
-  const mutations = view.getMutations();
+  // Collapsed before anything else looks at it: the snapshot records a state,
+  // and keeping the journal makes restore replay values that then get recorded
+  // again, doubling the log on every load/save cycle.
+  const mutations = collapseMutations(view.getMutations());
+  warnIfImplausible(mutations.length, modelName);
   const tombstones = view.getTombstones();
   if (newEntities.length === 0 && mutations.length === 0 && tombstones.size === 0) {
     return null;

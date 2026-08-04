@@ -333,6 +333,9 @@ export class MutablePropertyView {
 
     // Get old value for undo
     const oldValue = this.getPropertyValue(entityId, psetName, propName);
+    // Read before the write below overwrites it — needed to tell a genuine
+    // re-type of the same value from a true no-op.
+    const previousRecord = this.propertyMutations.get(key);
 
     // Whether the property already existed BEFORE this call — decided up front
     // because the block below may insert it into `newPsets`. A null value does
@@ -411,7 +414,25 @@ export class MutablePropertyView {
       valueType,
     };
 
-    if (!skipHistory) {
+    // A write that changes nothing is not history.
+    //
+    // The overlay is the source of truth for the value either way — the stores
+    // above have already been updated — but recording a no-op costs an entry
+    // that undo would step over and that the autosave snapshot has to carry.
+    // A caller that re-asserts the same value on a timer (a rule keeping a
+    // derived property current, for instance) would otherwise grow the log
+    // without bound: half a million identical writes of "1" is exactly how a
+    // snapshot here reached millions of records and broke IndexedDB.
+    //
+    // The mutation is still RETURNED, so callers that read it as "the write
+    // was accepted" keep working.
+    const changedNothing = propExistedBefore
+      && Object.is(oldValue, value)
+      && previousRecord?.operation === 'SET'
+      && previousRecord.valueType === valueType
+      && previousRecord.unit === unit;
+
+    if (!skipHistory && !changedNothing) {
       this.mutationHistory.push(mutation);
     }
     return mutation;
