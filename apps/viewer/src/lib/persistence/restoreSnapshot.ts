@@ -29,6 +29,14 @@ export interface RestoreHooks {
     storeyExpressId: number;
     ifcType: string;
     name: string;
+    /**
+     * The room that encloses it, when the snapshot recorded one and this file
+     * still has it. Restoring the storey alone silently drops the room: the
+     * IFC containment would still name it while every lookup answered with the
+     * storey — which is how a rule reading the room ends up producing a value
+     * that looks right and is not.
+     */
+    containerExpressId?: number;
   }) => void;
   /** Express id for a stable identifier, or -1 when absent from this file. */
   expressIdOfGlobalId: (globalId: string) => number;
@@ -81,11 +89,22 @@ export function restoreOverlaySnapshot(
     if (placement.storeyGlobalId === null) continue;
     const storeyExpressId = hooks.expressIdOfGlobalId(placement.storeyGlobalId);
     if (storeyExpressId < 0) continue;
+    // The container may be a room in THIS file, an authored space restored
+    // alongside, or gone entirely — resolve it, and fall back to the storey
+    // rather than claiming a room that is no longer there.
+    const containerExpressId = placement.containerGlobalId === null
+      ? undefined
+      : (() => {
+        const resolved = hooks.expressIdOfGlobalId(placement.containerGlobalId!);
+        return resolved >= 0 ? resolved : undefined;
+      })();
+
     hooks.registerElement({
       expressId: placement.expressId,
       storeyExpressId,
       ifcType: placement.ifcType,
       name: placement.name,
+      containerExpressId,
     });
     elementsRegistered += 1;
     restoredMeshIds.add(placement.expressId);

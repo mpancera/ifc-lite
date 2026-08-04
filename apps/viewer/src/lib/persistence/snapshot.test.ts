@@ -342,3 +342,41 @@ test('restore: a restored id cannot be handed out again by the allocator', () =>
   const highest = Math.max(...snapshot.newEntities.map((e) => e.expressId));
   assert.ok(fresh.peekNextExpressId() > highest);
 });
+
+test('restore: the room an element was placed in survives the round-trip', () => {
+  // Restoring the storey alone silently drops the room: the IFC containment
+  // still names it while every lookup answers with the storey, so a rule
+  // reading the room produces a value that looks right and is not.
+  const { snapshot, inRoom, inCorridor } = capture();
+  const fresh = new MutablePropertyView(null, 'm1');
+  const registered: Array<{ expressId: number; containerExpressId?: number }> = [];
+
+  restoreOverlaySnapshot(snapshot, fresh, {
+    registerElement: ({ expressId, containerExpressId }) => registered.push({ expressId, containerExpressId }),
+    expressIdOfGlobalId: unchangedFile.expressIdOfGlobalId,
+    appendMeshes: () => {},
+  });
+
+  assert.equal(registered.find((r) => r.expressId === inRoom)?.containerExpressId, ROOM);
+  // The corridor element was contained in the storey, which is not a room.
+  assert.equal(registered.find((r) => r.expressId === inCorridor)?.containerExpressId, STOREY);
+});
+
+test('restore: a room missing from this file falls back to the storey', () => {
+  const { snapshot, inRoom } = capture();
+  const roomGone = {
+    ...unchangedFile,
+    expressIdOfGlobalId: (gid: string) => (gid === GID.room ? -1 : unchangedFile.expressIdOfGlobalId(gid)),
+  };
+  const fresh = new MutablePropertyView(null, 'm1');
+  const registered: Array<{ expressId: number; containerExpressId?: number }> = [];
+
+  restoreOverlaySnapshot(snapshot, fresh, {
+    registerElement: ({ expressId, containerExpressId }) => registered.push({ expressId, containerExpressId }),
+    expressIdOfGlobalId: roomGone.expressIdOfGlobalId,
+    appendMeshes: () => {},
+  });
+
+  // Claiming a room that is no longer there would be worse than the storey.
+  assert.equal(registered.find((r) => r.expressId === inRoom)?.containerExpressId, undefined);
+});

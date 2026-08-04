@@ -85,9 +85,11 @@ export function useOverlayAutosave() {
     }
 
     const result = restoreOverlaySnapshot(snapshot, view, {
-      registerElement: ({ expressId, storeyExpressId, ifcType, name }) => {
+      registerElement: ({ expressId, storeyExpressId, ifcType, name, containerExpressId }) => {
         if (store.spatialHierarchy) {
-          registerAuthoredElement(store.spatialHierarchy, storeyExpressId, expressId, ifcType, name);
+          registerAuthoredElement(
+            store.spatialHierarchy, storeyExpressId, expressId, ifcType, name, containerExpressId,
+          );
         }
       },
       expressIdOfGlobalId: makeReconcileTarget(store).expressIdOfGlobalId,
