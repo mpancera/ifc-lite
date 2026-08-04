@@ -3,19 +3,21 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { useMemo, useState, useEffect } from 'react';
-import { Boxes, Triangle, CheckCircle2, AlertCircle, Loader2, Lock } from 'lucide-react';
+import { Boxes, Triangle, CheckCircle2, AlertCircle, Eye, Loader2, Lock } from 'lucide-react';
 import { Separator } from '@/components/ui/separator';
 import { formatNumber, formatBytes } from '@/lib/utils';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
-import { findDisciplineSystem } from '@/lib/roles/disciplineRoles';
+import { VIEWER_ROLE_ID, findDisciplineSystem } from '@/lib/roles/disciplineRoles';
 import { useWebGPU } from '@/hooks/useWebGPU';
 import { FlavorIndicator } from '@/components/extensions/FlavorIndicator';
 import { FlavorDialog } from '@/components/extensions/FlavorDialog';
 
 export function StatusBar() {
   const { loading, geometryResult, ifcDataStore } = useIfc();
-  const activeRole = findDisciplineSystem(useViewerStore((s) => s.activeDisciplineSystemId));
+  const activeRoleId = useViewerStore((s) => s.activeDisciplineSystemId);
+  const activeRole = findDisciplineSystem(activeRoleId);
+  const isViewerRole = activeRoleId === VIEWER_ROLE_ID;
   const progress = useViewerStore((s) => s.progress);
   const error = useViewerStore((s) => s.error);
   const selectedStoreys = useViewerStore((s) => s.selectedStoreys);
@@ -147,6 +149,18 @@ export function StatusBar() {
           >
             <Lock className="h-2.5 w-2.5" />
             {activeRole.label}
+          </span>
+        )}
+        {/* Viewer is the default, so it is the state someone is most likely to
+            be in without having chosen it — and the one whose refusals would
+            otherwise look like a broken tool. */}
+        {isViewerRole && (
+          <span
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded border border-sky-500/40 text-sky-700 dark:text-sky-400 text-[10px]"
+            title="Schreibgeschützt. Umschalten unter File › Settings › Discipline role."
+          >
+            <Eye className="h-2.5 w-2.5" />
+            Viewer
           </span>
         )}
       </div>

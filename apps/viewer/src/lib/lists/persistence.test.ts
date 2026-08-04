@@ -11,12 +11,12 @@ function listWith(...columns: ColumnDefinition[]): ListDefinition {
   return {
     id: 'l1',
     name: 'Melderliste',
-    entityTypes: ['IfcSensor'],
-    filters: [],
+    entityTypes: [],
+    conditions: [],
     columns,
     createdAt: 0,
     updatedAt: 0,
-  } as ListDefinition;
+  };
 }
 
 describe('migrateListDefinition · Container → Contained in', () => {

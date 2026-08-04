@@ -54,8 +54,8 @@ import { EntityExtractor, type MapConversion, type ProjectedCRS } from '@ifc-lit
 import type { MeshData } from '@ifc-lite/geometry';
 import { getEntityBounds, getEntityCenter } from '@/utils/viewportUtils';
 import type { CatalogEntry } from '@/lib/catalog';
-import { disciplineSystemName, findDisciplineSystem } from '@/lib/roles/disciplineRoles';
-import { mayEditEntity, type EditPermission } from '@/lib/roles/roleGuard';
+import { disciplineSystemName, findDisciplineSystem, normalizeRoleId } from '@/lib/roles/disciplineRoles';
+import { mayCreateEntities, mayEditEntity, type EditPermission } from '@/lib/roles/roleGuard';
 import { resolveSpaceForPlacement } from '@/lib/relationships/spaceLookup';
 import { overlayContainerOf } from '@/lib/persistence/storeAdapter';
 import { applySmartPropertyRules } from '@/lib/smartProperties/applyRules';
@@ -1006,6 +1006,10 @@ function runInStoreElementBuilder(
   build: (editor: StoreEditor, anchor: ReturnType<typeof resolveSpatialAnchor>) => number,
   meshPayload?: ElementMeshPayload,
 ): { expressId: number } | { error: string } {
+  // Creation needs its own gate: `canAuthorOn` asks about an entity, and a new
+  // element has none yet.
+  const mayCreate = mayCreateEntities(normalizeRoleId(get().activeDisciplineSystemId));
+  if (!mayCreate.allowed) return { error: mayCreate.reason };
   if (!get().canCollabEdit()) return { error: 'Editing is disabled for your role in this shared session' };
   const state = get();
   const model = state.models.get(modelId);
@@ -2341,11 +2345,15 @@ export const createMutationSlice: StateCreator<
   },
 
   canAuthorOn: (modelId, expressId) => {
-    const activeSystemId = get().activeDisciplineSystemId;
+    // Normalised so a missing or unrecognised id lands on read-only rather than
+    // in the discipline branch, which would refuse with a message about a
+    // Fachrolle nobody selected.
+    const activeSystemId = normalizeRoleId(get().activeDisciplineSystemId);
     const system = findDisciplineSystem(activeSystemId);
-    // Standard permits everything, so skip the ownership lookup entirely —
-    // this runs ahead of every mutation, and the answer cannot change it.
-    if (!system) return { allowed: true };
+    // Both base roles answer without knowing the entity — Editor permits
+    // everything, Viewer permits nothing — so skip the ownership lookup
+    // entirely; this runs ahead of every mutation.
+    if (!system) return mayEditEntity({ activeSystemId, isAuthored: false });
 
     // "Authored" is decided by the overlay, not by express-id ranges: an id
     // above the file's watermark is a good hint but not a guarantee once

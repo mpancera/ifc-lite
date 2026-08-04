@@ -40,10 +40,42 @@ export interface DisciplineRole {
 }
 
 /**
- * The "no role" default: authoring behaves exactly as it does without this
- * feature — elements are placed and contained, and nothing is grouped.
+ * Read-only, and the default. Most people who open a model never author in it —
+ * they look. Starting there means opening a file can't quietly damage it, and
+ * writing is something you switch into rather than something you are already in.
  */
-export const STANDARD_ROLE_ID = 'standard';
+export const VIEWER_ROLE_ID = 'viewer';
+
+/**
+ * Full access, including the reference model. Correcting it IS sometimes the
+ * job — unmaintained room numbers, a wrong classification — and that work needs
+ * a mode chosen on purpose rather than one you fall into while placing devices.
+ */
+export const EDITOR_ROLE_ID = 'editor';
+
+/** Neither Viewer nor Editor groups placements; only a discipline role does. */
+export function isBaseRole(roleId: string | null): boolean {
+  return roleId === VIEWER_ROLE_ID || roleId === EDITOR_ROLE_ID;
+}
+
+/**
+ * The single id stored before Viewer/Editor existed. It meant full access, so
+ * it becomes Editor — silently demoting someone mid-project to read-only would
+ * look like the tool had broken.
+ */
+const LEGACY_STANDARD_ROLE_ID = 'standard';
+
+/**
+ * A stored id made safe to use: the legacy value is migrated, and anything
+ * unrecognised (a role since removed from the catalogue, a corrupted value)
+ * falls back to Viewer rather than leaving authoring in a mode nothing
+ * describes — read-only is the safe direction to fail in.
+ */
+export function normalizeRoleId(stored: string | null | undefined): string {
+  if (stored === LEGACY_STANDARD_ROLE_ID) return EDITOR_ROLE_ID;
+  if (isBaseRole(stored ?? null)) return stored as string;
+  return findDisciplineSystem(stored ?? null) ? (stored as string) : VIEWER_ROLE_ID;
+}
 
 export const DISCIPLINE_ROLES: readonly DisciplineRole[] = [
   {
@@ -81,15 +113,15 @@ export function allDisciplineSystems(): DisciplineSystem[] {
   return DISCIPLINE_ROLES.flatMap((role) => role.systems);
 }
 
-/** The system with this id, or `null` — including for `STANDARD_ROLE_ID`. */
+/** The system with this id, or `null` — including for the base roles. */
 export function findDisciplineSystem(systemId: string | null): DisciplineSystem | null {
-  if (!systemId || systemId === STANDARD_ROLE_ID) return null;
+  if (!systemId || isBaseRole(systemId)) return null;
   return allDisciplineSystems().find((system) => system.id === systemId) ?? null;
 }
 
 /** The role a system belongs to, or `null` when the id is unknown. */
 export function roleOfSystem(systemId: string | null): DisciplineRole | null {
-  if (!systemId || systemId === STANDARD_ROLE_ID) return null;
+  if (!systemId || isBaseRole(systemId)) return null;
   return DISCIPLINE_ROLES.find((role) => role.systems.some((s) => s.id === systemId)) ?? null;
 }
 

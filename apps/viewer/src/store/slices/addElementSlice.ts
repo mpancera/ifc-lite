@@ -20,21 +20,19 @@
 
 import { type StateCreator } from 'zustand';
 import type { CatalogEntry } from '@/lib/catalog';
-import { STANDARD_ROLE_ID, findDisciplineSystem } from '@/lib/roles/disciplineRoles';
+import { VIEWER_ROLE_ID, normalizeRoleId } from '@/lib/roles/disciplineRoles';
 
 const ROLE_STORAGE_KEY = 'ifclite.authoring.discipline-role';
 
-/** Last chosen role, or Standard. An unknown id (a role since removed from the
- *  catalogue) falls back rather than leaving authoring in a mode nothing
- *  describes. */
+/** Last chosen role. `normalizeRoleId` migrates the pre-split `standard` value
+ *  and sends anything unrecognised to the read-only default. */
 function readStoredRole(): string {
   try {
-    const stored = window.localStorage.getItem(ROLE_STORAGE_KEY);
-    if (stored && (stored === STANDARD_ROLE_ID || findDisciplineSystem(stored))) return stored;
+    return normalizeRoleId(window.localStorage.getItem(ROLE_STORAGE_KEY));
   } catch {
     // Storage blocked; fall through to the default.
+    return VIEWER_ROLE_ID;
   }
-  return STANDARD_ROLE_ID;
 }
 
 export type AddElementType =
@@ -208,7 +206,8 @@ export interface AddElementSlice {
    * Active discipline role, as a `DisciplineSystem` id (see
    * `lib/roles/disciplineRoles.ts`). While one is set, every placed library
    * element also joins that installation's `IfcDistributionSystem`.
-   * `STANDARD_ROLE_ID` (the default) groups nothing.
+   * The base roles — `VIEWER_ROLE_ID` (the default) and `EDITOR_ROLE_ID` —
+   * group nothing; they differ only in what may be written.
    */
   activeDisciplineSystemId: string;
 

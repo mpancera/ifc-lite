@@ -14,6 +14,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import { EDITOR_ROLE_ID } from '../../lib/roles/disciplineRoles.js';
 import { createMutationSlice, type MutationSlice } from './mutationSlice.js';
 import type { ViewerState } from '../index.js';
 
@@ -46,6 +47,9 @@ function buildSlice(canEdit: boolean) {
     redoStacks: new Map(),
     dirtyModels: new Set(),
     mutationVersion: 0,
+    // The discipline gate is a separate concern that runs alongside this one;
+    // pin it open so a refusal here can only come from the collab role.
+    activeDisciplineSystemId: EDITOR_ROLE_ID,
     canCollabEdit: () => canEdit,
     // Mirrors are cross-slice; the gate under test runs before they would.
     mirrorPropertyEdit: () => {},

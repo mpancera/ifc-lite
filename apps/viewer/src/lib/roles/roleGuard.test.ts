@@ -4,14 +4,45 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { STANDARD_ROLE_ID } from './disciplineRoles.js';
-import { mayEditEntity } from './roleGuard.js';
+import { EDITOR_ROLE_ID, VIEWER_ROLE_ID } from './disciplineRoles.js';
+import { mayCreateEntities, mayEditEntity } from './roleGuard.js';
 
-test('Standard may change the reference model', () => {
+test('Editor may change the reference model', () => {
   // Correcting the reference model is sometimes the job — unmaintained room
-  // numbers, a wrong classification — and Standard is the mode for it.
-  const result = mayEditEntity({ activeSystemId: STANDARD_ROLE_ID, isAuthored: false });
+  // numbers, a wrong classification — and Editor is the mode for it.
+  const result = mayEditEntity({ activeSystemId: EDITOR_ROLE_ID, isAuthored: false });
   assert.equal(result.allowed, true);
+});
+
+test('Viewer may not change the reference model', () => {
+  const result = mayEditEntity({ activeSystemId: VIEWER_ROLE_ID, isAuthored: false });
+  assert.equal(result.allowed, false);
+});
+
+test('Viewer may not change even something authored in this session', () => {
+  // Read-only that makes an exception for authored entities stops being
+  // read-only the moment a snapshot restores an earlier session's work.
+  const result = mayEditEntity({ activeSystemId: VIEWER_ROLE_ID, isAuthored: true });
+  assert.equal(result.allowed, false);
+});
+
+test('Viewer may not create anything', () => {
+  assert.equal(mayCreateEntities(VIEWER_ROLE_ID).allowed, false);
+});
+
+test('Editor and every discipline role may create', () => {
+  // Adding is precisely what a discipline role is for, so creation is gated
+  // only on Viewer.
+  assert.equal(mayCreateEntities(EDITOR_ROLE_ID).allowed, true);
+  assert.equal(mayCreateEntities('fire.detection').allowed, true);
+});
+
+test("Viewer's refusal names both ways out", () => {
+  const result = mayCreateEntities(VIEWER_ROLE_ID);
+  assert.equal(result.allowed, false);
+  if (result.allowed) return;
+  assert.match(result.reason, /Fachrolle/);
+  assert.match(result.reason, /Editor/);
 });
 
 test('a discipline role may change what it authored', () => {
@@ -32,7 +63,7 @@ test('the refusal names the role and how to proceed', () => {
   assert.equal(result.allowed, false);
   if (result.allowed) return;
   assert.match(result.reason, /Fire · Branddetektion/);
-  assert.match(result.reason, /Standard/);
+  assert.match(result.reason, /Editor/);
 });
 
 test('the refusal still reads sensibly without a role label', () => {

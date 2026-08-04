@@ -6,10 +6,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DISCIPLINE_ROLES,
-  STANDARD_ROLE_ID,
+  EDITOR_ROLE_ID,
+  VIEWER_ROLE_ID,
   allDisciplineSystems,
   disciplineSystemName,
   findDisciplineSystem,
+  isBaseRole,
+  normalizeRoleId,
   roleOfSystem,
 } from './disciplineRoles.js';
 
@@ -25,8 +28,8 @@ test('discipline systems have unique ids', () => {
   assert.equal(new Set(ids).size, ids.length);
 });
 
-test('no system id collides with the standard sentinel', () => {
-  assert.ok(!allDisciplineSystems().some((s) => s.id === STANDARD_ROLE_ID));
+test('no system id collides with a base-role sentinel', () => {
+  assert.ok(!allDisciplineSystems().some((s) => isBaseRole(s.id)));
 });
 
 test('every system declares a standard IfcDistributionSystemEnum value', () => {
@@ -49,10 +52,33 @@ test('systems sharing a PredefinedType are told apart by ObjectType', () => {
   }
 });
 
-test('the standard role resolves to no system', () => {
-  assert.equal(findDisciplineSystem(STANDARD_ROLE_ID), null);
+test('the base roles resolve to no system', () => {
+  for (const id of [VIEWER_ROLE_ID, EDITOR_ROLE_ID]) {
+    assert.equal(findDisciplineSystem(id), null);
+    assert.equal(roleOfSystem(id), null);
+  }
   assert.equal(findDisciplineSystem(null), null);
-  assert.equal(roleOfSystem(STANDARD_ROLE_ID), null);
+});
+
+test('the pre-split "standard" value migrates to Editor', () => {
+  // It meant full access. Silently demoting someone mid-project to read-only
+  // would look like the tool had broken.
+  assert.equal(normalizeRoleId('standard'), EDITOR_ROLE_ID);
+});
+
+test('a stored role is kept as it is', () => {
+  assert.equal(normalizeRoleId(VIEWER_ROLE_ID), VIEWER_ROLE_ID);
+  assert.equal(normalizeRoleId(EDITOR_ROLE_ID), EDITOR_ROLE_ID);
+  assert.equal(normalizeRoleId('fire.detection'), 'fire.detection');
+});
+
+test('anything unrecognised falls back to read-only', () => {
+  // A role since removed from the catalogue, or a corrupted value: Viewer is
+  // the safe direction to fail in.
+  assert.equal(normalizeRoleId('fire.removed'), VIEWER_ROLE_ID);
+  assert.equal(normalizeRoleId(null), VIEWER_ROLE_ID);
+  assert.equal(normalizeRoleId(undefined), VIEWER_ROLE_ID);
+  assert.equal(normalizeRoleId(''), VIEWER_ROLE_ID);
 });
 
 test('an unknown id resolves to no system rather than throwing', () => {
