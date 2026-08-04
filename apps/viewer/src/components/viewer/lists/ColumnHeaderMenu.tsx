@@ -16,6 +16,7 @@ import {
   DropdownMenuItem,
   DropdownMenuCheckboxItem,
   DropdownMenuSeparator,
+  DropdownMenuLabel,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
 
@@ -31,11 +32,21 @@ interface ColumnHeaderMenuProps {
   onToggleGroup: () => void;
   onToggleSum: () => void;
   onColorBy: () => void;
+  /**
+   * Saved lenses this column could be pinned to — only passed for a `colour`
+   * column. Empty/absent means the column follows whichever lens is active,
+   * which is the default and the one that pairs with "Colour by this column".
+   */
+  lensOptions?: { id: string; name: string }[];
+  /** Currently pinned lens id, or '' for "follow the active lens". */
+  pinnedLensId?: string;
+  onPinLens?: (lensId: string) => void;
 }
 
 export function ColumnHeaderMenu({
   isNumeric, isGroupedBy, groupedElsewhere, isSummed, active,
   onSort, onToggleGroup, onToggleSum, onColorBy,
+  lensOptions, pinnedLensId, onPinLens,
 }: ColumnHeaderMenuProps) {
   return (
     <DropdownMenu>
@@ -83,6 +94,34 @@ export function ColumnHeaderMenu({
         <DropdownMenuItem className="gap-2 text-xs" onClick={onColorBy}>
           <Palette className="h-3.5 w-3.5" /> Colour by this column
         </DropdownMenuItem>
+        {/* A colour column can either follow whatever lens is active — which is
+            what "Colour by this column" sets up — or be pinned to a saved one,
+            so a list can carry a second colouring alongside the 3D view. */}
+        {lensOptions && onPinLens && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground">
+              Farbe aus Lens
+            </DropdownMenuLabel>
+            <DropdownMenuCheckboxItem
+              className="text-xs"
+              checked={!pinnedLensId}
+              onCheckedChange={() => onPinLens('')}
+            >
+              Aktive Lens
+            </DropdownMenuCheckboxItem>
+            {lensOptions.map((lens) => (
+              <DropdownMenuCheckboxItem
+                key={lens.id}
+                className="text-xs"
+                checked={pinnedLensId === lens.id}
+                onCheckedChange={() => onPinLens(lens.id)}
+              >
+                {lens.name}
+              </DropdownMenuCheckboxItem>
+            ))}
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

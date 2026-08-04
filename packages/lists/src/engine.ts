@@ -526,6 +526,11 @@ function extractColumnValues(
         values[i] = codes.length > 0 ? uniqueJoin(codes) : null;
         break;
       }
+      case 'colour':
+        // No value in the model: the colour comes from the active view's lens,
+        // which the engine knows nothing about. The viewer paints the cell.
+        values[i] = null;
+        break;
       case 'spatial':
         values[i] = getSpatialValue(entityId, col.propertyName, provider);
         break;

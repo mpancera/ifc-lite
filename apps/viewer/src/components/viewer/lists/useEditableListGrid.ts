@@ -91,6 +91,16 @@ export interface EditableListGrid {
   /** Wired to the container's onCopy/onPaste. */
   handleCopy: (event: React.ClipboardEvent) => void;
   handlePaste: (event: React.ClipboardEvent) => void;
+
+  // ── Fill handle ──
+  /** Rows the in-progress fill drag would write, or `null` when idle. */
+  fillPreview: CellRange | null;
+  /** Grab the handle at the bottom-right of the selection. */
+  beginFill: () => void;
+  /** Drag reached this row. */
+  extendFill: (rowIdx: number) => void;
+  /** Release: repeat the selection's values down the dragged rows. */
+  endFill: () => void;
 }
 
 export interface EditableListGridOptions {
@@ -269,6 +279,73 @@ export function useEditableListGrid(options: EditableListGridOptions): EditableL
     return false;
   }, [enabled, active, move, beginEdit, clearRange]);
 
+  // ── Fill handle ──
+  // Dragging the corner repeats the selection downwards. It reuses `planPaste`
+  // rather than growing a second copy of the same rules: tiling, the table
+  // bounds and the read-only accounting all have to behave identically to a
+  // paste, because to the model they ARE one.
+  const [fillSource, setFillSource] = useState<CellRange | null>(null);
+  const [fillToRow, setFillToRow] = useState<number | null>(null);
+  // The drag is also held in a ref: `mousedown` and the first `mouseenter`
+  // arrive in the same tick, so a hover asking "is a drag running" through
+  // state would still see `null` and drop the row it was over.
+  const fillSourceRef = useRef<CellRange | null>(null);
+
+  const fillPreview = useMemo(() => {
+    if (!fillSource || fillToRow === null || fillToRow <= fillSource.toRow) return null;
+    return { ...fillSource, toRow: fillToRow };
+  }, [fillSource, fillToRow]);
+
+  const beginFill = useCallback(() => {
+    if (!enabled || !range) return;
+    fillSourceRef.current = range;
+    setFillSource(range);
+    setFillToRow(range.toRow);
+  }, [enabled, range]);
+
+  const extendFill = useCallback((rowIdx: number) => {
+    // Every cell reports hover; only a running drag cares.
+    const source = fillSourceRef.current;
+    if (!source) return;
+    setFillToRow(Math.max(rowIdx, source.toRow));
+  }, []);
+
+  const endFill = useCallback(() => {
+    const source = fillSourceRef.current;
+    const toRow = fillToRow;
+    fillSourceRef.current = null;
+    setFillSource(null);
+    setFillToRow(null);
+    if (!source || toRow === null || toRow <= source.toRow) return;
+
+    // The dragged rows only — the source keeps the values it already has.
+    const grid: string[][] = [];
+    for (let r = source.fromRow; r <= source.toRow; r++) {
+      const line: string[] = [];
+      for (let c = source.fromCol; c <= source.toCol; c++) {
+        const value = displayedValue(r, c);
+        line.push(value === null || value === undefined ? '' : String(value));
+      }
+      grid.push(line);
+    }
+
+    const plan = planPaste({
+      grid,
+      target: { ...source, fromRow: source.toRow + 1, toRow },
+      rowCount: rows.length,
+      colCount: columns.length,
+      isEditableColumn: (colIdx) => editableCols[colIdx] ?? false,
+    });
+
+    let written = 0;
+    for (const cell of plan.cells) {
+      if (writeCell(cell.rowIdx, cell.colIdx, cell.value)) written++;
+    }
+    const summary = describePastePlan(plan);
+    if (summary) setNotice(summary);
+    else if (written > 0) setNotice(`${written} Werte übernommen.`);
+  }, [fillToRow, displayedValue, rows.length, columns.length, editableCols, writeCell]);
+
   const handleCopy = useCallback((event: React.ClipboardEvent) => {
     if (!enabled || !range) return;
     // The whole rectangle, in the tab/newline shape a spreadsheet expects, so
@@ -318,5 +395,6 @@ export function useEditableListGrid(options: EditableListGridOptions): EditableL
     active, range, editing: draft !== null, editableColumns: editableCols, draft, notice, clearNotice,
     patchFor, beginEdit, setDraft, cancelEdit, commitDraft, selectCell,
     handleKeyDown, handleCopy, handlePaste,
+    fillPreview, beginFill, extendFill, endFill,
   };
 }

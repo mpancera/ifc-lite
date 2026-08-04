@@ -12,7 +12,7 @@
  * rows), so 100K+ rows stay smooth.
  */
 
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { ArrowUp, ArrowDown, Search, Eye, EyeOff, Download, ChevronRight, ChevronDown, FileText, FileSpreadsheet, FileType, Link2 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
@@ -31,6 +31,9 @@ import { posthog } from '@/lib/analytics';
 import { cn } from '@/lib/utils';
 import { columnToAutoColor } from '@/lib/lists/columnToAutoColor';
 import { AUTO_COLOR_FROM_LIST_ID } from '@/store/slices/lensSlice';
+import { evaluateLens, evaluateAutoColorLens, rgbaToHex, isGhostColor } from '@ifc-lite/lens';
+import { createLensDataProvider } from '@/lib/lens';
+import { activePaletteDataViz } from '@/lib/theme/palette';
 import { isRelationColumn } from '@/lib/lists/editTarget';
 import { useListCellEdit } from '@/hooks/useListCellEdit';
 import { rangeContains, useEditableListGrid, type EditableListGrid } from './useEditableListGrid';
@@ -60,9 +63,12 @@ interface ListResultsTableProps {
   /** Turn the grid into a spreadsheet: cells become typeable, copy/paste works,
    *  and committed values are written to the mutation overlay. */
   editable?: boolean;
+  /** Persist a per-column change made from the header menu (currently: which
+   *  lens a `colour` column paints with). */
+  onColumnChange?: (columnId: string, updates: Partial<ColumnDefinition>) => void;
 }
 
-export function ListResultsTable({ result, listName, grouping, onGroupingChange, modelUnits, editable = false }: ListResultsTableProps) {
+export function ListResultsTable({ result, listName, grouping, onGroupingChange, modelUnits, editable = false, onColumnChange }: ListResultsTableProps) {
   const unitDisplayOverrides = useViewerStore((s) => s.unitDisplayOverrides);
   const parentRef = useRef<HTMLDivElement>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -98,6 +104,49 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
    *  chain link and muted, header and cells alike, so it reads as "shown here,
    *  changed elsewhere". */
   const relationCols = useMemo(() => columns.map((c) => isRelationColumn(c)), [columns]);
+
+  // ── Colour columns ──
+  // A `colour` column carries no value; it paints the colour a lens gives the
+  // row in 3D, so the table and the model agree at a glance. Empty by default:
+  // with no lens active there is nothing to show, which is the honest state
+  // rather than an invented palette.
+  const colourColumns = useMemo(
+    () => columns.map((c) => (c.source === 'colour' ? (c.propertyName || '') : null)),
+    [columns]);
+  const savedLenses = useViewerStore((s) => s.savedLenses);
+  const lensColorMap = useViewerStore((s) => s.lensColorMap);
+  const mutationVersion = useViewerStore((s) => s.mutationVersion);
+
+  /**
+   * Colour maps keyed by lens id, for columns pinned to a specific saved lens.
+   *
+   * The active lens already publishes its map to the store; a pinned one has to
+   * be evaluated here. Evaluating is a pure call on the same provider the lens
+   * panel uses, so a pinned column shows exactly what activating that lens
+   * would show.
+   */
+  const pinnedColourMaps = useMemo(() => {
+    const wanted = new Set(colourColumns.filter((id): id is string => !!id));
+    const maps = new Map<string, Map<number, string>>();
+    if (wanted.size === 0) return maps;
+    const { models, ifcDataStore, mutationViews } = useViewerStore.getState();
+    if (models.size === 0 && !ifcDataStore) return maps;
+    const provider = createLensDataProvider(models, ifcDataStore, mutationViews);
+    for (const lensId of wanted) {
+      const lens = savedLenses.find((l) => l.id === lensId);
+      if (!lens) continue;
+      const result = lens.autoColor
+        ? evaluateAutoColorLens(lens.autoColor, provider, activePaletteDataViz())
+        : evaluateLens(lens, provider);
+      const hex = new Map<number, string>();
+      for (const [id, rgba] of result.colorMap) {
+        if (!isGhostColor(rgba)) hex.set(id, rgbaToHex(rgba));
+      }
+      maps.set(lensId, hex);
+    }
+    return maps;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mutationVersion is the edit signal
+  }, [colourColumns, savedLenses, mutationVersion]);
 
   // Single per-column unit resolution (issue #1573 follow-up), shared with
   // `buildExportModel` so the table and the export can never disagree.
@@ -232,9 +281,27 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
     // this callback out of the hook's own dependency cycle.
   }, [editRows]);
 
+  /** Point a colour column at a specific saved lens, or back at the active one.
+   *  Written to the definition so the choice survives with the list. */
+  const handlePinLens = useCallback((col: ColumnDefinition, lensId: string) => {
+    if (!onGroupingChange) return;
+    // `onGroupingChange` is the table's only channel back to the definition;
+    // the column edit rides along with the grouping it already persists.
+    onColumnChange?.(col.id, { propertyName: lensId });
+  }, [onGroupingChange, onColumnChange]);
+
   const grid = useEditableListGrid({ enabled: editable, rows: editRows, columns, displayedValue, commitCell });
   const gridRef = useRef<EditableListGrid | null>(null);
   gridRef.current = grid;
+
+  // A fill drag can end anywhere — off the last row, outside the panel — so the
+  // release is caught on the window rather than on a cell.
+  useEffect(() => {
+    if (!editable) return;
+    const onUp = () => gridRef.current?.endFill();
+    window.addEventListener('mouseup', onUp);
+    return () => window.removeEventListener('mouseup', onUp);
+  }, [editable]);
 
   const columnWidths = useMemo(
     () => columns.map((c, i) => widthOverrides[c.id] ?? autoColumnWidth(c.label ?? c.propertyName, result.rows, i)),
@@ -520,6 +587,13 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
                       onToggleGroup={() => toggleGroupBy(col.id)}
                       onToggleSum={() => toggleSum(col.id)}
                       onColorBy={() => handleColorByColumn(col, colIdx)}
+                      lensOptions={colourColumns[colIdx] !== null
+                        ? savedLenses.map((l) => ({ id: l.id, name: l.name }))
+                        : undefined}
+                      pinnedLensId={colourColumns[colIdx] ?? undefined}
+                      onPinLens={colourColumns[colIdx] !== null
+                        ? (lensId) => handlePinLens(col, lensId)
+                        : undefined}
                     />
                   )}
                   <div
@@ -585,6 +659,13 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
                   onClick={(e) => handleRowClick(row, e)}
                 >
                   {row.values.map((value, colIdx) => {
+                    // A colour column has no text — the cell IS the swatch.
+                    const colourLensId = colourColumns[colIdx];
+                    const swatch = colourLensId === null ? undefined : (
+                      colourLensId === ''
+                        ? lensColorMap.get(globalId)
+                        : pinnedColourMaps.get(colourLensId)?.get(globalId)
+                    );
                     // A patch is the raw text the user committed; the executed
                     // value keeps its engine type until the next Run.
                     const patched = editable ? grid.patchFor(row, colIdx) : undefined;
@@ -594,6 +675,12 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
                     const isOpen = isActive && grid.editing;
                     const inRange = editable && !isActive
                       && rangeContains(grid.range, rowIdx, colIdx);
+                    const inFill = editable && rangeContains(grid.fillPreview, rowIdx, colIdx);
+                    // The handle hangs off the bottom-right cell of the
+                    // selection, and only where dragging could write anything.
+                    const showFillHandle = editable && grid.range
+                      && grid.range.toRow === rowIdx && grid.range.toCol === colIdx
+                      && grid.editableColumns[colIdx] && !isOpen;
                     return (
                       <div
                         key={colIdx}
@@ -607,12 +694,20 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
                           // mutated value; one colour for "you changed this".
                           patched !== undefined && 'bg-purple-50/50 dark:bg-purple-950/30 text-purple-900 dark:text-purple-100',
                           inRange && 'bg-primary/10',
+                          inFill && 'bg-primary/5 ring-1 ring-inset ring-primary/40',
                           isActive && !isOpen && 'ring-1 ring-inset ring-primary',
+                          showFillHandle && 'relative',
                           editable && grid.editableColumns[colIdx] && 'cursor-text',
                         )}
                         // Member rows sit one indent step past the deepest group header.
-                        style={{ width: columnWidths[colIdx], ...(isGrouped && colIdx === 0 ? { paddingLeft: 8 + groupColumnIds.length * 16 } : undefined) }}
-                        title={shown !== null && shown !== undefined ? String(shown) : ''}
+                        style={{
+                          width: columnWidths[colIdx],
+                          ...(isGrouped && colIdx === 0 ? { paddingLeft: 8 + groupColumnIds.length * 16 } : undefined),
+                          ...(swatch ? { backgroundColor: swatch } : undefined),
+                        }}
+                        title={colourLensId !== null
+                          ? (swatch ?? 'Keine Lens-Farbe für dieses Bauteil')
+                          : (shown !== null && shown !== undefined ? String(shown) : '')}
                         onClick={editable ? (e) => {
                           e.stopPropagation();
                           // Shift-click extends the selection, so it must not
@@ -621,6 +716,7 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
                           grid.selectCell({ rowIdx, colIdx }, e.shiftKey);
                         } : undefined}
                         onDoubleClick={editable ? (e) => { e.stopPropagation(); grid.beginEdit({ rowIdx, colIdx }); } : undefined}
+                        onMouseEnter={editable ? () => grid.extendFill(rowIdx) : undefined}
                       >
                         {isOpen ? (
                           <input
@@ -641,7 +737,18 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
                               else grid.commitDraft(e.currentTarget.value, e.key === 'Tab' ? 'right' : 'down');
                             }}
                           />
-                        ) : formatCellValue(shown)}
+                        ) : colourLensId !== null ? null : formatCellValue(shown)}
+                        {showFillHandle && (
+                          <span
+                            role="button"
+                            aria-label="Wert nach unten ausfüllen"
+                            title="Nach unten ziehen, um den Wert zu wiederholen"
+                            className="absolute -bottom-[3px] -right-[3px] h-2 w-2 cursor-crosshair rounded-[1px] bg-primary ring-1 ring-background"
+                            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); grid.beginFill(); }}
+                            onClick={(e) => e.stopPropagation()}
+                            onDoubleClick={(e) => e.stopPropagation()}
+                          />
+                        )}
                       </div>
                     );
                   })}

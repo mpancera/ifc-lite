@@ -139,6 +139,9 @@ const COMMON_COLUMNS: CommonColumn[] = [
   { id: 'col-site', source: 'spatial', propertyName: 'Site', label: 'Site' },
   { id: 'col-project', source: 'spatial', propertyName: 'Project', label: 'Project' },
   { id: 'col-model', source: 'model', propertyName: 'Model', label: 'Model' },
+  // No model value behind it: it paints the row's lens colour. Empty until a
+  // lens is active or the column is pointed at a saved one.
+  { id: 'col-colour', source: 'colour', propertyName: '', label: 'Colour' },
 ];
 
 /** Union the per-provider complete-discovery results into one column set. */
@@ -706,6 +709,7 @@ const SOURCE_TAG: Record<ColumnDefinition['source'], string> = {
   spatial: 'storey',
   model: 'model',
   zone: 'zone',
+  colour: 'lens',
 };
 
 /** A `spatial` column's tag reflects its level (storey / building / site /

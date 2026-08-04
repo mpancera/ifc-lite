@@ -241,13 +241,14 @@ export interface PropertyCondition {
    *   or the straddled zones joined when the element crosses a boundary) or
    *   `Straddles` (boolean)
    */
-  source: 'attribute' | 'property' | 'quantity' | 'material' | 'classification' | 'spatial' | 'model' | 'zone';
+  source: 'attribute' | 'property' | 'quantity' | 'material' | 'classification' | 'spatial' | 'model' | 'zone' | 'colour';
   /** Property set name (for property/quantity sources); the zone-SET id for `zone`. */
   psetName?: string;
   /** Attribute / property / quantity name, the spatial level for `spatial`
-   *  (`Container` | `Storey` | `Building` | `Site` | `Project`), or the zone
-   *  display mode for `zone` (`Zone` (default) | `Straddles`). Ignored for
-   *  material/classification/model. */
+   *  (`Container` | `Storey` | `Building` | `Site` | `Project`), the zone
+   *  display mode for `zone` (`Zone` (default) | `Straddles`), or for `colour`
+   *  the id of the lens to paint with (empty = whichever lens is active).
+   *  Ignored for material/classification/model. */
   propertyName: string;
   operator: ConditionOperator;
   value: string | number | boolean;
@@ -277,14 +278,21 @@ export interface ColumnDefinition {
    * (federation identity); `zone` is a location-zone assignment (issue
    * #1810) — see `PropertyCondition.source` for the exact `psetName`/
    * `propertyName` contract, shared verbatim between conditions and columns.
+   *
+   * `colour` has no value in the model at all: it paints the row's lens colour
+   * as the cell background. The engine returns null for it and the viewer fills
+   * it in, because a colour is a property of the current *view*, not of the
+   * element — two people looking at the same list under different lenses are
+   * both right.
    */
-  source: 'attribute' | 'property' | 'quantity' | 'material' | 'classification' | 'spatial' | 'model' | 'zone';
+  source: 'attribute' | 'property' | 'quantity' | 'material' | 'classification' | 'spatial' | 'model' | 'zone' | 'colour';
   /** For property: pset name. For quantity: qset name. For zone: the zone-SET id. */
   psetName?: string;
   /** Attribute / property / quantity name, the spatial level for `spatial`
-   *  (`Container` | `Storey` | `Building` | `Site` | `Project`), or the zone
-   *  display mode for `zone` (`Zone` (default) | `Straddles`). Ignored for
-   *  material/classification/model. */
+   *  (`Container` | `Storey` | `Building` | `Site` | `Project`), the zone
+   *  display mode for `zone` (`Zone` (default) | `Straddles`), or for `colour`
+   *  the id of the lens to paint with (empty = whichever lens is active).
+   *  Ignored for material/classification/model. */
   propertyName: string;
   /** Display label override */
   label?: string;

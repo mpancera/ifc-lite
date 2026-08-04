@@ -266,6 +266,25 @@ export function ListPanel({ onClose }: ListPanelProps) {
     e.target.value = '';
   }, [addListDefinition]);
 
+  /** A per-column change made in the results header — persisted to the saved
+   *  definition AND to the executed result, so the table repaints without a
+   *  re-run it does not need. */
+  const handleColumnChangeFromTable = useCallback((columnId: string, updates: Partial<ListDefinition['columns'][number]>) => {
+    const current = editingList;
+    if (!current) return;
+    const columns = current.columns.map((c) => (c.id === columnId ? { ...c, ...updates } : c));
+    const next = { ...current, columns };
+    setEditingList(next);
+    if (listDefinitions.some((d) => d.id === next.id)) updateListDefinition(next.id, { columns });
+    const result = useViewerStore.getState().listResult;
+    if (result) {
+      setListResult({
+        ...result,
+        columns: result.columns.map((c) => (c.id === columnId ? { ...c, ...updates } : c)),
+      });
+    }
+  }, [editingList, listDefinitions, updateListDefinition, setListResult]);
+
   const handleExportDefinition = useCallback((definition: ListDefinition) => {
     exportListDefinition(definition);
   }, []);
@@ -367,6 +386,7 @@ export function ListPanel({ onClose }: ListPanelProps) {
           onGroupingChange={handleGroupingFromTable}
           modelUnits={modelUnits}
           editable={editEnabled}
+          onColumnChange={handleColumnChangeFromTable}
         />
       )}
 
