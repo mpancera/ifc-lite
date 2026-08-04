@@ -100,6 +100,12 @@ export interface ListDataProvider {
    *  is uncontained. Used by the `spatial` column at `Container` level (Bonsai's
    *  "container"). */
   getContainerName?(expressId: number): string;
+  /** Name of the IfcSpace enclosing the element, or '' when it sits directly on
+   *  a storey (a corridor, an unmodelled area). Deliberately NOT falling back
+   *  to the storey the way `getContainerName` does: a room column that silently
+   *  shows storeys cannot be used to find elements that have no room. Used by
+   *  the `spatial` column at `Room` level. */
+  getSpaceName?(expressId: number): string;
   /** IfcBuilding name containing the element, or '' when unplaced. Used by the
    *  `spatial` column at `Building` level. */
   getBuildingName?(expressId: number): string;

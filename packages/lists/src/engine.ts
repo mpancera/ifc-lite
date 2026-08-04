@@ -395,6 +395,8 @@ function getSpatialValue(
   switch (level.toLowerCase()) {
     case 'container':
       return provider.getContainerName?.(entityId) || null;
+    case 'room':
+      return provider.getSpaceName?.(entityId) || null;
     case 'building':
       return provider.getBuildingName?.(entityId) || null;
     case 'site':

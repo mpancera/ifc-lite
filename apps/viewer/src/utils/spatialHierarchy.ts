@@ -248,10 +248,11 @@ export function buildSpatialAncestryIndex(
  *   - A spatial-structure element (IfcSpace / IfcSpatialZone, linked by
  *     IfcRelAggregates) becomes a child NODE of the storey.
  *   - Any other element (slab / wall / … linked by IfcRelContainedInSpatialStructure)
- *     joins the storey's contained-element list in BOTH representations:
- *     the flat `byStorey` map (what the Hierarchy tree UI reads) and the
- *     storey tree node's own `elements` array (what storey isolation /
- *     Solo mode reads, via `collectSpatialSubtreeElementsWithIfcSpace`).
+ *     joins its container's contained-element list in BOTH representations:
+ *     the flat map (`bySpace` when it sits in a room, else `byStorey` — what the
+ *     Hierarchy tree UI reads) and that container's tree node's own `elements`
+ *     array (what storey isolation / Solo mode reads, via
+ *     `collectSpatialSubtreeElementsWithIfcSpace`).
  * Idempotent. A later export+reparse rebuilds the hierarchy from the real
  * relationships, so this is purely the live-session bridge.
  */
@@ -269,6 +270,7 @@ export function registerAuthoredElement(
   // only the storey leaves "which room is this in" unanswerable for anything
   // authored this session — the containment says one thing and the hierarchy
   // another — which is what "the room a device sits in" has to read.
+  let roomId: number | undefined;
   if (containerExpressId !== undefined && containerExpressId !== storeyExpressId) {
     if (!hierarchy.elementToContainer) hierarchy.elementToContainer = new Map();
     hierarchy.elementToContainer.set(entityId, containerExpressId);
@@ -276,8 +278,10 @@ export function registerAuthoredElement(
     const roomElements = hierarchy.bySpace.get(containerExpressId);
     if (roomElements) {
       if (!roomElements.includes(entityId)) roomElements.push(entityId);
+      roomId = containerExpressId;
     } else if (isSpaceLike(hierarchy, containerExpressId)) {
       hierarchy.bySpace.set(containerExpressId, [entityId]);
+      roomId = containerExpressId;
     }
   }
 
@@ -297,21 +301,34 @@ export function registerAuthoredElement(
     return;
   }
 
-  const existing = hierarchy.byStorey.get(storeyExpressId);
-  if (existing) {
-    if (!existing.includes(entityId)) existing.push(entityId);
-  } else {
-    hierarchy.byStorey.set(storeyExpressId, [entityId]);
+  // A room-contained element belongs to `bySpace` (done above) and NOT to
+  // `byStorey` — that is exactly how the parser splits them, and `elementToStorey`
+  // above already answers "which storey". Adding it to both would make the
+  // ancestry index resolve its container to the storey, so "Contained in" would
+  // name the storey while the room maps said otherwise.
+  if (roomId === undefined) {
+    const existing = hierarchy.byStorey.get(storeyExpressId);
+    if (existing) {
+      if (!existing.includes(entityId)) existing.push(entityId);
+    } else {
+      hierarchy.byStorey.set(storeyExpressId, [entityId]);
+    }
   }
 
-  // `byStorey` is what the Hierarchy tree UI reads, but storey isolation
-  // (Solo mode / `collectSpatialSubtreeElementsWithIfcSpace`) walks the
-  // tree NODE's own `elements` array instead — a separate representation
-  // of the same containment that this used to leave out of sync, so an
-  // authored element would show in the tree but vanish under Solo.
-  const storeyNode = findSpatialNode(hierarchy.project, storeyExpressId);
-  if (storeyNode && !storeyNode.elements.includes(entityId)) {
-    storeyNode.elements.push(entityId);
+  // `byStorey`/`bySpace` are what the Hierarchy tree UI reads, but storey
+  // isolation (Solo mode / `collectSpatialSubtreeElementsWithIfcSpace`) walks
+  // the tree NODE's own `elements` array instead — a separate representation of
+  // the same containment that this used to leave out of sync, so an authored
+  // element would show in the tree but vanish under Solo. The room is itself a
+  // child of the storey, so storey isolation still reaches it either way.
+  //
+  // Straight after a parse those two representations are the SAME array (the
+  // builder hands `containedElements` to both), so the pushes above may already
+  // have landed here; the includes-guard keeps that harmless.
+  const ownerNode = findSpatialNode(hierarchy.project, roomId ?? storeyExpressId)
+    ?? findSpatialNode(hierarchy.project, storeyExpressId);
+  if (ownerNode && !ownerNode.elements.includes(entityId)) {
+    ownerNode.elements.push(entityId);
   }
 }
 

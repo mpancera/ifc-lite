@@ -105,7 +105,7 @@ interface CommonColumn {
 /** Spatial-container levels a `spatial` column / filter can target, fine to
  *  coarse: Container is the element's IMMEDIATE container (any level); Storey
  *  is the default (back-compat). */
-const SPATIAL_LEVELS = ['Container', 'Storey', 'Building', 'Site', 'Project'] as const;
+const SPATIAL_LEVELS = ['Room', 'Container', 'Storey', 'Building', 'Site', 'Project'] as const;
 
 /**
  * The first-class columns: built-in attributes plus the spatial / semantic
@@ -128,7 +128,12 @@ const COMMON_COLUMNS: CommonColumn[] = [
   })),
   { id: 'col-material', source: 'material', propertyName: 'Material', label: 'Material' },
   { id: 'col-classification', source: 'classification', propertyName: 'Classification', label: 'Classification' },
-  { id: 'col-container', source: 'spatial', propertyName: 'Container', label: 'Container' },
+  { id: 'col-room', source: 'spatial', propertyName: 'Room', label: 'Room' },
+  // `propertyName` is what saved lists store, so it stays 'Container' — only
+  // the heading changes. "Container" said nothing about what it holds, and for
+  // most elements it repeats the Storey column, which read as a duplicate
+  // rather than as "this element sits directly on the storey".
+  { id: 'col-container', source: 'spatial', propertyName: 'Container', label: 'Contained in' },
   { id: 'col-storey', source: 'spatial', propertyName: 'Storey', label: 'Storey' },
   { id: 'col-building', source: 'spatial', propertyName: 'Building', label: 'Building' },
   { id: 'col-site', source: 'spatial', propertyName: 'Site', label: 'Site' },

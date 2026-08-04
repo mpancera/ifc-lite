@@ -11,6 +11,7 @@ import {
   RelationshipType,
   StringTable,
 } from '@ifc-lite/data';
+import { collectIfcBuildingStoreyElementsWithIfcSpace } from '@/store/basketVisibleSet';
 import { rebuildSpatialHierarchy, rebuildOnDemandMaps, registerAuthoredElement, buildSpatialAncestryIndex, collectSpatialContainerNames } from './spatialHierarchy';
 
 describe('registerAuthoredElement', () => {
@@ -595,6 +596,9 @@ describe('rebuildOnDemandMaps', () => {
 });
 
 describe('registerAuthoredElement · room containment', () => {
+  const storeyNodeOf = (h: NonNullable<ReturnType<typeof rebuildSpatialHierarchy>>) =>
+    h.project.children[0].children[0].children[0];
+
   /** Project → Site → Building → Storey(4), plus an authored room on it. */
   function hierarchyWithRoom() {
     const strings = new StringTable();
@@ -652,5 +656,36 @@ describe('registerAuthoredElement · room containment', () => {
     registerAuthoredElement(h, 4, 900, 'IFCSENSOR', 'Melder', 60);
 
     assert.deepEqual(h.bySpace.get(60), [900]);
+  });
+
+  it('lists a room-contained element under the ROOM node, not the storey', () => {
+    // The ancestry index walks this tree and lets it win over the container
+    // maps, so listing it under the storey made "Contained in" answer with the
+    // storey while every other lookup said the room.
+    const h = hierarchyWithRoom();
+    registerAuthoredElement(h, 4, 900, 'IFCSENSOR', 'Melder', 60);
+
+    const storeyNode = storeyNodeOf(h);
+    const roomNode = storeyNode.children.find((c) => c.expressId === 60);
+    assert.ok(roomNode, 'the room should be a child node of the storey');
+    assert.ok(roomNode!.elements.includes(900));
+    assert.ok(!storeyNode.elements.includes(900));
+  });
+
+  it('an element with no room stays on the storey node', () => {
+    const h = hierarchyWithRoom();
+    registerAuthoredElement(h, 4, 901, 'IFCSENSOR', 'Melder');
+
+    assert.ok(storeyNodeOf(h).elements.includes(901));
+  });
+
+  it('storey isolation still reaches an element inside a room', () => {
+    // The room is a child of the storey, so a subtree walk finds it — this is
+    // what makes moving it off the storey node safe.
+    const h = hierarchyWithRoom();
+    registerAuthoredElement(h, 4, 900, 'IFCSENSOR', 'Melder', 60);
+
+    const visible = collectIfcBuildingStoreyElementsWithIfcSpace(h, 4) ?? [];
+    assert.ok(visible.includes(900));
   });
 });

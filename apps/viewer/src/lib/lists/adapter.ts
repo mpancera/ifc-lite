@@ -270,6 +270,17 @@ export function createListDataProvider(
       return ancestry().containerOf(entityId);
     },
 
+    getSpaceName(entityId: number): string {
+      // Only a real room counts. `containerOf` falls back to the storey, which
+      // is right for a column meaning "what directly contains this" and wrong
+      // for one meaning "which room" — a room column full of storey names
+      // cannot answer "what has no room yet".
+      const hierarchy = store.spatialHierarchy;
+      const containerId = hierarchy?.elementToContainer?.get(entityId);
+      if (containerId === undefined || !hierarchy?.bySpace.has(containerId)) return '';
+      return store.entities.getName(containerId) || '';
+    },
+
     getBuildingName(entityId: number): string {
       return ancestry().buildingOf(entityId);
     },
