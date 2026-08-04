@@ -51,6 +51,14 @@ export function makeModelResolver({ store, view }: ModelResolverArgs): ValueReso
    * session — which the columnar parse has never seen — reads at all.
    */
   const attributeOf = (expressId: number, field: string): string => {
+    // An edit to a REFERENCE entity — renaming a room, say — lives in the
+    // overlay, while `store.entities` still reports what the file said at load.
+    // Reading the parse alone is why a corrected room number produced no
+    // corrected identifier: the rule kept resolving the stale name.
+    const edited = view?.getAttributeMutationsForEntity?.(expressId)
+      ?.find((mutation) => mutation.name === field);
+    if (edited && typeof edited.value === 'string') return edited.value;
+
     const authored = view?.getNewEntity?.(expressId);
     if (authored) {
       const index = ATTR_INDEX[field];

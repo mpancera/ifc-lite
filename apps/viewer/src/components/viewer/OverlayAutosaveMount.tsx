@@ -10,10 +10,15 @@
 
 import { useViewerStore } from '@/store';
 import { useOverlayAutosave } from '@/hooks/useOverlayAutosave';
+import { useSmartPropertySync } from '@/hooks/useSmartPropertySync';
 import { RestoreSessionDialog } from './RestoreSessionDialog';
 
 export function OverlayAutosaveMount() {
   const { pendingRestore, acceptUndisputed, acceptAll, discard, dismiss } = useOverlayAutosave();
+  // Rule-driven values keep up with the model here rather than in their own
+  // mount: both react to the same authoring signal, and running them together
+  // means a re-evaluation is captured by the very next autosave.
+  useSmartPropertySync();
   const models = useViewerStore((s) => s.models);
   const currentModelName = pendingRestore
     ? models.get(pendingRestore.modelId)?.name ?? ''
