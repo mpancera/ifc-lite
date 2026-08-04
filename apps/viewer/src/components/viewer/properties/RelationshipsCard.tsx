@@ -8,10 +8,11 @@
 
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Link2, Focus } from 'lucide-react';
-import type { EntityRelationships } from '@ifc-lite/parser';
+import type { OverlayRelationships } from '@/lib/mutations/overlayRelationships';
 
 interface RelationshipsCardProps {
-  relationships: EntityRelationships;
+  /** Parsed relationships plus anything this session authored. */
+  relationships: OverlayRelationships;
   onSelectEntity?: (entityId: number) => void;
   /** Isolate + select all member objects of a group/zone in 3D (#1075). */
   onIsolateGroupMembers?: (groupId: number) => void;
@@ -19,7 +20,11 @@ interface RelationshipsCardProps {
 
 export function RelationshipsCard({ relationships, onSelectEntity, onIsolateGroupMembers }: RelationshipsCardProps) {
   const { voids, fills, groups, connections } = relationships;
-  const totalCount = voids.length + fills.length + groups.length + connections.length;
+  // Optional so a caller still holding a plain parsed result keeps working.
+  const definedBy = relationships.definedBy ?? [];
+  const containedIn = relationships.containedIn ?? [];
+  const totalCount = voids.length + fills.length + groups.length + connections.length
+    + definedBy.length + containedIn.length;
 
   if (totalCount === 0) return null;
 
@@ -36,6 +41,29 @@ export function RelationshipsCard({ relationships, onSelectEntity, onIsolateGrou
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div className="border-t-2 border-zinc-300 dark:border-zinc-700 divide-y divide-zinc-200 dark:divide-zinc-800">
+          {/* Where the element sits and what it is — first, because for an
+              authored device these answer "what is this" before openings and
+              connections do. */}
+          {containedIn.length > 0 && (
+            <div className="px-3 py-2">
+              <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
+                Contained in ({containedIn.length})
+              </div>
+              {containedIn.map((item) => (
+                <RelItem key={item.id} item={item} onSelect={onSelectEntity} />
+              ))}
+            </div>
+          )}
+          {definedBy.length > 0 && (
+            <div className="px-3 py-2">
+              <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
+                Product type ({definedBy.length})
+              </div>
+              {definedBy.map((item) => (
+                <RelItem key={item.id} item={item} onSelect={onSelectEntity} />
+              ))}
+            </div>
+          )}
           {voids.length > 0 && (
             <div className="px-3 py-2">
               <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">

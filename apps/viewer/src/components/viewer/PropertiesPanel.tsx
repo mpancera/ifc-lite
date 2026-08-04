@@ -36,6 +36,7 @@ import { useIfc } from '@/hooks/useIfc';
 import { configureMutationView } from '@/utils/configureMutationView';
 import { IfcQuery } from '@ifc-lite/query';
 import { MutablePropertyView } from '@ifc-lite/mutations';
+import { withOverlayRelationships } from '@/lib/mutations/overlayRelationships';
 import { extractClassificationsOnDemand, extractAllMaterialsOnDemand, extractMaterialPropertiesOnDemand, extractTypePropertiesOnDemand, extractTypeEntityOwnProperties, extractDocumentsOnDemand, extractRelationshipsOnDemand, extractGroupMembersOnDemand, extractGeoreferencingOnDemand, extractLengthUnitScale, extractProjectUnits, ProjectUnits, getAttributeNames, type IfcDataStore, type MaterialPsetGroup } from '@ifc-lite/parser';
 import type { NewEntity } from '@ifc-lite/mutations';
 import { EntityFlags, RelationshipType, isSpatialStructureTypeName, isStoreyLikeSpatialTypeName } from '@ifc-lite/data';
@@ -737,9 +738,34 @@ export function PropertiesPanel() {
     const dataStore = model?.ifcDataStore ?? ifcDataStore;
     if (!dataStore) return null;
     const rels = extractRelationshipsOnDemand(dataStore as IfcDataStore, lookupExpressId);
-    const totalCount = rels.voids.length + rels.fills.length + rels.groups.length + rels.connections.length;
-    return totalCount > 0 ? rels : null;
-  }, [selectedEntity, lookupExpressId, model, ifcDataStore]);
+
+    // The parsed graph is built once at load, so it knows nothing about
+    // relationships authored this session — an element could belong to an
+    // installation, carry a product type and sit in a room, and this card
+    // would report none of it.
+    // The selection may come from a federated model other than the active
+    // one, so the view is looked up against the entity's own model.
+    const view = selectedEntity.modelId !== 'legacy'
+      ? mutationViews.get(selectedEntity.modelId)
+      : null;
+    return withOverlayRelationships(rels, {
+      view,
+      expressId: lookupExpressId,
+      describe: (expressId) => {
+        const authored = view?.getNewEntity?.(expressId);
+        if (authored) {
+          const name = authored.attributes[2];
+          return { id: expressId, name: typeof name === 'string' ? name : undefined, type: authored.type };
+        }
+        const type = (dataStore as IfcDataStore).entities.getTypeName(expressId);
+        if (!type) return null;
+        return { id: expressId, name: (dataStore as IfcDataStore).entities.getName(expressId) || undefined, type };
+      },
+    });
+    // mutationVersion re-reads after every committed edit, so a freshly placed
+    // element shows its relationships without needing a reselect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedEntity, lookupExpressId, model, ifcDataStore, mutationViews, mutationVersion]);
 
   // Select a related entity by express id (e.g. click an IfcZone in the
   // Relationships card to inspect its Name/attributes). Resolves in the same
