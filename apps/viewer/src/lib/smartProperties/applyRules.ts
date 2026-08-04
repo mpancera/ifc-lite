@@ -17,6 +17,8 @@ import type { IfcDataStore } from '@ifc-lite/parser';
 import { DEFAULT_SMART_PROPERTY_RULES } from './defaultRules';
 import { evaluateRule, ruleApplies } from './evaluate';
 import { makeModelResolver } from './modelResolver';
+import { makeModelCounterResolver } from './modelCounter';
+import { COUNTER_STORE_PROPERTY } from './types';
 import type { SmartPropertyRule } from './types';
 
 export interface AppliedRule {
@@ -32,8 +34,12 @@ export interface ApplyRulesArgs {
   /** The element's IFC class, e.g. `IfcSensor`. */
   ifcClass: string;
   rules?: readonly SmartPropertyRule[];
-  /** Writes the result. Separate so the caller owns undo/dirty bookkeeping. */
-  write: (pset: string, property: string, value: string) => void;
+  /**
+   * Writes a result. Separate so the caller owns undo/dirty bookkeeping.
+   * `expressId` defaults to the element under evaluation; a counter writes its
+   * allocated number against that same element.
+   */
+  write: (pset: string, property: string, value: string, expressId?: number) => void;
 }
 
 /**
@@ -50,7 +56,19 @@ export function applySmartPropertyRules(args: ApplyRulesArgs): AppliedRule[] {
   const applied: AppliedRule[] = [];
 
   for (const rule of applicable) {
-    const evaluation = evaluateRule(rule, args.expressId, resolve);
+    // A freshly allocated number is written straight away, so the next element
+    // in the same room sees it and continues rather than repeating it.
+    const resolveCounter = makeModelCounterResolver({
+      view: args.view,
+      resolve,
+      pset: rule.target.pset,
+      applicability: rule.applicability,
+      store: (expressId, value) => {
+        args.write(rule.target.pset, COUNTER_STORE_PROPERTY, String(value), expressId);
+      },
+    });
+
+    const evaluation = evaluateRule(rule, args.expressId, resolve, resolveCounter);
     if (!evaluation.value) continue;
     args.write(rule.target.pset, rule.target.property, evaluation.value);
     applied.push({ rule, value: evaluation.value, warnings: evaluation.warnings });

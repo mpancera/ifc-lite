@@ -987,8 +987,8 @@ function applySmartProperties(
   try {
     applySmartPropertyRules({
       store, view, expressId, ifcClass,
-      write: (pset, property, value) => {
-        view.setProperty(expressId, pset, property, value, PropertyValueType.String);
+      write: (pset, property, value, targetId) => {
+        view.setProperty(targetId ?? expressId, pset, property, value, PropertyValueType.String);
       },
     });
   } catch (err) {

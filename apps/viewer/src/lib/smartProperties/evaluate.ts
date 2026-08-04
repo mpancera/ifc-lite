@@ -10,12 +10,14 @@
  * a parsed file, a store or a renderer.
  */
 
+import { isCounter } from './types';
 import type {
+  CounterResolver,
   RuleEvaluation,
   RuleSegment,
+  SegmentSource,
   SmartPropertyRule,
   ValueResolver,
-  ValueSource,
 } from './types';
 
 /** `IfcSensor` matches a rule listing `IfcSensor`, case-insensitively. */
@@ -24,8 +26,8 @@ export function ruleApplies(rule: SmartPropertyRule, ifcClass: string): boolean 
   return rule.applicability.some((entry) => entry.toLowerCase() === wanted);
 }
 
-function describe(source: ValueSource): string {
-  return `${source.scope}.${source.field}`;
+function describe(source: SegmentSource): string {
+  return isCounter(source) ? 'Counter' : `${source.scope}.${source.field}`;
 }
 
 /**
@@ -39,10 +41,16 @@ function resolveSegment(
   segment: RuleSegment,
   expressId: number,
   resolve: ValueResolver,
+  resolveCounter: CounterResolver | undefined,
   isFirst: boolean,
   report: { warnings: string[]; omitted: string[] },
 ): string | null {
-  const primary = resolve(segment.source, expressId).trim();
+  // A counter is allocated rather than read, so it takes a different resolver.
+  // Without one it simply yields nothing and follows its fallback, which keeps
+  // the evaluator usable in contexts that cannot allocate (a preview, a test).
+  const primary = isCounter(segment.source)
+    ? (resolveCounter?.(segment.source, expressId) ?? '').trim()
+    : resolve(segment.source, expressId).trim();
   if (primary) return (isFirst ? '' : segment.separator ?? '') + primary;
 
   switch (segment.fallback.kind) {
@@ -72,6 +80,7 @@ export function evaluateRule(
   rule: SmartPropertyRule,
   expressId: number,
   resolve: ValueResolver,
+  resolveCounter?: CounterResolver,
 ): RuleEvaluation {
   const report = { warnings: [] as string[], omitted: [] as string[] };
   const parts: string[] = [];
@@ -79,7 +88,7 @@ export function evaluateRule(
   for (const segment of rule.segments) {
     // "First" means first CONTRIBUTING segment, not first in the list: when the
     // root falls away, whatever leads must not inherit its separator.
-    const text = resolveSegment(segment, expressId, resolve, parts.length === 0, report);
+    const text = resolveSegment(segment, expressId, resolve, resolveCounter, parts.length === 0, report);
     if (text !== null) parts.push(text);
   }
 

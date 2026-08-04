@@ -28,9 +28,40 @@ export type ValueScope =
   | 'IfcEntityType';
 
 export interface ValueSource {
+  kind?: 'value';
   scope: ValueScope;
   /** Attribute name, e.g. `Name`, `LongName`, `Tag`, `Description`. */
   field: string;
+}
+
+/**
+ * A running number that distinguishes otherwise identical elements — the
+ * second smoke detector in a room is `002`.
+ *
+ * Structurally different from every other source: it is not read off the
+ * model, it is ALLOCATED, and once allocated it must never move. If detector
+ * 002 is deleted, 003 stays 003 — renumbering would silently invalidate every
+ * label, drawing and reference that already quotes the old number, and it
+ * would do so without any visible edit. So the allocated number is stored on
+ * the element and read back on later evaluations; only an element that has
+ * none gets a fresh one.
+ */
+export interface CounterSource {
+  kind: 'counter';
+  /** Zero-padded width, e.g. 3 → `007`. */
+  width: number;
+  /**
+   * What makes two elements peers, i.e. what the number counts WITHIN.
+   * `['IfcSpace', 'IfcEntityType']` numbers each product type separately
+   * per room, which is the common reading of "per room and type".
+   */
+  scopedBy: ValueScope[];
+}
+
+export type SegmentSource = ValueSource | CounterSource;
+
+export function isCounter(source: SegmentSource): source is CounterSource {
+  return source.kind === 'counter';
 }
 
 /**
@@ -48,9 +79,19 @@ export type SegmentFallback =
 export interface RuleSegment {
   /** Text before this segment's value. Absent on the first segment. */
   separator?: string;
-  source: ValueSource;
+  source: SegmentSource;
   fallback: SegmentFallback;
 }
+
+/**
+ * Where an allocated counter is kept so later evaluations reuse it instead of
+ * renumbering. `TagNumber` is a standard property of
+ * `Pset_ConstructionOccurence` and means exactly this, so the number survives
+ * an export and is answerable ("why is this 007?") without parsing the
+ * assembled identifier back apart — which any separator appearing inside a
+ * room name would defeat.
+ */
+export const COUNTER_STORE_PROPERTY = 'TagNumber';
 
 export interface SmartPropertyRule {
   id: string;
@@ -73,3 +114,13 @@ export interface RuleEvaluation {
 
 /** Reads a single value for the element under evaluation. */
 export type ValueResolver = (source: ValueSource, expressId: number) => string;
+
+/**
+ * Supplies a counter segment's number.
+ *
+ * Separate from {@link ValueResolver} because it is not a read: it may have to
+ * allocate, and allocation has to see the element's peers. Returning `''`
+ * means "cannot number this" — the segment then follows its fallback like any
+ * other.
+ */
+export type CounterResolver = (source: CounterSource, expressId: number) => string;

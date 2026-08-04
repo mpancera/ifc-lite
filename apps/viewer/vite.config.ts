@@ -297,7 +297,11 @@ export default defineConfig({
     },
   },
   server: {
-    port: 3000,
+    // 3000 unless PORT says otherwise, so several checkouts (or several agent
+    // sessions) can run a dev server at once instead of the second one failing
+    // on a taken port. Nothing here depends on the number — no OAuth callback,
+    // no webhook — and the isolation headers below travel with the config.
+    port: Number(process.env.PORT) || 3000,
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
       // Allows third-party no-cors resources like Stripe.js while preserving

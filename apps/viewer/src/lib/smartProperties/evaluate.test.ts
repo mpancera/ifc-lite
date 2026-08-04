@@ -6,7 +6,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ASSET_IDENTIFIER_RULE } from './defaultRules.js';
 import { evaluateRule, ruleApplies } from './evaluate.js';
-import type { ValueResolver, ValueSource } from './types.js';
+import type { CounterResolver, ValueResolver, ValueSource } from './types.js';
+
+/** Fixed number, so these tests exercise assembly rather than allocation
+ *  (which counter.test.ts covers on its own). */
+const counter: CounterResolver = () => '001';
 
 /** A resolver over a plain `Scope.Field` → value map; anything absent is ''. */
 function resolverFor(values: Record<string, string>): ValueResolver {
@@ -29,9 +33,9 @@ test('applicability matches the element class, case-insensitively', () => {
 });
 
 test('a complete model yields every segment', () => {
-  const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(COMPLETE));
+  const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(COMPLETE), counter);
 
-  assert.equal(result.value, '50266.E00.0.14_smoke-detector.RM-001');
+  assert.equal(result.value, '50266.E00.0.14_smoke-detector.RM-001.001');
   assert.deepEqual(result.warnings, []);
   assert.deepEqual(result.omitted, []);
 });
@@ -41,9 +45,9 @@ test('a missing room drops the segment AND its separator', () => {
   // behind produces "50266.E00._smoke-detector", which reads as a defect
   // rather than as an element that legitimately sits in a corridor.
   const { 'IfcSpace.Name': _room, ...noRoom } = COMPLETE;
-  const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(noRoom));
+  const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(noRoom), counter);
 
-  assert.equal(result.value, '50266.E00_smoke-detector.RM-001');
+  assert.equal(result.value, '50266.E00_smoke-detector.RM-001.001');
   assert.deepEqual(result.omitted, ['IfcSpace.Name']);
 });
 
@@ -57,9 +61,9 @@ test('a missing type tag falls back to the element name', () => {
 
 test('an empty alternative drops the segment rather than emitting a separator', () => {
   const { 'IfcEntityType.Tag': _t, 'IfcEntity.Name': _n, ...neither } = COMPLETE;
-  const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(neither));
+  const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(neither), counter);
 
-  assert.equal(result.value, '50266.E00.0.14.RM-001');
+  assert.equal(result.value, '50266.E00.0.14.RM-001.001');
   assert.deepEqual(result.omitted, ['IfcEntityType.Tag']);
 });
 
@@ -93,4 +97,20 @@ test('whitespace-only sources count as missing', () => {
   const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor({ ...COMPLETE, 'IfcSpace.Name': '   ' }));
 
   assert.equal(result.value, '50266.E00_smoke-detector.RM-001');
+});
+
+test('without a counter resolver the segment simply drops out', () => {
+  // Keeps the evaluator usable where allocation is impossible — a preview, or
+  // a rule being tried out before anything is placed.
+  const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(COMPLETE));
+
+  assert.equal(result.value, '50266.E00.0.14_smoke-detector.RM-001');
+  assert.deepEqual(result.omitted, ['Counter']);
+});
+
+test('a counter that cannot be allocated drops its separator too', () => {
+  const empty: CounterResolver = () => '';
+  const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(COMPLETE), empty);
+
+  assert.ok(!result.value.endsWith('.'));
 });

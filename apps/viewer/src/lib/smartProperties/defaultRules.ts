@@ -61,6 +61,14 @@ export const ASSET_IDENTIFIER_RULE: SmartPropertyRule = {
       source: { scope: 'IfcEntity', field: 'Tag' },
       fallback: { kind: 'omit' },
     },
+    {
+      // Distinguishes the second detector of the same product in the same room.
+      // Allocated once and then frozen — see counter.ts for why renumbering is
+      // the one thing this must never do.
+      separator: '.',
+      source: { kind: 'counter', width: 3, scopedBy: ['IfcSpace', 'IfcEntityType'] },
+      fallback: { kind: 'omit' },
+    },
   ],
 };
 
