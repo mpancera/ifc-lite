@@ -128,32 +128,37 @@ export function AuthorTab() {
 
       <RibbonGroupDivider />
 
+      {/* The two ways of authoring property VALUES get the large buttons; the
+          two that inspect or import sit in the stack beside them. Four small
+          buttons in one column were unreadable and gave no sense of which is
+          the everyday tool. */}
       <RibbonGroup label="Properties">
+        <SmartPropertyPanel
+          trigger={
+            <RibbonLargeButton
+              icon={Wand2}
+              label="Smart Property"
+              tooltip="Rules that build a property value from the model around an element"
+              disabled={!ifcDataStore}
+            />
+          }
+        />
+        <BulkPropertyEditor
+          trigger={
+            <RibbonLargeButton
+              icon={EditProperty}
+              label="Bulk Edit"
+              tooltip="Bulk property editor — set a property across a query result"
+              disabled={!ifcDataStore}
+            />
+          }
+        />
         <RibbonSmallStack>
-          <BulkPropertyEditor
-            trigger={
-              <RibbonSmallButton
-                icon={EditProperty}
-                label="Bulk property editor"
-                disabled={!ifcDataStore}
-              />
-            }
-          />
           <DataConnector
             trigger={
               <RibbonSmallButton
                 icon={ImportData}
                 label="Import data (CSV)"
-                disabled={!ifcDataStore}
-              />
-            }
-          />
-          <SmartPropertyPanel
-            trigger={
-              <RibbonSmallButton
-                icon={Wand2}
-                label="Smart Property"
-                tooltip="Rules that build a property value from the model around an element"
                 disabled={!ifcDataStore}
               />
             }
