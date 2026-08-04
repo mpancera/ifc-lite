@@ -37,8 +37,31 @@ function patchKey(row: ListRow, colIdx: number): string {
   return `${row.modelId}:${row.entityId}:${colIdx}`;
 }
 
+/** An inclusive rectangle of cells, normalised so `from` is the top-left. */
+export interface CellRange {
+  fromRow: number; toRow: number; fromCol: number; toCol: number;
+}
+
+/** The rectangle spanned by an anchor and the cell the selection was dragged to. */
+export function rangeBetween(anchor: CellAddress, focus: CellAddress): CellRange {
+  return {
+    fromRow: Math.min(anchor.rowIdx, focus.rowIdx),
+    toRow: Math.max(anchor.rowIdx, focus.rowIdx),
+    fromCol: Math.min(anchor.colIdx, focus.colIdx),
+    toCol: Math.max(anchor.colIdx, focus.colIdx),
+  };
+}
+
+export function rangeContains(range: CellRange | null, rowIdx: number, colIdx: number): boolean {
+  if (!range) return false;
+  return rowIdx >= range.fromRow && rowIdx <= range.toRow
+    && colIdx >= range.fromCol && colIdx <= range.toCol;
+}
+
 export interface EditableListGrid {
   active: CellAddress | null;
+  /** The selected rectangle; a single cell selection is a 1×1 range. */
+  range: CellRange | null;
   editing: boolean;
   /** Per column, whether it accepts input — drives the cursor and the styling. */
   editableColumns: boolean[];
@@ -61,7 +84,8 @@ export interface EditableListGrid {
    * commit a value that was already one render stale.
    */
   commitDraft: (text: string, advance?: 'down' | 'right' | 'none') => void;
-  selectCell: (address: CellAddress) => void;
+  /** Click a cell. `extend` (shift-click) grows the range from the anchor. */
+  selectCell: (address: CellAddress, extend?: boolean) => void;
   /** Handles the keys a grid owns; returns whether it consumed the event. */
   handleKeyDown: (event: React.KeyboardEvent) => boolean;
   /** Wired to the container's onCopy/onPaste. */
@@ -82,7 +106,12 @@ export interface EditableListGridOptions {
 export function useEditableListGrid(options: EditableListGridOptions): EditableListGrid {
   const { enabled, rows, columns, displayedValue, commitCell } = options;
 
+  // `active` is the cell you type into; `anchor` is where the current
+  // selection started. They differ only while a range is being extended —
+  // shift-click and shift-arrow move `active` and keep `anchor` put, exactly
+  // as a spreadsheet does.
   const [active, setActive] = useState<CellAddress | null>(null);
+  const [anchor, setAnchor] = useState<CellAddress | null>(null);
   const [draft, setDraftState] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [patches, setPatches] = useState<Map<string, unknown>>(() => new Map());
@@ -102,8 +131,14 @@ export function useEditableListGrid(options: EditableListGridOptions): EditableL
 
   const clearNotice = useCallback(() => setNotice(null), []);
 
-  const selectCell = useCallback((address: CellAddress) => {
+  const range = useMemo(
+    () => (active && anchor ? rangeBetween(anchor, active) : null),
+    [active, anchor]);
+
+  const selectCell = useCallback((address: CellAddress, extend = false) => {
     setActive(address);
+    if (!extend) setAnchor(address);
+    draftRef.current = null;
     setDraftState(null);
   }, []);
 
@@ -114,10 +149,13 @@ export function useEditableListGrid(options: EditableListGridOptions): EditableL
       // Say why rather than doing nothing — a cell that ignores a double-click
       // is indistinguishable from a broken one.
       setActive(address);
+      setAnchor(address);
       setNotice(rule ? rule.reason : null);
       return;
     }
+    // Opening a cell collapses any range to it: what you type goes in one place.
     setActive(address);
+    setAnchor(address);
     const current = displayedValue(address.rowIdx, address.colIdx);
     const opening = seed ?? (current === null || current === undefined ? '' : String(current));
     // Set the ref alongside the state so the "is a cell open" guard is true
@@ -165,21 +203,36 @@ export function useEditableListGrid(options: EditableListGridOptions): EditableL
     writeCell(address.rowIdx, address.colIdx, text);
 
     if (advance === 'down' && address.rowIdx + 1 < rows.length) {
-      setActive({ rowIdx: address.rowIdx + 1, colIdx: address.colIdx });
+      const next = { rowIdx: address.rowIdx + 1, colIdx: address.colIdx };
+      setActive(next); setAnchor(next);
     } else if (advance === 'right' && address.colIdx + 1 < columns.length) {
-      setActive({ rowIdx: address.rowIdx, colIdx: address.colIdx + 1 });
+      const next = { rowIdx: address.rowIdx, colIdx: address.colIdx + 1 };
+      setActive(next); setAnchor(next);
     }
   }, [active, rows.length, columns.length, writeCell]);
 
-  const move = useCallback((dRow: number, dCol: number) => {
+  /** Move the active cell; `extend` keeps the anchor so the range grows. */
+  const move = useCallback((dRow: number, dCol: number, extend = false) => {
     setActive((current) => {
       if (!current) return current;
-      return {
+      const next = {
         rowIdx: Math.min(Math.max(current.rowIdx + dRow, 0), Math.max(rows.length - 1, 0)),
         colIdx: Math.min(Math.max(current.colIdx + dCol, 0), Math.max(columns.length - 1, 0)),
       };
+      if (!extend) setAnchor(next);
+      return next;
     });
   }, [rows.length, columns.length]);
+
+  /** Empty every writable cell in the selection. */
+  const clearRange = useCallback(() => {
+    if (!range) return;
+    for (let r = range.fromRow; r <= range.toRow; r++) {
+      for (let c = range.fromCol; c <= range.toCol; c++) {
+        if (editableCols[c]) writeCell(r, c, '');
+      }
+    }
+  }, [range, editableCols, writeCell]);
 
   const handleKeyDown = useCallback((event: React.KeyboardEvent): boolean => {
     if (!enabled || !active) return false;
@@ -189,18 +242,20 @@ export function useEditableListGrid(options: EditableListGridOptions): EditableL
     // be delivered twice.
     if (draftRef.current !== null) return false;
 
+    // Shift extends the selection instead of moving it, which is the only way
+    // to grow a range from the keyboard.
+    const extend = event.shiftKey;
     switch (event.key) {
-      case 'ArrowDown': move(1, 0); return true;
-      case 'ArrowUp': move(-1, 0); return true;
-      case 'ArrowRight': move(0, 1); return true;
-      case 'ArrowLeft': move(0, -1); return true;
+      case 'ArrowDown': move(1, 0, extend); return true;
+      case 'ArrowUp': move(-1, 0, extend); return true;
+      case 'ArrowRight': move(0, 1, extend); return true;
+      case 'ArrowLeft': move(0, -1, extend); return true;
       case 'Enter':
       case 'F2':
         beginEdit(active); return true;
       case 'Delete':
       case 'Backspace':
-        if (editableCols[active.colIdx]) writeCell(active.rowIdx, active.colIdx, '');
-        return true;
+        clearRange(); return true;
       default:
         break;
     }
@@ -212,17 +267,24 @@ export function useEditableListGrid(options: EditableListGridOptions): EditableL
       return true;
     }
     return false;
-  }, [enabled, active, commitDraft, cancelEdit, move, beginEdit, editableCols, writeCell]);
+  }, [enabled, active, move, beginEdit, clearRange]);
 
   const handleCopy = useCallback((event: React.ClipboardEvent) => {
-    if (!enabled || !active) return;
-    const value = displayedValue(active.rowIdx, active.colIdx);
-    event.clipboardData.setData(
-      'text/plain',
-      serializeClipboardGrid([[value === null || value === undefined ? '' : String(value)]]),
-    );
+    if (!enabled || !range) return;
+    // The whole rectangle, in the tab/newline shape a spreadsheet expects, so
+    // a column of values can be lifted out, fixed elsewhere and pasted back.
+    const grid: string[][] = [];
+    for (let r = range.fromRow; r <= range.toRow; r++) {
+      const line: string[] = [];
+      for (let c = range.fromCol; c <= range.toCol; c++) {
+        const value = displayedValue(r, c);
+        line.push(value === null || value === undefined ? '' : String(value));
+      }
+      grid.push(line);
+    }
+    event.clipboardData.setData('text/plain', serializeClipboardGrid(grid));
     event.preventDefault();
-  }, [enabled, active, displayedValue]);
+  }, [enabled, range, displayedValue]);
 
   const handlePaste = useCallback((event: React.ClipboardEvent) => {
     if (!enabled || !active) return;
@@ -250,7 +312,7 @@ export function useEditableListGrid(options: EditableListGridOptions): EditableL
   }, [enabled, active, rows.length, columns.length, editableCols, writeCell]);
 
   return {
-    active, editing: draft !== null, editableColumns: editableCols, draft, notice, clearNotice,
+    active, range, editing: draft !== null, editableColumns: editableCols, draft, notice, clearNotice,
     patchFor, beginEdit, setDraft, cancelEdit, commitDraft, selectCell,
     handleKeyDown, handleCopy, handlePaste,
   };

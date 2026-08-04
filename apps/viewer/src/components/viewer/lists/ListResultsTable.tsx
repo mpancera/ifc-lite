@@ -14,7 +14,7 @@
 
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ArrowUp, ArrowDown, Search, Eye, EyeOff, Download, ChevronRight, ChevronDown, FileText, FileSpreadsheet, FileType } from 'lucide-react';
+import { ArrowUp, ArrowDown, Search, Eye, EyeOff, Download, ChevronRight, ChevronDown, FileText, FileSpreadsheet, FileType, Link2 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -31,8 +31,9 @@ import { posthog } from '@/lib/analytics';
 import { cn } from '@/lib/utils';
 import { columnToAutoColor } from '@/lib/lists/columnToAutoColor';
 import { AUTO_COLOR_FROM_LIST_ID } from '@/store/slices/lensSlice';
+import { isRelationColumn } from '@/lib/lists/editTarget';
 import { useListCellEdit } from '@/hooks/useListCellEdit';
-import { useEditableListGrid, type EditableListGrid } from './useEditableListGrid';
+import { rangeContains, useEditableListGrid, type EditableListGrid } from './useEditableListGrid';
 import { ColumnHeaderMenu } from './ColumnHeaderMenu';
 import { ListGroupingBar } from './ListGroupingBar';
 import { ListScheduleTable } from './ListScheduleTable';
@@ -93,6 +94,10 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
 
   const columns = result.columns;
   const numericCols = useMemo(() => detectNumericColumns(columns, result.rows), [columns, result.rows]);
+  /** Columns whose value is reached through an IFC relationship — marked with a
+   *  chain link and muted, header and cells alike, so it reads as "shown here,
+   *  changed elsewhere". */
+  const relationCols = useMemo(() => columns.map((c) => isRelationColumn(c)), [columns]);
 
   // Single per-column unit resolution (issue #1573 follow-up), shared with
   // `buildExportModel` so the table and the export can never disagree.
@@ -471,6 +476,10 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
               const groupedBy = groupLevel >= 0;
               const summed = sumColumnIds.includes(col.id);
               const unit = unitResolver.unitSymbol(colIdx);
+              // Columns reached through a relationship are marked and muted the
+              // way the properties panel mutes relationship-derived content: the
+              // value is real, but it is not edited here.
+              const viaRelation = relationCols[colIdx];
               return (
                 <div
                   key={col.id}
@@ -478,6 +487,8 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
                     'group/col relative flex items-center gap-0.5 border-r border-border/50 px-2 py-1.5 text-xs font-medium text-muted-foreground shrink-0',
                     colored && 'bg-primary/10',
                     (groupedBy || summed) && 'text-foreground',
+                    viaRelation && !groupedBy && !summed && !colored
+                      && 'bg-muted/60 text-muted-foreground/70',
                   )}
                   style={{ width: columnWidths[colIdx] }}
                 >
@@ -487,6 +498,12 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
                       <span className="shrink-0 text-[9px] font-semibold tabular-nums text-primary" aria-label={`grouping level ${groupLevel + 1}`}>
                         {groupLevel + 1}
                       </span>
+                    )}
+                    {viaRelation && (
+                      <Link2
+                        className="h-3 w-3 shrink-0 opacity-70"
+                        aria-label="über eine Beziehung ermittelt"
+                      />
                     )}
                     <span className="truncate">{col.label ?? col.propertyName}{unit ? ` (${unit})` : ''}</span>
                     {summed && <span className="text-primary">Σ</span>}
@@ -575,22 +592,34 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
                     const isActive = editable && grid.active?.rowIdx === rowIdx
                       && grid.active?.colIdx === colIdx;
                     const isOpen = isActive && grid.editing;
+                    const inRange = editable && !isActive
+                      && rangeContains(grid.range, rowIdx, colIdx);
                     return (
                       <div
                         key={colIdx}
                         className={cn(
                           'border-r border-border/20 px-2 py-1 text-xs truncate shrink-0',
                           numericCols[colIdx] && 'text-right font-mono tabular-nums',
+                          relationCols[colIdx] && 'bg-muted/40 text-muted-foreground',
                           // An edited cell stays marked until the next Run, so
                           // what you changed is visible among what you did not.
-                          patched !== undefined && 'bg-amber-500/10',
+                          // Purple is what the properties panel uses for a
+                          // mutated value; one colour for "you changed this".
+                          patched !== undefined && 'bg-purple-50/50 dark:bg-purple-950/30 text-purple-900 dark:text-purple-100',
+                          inRange && 'bg-primary/10',
                           isActive && !isOpen && 'ring-1 ring-inset ring-primary',
                           editable && grid.editableColumns[colIdx] && 'cursor-text',
                         )}
                         // Member rows sit one indent step past the deepest group header.
                         style={{ width: columnWidths[colIdx], ...(isGrouped && colIdx === 0 ? { paddingLeft: 8 + groupColumnIds.length * 16 } : undefined) }}
                         title={shown !== null && shown !== undefined ? String(shown) : ''}
-                        onClick={editable ? (e) => { e.stopPropagation(); handleRowClick(row, e); grid.selectCell({ rowIdx, colIdx }); } : undefined}
+                        onClick={editable ? (e) => {
+                          e.stopPropagation();
+                          // Shift-click extends the selection, so it must not
+                          // also re-select the row in the 3D view.
+                          if (!e.shiftKey) handleRowClick(row, e);
+                          grid.selectCell({ rowIdx, colIdx }, e.shiftKey);
+                        } : undefined}
                         onDoubleClick={editable ? (e) => { e.stopPropagation(); grid.beginEdit({ rowIdx, colIdx }); } : undefined}
                       >
                         {isOpen ? (

@@ -9,8 +9,8 @@
  * toolbar (viewer/commenter roles cannot unlock authoring).
  */
 
-import { FileDiff, Library, Table2, Wand2 } from 'lucide-react';
-import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, Undo, Redo } from '@/icons';
+import { FileDiff, Library, Wand2 } from 'lucide-react';
+import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, List, Select, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
 import { tourAnchor, toolAnchor } from '@/lib/tours/anchors';
@@ -56,25 +56,19 @@ export function AuthorTab() {
   const canRedo = canEditInSession && activeModelId !== null && (redoStacks.get(activeModelId)?.length ?? 0) > 0;
 
   const { activeWorkspacePanels, handleToggleRightPanel, handleToggleBottomPanel } = useWorkspacePanelControls();
-  const listEditMode = useViewerStore((s) => s.listEditMode);
-  const setListEditMode = useViewerStore((s) => s.setListEditMode);
-
-  /**
-   * Same Lists panel as under Analyze, opened in edit mode.
-   *
-   * Deliberately not a second panel: a separate editable copy would drift from
-   * the read-only one, and the saved lists, the columns and the grouping are
-   * the same objects either way. What changes is whether cells accept typing.
-   */
-  const openListEdit = () => {
-    const wasEditing = listEditMode && activeWorkspacePanels.has('list');
-    setListEditMode(!wasEditing);
-    if (!activeWorkspacePanels.has('list')) handleToggleBottomPanel('list');
-  };
 
   return (
     <>
       <RibbonGroup label="Edit">
+        {/* The pointer lives here as well as under Home: leaving edit mode to
+            pick something up should not cost a tab switch. */}
+        <RibbonLargeButton
+          icon={Select}
+          label="Select"
+          shortcut="V"
+          active={activeTool === 'select'}
+          onClick={() => setActiveTool('select')}
+        />
         <RibbonLargeButton
           icon={EditElement}
           label="Edit Mode"
@@ -168,14 +162,17 @@ export function AuthorTab() {
             />
           }
         />
+        {/* The same tool as under Analyze, named and iconed identically —
+            because it IS the same panel. Whether its cells accept typing
+            follows the global Edit Mode, exactly as the properties panel does,
+            rather than a second switch that could disagree with it. */}
         <RibbonLargeButton
-          icon={Table2}
-          label="List Edit"
-          tooltip="Die Liste als Tabelle bearbeiten — Zellen tippen, Copy & Paste wie in Excel"
+          icon={List}
+          label="List"
+          tooltip="Lists & schedules — im Edit Mode direkt in der Tabelle bearbeitbar"
           disabled={!ifcDataStore}
-          active={listEditMode && activeWorkspacePanels.has('list')}
-          className={listEditMode && activeWorkspacePanels.has('list') ? EDIT_ACTIVE_CLASS : undefined}
-          onClick={openListEdit}
+          active={activeWorkspacePanels.has('list')}
+          onClick={() => handleToggleBottomPanel('list')}
         />
         <RibbonSmallStack>
           <DataConnector

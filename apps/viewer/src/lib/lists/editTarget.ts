@@ -103,3 +103,25 @@ export function cellEditability(column: ColumnDefinition): CellEditability {
 export function isEditableColumn(column: ColumnDefinition): boolean {
   return cellEditability(column).editable;
 }
+
+/**
+ * Whether this column's value is reached through an IFC relationship rather
+ * than read off the element.
+ *
+ * Worth marking in the header: it explains at a glance why the column cannot be
+ * typed into, and — more usefully — where to go to change it. A wrong storey is
+ * fixed by re-containing the element, not by correcting a table.
+ *
+ * `quantity` is excluded on purpose. It is equally read-only, but it comes from
+ * geometry, and a chain link would point at a relationship that does not exist.
+ */
+export function isRelationColumn(column: ColumnDefinition): boolean {
+  if (column.source === 'attribute') {
+    // The IfcTypeProduct behind IfcRelDefinesByType.
+    return column.propertyName === 'Type';
+  }
+  return column.source === 'spatial'
+    || column.source === 'material'
+    || column.source === 'classification'
+    || column.source === 'zone';
+}

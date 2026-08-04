@@ -20,12 +20,6 @@ export interface ListSlice {
   /** A list definition handed off from elsewhere (e.g. "Create list" in the
    *  search filter) for the ListPanel to open straight into the builder. */
   pendingListDraft: ListDefinition | null;
-  /**
-   * Whether the results grid accepts typing. Session-only and deliberately not
-   * persisted: editing is a mode you enter for a task, and finding yourself in
-   * it days later without having chosen it is how accidental edits happen.
-   */
-  listEditMode: boolean;
 
   // Actions
   setListDefinitions: (definitions: ListDefinition[]) => void;
@@ -38,7 +32,6 @@ export interface ListSlice {
   toggleListPanel: () => void;
   setListExecuting: (executing: boolean) => void;
   setPendingListDraft: (definition: ListDefinition | null) => void;
-  setListEditMode: (editable: boolean) => void;
 }
 
 export const createListSlice: StateCreator<ListSlice, [], [], ListSlice> = (set, get) => ({
@@ -49,11 +42,8 @@ export const createListSlice: StateCreator<ListSlice, [], [], ListSlice> = (set,
   listPanelVisible: false,
   listExecuting: false,
   pendingListDraft: null,
-  listEditMode: false,
 
   // Actions
-  setListEditMode: (listEditMode) => set({ listEditMode }),
-
   setListDefinitions: (listDefinitions) => {
     set({ listDefinitions });
     saveListDefinitions(listDefinitions);

@@ -5,7 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { ColumnDefinition } from '@ifc-lite/lists';
-import { cellEditability, isEditableColumn } from './editTarget.js';
+import { cellEditability, isEditableColumn, isRelationColumn } from './editTarget.js';
 
 function col(partial: Partial<ColumnDefinition>): ColumnDefinition {
   return { id: 'c', source: 'attribute', propertyName: 'Name', ...partial } as ColumnDefinition;
@@ -94,5 +94,28 @@ describe('isEditableColumn', () => {
   it('agrees with cellEditability', () => {
     assert.equal(isEditableColumn(col({ propertyName: 'Name' })), true);
     assert.equal(isEditableColumn(col({ propertyName: 'GlobalId' })), false);
+  });
+});
+
+describe('isRelationColumn', () => {
+  it('marks the columns reached through a relationship', () => {
+    for (const source of ['spatial', 'material', 'classification', 'zone'] as const) {
+      assert.equal(isRelationColumn(col({ source, propertyName: 'X' })), true, source);
+    }
+    // The IfcTypeProduct behind IfcRelDefinesByType.
+    assert.equal(isRelationColumn(col({ propertyName: 'Type' })), true);
+  });
+
+  it('leaves quantities unmarked, since geometry is not a relationship', () => {
+    // Equally read-only, but a chain link would point at something that does
+    // not exist.
+    assert.equal(isRelationColumn(col({ source: 'quantity', propertyName: 'Area' })), false);
+  });
+
+  it('leaves plain attributes and properties unmarked', () => {
+    assert.equal(isRelationColumn(col({ propertyName: 'Name' })), false);
+    assert.equal(isRelationColumn(col({ propertyName: 'GlobalId' })), false);
+    assert.equal(isRelationColumn(col({ source: 'property', psetName: 'P', propertyName: 'X' })), false);
+    assert.equal(isRelationColumn(col({ source: 'model', propertyName: 'Model' })), false);
   });
 });

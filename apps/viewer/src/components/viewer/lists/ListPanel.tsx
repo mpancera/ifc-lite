@@ -25,6 +25,7 @@ import {
   Pencil,
   Copy,
   Settings2,
+  PenLine,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -60,7 +61,10 @@ export function ListPanel({ onClose }: ListPanelProps) {
 
   const listDefinitions = useViewerStore((s) => s.listDefinitions);
   const activeListId = useViewerStore((s) => s.activeListId);
-  const listEditMode = useViewerStore((s) => s.listEditMode);
+  // Editability follows the global Edit Mode, the same switch the properties
+  // panel obeys — one mode, so the two can never disagree about whether this
+  // session is authoring.
+  const editEnabled = useViewerStore((s) => s.editEnabled);
   const listResult = useViewerStore((s) => s.listResult);
   const listExecuting = useViewerStore((s) => s.listExecuting);
   const addListDefinition = useViewerStore((s) => s.addListDefinition);
@@ -282,6 +286,16 @@ export function ListPanel({ onClose }: ListPanelProps) {
               ({listResult.totalCount} rows, {listResult.executionTime.toFixed(0)}ms)
             </span>
           )}
+          {/* Same pen the properties panel shows beside Attributes in edit
+              mode: one signal for "this surface is writable right now". */}
+          {view === 'results' && editEnabled && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <PenLine className="h-3 w-3 text-purple-500" aria-label="Edit mode — Zellen sind bearbeitbar" />
+              </TooltipTrigger>
+              <TooltipContent>Edit Mode — Zellen sind bearbeitbar</TooltipContent>
+            </Tooltip>
+          )}
         </div>
         <div className="flex items-center gap-1">
           {view === 'results' && (
@@ -352,7 +366,7 @@ export function ListPanel({ onClose }: ListPanelProps) {
           grouping={editingList?.grouping}
           onGroupingChange={handleGroupingFromTable}
           modelUnits={modelUnits}
-          editable={listEditMode}
+          editable={editEnabled}
         />
       )}
 
