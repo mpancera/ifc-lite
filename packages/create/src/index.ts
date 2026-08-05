@@ -35,6 +35,14 @@ export { addSensorToStore, type SensorInStoreParams, type SensorBuildResult, typ
 export { addLibraryElementToStore, type LibraryElementInStoreParams, type LibraryElementBuildResult } from './in-store/library-element.js';
 export { addLibraryTypeToStore, emitRelDefinesByType, type LibraryTypeInStoreParams, type LibraryTypeBuildResult } from './in-store/library-type.js';
 export { addDistributionSystemToStore, emitRelAssignsToGroup, findDistributionSystem, type DistributionSystemInStoreParams } from './in-store/distribution-system.js';
+export { addZoneToStore, findZone, type ZoneInStoreParams } from './in-store/zone.js';
+export {
+  addSpatialZoneToStore,
+  type SpatialZoneInStoreParams,
+  type SpatialZoneRectangleParams,
+  type SpatialZonePolygonParams,
+  type SpatialZonePredefinedType,
+} from './in-store/spatial-zone.js';
 export { addSpaceToStore, type SpaceInStoreParams, type SpaceRectangleParams, type SpacePolygonParams, type SpaceBuildResult } from './in-store/space.js';
 export { addRoofToStore, type RoofInStoreParams, type RoofRectangleParams, type RoofPolygonParams, type RoofBuildResult } from './in-store/roof.js';
 export { addPlateToStore, type PlateInStoreParams, type PlateRectangleParams, type PlatePolygonParams, type PlateBuildResult } from './in-store/plate.js';
