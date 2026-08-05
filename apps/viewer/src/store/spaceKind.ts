@@ -17,6 +17,17 @@
  * NOTDEFINED — our own space builder writes INTERNAL. Matching only `.SPACE.`
  * would leave almost every real room ungrouped, so anything that is not
  * explicitly gross-area or parking counts as a room.
+ *
+ * Two notes on the enum itself, which the grouping deliberately does not
+ * expose:
+ *
+ *   - `INTERNAL` / `EXTERNAL` are carry-overs from IFC2X3. Inside vs. outside
+ *     belongs in `Pset_SpaceCommon.IsExternal` now, so a file still using them
+ *     is stating something the modern schema states elsewhere. They land under
+ *     Rooms and are NOT named in the group's description: describing the
+ *     grouping by a legacy value would teach the wrong thing.
+ *   - `BERTH` (a boat berth) is rare enough here that it rides along under
+ *     Rooms rather than earning a group of its own.
  */
 
 /** The visibility groups an `IfcSpace` can fall into. */
