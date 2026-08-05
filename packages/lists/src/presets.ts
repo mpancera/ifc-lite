@@ -138,16 +138,15 @@ export const LIST_PRESETS: ListDefinition[] = [
     ],
   ),
 
+  // Deliberately EMPTY rather than a list of classes: the engine reads an empty
+  // `entityTypes` as "no class constraint" and enumerates the whole model. The
+  // twelve classes that used to stand here were not "all elements" by any
+  // reading — an IfcSensor, an IfcPipeSegment or anything else a discipline
+  // places was simply absent from the overview named after covering everything.
   makePreset(
     'All Elements',
-    'Overview of all building elements',
-    [
-      IfcTypeEnum.IfcWall, IfcTypeEnum.IfcWallStandardCase,
-      IfcTypeEnum.IfcDoor, IfcTypeEnum.IfcWindow,
-      IfcTypeEnum.IfcSlab, IfcTypeEnum.IfcColumn, IfcTypeEnum.IfcBeam,
-      IfcTypeEnum.IfcStair, IfcTypeEnum.IfcRoof, IfcTypeEnum.IfcCovering,
-      IfcTypeEnum.IfcCurtainWall, IfcTypeEnum.IfcRailing,
-    ],
+    'Every element in the model, no class filter',
+    [],
     [
       attr('Name'),
       attr('Class'),

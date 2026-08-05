@@ -1055,11 +1055,21 @@ describe('LIST_PRESETS', () => {
     for (const preset of LIST_PRESETS) {
       expect(preset.id).toBeTruthy();
       expect(preset.name).toBeTruthy();
-      expect(preset.entityTypes.length).toBeGreaterThan(0);
       expect(preset.columns.length).toBeGreaterThan(0);
+      // `entityTypes` may legitimately be EMPTY — the engine reads that as "no
+      // class constraint" and targets the whole model, which is the only honest
+      // way to express a preset called "All Elements".
       // Presets are full ListDefinitions — they must run against any provider.
       const result = executeList(preset, provider);
       expect(result.columns.length).toBe(preset.columns.length);
     }
+  });
+
+  it('the All Elements preset constrains no class at all', () => {
+    // It used to name twelve classes, so an IfcSensor — anything a discipline
+    // places — was missing from the overview named after covering everything.
+    const all = LIST_PRESETS.find((p) => p.name === 'All Elements');
+    expect(all).toBeTruthy();
+    expect(all!.entityTypes).toEqual([]);
   });
 });

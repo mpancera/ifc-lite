@@ -76,6 +76,20 @@ export function ListPanel({ onClose }: ListPanelProps) {
   const pendingListDraft = useViewerStore((s) => s.pendingListDraft);
   const setPendingListDraft = useViewerStore((s) => s.setPendingListDraft);
 
+  // Opening the panel highlights "All Elements" without running it.
+  //
+  // Deliberately not executed: the preset now targets every element in the
+  // model — ~19,500 in a real building — and a table that runs itself the
+  // moment a panel opens is a brake, not a convenience. Preselecting it makes
+  // the everyday case one click instead of a hunt through the library.
+  React.useEffect(() => {
+    if (activeListId !== null) return;
+    const all = LIST_PRESETS.find((preset) => preset.name === 'All Elements');
+    if (all) setActiveListId(all.id);
+    // Runs once per session; a later selection is the user's own.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // A draft handed off from "Create list" (search filter) opens straight into
   // the builder for column configuration, then is cleared so it fires once.
   React.useEffect(() => {
