@@ -191,12 +191,24 @@ export interface SnapVisualization {
 // ============================================================================
 
 export interface TypeVisibility {
-  /** IfcSpace - off by default */
+  /** IfcSpace master switch - off by default. The three kinds below sit
+   *  under it: with this off, no space of any kind shows. */
   spaces: boolean;
+  /** `IfcSpace` that is not gross-area or parking — the rooms people work in.
+   *  Rooms are the DEFAULT kind, since real files mark them INTERNAL or
+   *  NOTDEFINED far more often than `.SPACE.` (see `spaceKind.ts`). */
+  rooms: boolean;
+  /** `IfcSpace.GFA` — one storey-sized volume per floor carrying the gross
+   *  floor area. Hidden separately because it covers every room on the floor
+   *  and made the plain "Spaces" toggle unusable. */
+  storeySpaces: boolean;
+  /** `IfcSpace.PARKING` — parking spots for vehicles. */
+  parking: boolean;
   /**
-   * IfcSpatialZone (modelled GFA volumes) - off by default, its own toggle
-   * separate from `spaces` so net (room) and gross (zone) areas can be shown
-   * independently (issue #1075).
+   * `IfcSpatialZone` - off by default. A spatial REGION: fire compartment,
+   * security or thermal zone. Not to be confused with the gross-area volume,
+   * which is an `IfcSpace.GFA` and rides the `storeySpaces` toggle — the panel
+   * described this one as "gross-area volumes", which was simply wrong.
    */
   spatialZones: boolean;
   /** IfcOpeningElement - off by default */

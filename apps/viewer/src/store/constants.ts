@@ -461,6 +461,9 @@ export const UI_DEFAULTS = {
  */
 export const TYPE_VISIBILITY_STORAGE_KEYS = {
   spaces:          'ifc-lite-ifc-spaces-visible',
+  rooms:           'ifc-lite-ifc-rooms-visible',
+  storeySpaces:    'ifc-lite-ifc-storey-spaces-visible',
+  parking:         'ifc-lite-ifc-parking-visible',
   spatialZones:    'ifc-lite-ifc-spatial-zones-visible',
   openings:        'ifc-lite-ifc-openings-visible',
   virtualElements: 'ifc-lite-ifc-virtual-elements-visible',
@@ -493,6 +496,13 @@ function readPersistedBool(key: string, fallback: boolean): boolean {
 // menu can restore these without re-deriving them.
 export const TYPE_VISIBILITY_SEMANTIC_DEFAULTS: TypeVisibility = {
   spaces: false,
+  // The three kinds are ON beneath the master switch: someone who turns
+  // "Spaces" on wants to see spaces, and having to switch a second level on
+  // as well would read as a broken toggle. Turning a single kind off is the
+  // deliberate act.
+  rooms: true,
+  storeySpaces: true,
+  parking: true,
   spatialZones: false,
   openings: false,
   // IfcVirtualElement off — non-physical clearance/boundary volumes that
@@ -517,6 +527,9 @@ export const TYPE_VISIBILITY_SEMANTIC_DEFAULTS: TypeVisibility = {
 export function getPersistedTypeVisibility(): TypeVisibility {
   return {
     spaces:          readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.spaces, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.spaces),
+    rooms:           readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.rooms, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.rooms),
+    storeySpaces:    readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.storeySpaces, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.storeySpaces),
+    parking:         readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.parking, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.parking),
     spatialZones:    readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.spatialZones, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.spatialZones),
     openings:        readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.openings, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.openings),
     virtualElements: readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.virtualElements, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.virtualElements),

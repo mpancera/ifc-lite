@@ -288,6 +288,11 @@ describe('VisibilitySlice', () => {
       state.resetTypeVisibility();
       assert.deepStrictEqual(state.typeVisibility, {
         spaces: false,
+        // The three space kinds default ON beneath the master switch: turning
+        // "Spaces" on must show spaces, not require a second level of toggling.
+        rooms: true,
+        storeySpaces: true,
+        parking: true,
         spatialZones: false,
         openings: false,
         virtualElements: false,

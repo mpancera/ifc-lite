@@ -34,6 +34,8 @@ import { getViewerStoreApi, useViewerStore } from '@/store';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import { collectIfcBuildingStoreyElementsWithIfcSpace } from '@/store/basketVisibleSet';
 import { isTypeVisible } from '@/store/typeVisibilityFilter';
+import { buildSpaceKindIndex, spaceKindIndexFor } from '@/store/spaceKind';
+import { resolveEntityPredefinedType } from '@/lib/entity-predefined-type';
 import type { AggregationRelationships } from '@/utils/aggregation';
 import { useIfc } from '@/hooks/useIfc';
 import { useWebGPU } from '@/hooks/useWebGPU';
@@ -793,6 +795,9 @@ export function ViewportContainer() {
     const prevVis = filteredTypeVisRef.current;
     const typeVisChanged =
       prevVis.spaces !== typeVisibility.spaces ||
+      prevVis.rooms !== typeVisibility.rooms ||
+      prevVis.storeySpaces !== typeVisibility.storeySpaces ||
+      prevVis.parking !== typeVisibility.parking ||
       prevVis.spatialZones !== typeVisibility.spatialZones ||
       prevVis.openings !== typeVisibility.openings ||
       prevVis.virtualElements !== typeVisibility.virtualElements ||
@@ -812,7 +817,20 @@ export function ViewportContainer() {
       filteredHasOccRef.current = hasOccurrenceGeometry;
     }
 
-    const needsFilter = !typeVisibility.spaces || !typeVisibility.spatialZones || !typeVisibility.openings || !typeVisibility.virtualElements || !typeVisibility.site || !typeVisibility.ifcAnnotations;
+    const needsFilter = !typeVisibility.spaces || !typeVisibility.rooms
+      || !typeVisibility.storeySpaces || !typeVisibility.parking
+      || !typeVisibility.spatialZones || !typeVisibility.openings
+      || !typeVisibility.virtualElements || !typeVisibility.site || !typeVisibility.ifcAnnotations;
+    // Space kind per express id, built once per parsed store — a mesh carries
+    // no PredefinedType and reading one costs a re-parse, so it must not
+    // happen inside the mesh loop.
+    const spaceKinds = spaceKindIndexFor(ifcDataStore, () => buildSpaceKindIndex({
+      spatialHierarchy: ifcDataStore?.spatialHierarchy ?? null,
+      predefinedTypeOf: (expressId) => (
+        ifcDataStore?.entities.getPredefinedType?.(expressId)
+        || (ifcDataStore ? resolveEntityPredefinedType(ifcDataStore as IfcDataStore, expressId) : '')
+      ),
+    }));
     const prevCacheLen = cache.length;
 
     // Only process NEW meshes since last run — O(batch_size) not O(total)
@@ -836,7 +854,7 @@ export function ViewportContainer() {
       // `site` toggle also hides `IfcGeographicElement` terrain (issue #1480);
       // `ifcAnnotations` also hides annotation 3D solid geometry / "Model Text"
       // breps on top of the 2D curve overlay (issues #1354, #1480).
-      if (needsFilter && !isTypeVisible(ifcType, typeVisibility)) continue;
+      if (needsFilter && !isTypeVisible(ifcType, typeVisibility, spaceKinds.get(mesh.expressId))) continue;
 
       // Mesh alpha flows through unchanged. The previous code re-multiplied
       // IfcSpace / IfcOpeningElement alpha down to <= 0.3 here, which stomped

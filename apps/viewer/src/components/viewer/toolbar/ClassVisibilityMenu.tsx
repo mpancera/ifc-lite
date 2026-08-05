@@ -33,6 +33,7 @@ import { Switch } from '@/components/ui/switch';
 import { DropdownMenuContent, DropdownMenuSeparator } from '@/components/ui/dropdown-menu';
 import { useViewerStore } from '@/store';
 import { cn } from '@/lib/utils';
+import { SPACE_KIND_LABEL, SPACE_KIND_DESCRIPTION } from '@/store/spaceKind';
 
 interface ClassVisibilityRowProps {
   /** Colored class glyph (caller sets the tint). */
@@ -176,17 +177,50 @@ export function ClassVisibilityMenuContent({ align = 'start' }: { align?: 'start
         </div>
       </div>
 
+      {/* Spaces is a master switch over three kinds that are used completely
+          differently. One toggle for all three meant turning rooms on also
+          dropped a storey-sized gross-area slab over the floor, which is why
+          it was usually left off. The children are indented and only reachable
+          while the master is on. */}
       <ClassVisibilityRow
         icon={<Box className="h-4 w-4 shrink-0" style={{ color: '#33d9ff' }} />}
         label="Spaces"
-        description="Room volumes (IfcSpace)"
+        description="All space volumes (IfcSpace)"
         checked={typeVisibility.spaces}
         onChange={() => toggleTypeVisibility('spaces')}
       />
+      {typeVisibility.spaces && (
+        <div className="ml-4 border-l border-border/60 pl-2">
+          <ClassVisibilityRow
+            icon={<Box className="h-4 w-4 shrink-0" style={{ color: '#33d9ff' }} />}
+            label={SPACE_KIND_LABEL.room}
+            description={SPACE_KIND_DESCRIPTION.room}
+            checked={typeVisibility.rooms}
+            onChange={() => toggleTypeVisibility('rooms')}
+          />
+          <ClassVisibilityRow
+            icon={<Box className="h-4 w-4 shrink-0" style={{ color: '#7fd4ff' }} />}
+            label={SPACE_KIND_LABEL.storeySpace}
+            description={SPACE_KIND_DESCRIPTION.storeySpace}
+            checked={typeVisibility.storeySpaces}
+            onChange={() => toggleTypeVisibility('storeySpaces')}
+          />
+          <ClassVisibilityRow
+            icon={<Box className="h-4 w-4 shrink-0" style={{ color: '#2aa9cc' }} />}
+            label={SPACE_KIND_LABEL.parking}
+            description={SPACE_KIND_DESCRIPTION.parking}
+            checked={typeVisibility.parking}
+            onChange={() => toggleTypeVisibility('parking')}
+          />
+        </div>
+      )}
+      {/* Not a gross-area volume — that is an IfcSpace.GFA and sits above.
+          IfcSpatialZone is a spatial REGION: fire compartment, security or
+          thermal zone. The panel used to say the opposite. */}
       <ClassVisibilityRow
         icon={<Box className="h-4 w-4 shrink-0" style={{ color: '#b85af2' }} />}
-        label="Spatial Zones"
-        description="Gross-area volumes (IfcSpatialZone)"
+        label="Compartments"
+        description="Fire, security and other spatial regions (IfcSpatialZone)"
         checked={typeVisibility.spatialZones}
         onChange={() => toggleTypeVisibility('spatialZones')}
       />

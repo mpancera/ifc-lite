@@ -16,6 +16,8 @@ import { entityRefToString, stringToEntityRef } from './types.js';
 import { useViewerStore } from './index.js';
 import { toGlobalIdFromModels } from './globalId.js';
 import { isTypeVisible } from './typeVisibilityFilter.js';
+import { buildSpaceKindIndex, spaceKindIndexFor, type SpaceKind } from './spaceKind.js';
+import { resolveEntityPredefinedType } from '../lib/entity-predefined-type.js';
 import { collectAggregatedDescendants, type AggregationRelationships } from '../utils/aggregation.js';
 
 type ViewerStateSnapshot = ReturnType<typeof useViewerStore.getState>;
@@ -82,6 +84,11 @@ function visibilityFingerprint(state: ViewerStateSnapshot): string {
     digestModelEntityMap(state.isolatedEntitiesByModel),
     digestNumberSet(state.selectedStoreys),
     tv.spaces ? 1 : 0,
+    // The three space kinds belong here too — the cached visible set is keyed
+    // on this string, so a toggle missing from it simply never takes effect.
+    tv.rooms ? 1 : 0,
+    tv.storeySpaces ? 1 : 0,
+    tv.parking ? 1 : 0,
     tv.spatialZones ? 1 : 0,
     tv.openings ? 1 : 0,
     tv.virtualElements ? 1 : 0,
@@ -110,11 +117,32 @@ function dedupeRefs(refs: EntityRef[]): EntityRef[] {
   return out;
 }
 
-function matchesTypeVisibility(ifcType: string | undefined, typeVisibility: ViewerStateSnapshot['typeVisibility']): boolean {
+function matchesTypeVisibility(
+  ifcType: string | undefined,
+  typeVisibility: ViewerStateSnapshot['typeVisibility'],
+  spaceKind?: SpaceKind,
+): boolean {
   // Shared mapping (`typeVisibilityFilter.ts`) so the basket's visible set,
   // the viewport mesh filter and the GLB export never drift. `site` also hides
-  // `IfcGeographicElement` terrain (issue #1480).
-  return isTypeVisible(ifcType, typeVisibility);
+  // `IfcGeographicElement` terrain (issue #1480). Spaces additionally split by
+  // kind, which a mesh cannot tell us — the caller supplies it from the index.
+  return isTypeVisible(ifcType, typeVisibility, spaceKind);
+}
+
+/**
+ * Space kind per express id for one model, built once per parsed store.
+ *
+ * Only spaces are looked up, and only the first time: the index costs a few
+ * dozen entity reads, against a mesh loop that runs on every visibility change.
+ */
+function spaceKindsFor(store: IfcDataStore | null): Map<number, SpaceKind> {
+  return spaceKindIndexFor(store, () => buildSpaceKindIndex({
+    spatialHierarchy: store?.spatialHierarchy ?? null,
+    predefinedTypeOf: (expressId) => (
+      store?.entities.getPredefinedType?.(expressId)
+      || (store ? resolveEntityPredefinedType(store, expressId) : '')
+    ),
+  }));
 }
 
 function getDataStoreForModel(state: ViewerStateSnapshot, modelId: string): IfcDataStore | null {
@@ -369,8 +397,11 @@ function collectVisibleCandidates(state: ViewerStateSnapshot): VisibleCandidate[
       // — they can't contribute mesh-level visible candidates.
       if (!model.geometryResult) continue;
       const offset = model.idOffset ?? 0;
+      const spaceKinds = spaceKindsFor(model.ifcDataStore ?? null);
       for (const mesh of model.geometryResult.meshes) {
-        if (!matchesTypeVisibility(mesh.ifcType, state.typeVisibility)) continue;
+        if (!matchesTypeVisibility(
+          mesh.ifcType, state.typeVisibility, spaceKinds.get(mesh.expressId - offset),
+        )) continue;
         const globalId = mesh.expressId;
         candidates.push({
           globalId,
@@ -381,8 +412,11 @@ function collectVisibleCandidates(state: ViewerStateSnapshot): VisibleCandidate[
       }
     }
   } else if (state.geometryResult) {
+    const spaceKinds = spaceKindsFor(state.ifcDataStore ?? null);
     for (const mesh of state.geometryResult.meshes) {
-      if (!matchesTypeVisibility(mesh.ifcType, state.typeVisibility)) continue;
+      if (!matchesTypeVisibility(
+        mesh.ifcType, state.typeVisibility, spaceKinds.get(mesh.expressId),
+      )) continue;
       candidates.push({
         globalId: mesh.expressId,
         modelId: 'legacy',

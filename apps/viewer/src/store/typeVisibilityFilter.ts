@@ -12,13 +12,22 @@
  * consumer (viewport, Cesium, basket, export) stays in lockstep.
  */
 
+import type { SpaceKind } from './spaceKind.js';
 import type { TypeVisibility } from './types.js';
 
 /** Which `typeVisibility` boolean gates each IFC class. */
 type TypeVisibilityKey = keyof Pick<
   TypeVisibility,
-  'spaces' | 'spatialZones' | 'openings' | 'virtualElements' | 'site' | 'ifcAnnotations'
+  'spaces' | 'rooms' | 'storeySpaces' | 'parking'
+  | 'spatialZones' | 'openings' | 'virtualElements' | 'site' | 'ifcAnnotations'
 >;
+
+/** Which toggle gates each kind of `IfcSpace`. */
+const SPACE_KIND_TO_VISIBILITY_KEY: Readonly<Record<SpaceKind, TypeVisibilityKey>> = {
+  room: 'rooms',
+  storeySpace: 'storeySpaces',
+  parking: 'parking',
+};
 
 /**
  * IFC class → toggle key. When the mapped toggle is `false` the class is
@@ -50,8 +59,27 @@ const IFC_TYPE_TO_VISIBILITY_KEY: Readonly<Record<string, TypeVisibilityKey>> = 
 export function isTypeVisible(
   ifcType: string | undefined,
   typeVisibility: Pick<TypeVisibility, TypeVisibilityKey>,
+  spaceKind?: SpaceKind,
 ): boolean {
   if (!ifcType) return true;
+
+  // Spaces split three ways — rooms, the storey-sized gross-area volume, and
+  // parking — because they are used completely differently and one toggle for
+  // all three was useless. `spaces` remains the master switch above them, so
+  // turning it off still hides every space in one move.
+  //
+  // The KIND is passed in, already classified, rather than the raw
+  // PredefinedType: a mesh carries neither, so the caller has to consult an
+  // index either way, and classifying in one place keeps `classifySpace` the
+  // only thing that knows how the enum maps.
+  if (ifcType === 'IfcSpace') {
+    if (!typeVisibility.spaces) return false;
+    // A caller that cannot resolve the kind gets the coarse answer rather
+    // than a guess.
+    if (spaceKind === undefined) return true;
+    return typeVisibility[SPACE_KIND_TO_VISIBILITY_KEY[spaceKind]];
+  }
+
   const key = IFC_TYPE_TO_VISIBILITY_KEY[ifcType];
   if (key === undefined) return true;
   return typeVisibility[key];
@@ -70,4 +98,18 @@ export function buildHiddenIfcTypes(
     if (!typeVisibility[key]) out.add(ifcType);
   }
   return out;
+}
+
+/**
+ * Whether every kind of space is currently hidden.
+ *
+ * The GLB export drops whole classes, so it can only exclude `IfcSpace` when
+ * NO kind of space is wanted — hiding just the gross-area volumes is a
+ * per-entity decision the class-level export cannot express.
+ */
+export function allSpaceKindsHidden(
+  typeVisibility: Pick<TypeVisibility, TypeVisibilityKey>,
+): boolean {
+  return !typeVisibility.spaces
+    || (!typeVisibility.rooms && !typeVisibility.storeySpaces && !typeVisibility.parking);
 }

@@ -10,10 +10,13 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { isTypeVisible, buildHiddenIfcTypes } from './typeVisibilityFilter.js';
+import { isTypeVisible, buildHiddenIfcTypes, allSpaceKindsHidden } from './typeVisibilityFilter.js';
 
 const ALL_ON = {
   spaces: true,
+  rooms: true,
+  storeySpaces: true,
+  parking: true,
   spatialZones: true,
   openings: true,
   virtualElements: true,
@@ -35,7 +38,7 @@ describe('isTypeVisible', () => {
   });
 
   it('leaves unmapped classes (walls, slabs) always visible', () => {
-    const allOff = { spaces: false, spatialZones: false, openings: false, virtualElements: false, site: false, ifcAnnotations: false };
+    const allOff = { spaces: false, rooms: false, storeySpaces: false, parking: false, spatialZones: false, openings: false, virtualElements: false, site: false, ifcAnnotations: false };
     assert.equal(isTypeVisible('IfcWall', allOff), true);
     assert.equal(isTypeVisible('IfcBuildingElementProxy', allOff), true);
   });
@@ -66,5 +69,66 @@ describe('buildHiddenIfcTypes', () => {
   it('drops IfcAnnotation when annotations are off', () => {
     const hidden = buildHiddenIfcTypes({ ...ALL_ON, ifcAnnotations: false });
     assert.deepEqual([...hidden], ['IfcAnnotation']);
+  });
+});
+
+describe('isTypeVisible · kinds of space', () => {
+  it('keeps the coarse answer when the caller cannot resolve a PredefinedType', () => {
+    // A mesh carries no PredefinedType. Guessing would be worse than the
+    // master switch's answer.
+    assert.equal(isTypeVisible('IfcSpace', ALL_ON), true);
+    assert.equal(isTypeVisible('IfcSpace', { ...ALL_ON, spaces: false }), false);
+  });
+
+  it('hides the storey-sized gross-area volume on its own', () => {
+    // The whole point: look at rooms without a slab over the entire floor.
+    const tv = { ...ALL_ON, storeySpaces: false };
+    assert.equal(isTypeVisible('IfcSpace', tv, 'storeySpace'), false);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'room'), true);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'parking'), true);
+  });
+
+  it('hides parking on its own', () => {
+    const tv = { ...ALL_ON, parking: false };
+    assert.equal(isTypeVisible('IfcSpace', tv, 'parking'), false);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'storeySpace'), true);
+  });
+
+  it('hides rooms on their own', () => {
+    const tv = { ...ALL_ON, rooms: false };
+    assert.equal(isTypeVisible('IfcSpace', tv, 'room'), false);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'storeySpace'), true);
+  });
+
+  it('lets the master switch beat every kind', () => {
+    const tv = { ...ALL_ON, spaces: false };
+    for (const kind of ['room', 'storeySpace', 'parking'] as const) {
+      assert.equal(isTypeVisible('IfcSpace', tv, kind), false, kind);
+    }
+  });
+
+  it('does not apply space kinds to a spatial zone', () => {
+    // The bug this replaces: the panel called IfcSpatialZone a "gross-area
+    // volume", which is an IfcSpace.GFA. They are unrelated.
+    const tv = { ...ALL_ON, storeySpaces: false };
+    assert.equal(isTypeVisible('IfcSpatialZone', tv), true);
+    assert.equal(isTypeVisible('IfcSpatialZone', { ...ALL_ON, spatialZones: false }), false);
+  });
+});
+
+describe('allSpaceKindsHidden', () => {
+  it('is false while any kind is wanted', () => {
+    assert.equal(allSpaceKindsHidden({ ...ALL_ON, rooms: false, parking: false }), false);
+  });
+
+  it('is true when every kind is off', () => {
+    assert.equal(
+      allSpaceKindsHidden({ ...ALL_ON, rooms: false, storeySpaces: false, parking: false }),
+      true,
+    );
+  });
+
+  it('is true when the master switch is off', () => {
+    assert.equal(allSpaceKindsHidden({ ...ALL_ON, spaces: false }), true);
   });
 });
