@@ -24,8 +24,8 @@ import {
   Table2,
   Pencil,
   Copy,
-  Settings2,
   PenLine,
+  ArrowLeft,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -303,6 +303,18 @@ export function ListPanel({ onClose }: ListPanelProps) {
     exportListDefinition(definition);
   }, []);
 
+  /** Whether the open list is one of the user's own, or a built-in template. */
+  const isSavedList = !!editingList && listDefinitions.some((d) => d.id === editingList.id);
+
+  /** Delete from the results view returns to the library — the list the view
+   *  was showing no longer exists. */
+  const handleDeleteFromResults = useCallback(() => {
+    if (!editingList) return;
+    deleteListDefinition(editingList.id);
+    setEditingList(null);
+    setView('library');
+  }, [editingList, deleteListDefinition]);
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -312,7 +324,10 @@ export function ListPanel({ onClose }: ListPanelProps) {
           <span className="font-medium text-sm">
             {view === 'library' && 'Lists'}
             {view === 'builder' && (editingList ? 'Edit List' : 'New List')}
-            {view === 'results' && 'Results'}
+            {/* The list's own name, not "Results" — with several lists in play
+                the header was the only thing that could say which one is on
+                screen, and it said nothing. */}
+            {view === 'results' && (editingList?.name || 'Results')}
           </span>
           {view === 'results' && listResult && (
             <span className="text-xs text-muted-foreground">
@@ -331,20 +346,68 @@ export function ListPanel({ onClose }: ListPanelProps) {
           )}
         </div>
         <div className="flex items-center gap-1">
-          {view === 'results' && (
+          {/* The same five commands the library shows on hover, here shown
+              permanently: once a list is open they are what you reach for, and
+              hunting back through the library to re-run or duplicate it was a
+              detour. Delete and Edit are absent for a preset — a template
+              cannot be removed or edited in place, only used as a starting
+              point (which is what Duplicate does). */}
+          {view === 'results' && editingList && (
             <>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Button variant="ghost" size="icon-sm" aria-label="Edit Configuration" onClick={handleEditFromResults}>
-                    <Settings2 className="h-3.5 w-3.5" />
+                  <Button variant="ghost" size="icon-sm" aria-label={`Run list ${editingList.name}`}
+                    disabled={!hasData} onClick={() => handleExecuteList(editingList)}>
+                    <Play className="h-3.5 w-3.5" />
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>Edit Configuration</TooltipContent>
+                <TooltipContent>Run</TooltipContent>
+              </Tooltip>
+              {isSavedList && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon-sm" aria-label={`Edit list ${editingList.name}`}
+                      onClick={handleEditFromResults}>
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Edit</TooltipContent>
+                </Tooltip>
+              )}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant="ghost" size="icon-sm"
+                    aria-label={isSavedList ? `Duplicate list ${editingList.name}` : `Use ${editingList.name} as template`}
+                    onClick={() => handleDuplicate(editingList)}>
+                    <Copy className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{isSavedList ? 'Duplicate' : 'Use as Template'}</TooltipContent>
               </Tooltip>
               <Tooltip>
                 <TooltipTrigger asChild>
+                  <Button variant="ghost" size="icon-sm" aria-label={`Export list ${editingList.name}`}
+                    onClick={() => handleExportDefinition(editingList)}>
+                    <Download className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Export</TooltipContent>
+              </Tooltip>
+              {isSavedList && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon-sm" aria-label={`Delete list ${editingList.name}`}
+                      onClick={handleDeleteFromResults}>
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Delete</TooltipContent>
+                </Tooltip>
+              )}
+              <Tooltip>
+                <TooltipTrigger asChild>
                   <Button variant="ghost" size="icon-sm" aria-label="Back to Lists" onClick={() => setView('library')}>
-                    <Table2 className="h-3.5 w-3.5" />
+                    <ArrowLeft className="h-3.5 w-3.5" />
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>Back to Lists</TooltipContent>
@@ -357,9 +420,14 @@ export function ListPanel({ onClose }: ListPanelProps) {
             </Button>
           )}
           {onClose && (
-            <Button variant="ghost" size="icon-sm" aria-label="Close" onClick={onClose}>
-              <X className="h-3.5 w-3.5" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon-sm" aria-label="Close Lists" onClick={onClose}>
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Close Lists</TooltipContent>
+            </Tooltip>
           )}
         </div>
       </div>
