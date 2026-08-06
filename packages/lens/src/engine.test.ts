@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { describe, it, expect } from 'vitest';
-import { evaluateLens, evaluateAutoColorLens } from './engine.js';
+import { evaluateLens, evaluateAutoColorLens, groupBucketValue } from './engine.js';
 import { GHOST_COLOR, hexToRgba } from './colors.js';
 import type { Lens, LensDataProvider, AutoColorSpec } from './types.js';
 
@@ -663,5 +663,82 @@ describe('evaluateAutoColorLens — By Zone', () => {
     const result = evaluateAutoColorLens({ source: 'group' }, provider);
     expect(result.legend).toHaveLength(1);
     expect(result.colorMap.get(2)).toEqual(GHOST_COLOR);
+  });
+});
+
+describe('evaluateAutoColorLens — a value that dictates its own colour', () => {
+  const zones = (): LensDataProvider => ({
+    ...createGroupProvider([
+      { id: 1, groups: [{ id: 100, name: 'Zone A', type: 'IfcZone' }] },
+      { id: 2, groups: [{ id: 101, name: 'Zone B', type: 'IfcZone' }] },
+      { id: 3, groups: [{ id: 101, name: 'Zone B', type: 'IfcZone' }] },
+    ]),
+    getValueColor: (value) => (value === 'Zone A' ? '#472A24' : null),
+  });
+
+  it('uses the dictated colour instead of the palette', () => {
+    // A trigger zone is red because it is red in the fire concept.
+    const result = evaluateAutoColorLens({ source: 'group' }, zones(), ['#111111', '#222222']);
+    const entry = result.legend.find((e) => e.name === 'Zone A')!;
+
+    expect(entry.color).toBe('#472A24');
+  });
+
+  it('leaves values with no opinion to the palette', () => {
+    const result = evaluateAutoColorLens({ source: 'group' }, zones(), ['#111111', '#222222']);
+    const entry = result.legend.find((e) => e.name === 'Zone B')!;
+
+    // Zone B holds two entities, so it sorts first and takes palette slot 0.
+    expect(entry.color).toBe('#111111');
+  });
+
+  it('keeps the dictated colour when bucket order changes', () => {
+    // Adding a room to a zone reshuffles the count-sorted order. A palette
+    // colour would move with it; a dictated one must not.
+    const base = createGroupProvider([
+      { id: 1, groups: [{ id: 100, name: 'Zone A', type: 'IfcZone' }] },
+      { id: 2, groups: [{ id: 100, name: 'Zone A', type: 'IfcZone' }] },
+      { id: 3, groups: [{ id: 101, name: 'Zone B', type: 'IfcZone' }] },
+    ]);
+    const provider: LensDataProvider = {
+      ...base,
+      getValueColor: (value) => (value === 'Zone A' ? '#472A24' : null),
+    };
+    const result = evaluateAutoColorLens({ source: 'group' }, provider, ['#111111', '#222222']);
+
+    expect(result.legend.find((e) => e.name === 'Zone A')!.color).toBe('#472A24');
+  });
+
+  it('is not consulted when the provider does not implement it', () => {
+    const result = evaluateAutoColorLens({ source: 'group' }, createGroupProvider([
+      { id: 1, groups: [{ id: 100, name: 'Zone A', type: 'IfcZone' }] },
+    ]), ['#111111']);
+
+    expect(result.legend[0].color).toBe('#111111');
+  });
+});
+
+describe('groupBucketValue', () => {
+  it('uses the group name', () => {
+    expect(groupBucketValue({ id: 100, name: 'Zone A', type: 'IfcZone' })).toBe('Zone A');
+  });
+
+  it('falls back to the ObjectType, qualified by type', () => {
+    expect(groupBucketValue({ id: 100, type: 'IfcSystem', objectType: 'BMA' }))
+      .toBe('IfcSystem: BMA');
+  });
+
+  it('falls back to the express id, so unnamed groups still bucket apart', () => {
+    expect(groupBucketValue({ id: 100, type: 'IfcZone' })).toBe('IfcZone #100');
+    expect(groupBucketValue({ id: 101, type: 'IfcZone', name: '  ' })).toBe('IfcZone #101');
+  });
+
+  it('agrees with the value the engine buckets by', () => {
+    // The contract `getValueColor` keys on: derive it here, match it there.
+    const result = evaluateAutoColorLens({ source: 'group' }, createGroupProvider([
+      { id: 1, groups: [{ id: 100, type: 'IfcZone' }] },
+    ]));
+
+    expect(result.legend[0].name).toBe(groupBucketValue({ id: 100, type: 'IfcZone' }));
   });
 });

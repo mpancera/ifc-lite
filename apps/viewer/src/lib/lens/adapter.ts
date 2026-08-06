@@ -24,6 +24,8 @@ import {
   extractAllMaterialsOnDemand,
 } from '@ifc-lite/parser';
 import { resolveEntityPredefinedType } from '@/lib/entity-predefined-type';
+import { readZones } from '@/lib/ifcZones/membership';
+import { groupBucketValue } from '@ifc-lite/lens';
 import { resolveOverlayDefiningTypeId } from '@/lib/mutations/overlayTypeLink';
 import { lensMaterialNames } from '@/lib/lens-material-names';
 import { toGlobalIdFromModels } from '@/store/globalId';
@@ -105,6 +107,10 @@ export function createLensDataProvider(
   // by federated global id once, so every accessor below is an O(1) lookup.
   const overlayById = new Map<number, OverlayEntity>();
   const overlayTombstones = new Set<number>();
+  /** modelId → (local expressId → the zones it was painted into this session). */
+  const overlayZonesByModel = new Map<string, Map<number, Array<{ id: number; name?: string; type: string; objectType?: string }>>>();
+  /** Auto-colour bucket value → the zone's own colour, for `getValueColor`. */
+  const zoneColourByValue = new Map<string, string>();
   const offsets = new Map(entries.map((entry) => [entry.id, { idOffset: entry.idOffset }]));
   if (mutationViews) {
     for (const entry of entries) {
@@ -127,7 +133,37 @@ export function createLensDataProvider(
         });
       }
       for (const expressId of view.getTombstones()) overlayTombstones.add(toGlobal(expressId));
+
+      // Zones painted this session and their members. Indexed per model
+      // because express ids are local to one file.
+      const zones = readZones(view.getNewEntities());
+      const perModel = new Map<number, Array<{ id: number; name?: string; type: string; objectType?: string }>>();
+      for (const zone of zones) {
+        const ref = {
+          id: zone.expressId,
+          name: zone.name || undefined,
+          type: 'IfcZone',
+          objectType: zone.objectType || undefined,
+        };
+        // Keyed by the bucket the engine will actually form, not by the name —
+        // an unnamed zone buckets as `IfcZone #id` and still deserves its colour.
+        if (zone.colour) zoneColourByValue.set(groupBucketValue(ref), zone.colour);
+        for (const memberId of zone.memberIds) {
+          const list = perModel.get(memberId) ?? [];
+          list.push(ref);
+          perModel.set(memberId, list);
+        }
+      }
+      overlayZonesByModel.set(entry.id, perModel);
     }
+  }
+
+  /** Zones the overlay assigns to this element, or an empty list. */
+  function overlayGroupsOf(
+    modelId: string,
+    expressId: number,
+  ): ReadonlyArray<{ id: number; name?: string; type: string; objectType?: string }> {
+    return overlayZonesByModel.get(modelId)?.get(expressId) ?? [];
   }
 
   /**
@@ -453,7 +489,26 @@ export function createLensDataProvider(
         const objectType = store.entities?.getObjectType?.(gid);
         out.push({ id: gid, name: name || undefined, type, objectType: objectType || undefined });
       }
+      // The parsed graph predates this session, so a zone painted just now is
+      // invisible to it — the same overlay blindness that hid authored elements
+      // from Lists, Solo and the Relationships tab. Merge what the overlay
+      // says on top.
+      for (const group of overlayGroupsOf(resolved.entry.id, resolved.expressId)) {
+        if (!out.some((g) => g.id === group.id)) out.push(group);
+      }
       return out;
+    },
+
+    /**
+     * A zone dictates its own colour, so painting keeps it stable.
+     *
+     * Only the `group` source has an opinion: everything else leaves the
+     * palette alone. The colour lives in the zone's Description as a
+     * `ZoneDisplay=` token — see `lib/ifcZones/zoneDisplay.ts`.
+     */
+    getValueColor(value: string, source: string): string | null {
+      if (source !== 'group') return null;
+      return zoneColourByValue.get(value) ?? null;
     },
   };
 }

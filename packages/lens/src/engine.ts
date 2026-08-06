@@ -187,9 +187,14 @@ export function evaluateAutoColorLens(
     // many distinct values can be shown — it just stops being the source once
     // exhausted. Indexing from 0 keeps a given value's colour stable whichever
     // branch it came from.
-    const color = palette && palette.length > 0 && i < palette.length
+    // A value that carries its own colour wins over the palette: a trigger
+    // zone is red because it is red in the fire concept, not because it is the
+    // third-largest bucket — and it has to stay red when adding a room
+    // reshuffles the bucket order.
+    const dictated = provider.getValueColor?.(value, autoColor.source);
+    const color = dictated || (palette && palette.length > 0 && i < palette.length
       ? palette[i]
-      : uniqueColor(i);
+      : uniqueColor(i));
     const ruleId = `auto-${i}`;
     const rgba = hexToRgba(color, 1);
 
@@ -245,6 +250,21 @@ function selectClassificationRef(
     cls.find((ref) => (ref.system ?? '').toLowerCase().includes(psetName.toLowerCase())) ??
     cls[0]
   );
+}
+
+/**
+ * The bucket a group membership falls into, and so the value the legend shows.
+ *
+ * Exported because a provider that dictates colours per value (`getValueColor`)
+ * has to key its map by exactly this string — deriving it a second time by hand
+ * is how the two quietly drift apart.
+ */
+export function groupBucketValue(
+  g: { id: number; name?: string; type: string; objectType?: string },
+): string {
+  if (g.name && g.name.trim() !== '') return g.name;
+  if (g.objectType && g.objectType.trim() !== '') return `${g.type}: ${g.objectType}`;
+  return `${g.type} #${g.id}`;
 }
 
 /**
@@ -360,9 +380,7 @@ function extractAutoColorValue(
       // ObjectType (e.g. a system designation), else "Type #id" so unnamed
       // groups still bucket distinctly. (#1075)
       const g = groups.find((x) => x.type === 'IfcZone') ?? groups[0];
-      if (g.name && g.name.trim() !== '') return g.name;
-      if (g.objectType && g.objectType.trim() !== '') return `${g.type}: ${g.objectType}`;
-      return `${g.type} #${g.id}`;
+      return groupBucketValue(g);
     }
 
     default:

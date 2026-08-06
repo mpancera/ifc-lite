@@ -123,6 +123,14 @@ export interface LensDataProvider {
    * group criteria when not implemented (#1075).
    */
   getEntityGroups?(globalId: number): ReadonlyArray<{ id: number; name?: string; type: string; objectType?: string }>;
+
+  /**
+   * A colour the auto-colour VALUE dictates for itself, overriding the palette.
+   *
+   * See {@link AutoColorValueColor}. Optional: a provider that returns nothing
+   * leaves every bucket to the palette, which is the previous behaviour.
+   */
+  getValueColor?: AutoColorValueColor;
 }
 
 /** Property set returned by {@link LensDataProvider.getPropertySets} */
@@ -211,6 +219,23 @@ export interface AutoColorSpec {
   /** Attribute, property, or quantity name */
   propertyName?: string;
 }
+
+/**
+ * A colour the VALUE itself dictates, rather than one the palette hands out.
+ *
+ * Auto-colour normally allocates from a palette by bucket order, which is right
+ * when the values carry no colour of their own — IFC classes, materials.
+ * Some do carry one: a trigger zone is red because it is red in the fire
+ * concept, not because it happens to be the third-largest bucket, and that
+ * colour has to survive re-running the lens after a room is added.
+ *
+ * Return `null`/`undefined` to let the palette decide, which is what every
+ * source that has no opinion does.
+ */
+export type AutoColorValueColor = (
+  value: string,
+  source: AutoColorSpec['source'],
+) => string | null | undefined;
 
 /** A saved Lens configuration */
 export interface Lens {

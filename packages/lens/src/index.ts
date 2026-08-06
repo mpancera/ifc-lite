@@ -54,7 +54,7 @@ export {
 // Engine
 // ============================================================================
 
-export { evaluateLens, evaluateAutoColorLens } from './engine.js';
+export { evaluateLens, evaluateAutoColorLens, groupBucketValue } from './engine.js';
 export type { AutoColorEvaluationResult } from './engine.js';
 
 // ============================================================================
