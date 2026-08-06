@@ -6,8 +6,10 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { planMembership, readZones, zoneOfSpace, type OverlayEntity } from './membership.js';
 
-function zone(expressId: number, name: string, objectType: string | null = null): OverlayEntity {
-  return { expressId, type: 'IfcZone', attributes: ['guid', null, name, null, objectType, null] };
+function zone(
+  expressId: number, name: string, objectType: string | null = null, description: string | null = null,
+): OverlayEntity {
+  return { expressId, type: 'IfcZone', attributes: ['guid', null, name, description, objectType, null] };
 }
 function rel(expressId: number, members: number[], groupId: number): OverlayEntity {
   return {
@@ -26,6 +28,20 @@ describe('readZones', () => {
     assert.equal(zones[0].objectType, 'TriggerZone');
     assert.equal(zones[0].relExpressId, 11);
     assert.deepEqual(zones[0].memberIds, [21, 22]);
+  });
+
+  it('separates the colour from the author text in Description', () => {
+    const zones = readZones([zone(10, 'AZ-A', null, 'Ostflügel ZoneDisplay=#472A24')]);
+
+    assert.equal(zones[0].description, 'Ostflügel');
+    assert.equal(zones[0].colour, '#472A24');
+  });
+
+  it('reports no colour for a zone that carries none', () => {
+    const zones = readZones([zone(10, 'AZ-A', null, 'Ostflügel')]);
+
+    assert.equal(zones[0].description, 'Ostflügel');
+    assert.equal(zones[0].colour, null);
   });
 
   it('reports a zone with no members yet', () => {

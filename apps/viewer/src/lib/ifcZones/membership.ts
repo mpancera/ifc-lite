@@ -26,6 +26,8 @@
  * applies the plan.
  */
 
+import { parseZoneDescription } from './zoneDisplay.js';
+
 /** An overlay entity as `MutablePropertyView.getNewEntities()` returns it. */
 export interface OverlayEntity {
   expressId: number;
@@ -36,6 +38,10 @@ export interface OverlayEntity {
 export interface ZoneInfo {
   expressId: number;
   name: string;
+  /** What the author wrote in `Description`, without the colour token. */
+  description: string;
+  /** `#RRGGBB` from the `ZoneDisplay=` token, or `null`. See `zoneDisplay.ts`. */
+  colour: string | null;
   /** Refinement, e.g. `'TriggerZone'`. `IfcZone` has no PredefinedType. */
   objectType: string | null;
   /** The `IfcRelAssignsToGroup` carrying membership, or `null` when none yet. */
@@ -68,9 +74,16 @@ export function readZones(entities: Iterable<OverlayEntity>): ZoneInfo[] {
 
   for (const entity of entities) {
     if (entity.type === 'IfcZone') {
+      // Description carries both the author's text and the zone colour; the
+      // two are separated here so no caller has to know the token syntax.
+      const described = parseZoneDescription(
+        typeof entity.attributes[3] === 'string' ? entity.attributes[3] : null,
+      );
       zones.set(entity.expressId, {
         expressId: entity.expressId,
         name: asString(entity.attributes[2]),
+        description: described.text,
+        colour: described.colour,
         objectType: typeof entity.attributes[4] === 'string' ? entity.attributes[4] : null,
         relExpressId: null,
         memberIds: [],
