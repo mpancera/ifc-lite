@@ -9,7 +9,7 @@
  * toolbar (viewer/commenter roles cannot unlock authoring).
  */
 
-import { FileDiff, Library, Wand2 } from 'lucide-react';
+import { Brush, FileDiff, Library, Wand2 } from 'lucide-react';
 import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, List, Select, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -123,6 +123,18 @@ export function AuthorTab() {
           disabled={!canEditInSession}
           onClick={() => setActiveTool('spaceSketch')}
           {...tourAnchor(toolAnchor('spaceSketch'))}
+        />
+        {/* Zones group ROOMS, so they belong next to the tools that make rooms
+            rather than under Analyze — painting a zone is authoring, and it
+            writes IfcZone into the model like anything else here. */}
+        <RibbonLargeButton
+          icon={Brush}
+          label="Zones"
+          tooltip="Zonen anlegen und Räume hineinmalen (IfcZone)"
+          active={activeWorkspacePanels.has('zonePaint')}
+          activeClassName={EDIT_ACTIVE_CLASS}
+          disabled={!canEditInSession || !ifcDataStore}
+          onClick={() => handleToggleRightPanel('zonePaint')}
         />
         <ProductLibraryPanel
           trigger={

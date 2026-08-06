@@ -23,8 +23,8 @@
  * floating; release past the window edge hands it off to an OS / PiP window.
  *
  * Render precedence preserves the pre-existing right-slot behavior:
- *   right-placed analysis extension, then Add Element tool, then active panel,
- *   then Information.
+ *   right-placed analysis extension, then a tool panel (Add Element, Zones),
+ *   then active panel, then Information.
  */
 
 import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
@@ -46,6 +46,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { ExtensionDockHost } from '@/components/extensions/ExtensionDockHost';
 import { AddElementPanel } from '../AddElementPanel';
+import { IfcZonePanel } from '../IfcZonePanel';
 import {
   closeActiveAnalysisExtension,
   getAnalysisExtensionById,
@@ -294,6 +295,13 @@ export function SidebarPanelHost() {
     return (
       <div data-detach-root className="h-full flex flex-col panel-container">
         <AddElementPanel onClose={() => setActiveTool('select')} />
+      </div>
+    );
+  }
+  if (activeTool === 'zonePaint') {
+    return (
+      <div data-detach-root className="h-full flex flex-col panel-container">
+        <IfcZonePanel onClose={() => setActiveTool('select')} />
       </div>
     );
   }

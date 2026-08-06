@@ -25,6 +25,7 @@ import {
 } from '@ifc-lite/parser';
 import { resolveEntityPredefinedType } from '@/lib/entity-predefined-type';
 import { readZones } from '@/lib/ifcZones/membership';
+import { authoredEntities } from '@/lib/mutations/authoredEntities';
 import { groupBucketValue } from '@ifc-lite/lens';
 import { resolveOverlayDefiningTypeId } from '@/lib/mutations/overlayTypeLink';
 import { lensMaterialNames } from '@/lib/lens-material-names';
@@ -135,8 +136,11 @@ export function createLensDataProvider(
       for (const expressId of view.getTombstones()) overlayTombstones.add(toGlobal(expressId));
 
       // Zones painted this session and their members. Indexed per model
-      // because express ids are local to one file.
-      const zones = readZones(view.getNewEntities());
+      // because express ids are local to one file. `authoredEntities` rather
+      // than `getNewEntities` — recolouring or repainting a zone edits it
+      // positionally, and the raw creation record would still show the
+      // original colour and the original member list.
+      const zones = readZones(authoredEntities(view));
       const perModel = new Map<number, Array<{ id: number; name?: string; type: string; objectType?: string }>>();
       for (const zone of zones) {
         const ref = {
@@ -474,11 +478,20 @@ export function createLensDataProvider(
       const resolved = resolveGlobalId(globalId, entries);
       if (!resolved) return [];
       const store = resolved.entry.ifcDataStore;
-      if (!store.relationships) return [];
       // Inverse IfcRelAssignsToGroup: entity → the groups/zones it belongs to.
-      const groupIds = store.relationships.getRelated(resolved.expressId, RelationshipType.AssignsToGroup, 'inverse');
-      if (!groupIds || groupIds.length === 0) return [];
-      const out: Array<{ id: number; name?: string; type: string; objectType?: string }> = [];
+      // The parsed graph predates this session, so a zone painted just now is
+      // invisible to it — the same overlay blindness that hid authored elements
+      // from Lists, Solo and the Relationships tab. An element with no parsed
+      // membership at all still has to reach the overlay lookup below.
+      const groupIds = store.relationships?.getRelated(
+        resolved.expressId, RelationshipType.AssignsToGroup, 'inverse',
+      ) ?? [];
+      // Overlay zones come FIRST. Auto-colour picks the first `IfcZone` it
+      // finds, and a room the user just painted is usually already in some
+      // zone the file shipped with — leaving the parsed one in front would
+      // make painting look like it did nothing at all.
+      const out: Array<{ id: number; name?: string; type: string; objectType?: string }> =
+        [...overlayGroupsOf(resolved.entry.id, resolved.expressId)];
       for (const gid of groupIds) {
         const name = store.entities?.getName(gid);
         // Canonical IfcPascalCase so the "By Zone" lens can match `IfcZone`
@@ -488,13 +501,6 @@ export function createLensDataProvider(
         // lens legend falls back to it when Name/LongName are empty. (#1075)
         const objectType = store.entities?.getObjectType?.(gid);
         out.push({ id: gid, name: name || undefined, type, objectType: objectType || undefined });
-      }
-      // The parsed graph predates this session, so a zone painted just now is
-      // invisible to it — the same overlay blindness that hid authored elements
-      // from Lists, Solo and the Relationships tab. Merge what the overlay
-      // says on top.
-      for (const group of overlayGroupsOf(resolved.entry.id, resolved.expressId)) {
-        if (!out.some((g) => g.id === group.id)) out.push(group);
       }
       return out;
     },

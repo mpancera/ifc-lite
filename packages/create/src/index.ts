@@ -47,7 +47,7 @@ export { addSpaceToStore, type SpaceInStoreParams, type SpaceRectangleParams, ty
 export { addRoofToStore, type RoofInStoreParams, type RoofRectangleParams, type RoofPolygonParams, type RoofBuildResult } from './in-store/roof.js';
 export { addPlateToStore, type PlateInStoreParams, type PlateRectangleParams, type PlatePolygonParams, type PlateBuildResult } from './in-store/plate.js';
 export { addMemberToStore, type MemberInStoreParams, type MemberBuildResult } from './in-store/member.js';
-export { resolveSpatialAnchor } from './in-store/resolve-anchor.js';
+export { resolveSpatialAnchor, findOwnerHistoryId } from './in-store/resolve-anchor.js';
 export type { SpatialAnchor } from './in-store/anchor.js';
 export {
   duplicateInStore,

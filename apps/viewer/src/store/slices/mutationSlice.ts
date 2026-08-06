@@ -774,7 +774,13 @@ function syncTypeOverride(get: () => ViewerState, modelId: string, entityId: num
   dataStore?.entities?.setTypeOverride?.(entityId, newType);
 }
 
-function getOrCreateStoreEditor(
+/**
+ * Exported for sibling slices that author IFC (zones, and whatever comes next).
+ * The cache lives here because this slice owns `storeEditors`; handing out the
+ * accessor keeps every authoring feature on the same editor instance rather
+ * than each building its own overlay.
+ */
+export function getOrCreateStoreEditor(
   get: () => ViewerState,
   // Editors are cached in-place on the (non-reactive) `storeEditors`
   // Map below, so the Zustand setter is intentionally unused here.

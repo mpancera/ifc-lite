@@ -20,8 +20,26 @@ import {
 import { closePanelWindow } from '@/services/panel-windows';
 
 export type BottomPanel = 'script' | 'list' | 'gantt';
-export type RightPanel = 'bcf' | 'ids' | 'lens' | 'clash' | 'compare' | 'addElement' | 'extensions';
+export type RightPanel = 'bcf' | 'ids' | 'lens' | 'clash' | 'compare' | 'addElement' | 'zonePaint' | 'extensions';
 export type WorkspacePanel = BottomPanel | RightPanel | string;
+
+/**
+ * Right-slot panels that are really TOOLS: their open/closed state is
+ * `activeTool`, not a `…PanelVisible` flag, because the panel and the 3D click
+ * behaviour are one thing. Closing the panel has to put the pointer back, and
+ * an analysis extension taking the slot has to stop the tool — otherwise its
+ * click handler keeps writing to the model behind whatever is on top.
+ *
+ * The panel id and the tool id are deliberately the same string.
+ */
+export type ToolPanel = 'addElement' | 'zonePaint';
+
+const TOOL_PANELS: ReadonlySet<string> = new Set<ToolPanel>(['addElement', 'zonePaint']);
+
+/** Narrows, so the non-tool branches still see only real `…PanelVisible` ids. */
+function isToolPanel(panel: string | null | undefined): panel is ToolPanel {
+  return panel !== null && panel !== undefined && TOOL_PANELS.has(panel);
+}
 
 export function useWorkspacePanelControls() {
   const activeTool = useViewerStore((state) => state.activeTool);
@@ -103,8 +121,10 @@ export function useWorkspacePanelControls() {
     const nextClashVisible = panel === 'clash' ? !clashPanelVisible : false;
     const nextCompareVisible = panel === 'compare' ? !comparePanelVisible : false;
     const nextExtensionsVisible = panel === 'extensions' ? !extensionsPanelVisible : false;
-    const isAddElementActive = activeTool === 'addElement';
-    const nextAddElementActive = panel === 'addElement' ? !isAddElementActive : false;
+    // A tool panel is "open" when its tool is active. Toggling any panel closes
+    // whichever tool panel was running, so the right slot stays single-tenant.
+    const activeToolPanel = isToolPanel(activeTool) ? activeTool : null;
+    const nextToolPanel = isToolPanel(panel) && panel !== activeToolPanel ? panel : null;
 
     setBcfPanelVisible(nextBcfVisible);
     setIdsPanelVisible(nextIdsVisible);
@@ -115,18 +135,18 @@ export function useWorkspacePanelControls() {
     // Keep the float + window channels in sync (#1200/#1201/#1208): toggling a
     // workspace panel from the toolbar re-docks it if it was floating or popped
     // out, instead of leaving an orphaned floating panel or OS window.
-    if (panel !== 'addElement') {
+    if (!isToolPanel(panel)) {
       useViewerStore.getState().closeFloatingPanel(panel);
       closePanelWindow(panel);
     }
 
-    if (panel === 'addElement') {
-      setActiveTool(nextAddElementActive ? 'addElement' : 'select');
-    } else if (isAddElementActive) {
+    if (isToolPanel(panel)) {
+      setActiveTool(nextToolPanel ?? 'select');
+    } else if (activeToolPanel) {
       setActiveTool('select');
     }
 
-    if (nextBcfVisible || nextIdsVisible || nextLensVisible || nextClashVisible || nextCompareVisible || nextExtensionsVisible || nextAddElementActive) {
+    if (nextBcfVisible || nextIdsVisible || nextLensVisible || nextClashVisible || nextCompareVisible || nextExtensionsVisible || nextToolPanel) {
       setRightPanelCollapsed(false);
     }
   }, [
@@ -179,9 +199,9 @@ export function useWorkspacePanelControls() {
     setComparePanelVisible(false);
     setExtensionsPanelVisible(false);
     // The right slot is single-tenant: when an analysis extension takes
-    // it over, the AddElement tool must release it too, otherwise its 3D
-    // click handler keeps placing elements behind the extension panel.
-    if (activeTool === 'addElement') {
+    // it over, a tool panel must release it too, otherwise its 3D click
+    // handler keeps writing to the model behind the extension panel.
+    if (isToolPanel(activeTool)) {
       setActiveTool('select');
     }
     setRightPanelCollapsed(false);
@@ -213,7 +233,7 @@ export function useWorkspacePanelControls() {
     if (clashPanelVisible) panels.add('clash');
     if (comparePanelVisible) panels.add('compare');
     if (extensionsPanelVisible) panels.add('extensions');
-    if (activeTool === 'addElement') panels.add('addElement');
+    if (isToolPanel(activeTool)) panels.add(activeTool);
     if (layersPanelVisible) panels.add('layers');
     if (collabPanelVisible) panels.add('collab');
     if (analysisExtensionState.activeId) panels.add(analysisExtensionState.activeId);
@@ -247,6 +267,7 @@ export function useWorkspacePanelControls() {
     if (activeWorkspacePanels.has('compare')) return 'Compare Models';
     if (activeWorkspacePanels.has('extensions')) return 'Extensions';
     if (activeWorkspacePanels.has('addElement')) return 'Add Element';
+    if (activeWorkspacePanels.has('zonePaint')) return 'Zones';
     if (activeWorkspacePanels.has('layers')) return 'Layer Stack';
     if (activeWorkspacePanels.has('collab')) return 'Collaboration Room';
     return activeAnalysisExtension?.label ?? 'Analysis';

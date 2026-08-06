@@ -56,7 +56,15 @@ export function resolveSpatialAnchor(store: IfcDataStore, storeyExpressId: numbe
   return { ownerHistoryId, bodyContextId, axisContextId, storeyId: storeyExpressId, storeyPlacementId, schema, lengthUnitScale };
 }
 
-function findOwnerHistoryId(store: IfcDataStore): number | null {
+/**
+ * The file's `IfcOwnerHistory`, or `null` when it has none.
+ *
+ * Exported for builders that need one without a storey to anchor to — an
+ * `IfcZone` groups rooms and sits nowhere in space, so `resolveSpatialAnchor`
+ * (which insists on a placement and a representation context) has nothing to
+ * give it. OwnerHistory is optional from IFC4 on, so `null` is a valid answer.
+ */
+export function findOwnerHistoryId(store: IfcDataStore): number | null {
   const ids = store.entityIndex.byType.get('IFCOWNERHISTORY');
   return ids && ids.length > 0 ? ids[0] : null;
 }
