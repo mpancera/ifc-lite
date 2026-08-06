@@ -74,7 +74,15 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
   const [searchQuery, setSearchQuery] = useState('');
   const [sortCol, setSortCol] = useState<number | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
-  const [filterByVisibility, setFilterByVisibility] = useState(true);
+  // A list answers its own filter, not the viewport's.
+  //
+  // This defaulted to ON, which quietly made every list a view of what happens
+  // to be on screen: with a storey soloed, "All Elements" over ~19,500 entities
+  // returned 392 rows, and turning the Rooms visibility off emptied a room
+  // schedule outright. A schedule that silently omits what it was asked for is
+  // worse than a long one — and the toggle is still here for anyone who wants
+  // the viewport-linked reading deliberately.
+  const [filterByVisibility, setFilterByVisibility] = useState(false);
   const [colorByColIdx, setColorByColIdx] = useState<number | null>(null);
   const [widthOverrides, setWidthOverrides] = useState<Record<string, number>>({});
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
