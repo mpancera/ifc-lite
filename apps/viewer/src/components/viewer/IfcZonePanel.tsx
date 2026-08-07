@@ -21,7 +21,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Brush, Check, Plus, Trash2, X } from 'lucide-react';
+import { Brush, Check, MousePointerSquareDashed, Plus, Trash2, X } from 'lucide-react';
 import { LENS_PALETTE } from '@ifc-lite/lens';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -30,10 +30,11 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useViewerStore } from '@/store';
 import { parseIfcZoneKey } from '@/store/slices/ifcZonesSlice';
 import { nextZoneColour } from '@/lib/ifcZones/authoring';
+import {
+  ZONE_MEMBER_TYPES, describeZoneTargets, eligibleZoneMembers,
+} from '@/lib/ifcZones/selectionTargets';
 import type { ZoneInfo } from '@/lib/ifcZones/membership';
-
-/** Types that may be a zone member. Everything else is refused with a reason. */
-const MEMBER_TYPES = new Set(['IfcSpace', 'IfcSpatialZone', 'IfcZone']);
+import { stringToEntityRef } from '@/store/types';
 
 /** A zone with no colour still needs something to show in the swatch. */
 const NO_COLOUR = 'transparent';
@@ -62,6 +63,13 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
   const paintIfcZone = useViewerStore((s) => s.paintIfcZone);
 
   const selectedEntity = useViewerStore((s) => s.selectedEntity);
+  // There are two multi-selection channels and they are NOT the same store
+  // field: Ctrl+click in the viewport fills `selectedEntitiesSet`, while the
+  // hierarchy's range-select fills `selectedEntities`. Reading only one would
+  // report "nothing selected" for half the ways a user picks rooms.
+  const selectedEntitiesSet = useViewerStore((s) => s.selectedEntitiesSet);
+  const selectedEntities = useViewerStore((s) => s.selectedEntities);
+  const setIfcZoneDescription = useViewerStore((s) => s.setIfcZoneDescription);
 
   const [note, setNote] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<number | null>(null);
@@ -73,6 +81,24 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [activeModelId, ifcZonesOf, mutationVersion],
   );
+
+  /**
+   * Everything currently selected, from whichever channel has it, deduplicated.
+   *
+   * A plain single click reaches neither multi-select field, so the primary
+   * selection is the last fallback.
+   */
+  const selectedRefs = useMemo(() => {
+    const byKey = new Map<string, { modelId: string; expressId: number }>();
+    for (const key of selectedEntitiesSet) byKey.set(key, stringToEntityRef(key));
+    for (const ref of selectedEntities) byKey.set(`${ref.modelId}:${ref.expressId}`, ref);
+    if (byKey.size === 0 && selectedEntity) {
+      byKey.set(`${selectedEntity.modelId}:${selectedEntity.expressId}`, selectedEntity);
+    }
+    return [...byKey.values()];
+  }, [selectedEntities, selectedEntitiesSet, selectedEntity]);
+
+  const selectionCount = selectedRefs.length;
 
   const active = parseIfcZoneKey(activeIfcZoneKey);
   const activeZone = active && active.modelId === activeModelId
@@ -110,7 +136,7 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
     }
 
     const type = typeOf(selectedEntity.modelId, selectedEntity.expressId);
-    if (type && !MEMBER_TYPES.has(type)) {
+    if (type && !ZONE_MEMBER_TYPES.has(type)) {
       setNote(`${type} kann nicht Mitglied einer Zone sein — IFC lässt nur Räume zu.`);
       return;
     }
@@ -124,6 +150,33 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
     }
     setNote(result.added.length > 0 ? 'Raum zugewiesen' : 'Raum entfernt');
   }, [activeModelId, activeZone, brushActive, paintIfcZone, selectedEntity, typeOf]);
+
+  /**
+   * Assign (or unassign) the whole current multi-selection in one go.
+   *
+   * The everyday alternative to the brush: rubber-band or Ctrl+click a floor's
+   * worth of rooms, then commit them all as one stroke — one undo entry, one
+   * relationship rewrite. Non-rooms in the selection are reported, not dropped
+   * in silence.
+   */
+  const applySelection = (mode: 'add' | 'remove') => {
+    if (!activeModelId || !activeZone) return;
+
+    if (selectedRefs.length === 0) {
+      setNote('Nichts ausgewählt.');
+      return;
+    }
+
+    const targets = eligibleZoneMembers(selectedRefs, activeModelId, typeOf);
+    const result = targets.eligible.length > 0
+      ? paintIfcZone(activeModelId, activeZone.expressId, targets.eligible, mode)
+      : null;
+
+    setNote(describeZoneTargets(
+      targets,
+      result ? { added: result.added.length, removed: result.removed.length } : null,
+    ) ?? 'Nichts geändert.');
+  };
 
   const handleCreate = () => {
     if (!activeModelId) return;
@@ -182,6 +235,31 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
               : 'Zuerst eine Zone wählen'}
           </TooltipContent>
         </Tooltip>
+      </div>
+
+      <div className="flex items-center gap-2 border-b px-3 py-2">
+        <MousePointerSquareDashed className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        <span className="flex-1 truncate text-[11px] text-muted-foreground">
+          Auswahl: {selectionCount === 0 ? 'keine' : selectionCount}
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-6 px-2 text-[11px]"
+          disabled={!activeZone || selectionCount === 0}
+          onClick={() => applySelection('add')}
+        >
+          Zuweisen
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-6 px-2 text-[11px]"
+          disabled={!activeZone || selectionCount === 0}
+          onClick={() => applySelection('remove')}
+        >
+          Entfernen
+        </Button>
       </div>
 
       <ScrollArea className="flex-1">
@@ -249,19 +327,43 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
                   </div>
 
                   {isActive && (
-                    <div className="mt-2 flex flex-wrap gap-1 pl-6">
-                      {LENS_PALETTE.map((colour) => (
-                        <button
-                          key={colour}
-                          type="button"
-                          title={colour}
-                          onClick={() => activeModelId && setIfcZoneColour(activeModelId, zone.expressId, colour)}
-                          className={`h-4 w-4 rounded-sm border ${
-                            zone.colour === colour ? 'ring-2 ring-offset-1 ring-foreground/50' : ''
-                          }`}
-                          style={{ background: colour }}
-                        />
-                      ))}
+                    <div className="mt-2 space-y-2 pl-6">
+                      <div className="flex flex-wrap gap-1">
+                        {LENS_PALETTE.map((colour) => (
+                          <button
+                            key={colour}
+                            type="button"
+                            title={colour}
+                            onClick={() => activeModelId && setIfcZoneColour(activeModelId, zone.expressId, colour)}
+                            className={`h-4 w-4 rounded-sm border ${
+                              zone.colour === colour ? 'ring-2 ring-offset-1 ring-foreground/50' : ''
+                            }`}
+                            style={{ background: colour }}
+                          />
+                        ))}
+                      </div>
+                      {/* Plain text only — the colour rides along in the same
+                          IFC attribute, but the author never sees the token.
+                          Keyed by the current text so an outside change (undo)
+                          re-seeds the field instead of holding a stale value. */}
+                      <Input
+                        key={`${zone.expressId}:${zone.description}`}
+                        defaultValue={zone.description}
+                        placeholder="Beschrieb (optional)"
+                        className="h-6 w-full text-[11px]"
+                        onBlur={(e) => {
+                          if (!activeModelId) return;
+                          if (e.target.value === zone.description) return;
+                          setIfcZoneDescription(activeModelId, zone.expressId, e.target.value);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') e.currentTarget.blur();
+                          if (e.key === 'Escape') {
+                            e.currentTarget.value = zone.description;
+                            e.currentTarget.blur();
+                          }
+                        }}
+                      />
                     </div>
                   )}
                 </li>
