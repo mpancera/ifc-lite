@@ -20,7 +20,7 @@ import {
 import { closePanelWindow } from '@/services/panel-windows';
 
 export type BottomPanel = 'script' | 'list' | 'gantt';
-export type RightPanel = 'bcf' | 'ids' | 'lens' | 'clash' | 'compare' | 'addElement' | 'zonePaint' | 'extensions';
+export type RightPanel = 'bcf' | 'ids' | 'lens' | 'clash' | 'compare' | 'addElement' | 'zonePaint' | 'zones' | 'extensions';
 export type WorkspacePanel = BottomPanel | RightPanel | string;
 
 /**
@@ -58,6 +58,8 @@ export function useWorkspacePanelControls() {
   const setLensPanelVisible = useViewerStore((state) => state.setLensPanelVisible);
   const extensionsPanelVisible = useViewerStore((state) => state.extensionsPanelVisible);
   const setExtensionsPanelVisible = useViewerStore((state) => state.setExtensionsPanelVisible);
+  const zonesPanelVisible = useViewerStore((state) => state.zonesPanelVisible);
+  const setZonesPanelVisible = useViewerStore((state) => state.setZonesPanelVisible);
   const scriptPanelVisible = useViewerStore((state) => state.scriptPanelVisible);
   const setScriptPanelVisible = useViewerStore((state) => state.setScriptPanelVisible);
   const ganttPanelVisible = useViewerStore((state) => state.ganttPanelVisible);
@@ -121,6 +123,7 @@ export function useWorkspacePanelControls() {
     const nextClashVisible = panel === 'clash' ? !clashPanelVisible : false;
     const nextCompareVisible = panel === 'compare' ? !comparePanelVisible : false;
     const nextExtensionsVisible = panel === 'extensions' ? !extensionsPanelVisible : false;
+    const nextZonesVisible = panel === 'zones' ? !zonesPanelVisible : false;
     // A tool panel is "open" when its tool is active. Toggling any panel closes
     // whichever tool panel was running, so the right slot stays single-tenant.
     const activeToolPanel = isToolPanel(activeTool) ? activeTool : null;
@@ -132,6 +135,7 @@ export function useWorkspacePanelControls() {
     setClashPanelVisible(nextClashVisible);
     setComparePanelVisible(nextCompareVisible);
     setExtensionsPanelVisible(nextExtensionsVisible);
+    setZonesPanelVisible(nextZonesVisible);
     // Keep the float + window channels in sync (#1200/#1201/#1208): toggling a
     // workspace panel from the toolbar re-docks it if it was floating or popped
     // out, instead of leaving an orphaned floating panel or OS window.
@@ -146,7 +150,7 @@ export function useWorkspacePanelControls() {
       setActiveTool('select');
     }
 
-    if (nextBcfVisible || nextIdsVisible || nextLensVisible || nextClashVisible || nextCompareVisible || nextExtensionsVisible || nextToolPanel) {
+    if (nextBcfVisible || nextIdsVisible || nextLensVisible || nextClashVisible || nextCompareVisible || nextExtensionsVisible || nextZonesVisible || nextToolPanel) {
       setRightPanelCollapsed(false);
     }
   }, [
@@ -156,6 +160,7 @@ export function useWorkspacePanelControls() {
     clashPanelVisible,
     comparePanelVisible,
     extensionsPanelVisible,
+    zonesPanelVisible,
     idsPanelVisible,
     lensPanelVisible,
     setActiveTool,
@@ -198,6 +203,7 @@ export function useWorkspacePanelControls() {
     setClashPanelVisible(false);
     setComparePanelVisible(false);
     setExtensionsPanelVisible(false);
+    setZonesPanelVisible(false);
     // The right slot is single-tenant: when an analysis extension takes
     // it over, a tool panel must release it too, otherwise its 3D click
     // handler keeps writing to the model behind the extension panel.
@@ -214,6 +220,7 @@ export function useWorkspacePanelControls() {
     setClashPanelVisible,
     setComparePanelVisible,
     setExtensionsPanelVisible,
+    setZonesPanelVisible,
     setGanttPanelVisible,
     setIdsPanelVisible,
     setLensPanelVisible,
@@ -233,6 +240,7 @@ export function useWorkspacePanelControls() {
     if (clashPanelVisible) panels.add('clash');
     if (comparePanelVisible) panels.add('compare');
     if (extensionsPanelVisible) panels.add('extensions');
+    if (zonesPanelVisible) panels.add('zones');
     if (isToolPanel(activeTool)) panels.add(activeTool);
     if (layersPanelVisible) panels.add('layers');
     if (collabPanelVisible) panels.add('collab');
@@ -247,6 +255,7 @@ export function useWorkspacePanelControls() {
     clashPanelVisible,
     comparePanelVisible,
     extensionsPanelVisible,
+    zonesPanelVisible,
     ganttPanelVisible,
     idsPanelVisible,
     lensPanelVisible,
@@ -266,6 +275,7 @@ export function useWorkspacePanelControls() {
     if (activeWorkspacePanels.has('clash')) return 'Clash Detection';
     if (activeWorkspacePanels.has('compare')) return 'Compare Models';
     if (activeWorkspacePanels.has('extensions')) return 'Extensions';
+    if (activeWorkspacePanels.has('zones')) return 'Compartments';
     if (activeWorkspacePanels.has('addElement')) return 'Add Element';
     if (activeWorkspacePanels.has('zonePaint')) return 'Zones';
     if (activeWorkspacePanels.has('layers')) return 'Layer Stack';

@@ -104,9 +104,15 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   // Alt+1..0 mapping stays intact (no Alt shortcut). The activity bar only
   // surfaces it while a federated layer stack is loaded.
   { id: 'layers', title: 'Layer stack', short: 'Layers', Icon: LayersIcon, group: 'review', region: 'side' },
-  // Location zones (construction sections / takt areas, #1810). APPENDED so
-  // the frozen Alt+1..0 mapping stays intact (no Alt shortcut).
-  { id: 'zones', title: 'Location zones', short: 'Zones', Icon: Box, group: 'review', region: 'side' },
+  // Compartments — spatial sections with their own geometry: fire
+  // compartments, takt areas, construction phases (#1810). APPENDED so the
+  // frozen Alt+1..0 mapping stays intact (no Alt shortcut).
+  //
+  // The id stays `zones` on purpose: it is persisted in the sidebar layout and
+  // in exported flavors, so renaming it would silently drop a user's rail
+  // order. The LABEL is what changed — "Location zones" said nothing about
+  // what the boxes are for, and collided with the IfcZone tool next to it.
+  { id: 'zones', title: 'Compartments', short: 'Sections', Icon: Box, group: 'review', region: 'side' },
 ];
 
 /** The bottom-strip panel ids, mapped to their store visibility flag + setter

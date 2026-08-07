@@ -1216,10 +1216,10 @@ const CONDITION_SOURCES: { source: ConditionSource; label: string }[] = [
   { source: 'model', label: 'Model' },
   // Two different things that both want to be called "zone". `group` is IFC
   // membership (IfcZone / IfcSystem, exported with the file); `zone` is the
-  // viewer's drawn boxes, which never leave the session. The labels have to
-  // say which, or picking one is a coin toss.
+  // Compartments tool's drawn boxes, which today never leave the session. The
+  // labels have to say which, or picking one is a coin toss.
   { source: 'group', label: 'Zone / System (IFC)' },
-  { source: 'zone', label: 'Location zone' },
+  { source: 'zone', label: 'Compartment (box)' },
 ];
 
 const OPERATOR_LABEL: Record<ConditionOperator, string> = {

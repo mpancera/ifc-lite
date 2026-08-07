@@ -271,7 +271,9 @@ export function ZonesPanel({ onClose }: ZonesPanelProps) {
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 border-b p-3">
         <Box className="h-4 w-4 text-amber-600" />
-        <span className="font-medium text-sm flex-1">Location zones</span>
+        {/* Ribbon label English, panel title German — the same split the
+            IfcZone tool uses ("Zones" / "Zonen"). */}
+        <span className="font-medium text-sm flex-1">Abschnitte</span>
         {onClose && (
           <Button variant="ghost" size="icon" className="h-6 w-6" onClick={handleClose}>
             <X className="h-3.5 w-3.5" />

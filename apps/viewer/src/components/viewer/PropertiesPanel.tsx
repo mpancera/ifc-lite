@@ -1569,14 +1569,16 @@ export function PropertiesPanel() {
         </Collapsible>
       )}
 
-      {/* Location zones (issue #1810) — which user-defined zone box(es) this
-          element falls in, per zone set. Read-only: editing zones happens in
-          the Zones panel, not here. */}
+      {/* Compartments (issue #1810) — which drawn box(es) this element falls
+          in, per set. Read-only: editing happens in the Compartments panel.
+          Labelled "Abschnitte", NOT "Zones": the Relationships card below
+          already shows IfcZone membership, and two cards called Zones showing
+          different things is how a reader stops trusting either. */}
       {zoneMembership && (
         <Collapsible defaultOpen className="border-b">
           <CollapsibleTrigger className="flex items-center gap-2 w-full p-3 hover:bg-muted/50 text-left">
             <Box className="h-4 w-4 text-amber-600" />
-            <span className="font-medium text-sm">Zones</span>
+            <span className="font-medium text-sm">Abschnitte</span>
             <span className="text-xs text-muted-foreground ml-auto">{zoneMembership.length}</span>
           </CollapsibleTrigger>
           <CollapsibleContent>

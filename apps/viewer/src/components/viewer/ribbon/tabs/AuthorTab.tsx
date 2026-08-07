@@ -9,7 +9,7 @@
  * toolbar (viewer/commenter roles cannot unlock authoring).
  */
 
-import { Brush, FileDiff, Library, Wand2 } from 'lucide-react';
+import { Box, Brush, FileDiff, Library, Wand2 } from 'lucide-react';
 import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, List, Select, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -135,6 +135,19 @@ export function AuthorTab() {
           activeClassName={EDIT_ACTIVE_CLASS}
           disabled={!canEditInSession || !ifcDataStore}
           onClick={() => handleToggleRightPanel('zonePaint')}
+        />
+        {/* Compartments are the geometric counterpart of Zones: a zone groups
+            the architect's rooms, a compartment carries its own body for the
+            cases where the zone boundary does not follow room boundaries.
+            Side by side, because choosing between them IS the decision. */}
+        <RibbonLargeButton
+          icon={Box}
+          label="Compartments"
+          tooltip="Abschnitte zeichnen und Bauteile darin klassifizieren"
+          active={activeWorkspacePanels.has('zones')}
+          activeClassName={EDIT_ACTIVE_CLASS}
+          disabled={!ifcDataStore}
+          onClick={() => handleToggleRightPanel('zones')}
         />
         <ProductLibraryPanel
           trigger={
