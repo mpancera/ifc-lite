@@ -245,3 +245,83 @@ export function extractLengthUnitScale(
   // No length unit found, default to meters
   return 1.0;
 }
+
+/**
+ * NAME the file's length unit, or report that it cannot be determined.
+ *
+ * The companion to {@link extractLengthUnitScale}, and deliberately a separate
+ * function with the opposite disposition. That one is LENIENT: it falls back to
+ * 1.0 so geometry still draws, which is right when the alternative is a blank
+ * screen. Some callers need the opposite — deriving a building's storey
+ * elevations from a file whose unit is unknown produces numbers that are wrong
+ * by a factor of 100 and look entirely plausible, which is the most expensive
+ * kind of silent error. Those callers ask here and refuse when the answer is
+ * `null`.
+ *
+ * Returns a canonical, human-readable name (`'MILLI.METRE'`, `'METRE'`,
+ * `'FOOT'`) — the same string worth recording alongside exported values so a
+ * reader can tell what was assumed.
+ *
+ * Deliberately does NOT compute a scale: that stays single-sourced in
+ * {@link extractLengthUnitScale}, so the two can never disagree.
+ */
+export function describeLengthUnit(
+  source: Uint8Array,
+  entityIndex: { byId: { get(expressId: number): EntityRef | undefined }; byType: Map<string, number[]> },
+): { name: string } | null {
+  const extractor = new EntityExtractor(source);
+
+  const projectIds = entityIndex.byType.get('IFCPROJECT') || [];
+  if (projectIds.length === 0) return null;
+  const projectRef = entityIndex.byId.get(projectIds[0]);
+  if (!projectRef) return null;
+  const project = extractor.extractEntity(projectRef);
+  // IFCPROJECT[8] = UnitsInContext.
+  const unitsRef = project?.attributes?.[8];
+  if (typeof unitsRef !== 'number') return null;
+
+  const assignmentRef = entityIndex.byId.get(unitsRef);
+  if (!assignmentRef) return null;
+  const assignment = extractor.extractEntity(assignmentRef);
+  if (!assignment || assignment.type.toUpperCase() !== 'IFCUNITASSIGNMENT') return null;
+
+  const units = assignment.attributes?.[0];
+  if (!Array.isArray(units)) return null;
+
+  for (const ref of units) {
+    if (typeof ref !== 'number') continue;
+    const unitRef = entityIndex.byId.get(ref);
+    if (!unitRef) continue;
+    const unit = extractor.extractEntity(unitRef);
+    if (!unit) continue;
+
+    const attrs = unit.attributes || [];
+    const isLength = typeof attrs[1] === 'string'
+      && attrs[1].replace(/\./g, '').toUpperCase() === 'LENGTHUNIT';
+    if (!isLength) continue;
+
+    const type = unit.type.toUpperCase();
+    if (type === 'IFCSIUNIT') {
+      // [2] Prefix, [3] Name. An SI unit with an unrecognised prefix is NOT
+      // metres — it is a file we do not understand, and saying so is the point.
+      const prefixRaw = attrs[2];
+      const name = typeof attrs[3] === 'string' ? attrs[3].replace(/\./g, '').toUpperCase() : 'METRE';
+      if (prefixRaw === null || prefixRaw === undefined || prefixRaw === '$') return { name };
+
+      const prefix = typeof prefixRaw === 'string' ? prefixRaw.replace(/\./g, '').toUpperCase() : '';
+      if (SI_PREFIX_MULTIPLIERS[prefix] === undefined) return null;
+      return { name: `${prefix}.${name}` };
+    }
+
+    if (type === 'IFCCONVERSIONBASEDUNIT') {
+      // [2] Name, e.g. 'FOOT'. Quoted in the STEP text, hence the strip.
+      const raw = attrs[2];
+      if (typeof raw !== 'string') return null;
+      const name = raw.replace(/'/g, '').trim().toUpperCase();
+      return name.length > 0 ? { name } : null;
+    }
+  }
+
+  // A unit assignment that names no length unit at all.
+  return null;
+}
