@@ -122,7 +122,11 @@ export interface LensDataProvider {
    * source to colour or isolate by zone membership. Optional — the engine skips
    * group criteria when not implemented (#1075).
    */
-  getEntityGroups?(globalId: number): ReadonlyArray<{ id: number; name?: string; type: string; objectType?: string }>;
+  getEntityGroups?(
+    globalId: number,
+    /** {@link AutoColorSpec.groupFilter}, passed straight through. */
+    filter?: string,
+  ): ReadonlyArray<{ id: number; name?: string; type: string; objectType?: string }>;
 
   /**
    * A colour the auto-colour VALUE dictates for itself, overriding the palette.
@@ -218,6 +222,21 @@ export interface AutoColorSpec {
   psetName?: string;
   /** Attribute, property, or quantity name */
   propertyName?: string;
+  /**
+   * For source `group`: narrow the memberships to one KIND of grouping.
+   *
+   * A room belongs to one zone per subject — one fire compartment, one
+   * ventilation section, one construction phase — and legitimately to several
+   * zones overall. Colouring by "any zone" therefore produces a legend with
+   * more entries than the picture can show, since an element renders once.
+   * Narrowing makes the two agree again.
+   *
+   * The string is OPAQUE to the engine: it is handed to
+   * {@link LensDataProvider.getEntityGroups} and means whatever that provider
+   * decides. The viewer reads it as a zone-theme id. Empty or absent = every
+   * grouping, which is the previous behaviour.
+   */
+  groupFilter?: string;
 }
 
 /**

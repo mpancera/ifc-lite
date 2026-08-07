@@ -79,6 +79,7 @@ function isImportableAutoColor(item: unknown): item is AutoColorSpec {
     || !(AUTO_COLOR_SOURCES as readonly string[]).includes(item.source)) return false;
   if (item.psetName !== undefined && typeof item.psetName !== 'string') return false;
   if (item.propertyName !== undefined && typeof item.propertyName !== 'string') return false;
+  if (item.groupFilter !== undefined && typeof item.groupFilter !== 'string') return false;
   return true;
 }
 

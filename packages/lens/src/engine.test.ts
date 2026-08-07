@@ -789,3 +789,68 @@ describe('groupBucketValue', () => {
     expect(result.legend[0].name).toBe(groupBucketValue({ id: 100, type: 'IfcZone' }));
   });
 });
+
+describe('evaluateAutoColorLens — narrowing By Zone to one theme', () => {
+  /** A provider whose groups honour the filter, as the viewer's does. */
+  function themedProvider(
+    entities: Array<{ id: number; groups: Array<{ id: number; name: string; type: string; theme: string }> }>,
+  ): LensDataProvider {
+    const byId = new Map(entities.map((e) => [e.id, e.groups]));
+    return {
+      forEachEntity: (cb) => { for (const e of entities) cb(e.id, 'm'); },
+      getEntityType: () => 'IfcSpace',
+      getPropertySets: () => [],
+      getEntityGroups: (globalId, filter) => {
+        const groups = byId.get(globalId) ?? [];
+        return (filter ? groups.filter((g) => g.theme === filter) : groups)
+          .map(({ id, name, type }) => ({ id, name, type }));
+      },
+    } as unknown as LensDataProvider;
+  }
+
+  const rooms = () => themedProvider([
+    { id: 1, groups: [
+      { id: 100, name: 'BA 1', type: 'IfcZone', theme: 'fire-compartment' },
+      { id: 200, name: 'AZ-A', type: 'IfcZone', theme: 'fire-trigger' },
+    ] },
+    { id: 2, groups: [
+      { id: 101, name: 'BA 2', type: 'IfcZone', theme: 'fire-compartment' },
+      { id: 200, name: 'AZ-A', type: 'IfcZone', theme: 'fire-trigger' },
+    ] },
+  ]);
+
+  it('shows every membership when no theme is chosen', () => {
+    const result = evaluateAutoColorLens({ source: 'group' }, rooms());
+
+    expect(result.legend.map((e) => e.name).sort()).toEqual(['AZ-A', 'BA 1', 'BA 2']);
+  });
+
+  it('leaves one zone per room once a theme is chosen', () => {
+    // The point: three legend entries but only two colours could ever show,
+    // because each room renders once. Narrowed, legend and picture agree.
+    const result = evaluateAutoColorLens(
+      { source: 'group', groupFilter: 'fire-compartment' }, rooms(),
+    );
+
+    expect(result.legend.map((e) => e.name).sort()).toEqual(['BA 1', 'BA 2']);
+    expect(result.legend.every((e) => e.count === 1)).toBe(true);
+  });
+
+  it('narrows to the other theme just as well', () => {
+    const result = evaluateAutoColorLens(
+      { source: 'group', groupFilter: 'fire-trigger' }, rooms(),
+    );
+
+    expect(result.legend.map((e) => e.name)).toEqual(['AZ-A']);
+    expect(result.legend[0].count).toBe(2);
+  });
+
+  it('ghosts everything when no room carries the chosen theme', () => {
+    const result = evaluateAutoColorLens(
+      { source: 'group', groupFilter: 'ventilation' }, rooms(),
+    );
+
+    expect(result.legend).toEqual([]);
+    expect(result.colorMap.get(1)).toEqual(GHOST_COLOR);
+  });
+});

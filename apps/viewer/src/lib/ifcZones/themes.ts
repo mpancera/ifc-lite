@@ -145,16 +145,6 @@ export const ZONE_THEMES: readonly ZoneTheme[] = [
     zoneObjectType: 'ThermalZone',
     spatialPredefinedType: 'THERMAL', spatialObjectType: null,
   },
-  {
-    id: 'cleanroom', label: 'Reinraum (GMP)',
-    zoneObjectType: 'Cleanroom',
-    spatialPredefinedType: 'THERMAL', spatialObjectType: 'Cleanroom',
-  },
-  {
-    id: 'smoke-pressurisation', label: 'RDA-Druckzonen',
-    zoneObjectType: 'SmokecontrolPressurisation',
-    spatialPredefinedType: 'THERMAL', spatialObjectType: 'SmokecontrolPressurisation',
-  },
 
   {
     id: 'transport', label: 'Transportabschnitt',
@@ -195,6 +185,20 @@ export const ZONE_THEMES: readonly ZoneTheme[] = [
     id: 'running-duct', label: 'Leitungszone horizontal',
     zoneObjectType: 'RunningDuct',
     spatialPredefinedType: 'VENTILATION', spatialObjectType: 'RunningDuct',
+  },
+  {
+    // A cleanroom class is reached through air changes and filtration, so it
+    // belongs to the ventilation family rather than the thermal one.
+    id: 'cleanroom', label: 'Reinraum (GMP)',
+    zoneObjectType: 'Cleanroom',
+    spatialPredefinedType: 'VENTILATION', spatialObjectType: 'Cleanroom',
+  },
+  {
+    // Smoke-control pressurisation is ventilation equipment serving a fire
+    // purpose; the mechanism decides the family.
+    id: 'smoke-pressurisation', label: 'RDA-Druckzonen',
+    zoneObjectType: 'SmokecontrolPressurisation',
+    spatialPredefinedType: 'VENTILATION', spatialObjectType: 'SmokecontrolPressurisation',
   },
 
   {

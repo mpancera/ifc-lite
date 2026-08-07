@@ -25,6 +25,7 @@ import {
 } from '@ifc-lite/parser';
 import { resolveEntityPredefinedType } from '@/lib/entity-predefined-type';
 import { readZones } from '@/lib/ifcZones/membership';
+import { themeOfZone } from '@/lib/ifcZones/themes';
 import { authoredEntities } from '@/lib/mutations/authoredEntities';
 import { groupBucketValue } from '@ifc-lite/lens';
 import { resolveOverlayDefiningTypeId } from '@/lib/mutations/overlayTypeLink';
@@ -474,7 +475,10 @@ export function createLensDataProvider(
       return entry?.name ?? modelId;
     },
 
-    getEntityGroups(globalId: number): ReadonlyArray<{ id: number; name?: string; type: string; objectType?: string }> {
+    getEntityGroups(
+      globalId: number,
+      filter?: string,
+    ): ReadonlyArray<{ id: number; name?: string; type: string; objectType?: string }> {
       const resolved = resolveGlobalId(globalId, entries);
       if (!resolved) return [];
       const store = resolved.entry.ifcDataStore;
@@ -502,7 +506,12 @@ export function createLensDataProvider(
         const objectType = store.entities?.getObjectType?.(gid);
         out.push({ id: gid, name: name || undefined, type, objectType: objectType || undefined });
       }
-      return out;
+      if (!filter) return out;
+      // The filter is a zone-theme id: keep only the zones ABOUT that subject,
+      // so "one zone per room" holds again and the legend matches the picture.
+      // A grouping whose ObjectType follows a convention we do not know is
+      // dropped rather than guessed into the wrong theme.
+      return out.filter((g) => themeOfZone(g.objectType)?.id === filter);
     },
 
     /**

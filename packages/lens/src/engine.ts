@@ -310,7 +310,7 @@ function extractAutoColorValues(
   }
 
   if (spec.source === 'group' && provider.getEntityGroups) {
-    const groups = provider.getEntityGroups(globalId);
+    const groups = provider.getEntityGroups(globalId, spec.groupFilter);
     if (groups && groups.length > 0) {
       // Zones before the rest, so the element's colour comes from a zone when
       // it has one — the picture is "by zone", not "by whichever grouping the
@@ -400,7 +400,7 @@ function extractAutoColorValue(
 
     case 'group': {
       if (!provider.getEntityGroups) return undefined;
-      const groups = provider.getEntityGroups(globalId);
+      const groups = provider.getEntityGroups(globalId, spec.groupFilter);
       if (!groups || groups.length === 0) return undefined;
       // Prefer an IfcZone membership so multi-group entities (IfcZone +
       // IfcGroup/IfcSystem) bucket by zone deterministically, not by whichever

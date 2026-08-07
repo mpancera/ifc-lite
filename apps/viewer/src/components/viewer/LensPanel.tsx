@@ -25,6 +25,7 @@ import { cn } from '@/lib/utils';
 import { downloadFile } from '@/lib/export/download';
 import { tourAnchor, TOUR_ANCHORS, lensCardAnchor } from '@/lib/tours/anchors';
 import { useViewerStore } from '@/store';
+import { ZONE_THEMES } from '@/lib/ifcZones/themes';
 import { useLens } from '@/hooks/useLens';
 import { createLensDataProvider } from '@/lib/lens';
 import { buildAutoColorLensToSave, moveItem } from './lens-editor-utils';
@@ -940,6 +941,7 @@ function AutoColorEditor({
   const [source, setSource] = useState<AutoColorSpec['source']>(initial.autoColor.source);
   const [psetName, setPsetName] = useState(initial.autoColor.psetName ?? '');
   const [propertyName, setPropertyName] = useState(initial.autoColor.propertyName ?? '');
+  const [groupFilter, setGroupFilter] = useState(initial.autoColor.groupFilter ?? '');
 
   const needsPset = source === 'property' || source === 'quantity' || source === 'classification';
   const needsPropertyName = source === 'attribute' || source === 'property' || source === 'quantity';
@@ -981,6 +983,7 @@ function AutoColorEditor({
     const autoColor: AutoColorSpec = { source };
     if (needsPset) autoColor.psetName = psetName.trim();
     if (needsPropertyName) autoColor.propertyName = propertyName.trim();
+    if (source === 'group' && groupFilter) autoColor.groupFilter = groupFilter;
 
     onSave(buildAutoColorLensToSave(
       initial,
@@ -1034,6 +1037,27 @@ function AutoColorEditor({
             ))}
           </select>
         </div>
+
+        {/* A room belongs to one zone PER THEME and to several zones overall, so
+            colouring by "any zone" yields more legend entries than the picture
+            can show. Narrowing to one theme makes the two agree. */}
+        {source === 'group' && (
+          <div className="flex items-center gap-1.5">
+            <label className="text-[10px] uppercase tracking-wider text-zinc-500 w-[50px]">
+              Thema
+            </label>
+            <select
+              value={groupFilter}
+              onChange={(e) => setGroupFilter(e.target.value)}
+              className={cn(selectClass, 'flex-1')}
+            >
+              <option value="">Alle Zonen und Systeme</option>
+              {ZONE_THEMES.map((t) => (
+                <option key={t.id} value={t.id}>{t.label}</option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {needsPset && (
           <div className="flex items-center gap-1.5">
