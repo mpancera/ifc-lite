@@ -7,10 +7,15 @@
  *
  * `MutablePropertyView.getNewEntities()` returns each entity with the
  * attributes it was created with. Later edits do not go back into that record —
- * `setPositionalAttribute` keeps its overrides in a separate map. So an entity
+ * they live in two OTHER maps: `setPositionalAttribute` writes by index,
+ * `setAttribute` writes by name (`'Description'`, `'Name'`, …). So an entity
  * that was created and then edited reads back stale from `getNewEntities()`,
- * while the STEP exporter (which merges both) writes the edited values. A
+ * while the STEP exporter (which merges all three) writes the edited values. A
  * reader that skips the merge therefore disagrees with the file it exports.
+ *
+ * Both edit channels are real and in daily use: the zone panel writes
+ * positionally, the properties panel and list cells write by name. Merging only
+ * one is how a renamed zone shows its old name in half the UI.
  *
  * `placement-core` already merges the two for the single entity it walks; this
  * does the same for the whole set, which is what any feature that scans
@@ -21,6 +26,14 @@
  */
 
 import type { MutablePropertyView } from '@ifc-lite/mutations';
+
+/**
+ * Where each named `IfcRoot` attribute sits in the STEP argument list.
+ * `Tag` is `IfcElement`'s, at 7 — the same table the list overlay uses.
+ */
+const ATTR_INDEX: Readonly<Record<string, number>> = {
+  GlobalId: 0, Name: 2, Description: 3, ObjectType: 4, Tag: 7,
+};
 
 /** An overlay entity with its current attribute values. */
 export interface AuthoredEntity {
@@ -40,14 +53,25 @@ export function authoredEntities(view: MutablePropertyView): AuthoredEntity[] {
   const out: AuthoredEntity[] = [];
 
   for (const entity of view.getNewEntities()) {
-    const edits = view.getPositionalMutationsForEntity(entity.expressId);
-    if (!edits || edits.size === 0) {
+    const positional = view.getPositionalMutationsForEntity(entity.expressId);
+    const named = view.getAttributeMutationsForEntity(entity.expressId);
+    if ((!positional || positional.size === 0) && named.length === 0) {
       out.push(entity);
       continue;
     }
 
     const attributes = entity.attributes.slice();
-    for (const [index, value] of edits) attributes[index] = value;
+    if (positional) {
+      for (const [index, value] of positional) attributes[index] = value;
+    }
+    // Named edits last: they are the later channel in every flow that uses
+    // both (author a zone positionally, then retype its Description in a
+    // list cell), and an attribute the caller named explicitly is the more
+    // specific statement of intent.
+    for (const { name, value } of named) {
+      const index = ATTR_INDEX[name];
+      if (index !== undefined) attributes[index] = value;
+    }
     out.push({ expressId: entity.expressId, type: entity.type, attributes });
   }
 

@@ -43,6 +43,7 @@ import {
 } from '@/lib/lists';
 import type { ListDefinition, ListResult, ListDataProvider, ListGrouping } from '@/lib/lists';
 import { withMutationOverlay } from '@/lib/lists/mutationOverlayProvider';
+import { GROUP_ENTITY_TYPES } from '@/components/viewer/hierarchy/treeDataBuilder';
 import { mergeResultColumns } from '@/lib/lists/merge-result-columns';
 import { extractProjectUnits, ProjectUnits, type IfcDataStore } from '@ifc-lite/parser';
 import { ListBuilder } from './ListBuilder';
@@ -53,6 +54,17 @@ interface ListPanelProps {
 }
 
 type PanelView = 'library' | 'builder' | 'results';
+
+/**
+ * Authored classes that belong in a list even though they have no storey.
+ *
+ * The group family (zones, systems) plus `IfcSpatialZone`, which our builder
+ * deliberately does NOT aggregate into a storey — a compartment spans them.
+ */
+const NON_SPATIAL_ROW_TYPES: ReadonlySet<string> = new Set([
+  ...GROUP_ENTITY_TYPES,
+  'IfcSpatialZone',
+]);
 
 export function ListPanel({ onClose }: ListPanelProps) {
   const { ifcDataStore, models } = useIfc();
@@ -123,9 +135,16 @@ export function ListPanel({ onClose }: ListPanelProps) {
     // Authoring an element also creates its placement/profile/solid/shape-rep
     // entities. Only the product itself is registered against a storey, so
     // that registry is the row filter — the plumbing must not become rows.
+    //
+    // On its own, though, it also excludes everything that legitimately has no
+    // storey: an IfcZone groups rooms and sits nowhere in space, so a zone
+    // authored this session never became a row. The class check restores those
+    // without letting the plumbing back in (a cartesian point is not a group).
     const overlayFor = (modelId: string, store: IfcDataStore, provider: ListDataProvider) =>
       withMutationOverlay(provider, mutationViews.get(modelId), {
-        isRowEntity: (expressId) => store.spatialHierarchy?.elementToStorey.has(expressId) ?? false,
+        isRowEntity: (expressId, ifcType) =>
+          (store.spatialHierarchy?.elementToStorey.has(expressId) ?? false)
+          || NON_SPATIAL_ROW_TYPES.has(ifcType),
       });
     if (models.size > 0) {
       for (const [modelId, model] of models) {

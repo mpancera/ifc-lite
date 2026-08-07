@@ -258,6 +258,34 @@ export function createListDataProvider(
       }));
     },
 
+    /**
+     * IFC group memberships (`IfcRelAssignsToGroup`, inverse) — the zones and
+     * systems this entity belongs to.
+     *
+     * Reads the PARSED graph only. Zones authored this session live in the
+     * mutation overlay, and `withMutationOverlay` merges them on top; keeping
+     * that split here means the adapter stays a plain view of the file.
+     */
+    getEntityGroupNames(entityId: number): Array<{ name: string; ifcType: string }> {
+      const groupIds = store.relationships?.getRelated(
+        entityId, RelationshipType.AssignsToGroup, 'inverse',
+      ) ?? [];
+
+      const out: Array<{ name: string; ifcType: string }> = [];
+      for (const groupId of groupIds) {
+        const ifcType = store.entities.getTypeName?.(groupId)
+          || store.entityIndex?.byId.get(groupId)?.type
+          || 'Unknown';
+        // ObjectType stands in for unnamed systems, exactly as the hierarchy's
+        // group rows and the lens legend do.
+        const name = store.entities.getName(groupId)
+          || store.entities.getObjectType?.(groupId)
+          || `${ifcType} #${groupId}`;
+        out.push({ name, ifcType });
+      }
+      return out;
+    },
+
     getStoreyName(entityId: number): string {
       const hierarchy = store.spatialHierarchy;
       if (!hierarchy) return '';

@@ -56,6 +56,7 @@ import { getEntityBounds, getEntityCenter } from '@/utils/viewportUtils';
 import type { CatalogEntry } from '@/lib/catalog';
 import { disciplineSystemName, findDisciplineSystem, normalizeRoleId } from '@/lib/roles/disciplineRoles';
 import { mayCreateEntities, mayEditEntity, type EditPermission } from '@/lib/roles/roleGuard';
+import { preserveZoneColour } from '@/lib/ifcZones/zoneDisplay';
 import { resolveSpaceForPlacement } from '@/lib/relationships/spaceLookup';
 import { overlayContainerOf } from '@/lib/persistence/storeAdapter';
 import { applySmartPropertyRules } from '@/lib/smartProperties/applyRules';
@@ -773,6 +774,39 @@ function syncTypeOverride(get: () => ViewerState, modelId: string, entityId: num
   const dataStore = get().models.get(modelId)?.ifcDataStore ?? get().ifcDataStore;
   dataStore?.entities?.setTypeOverride?.(entityId, newType);
 }
+
+/** True when this entity is an `IfcZone` — authored this session or in the file. */
+function zoneTypeOf(get: () => ViewerState, modelId: string, entityId: number): boolean {
+  const authored = get().mutationViews.get(modelId)?.getNewEntity(entityId)?.type;
+  if (authored) return authored === 'IfcZone';
+  const store = get().models.get(modelId)?.ifcDataStore ?? get().ifcDataStore;
+  return store?.entities?.getTypeName?.(entityId) === 'IfcZone';
+}
+
+/**
+ * The entity's Description as it currently stands, merging the overlay the
+ * same way every reader does: a named edit wins, then a positional one, then
+ * the authored record, then the parsed file.
+ */
+function currentDescription(
+  get: () => ViewerState, modelId: string, entityId: number,
+): string | null {
+  const view = get().mutationViews.get(modelId);
+  if (view) {
+    for (const m of view.getAttributeMutationsForEntity(entityId)) {
+      if (m.name === 'Description') return m.value;
+    }
+    const positional = view.getPositionalMutationsForEntity(entityId)?.get(DESCRIPTION_INDEX);
+    if (typeof positional === 'string') return positional;
+    const authored = view.getNewEntity(entityId)?.attributes?.[DESCRIPTION_INDEX];
+    if (typeof authored === 'string') return authored;
+  }
+  const store = get().models.get(modelId)?.ifcDataStore ?? get().ifcDataStore;
+  return store?.entities?.getDescription?.(entityId) ?? null;
+}
+
+/** `Description` sits at index 3 on every `IfcRoot` subtype. */
+const DESCRIPTION_INDEX = 3;
 
 /**
  * Exported for sibling slices that author IFC (zones, and whatever comes next).
@@ -1492,7 +1526,16 @@ export const createMutationSlice: StateCreator<
     const view = get().mutationViews.get(modelId);
     if (!view) return null;
 
-    const mutation = view.setAttribute(entityId, attrName, value, oldValue);
+    // A zone's colour is stored as a token inside its Description, which is
+    // also a field the author can retype anywhere Description is editable —
+    // a list cell, the properties panel. Rewriting the sentence would take the
+    // colour with it, silently. Guard here rather than at each write site, so
+    // no future editing surface has to remember.
+    const written = attrName === 'Description' && zoneTypeOf(get, modelId, entityId)
+      ? preserveZoneColour(value, currentDescription(get, modelId, entityId))
+      : value;
+
+    const mutation = view.setAttribute(entityId, attrName, written, oldValue);
 
     set((state) => {
       const newUndoStacks = new Map(state.undoStacks);

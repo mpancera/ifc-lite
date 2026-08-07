@@ -4,7 +4,9 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatZoneDescription, parseZoneDescription, zoneColourOf } from './zoneDisplay.js';
+import {
+  formatZoneDescription, parseZoneDescription, preserveZoneColour, zoneColourOf,
+} from './zoneDisplay.js';
 
 describe('parseZoneDescription', () => {
   it('reads the colour and hands back the author text without it', () => {
@@ -122,5 +124,41 @@ describe('zoneColourOf', () => {
   it('is the short way to the colour', () => {
     assert.equal(zoneColourOf('Text ZoneDisplay=#472A24'), '#472A24');
     assert.equal(zoneColourOf('Text'), null);
+  });
+});
+
+describe('preserveZoneColour', () => {
+  it('keeps the colour when the author rewrites the text', () => {
+    // The data-loss case: retyping a Description in a list cell or the
+    // properties panel would otherwise drop the token with the old sentence.
+    assert.equal(
+      preserveZoneColour('Ostflügel Nord', 'Ostflügel ZoneDisplay=#472A24'),
+      'Ostflügel Nord ZoneDisplay=#472A24',
+    );
+  });
+
+  it('keeps the colour when the author clears the text', () => {
+    assert.equal(preserveZoneColour('', 'Ostflügel ZoneDisplay=#472A24'), 'ZoneDisplay=#472A24');
+  });
+
+  it('leaves a description that never had a colour alone', () => {
+    assert.equal(preserveZoneColour('neu', 'alt'), 'neu');
+    assert.equal(preserveZoneColour('neu', null), 'neu');
+  });
+
+  it('lets a hand-typed token win, so editing the colour by hand still works', () => {
+    assert.equal(
+      preserveZoneColour('Text ZoneDisplay=#00FF00', 'Text ZoneDisplay=#472A24'),
+      'Text ZoneDisplay=#00FF00',
+    );
+  });
+
+  it('does not add a second token when the text already carries the same one', () => {
+    const same = 'Text ZoneDisplay=#472A24';
+    assert.equal(preserveZoneColour(same, same), same);
+  });
+
+  it('normalises a re-attached colour', () => {
+    assert.equal(preserveZoneColour('neu', 'ZoneDisplay=#f00'), 'neu ZoneDisplay=#FF0000');
   });
 });

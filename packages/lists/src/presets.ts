@@ -31,6 +31,11 @@ function attr(name: string): ListDefinition['columns'][0] {
   return { id: `attr-${name.toLowerCase()}`, source: 'attribute', propertyName: name };
 }
 
+/** IFC group membership — `Zone` (default), `System`, or `All`. */
+function group(filter: 'Zone' | 'System' | 'All' = 'Zone'): ListDefinition['columns'][0] {
+  return { id: `group-${filter.toLowerCase()}`, source: 'group', propertyName: filter, label: filter };
+}
+
 function prop(psetName: string, propName: string): ListDefinition['columns'][0] {
   return {
     id: `prop-${psetName}-${propName}`.toLowerCase().replace(/\s+/g, '-'),
@@ -113,6 +118,9 @@ export const LIST_PRESETS: ListDefinition[] = [
       attr('Name'),
       attr('Description'),
       attr('ObjectType'),
+      // The zone a room was assigned to. Empty until somebody assigns one,
+      // which is itself the useful reading: it is the list of what is left.
+      group('Zone'),
       prop('Pset_SpaceCommon', 'Category'),
       prop('Pset_SpaceCommon', 'IsExternal'),
       quant('Qto_SpaceBaseQuantities', 'GrossFloorArea'),

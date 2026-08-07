@@ -20,6 +20,8 @@ import { IfcTypeEnumFromString } from '@ifc-lite/data';
 import type { MutablePropertyView } from '@ifc-lite/mutations';
 import type { ListDataProvider } from '@ifc-lite/lists';
 import { resolveOverlayDefiningTypeId } from '@/lib/mutations/overlayTypeLink';
+import { authoredEntities } from '@/lib/mutations/authoredEntities';
+import { readZones } from '@/lib/ifcZones/membership';
 
 /** Positional index of each named attribute in an `IfcRoot`-derived entity's
  *  STEP argument list. `Tag` sits at 7 for `IfcElement` subtypes, which is what
@@ -27,7 +29,7 @@ import { resolveOverlayDefiningTypeId } from '@/lib/mutations/overlayTypeLink';
 const ATTR_INDEX = { GlobalId: 0, Name: 2, Description: 3, ObjectType: 4, Tag: 7 } as const;
 
 /** Reads a positional attribute off an overlay entity as a display string. */
-function attrString(attributes: unknown[] | undefined, index: number): string {
+function attrString(attributes: readonly unknown[] | undefined, index: number): string {
   const raw = attributes?.[index];
   return typeof raw === 'string' ? raw : '';
 }
@@ -40,8 +42,13 @@ export interface MutationOverlayProviderOptions {
    * caller decides (the viewer knows which overlay ids ended up with a mesh) —
    * omitted, every authored entity is treated as a row, which is only right
    * for tests and callers that author products exclusively.
+   *
+   * The IFC class is passed alongside the id because the obvious test — "is it
+   * registered against a storey" — silently excludes everything that has no
+   * storey by definition: an `IfcZone` groups rooms and sits nowhere in space,
+   * so a zone list built on that test alone comes back empty.
    */
-  isRowEntity?: (expressId: number) => boolean;
+  isRowEntity?: (expressId: number, ifcType: string) => boolean;
 }
 
 /**
@@ -56,7 +63,10 @@ export function withMutationOverlay(
 ): ListDataProvider {
   if (!view) return base;
 
-  const newEntities = view.getNewEntities();
+  // `authoredEntities`, not `getNewEntities`: the latter reports the attributes
+  // an entity was CREATED with, so a zone renamed or recoloured afterwards
+  // would read back stale here while the exporter wrote the new value.
+  const newEntities = authoredEntities(view);
   const tombstones = view.getTombstones();
   if (newEntities.length === 0 && tombstones.size === 0 && view.getMutations().length === 0) {
     return base;
@@ -67,11 +77,24 @@ export function withMutationOverlay(
   const overlayById = new Map(newEntities.map((e) => [e.expressId, e] as const));
   const rowIdsByType = new Map<number, number[]>();
   for (const entity of newEntities) {
-    if (!isRowEntity(entity.expressId)) continue;
+    if (!isRowEntity(entity.expressId, entity.type)) continue;
     const typeEnum = IfcTypeEnumFromString(entity.type);
     let bucket = rowIdsByType.get(typeEnum);
     if (!bucket) { bucket = []; rowIdsByType.set(typeEnum, bucket); }
     bucket.push(entity.expressId);
+  }
+
+  // Zone membership authored this session, indexed room → zones. The parsed
+  // relationship graph cannot know about it, so a `group` column would show
+  // only the memberships the file arrived with.
+  const overlayGroupsOf = new Map<number, Array<{ name: string; ifcType: string }>>();
+  for (const zone of readZones(newEntities)) {
+    const ref = { name: zone.name || `IfcZone #${zone.expressId}`, ifcType: 'IfcZone' };
+    for (const memberId of zone.memberIds) {
+      const list = overlayGroupsOf.get(memberId);
+      if (list) list.push(ref);
+      else overlayGroupsOf.set(memberId, [ref]);
+    }
   }
 
   const alive = (id: number) => !tombstones.has(id);
@@ -115,9 +138,18 @@ export function withMutationOverlay(
       const existing = (base.getAllEntityIds?.() ?? []).filter(alive);
       const authored: number[] = [];
       for (const entity of newEntities) {
-        if (isRowEntity(entity.expressId)) authored.push(entity.expressId);
+        if (isRowEntity(entity.expressId, entity.type)) authored.push(entity.expressId);
       }
       return authored.length === 0 ? existing : [...existing, ...authored];
+    },
+
+    getEntityGroupNames(id: number): Array<{ name: string; ifcType: string }> {
+      const authored = overlayGroupsOf.get(id) ?? [];
+      const existing = base.getEntityGroupNames?.(id) ?? [];
+      // Authored first, mirroring the lens adapter: a room is usually already
+      // in some zone the file shipped with, and the one just painted is the
+      // answer the user is looking for.
+      return authored.length === 0 ? existing : [...authored, ...existing];
     },
 
     getEntityTypeName: (id) => overlayById.get(id)?.type ?? base.getEntityTypeName(id),

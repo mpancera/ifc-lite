@@ -12,6 +12,9 @@ import {
   type SpatialNode,
 } from '@ifc-lite/data';
 import type { IfcDataStore } from '@ifc-lite/parser';
+import type { MutablePropertyView } from '@ifc-lite/mutations';
+import { readZones } from '@/lib/ifcZones/membership';
+import { authoredEntities } from '@/lib/mutations/authoredEntities';
 import { buildMaterialUsageIndex, extractGroupMembersOnDemand } from '@ifc-lite/parser';
 import { useViewerStore, type FederatedModel } from '@/store';
 import { toGlobalIdFromModels } from '@/store/globalId';
@@ -1110,6 +1113,7 @@ export function buildGroupTree(
   isMultiModel: boolean,
   geometricIds?: Set<number>,
   subFilter: GroupSubFilter = 'all',
+  mutationViews?: Map<string, MutablePropertyView>,
 ): TreeNode[] {
   interface MemberRow {
     expressId: number;
@@ -1228,6 +1232,55 @@ export function buildGroupTree(
     }
   };
 
+  /**
+   * Zones authored this session. They live in the mutation overlay, which the
+   * parsed `entityIndex` above knows nothing about — so without this pass a
+   * zone the user just painted is missing from the very tab named after zones,
+   * while the rooms in it correctly list the membership under Relationships.
+   *
+   * Members are existing rooms, so their names, types and geometry all resolve
+   * through the parsed store exactly as for a file-borne zone.
+   */
+  const processOverlay = (
+    dataStore: IfcDataStore, modelId: string, view: MutablePropertyView,
+  ) => {
+    if (!groupMatchesSubFilter('IfcZone', subFilter)) return;
+    const entities = dataStore.entities;
+    if (!entities) return;
+    const toGlobal = (expressId: number) => resolveTreeGlobalId(modelId, expressId, models);
+
+    for (const zone of readZones(authoredEntities(view))) {
+      if (zone.memberIds.length === 0) continue;
+
+      const rowByGlobalId = new Map<number, MemberRow>();
+      const isolation = new Set<number>();
+      for (const memberId of zone.memberIds) {
+        const ownGlobal = toGlobal(memberId);
+        const resolved = resolveMemberGeometry(dataStore, memberId, toGlobal, geo);
+        for (const r of resolved) isolation.add(r.globalId);
+        if (rowByGlobalId.has(ownGlobal)) continue;
+
+        const memberType = entities.getTypeName(memberId) || 'Unknown';
+        rowByGlobalId.set(ownGlobal, {
+          expressId: memberId,
+          globalId: ownGlobal,
+          name: entities.getName(memberId) || `${memberType} #${memberId}`,
+          ifcType: memberType,
+        });
+      }
+
+      entries.push({
+        modelId,
+        groupExpressId: zone.expressId,
+        name: zone.name || zone.objectType || `IfcZone #${zone.expressId}`,
+        ifcType: 'IfcZone',
+        typeRank: GROUP_ENTITY_TYPES.indexOf('IfcZone'),
+        memberRows: Array.from(rowByGlobalId.values()),
+        isolationGlobalIds: Array.from(isolation),
+      });
+    }
+  };
+
   if (models.size > 0) {
     // Federated IFCX layers all share ONE composed data store (each overlay
     // is registered as a "model" for the Models panel) — process each
@@ -1238,9 +1291,13 @@ export function buildGroupTree(
       if (!store || processed.has(store)) continue;
       processed.add(store);
       processDataStore(store, modelId);
+      const view = mutationViews?.get(modelId);
+      if (view) processOverlay(store, modelId, view);
     }
   } else if (ifcDataStore) {
     processDataStore(ifcDataStore, 'legacy');
+    const view = mutationViews?.get('legacy') ?? mutationViews?.get('default');
+    if (view) processOverlay(ifcDataStore, 'legacy', view);
   }
 
   // Systems first, then zones, then generic groups; name order within a class.

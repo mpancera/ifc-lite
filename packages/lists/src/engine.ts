@@ -301,9 +301,9 @@ function matchesCondition(
 
   const actualValue = getConditionValue(entityId, condition, provider);
 
-  if (condition.operator === 'exists') {
-    return actualValue !== null && actualValue !== undefined && actualValue !== '';
-  }
+  const present = actualValue !== null && actualValue !== undefined && actualValue !== '';
+  if (condition.operator === 'exists') return present;
+  if (condition.operator === 'notExists') return !present;
 
   if (actualValue === null || actualValue === undefined) {
     return false;
@@ -347,9 +347,42 @@ function getConditionValue(
       return provider.getModelName?.() || null;
     case 'zone':
       return getZoneValue(entityId, condition.psetName ?? '', condition.propertyName, provider);
+    case 'group':
+      return getGroupValue(entityId, condition.propertyName, provider);
     default:
       return null;
   }
+}
+
+/** Which IFC classes each `group` filter accepts. */
+const GROUP_FILTERS: Readonly<Record<string, (ifcType: string) => boolean>> = {
+  // `IfcSpatialZone` is included under Zone because it is what a compartment
+  // is modelled as — a user asking "which zone is this room in" does not care
+  // that one of the two answers has geometry and the other does not.
+  zone: (t) => t === 'IfcZone' || t === 'IfcSpatialZone',
+  system: (t) => t.endsWith('System') || t === 'IfcDistributionCircuit',
+  all: () => true,
+};
+
+/**
+ * Resolve a `group` column/condition: the names of the IFC groups this entity
+ * belongs to, joined.
+ *
+ * Multi-valued on purpose — IFC allows a space in several zones, and hiding
+ * the second one would make a list lie about the model. An unrecognised filter
+ * falls back to `Zone`, matching how `spatial` treats its level selector.
+ */
+function getGroupValue(
+  entityId: number,
+  filter: string,
+  provider: ListDataProvider,
+): CellValue {
+  const groups = provider.getEntityGroupNames?.(entityId) ?? [];
+  if (groups.length === 0) return null;
+
+  const accept = GROUP_FILTERS[filter.toLowerCase()] ?? GROUP_FILTERS.zone;
+  const names = groups.filter((g) => accept(g.ifcType)).map((g) => g.name).filter((n) => n.length > 0);
+  return names.length > 0 ? uniqueJoin(names) : null;
 }
 
 /**
@@ -414,7 +447,7 @@ function getSpatialValue(
  * operators match if ANY candidate value satisfies them; `notEquals`
  * matches only if NO candidate equals the value. An element with no
  * materials / classifications never matches (including `notEquals`),
- * except `exists` which is a pure presence check.
+ * except `exists` / `notExists`, which are pure presence checks.
  */
 function matchesMultiValuedCondition(
   entityId: number,
@@ -426,6 +459,7 @@ function matchesMultiValuedCondition(
     : classificationCandidates(provider.getClassifications?.(entityId) ?? []);
 
   if (condition.operator === 'exists') return candidates.length > 0;
+  if (condition.operator === 'notExists') return candidates.length === 0;
   if (candidates.length === 0) return false;
 
   const target = String(condition.value).toLowerCase();
@@ -539,6 +573,9 @@ function extractColumnValues(
         break;
       case 'zone':
         values[i] = getZoneValue(entityId, col.psetName ?? '', col.propertyName, provider);
+        break;
+      case 'group':
+        values[i] = getGroupValue(entityId, col.propertyName, provider);
         break;
       default:
         values[i] = null;

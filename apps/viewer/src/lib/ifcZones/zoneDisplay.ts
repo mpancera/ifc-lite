@@ -85,3 +85,23 @@ export function formatZoneDescription(
 export function zoneColourOf(description: string | null | undefined): string | null {
   return parseZoneDescription(description).colour;
 }
+
+/**
+ * A new `Description` that keeps the old one's colour.
+ *
+ * The colour lives inside a field the author can also edit by hand — in the
+ * properties panel, in a list cell, anywhere `Description` is writable. Typing
+ * a new sentence there would otherwise drop the token with it, and the zone
+ * would silently lose the colour it has in the fire concept.
+ *
+ * A token the author typed themselves wins: editing the colour by hand has to
+ * remain possible, or the field stops being honest about what it holds.
+ */
+export function preserveZoneColour(
+  next: string,
+  previous: string | null | undefined,
+): string {
+  if (TOKEN.test(next)) return next;
+  const colour = zoneColourOf(previous);
+  return colour === null ? next : formatZoneDescription(next, colour);
+}

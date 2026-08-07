@@ -148,6 +148,21 @@ export interface ListDataProvider {
   /** Every zone set currently defined, for the column/condition picker to
    *  offer by name while storing the durable id. */
   getZoneSetNames?(): Array<{ id: string; name: string }>;
+
+  /**
+   * The IFC groups this entity belongs to — `IfcZone` memberships above all,
+   * but also `IfcSystem` / `IfcDistributionSystem` and the rest of the
+   * `IfcGroup` family, via `IfcRelAssignsToGroup`.
+   *
+   * Deliberately NOT the same thing as {@link getZoneAssignment}, whose
+   * "zones" are viewer-side boxes the user draws and which never reach IFC.
+   * These are real entities in the file (or authored into it this session), so
+   * a room's zone membership survives an export — which is exactly why a list
+   * needs to be able to show and filter on it.
+   *
+   * Optional: a provider without it makes `group` columns resolve empty.
+   */
+  getEntityGroupNames?(expressId: number): Array<{ name: string; ifcType: string }>;
 }
 
 /** A classification reference exposed to the list engine (code + name). */
@@ -240,8 +255,12 @@ export interface PropertyCondition {
    *   zone-SET id, `propertyName` selects `Zone` (default, the zone name —
    *   or the straddled zones joined when the element crosses a boundary) or
    *   `Straddles` (boolean)
+   * - `group` — IFC group membership via `IfcRelAssignsToGroup`;
+   *   `propertyName` narrows the class (`Zone` (default) | `System` | `All`).
+   *   Not to be confused with `zone` above: these are real IFC entities that
+   *   survive an export, those are viewer-side boxes
    */
-  source: 'attribute' | 'property' | 'quantity' | 'material' | 'classification' | 'spatial' | 'model' | 'zone' | 'colour';
+  source: 'attribute' | 'property' | 'quantity' | 'material' | 'classification' | 'spatial' | 'model' | 'zone' | 'group' | 'colour';
   /** Property set name (for property/quantity sources); the zone-SET id for `zone`. */
   psetName?: string;
   /** Attribute / property / quantity name, the spatial level for `spatial`
@@ -262,7 +281,16 @@ export type ConditionOperator =
   | 'lt'
   | 'gte'
   | 'lte'
-  | 'exists';
+  | 'exists'
+  /**
+   * The value is absent — no property, no material, no zone membership.
+   *
+   * `exists` alone could not express it: it is a pure presence check and the
+   * builder hides the value field for it, so "which rooms have no zone yet"
+   * — the question you ask right after assigning some — had no way to be
+   * written down.
+   */
+  | 'notExists';
 
 // ============================================================================
 // Column Definitions
@@ -279,13 +307,17 @@ export interface ColumnDefinition {
    * #1810) — see `PropertyCondition.source` for the exact `psetName`/
    * `propertyName` contract, shared verbatim between conditions and columns.
    *
+   * `group` is IFC group membership (`IfcRelAssignsToGroup`), multi-valued and
+   * joined like `material`; `propertyName` narrows the class (`Zone` (default)
+   * | `System` | `All`).
+   *
    * `colour` has no value in the model at all: it paints the row's lens colour
    * as the cell background. The engine returns null for it and the viewer fills
    * it in, because a colour is a property of the current *view*, not of the
    * element — two people looking at the same list under different lenses are
    * both right.
    */
-  source: 'attribute' | 'property' | 'quantity' | 'material' | 'classification' | 'spatial' | 'model' | 'zone' | 'colour';
+  source: 'attribute' | 'property' | 'quantity' | 'material' | 'classification' | 'spatial' | 'model' | 'zone' | 'group' | 'colour';
   /** For property: pset name. For quantity: qset name. For zone: the zone-SET id. */
   psetName?: string;
   /** Attribute / property / quantity name, the spatial level for `spatial`

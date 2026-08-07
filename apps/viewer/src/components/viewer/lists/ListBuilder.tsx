@@ -139,6 +139,10 @@ const COMMON_COLUMNS: CommonColumn[] = [
   { id: 'col-site', source: 'spatial', propertyName: 'Site', label: 'Site' },
   { id: 'col-project', source: 'spatial', propertyName: 'Project', label: 'Project' },
   { id: 'col-model', source: 'model', propertyName: 'Model', label: 'Model' },
+  // IFC group membership — the zone a room was assigned to, which survives an
+  // export. Distinct from the `zone` source, whose zones are viewer-side boxes.
+  { id: 'col-ifczone', source: 'group', propertyName: 'Zone', label: 'Zone' },
+  { id: 'col-ifcsystem', source: 'group', propertyName: 'System', label: 'System' },
   // No model value behind it: it paints the row's lens colour. Empty until a
   // lens is active or the column is pointed at a saved one.
   { id: 'col-colour', source: 'colour', propertyName: '', label: 'Colour' },
@@ -709,6 +713,10 @@ const SOURCE_TAG: Record<ColumnDefinition['source'], string> = {
   spatial: 'storey',
   model: 'model',
   zone: 'zone',
+  // "grp" rather than a second "zone": the two sources are different things
+  // (IFC membership vs. the viewer's drawn boxes) and the tag is the only
+  // place a reader can tell which column is which.
+  group: 'grp',
   colour: 'lens',
 };
 
@@ -1159,7 +1167,12 @@ const CONDITION_SOURCES: { source: ConditionSource; label: string }[] = [
   { source: 'classification', label: 'Classification' },
   { source: 'spatial', label: 'Spatial' },
   { source: 'model', label: 'Model' },
-  { source: 'zone', label: 'Zone' },
+  // Two different things that both want to be called "zone". `group` is IFC
+  // membership (IfcZone / IfcSystem, exported with the file); `zone` is the
+  // viewer's drawn boxes, which never leave the session. The labels have to
+  // say which, or picking one is a coin toss.
+  { source: 'group', label: 'Zone / System (IFC)' },
+  { source: 'zone', label: 'Location zone' },
 ];
 
 const OPERATOR_LABEL: Record<ConditionOperator, string> = {
@@ -1171,17 +1184,18 @@ const OPERATOR_LABEL: Record<ConditionOperator, string> = {
   gte: '≥',
   lte: '≤',
   exists: 'is set',
+  notExists: 'is empty',
 };
 
 function operatorsFor(source: ConditionSource): ConditionOperator[] {
   switch (source) {
     case 'quantity':
-      return ['equals', 'notEquals', 'gt', 'gte', 'lt', 'lte', 'exists'];
+      return ['equals', 'notEquals', 'gt', 'gte', 'lt', 'lte', 'exists', 'notExists'];
     case 'material':
     case 'classification':
-      return ['contains', 'equals', 'notEquals', 'exists'];
+      return ['contains', 'equals', 'notEquals', 'exists', 'notExists'];
     default:
-      return ['equals', 'notEquals', 'contains', 'exists'];
+      return ['equals', 'notEquals', 'contains', 'exists', 'notExists'];
   }
 }
 
@@ -1204,6 +1218,8 @@ function defaultConditionFor(source: ConditionSource, zoneSets: ZoneSet[] = []):
       return { source, propertyName: 'Model', operator: 'equals', value: '' };
     case 'zone':
       return { source, psetName: zoneSets[0]?.id ?? '', propertyName: 'Zone', operator: 'equals', value: '' };
+    case 'group':
+      return { source, propertyName: 'Zone', operator: 'equals', value: '' };
     case 'attribute':
     default:
       return { source: 'attribute', propertyName: 'Name', operator: 'contains', value: '' };
@@ -1279,11 +1295,14 @@ function ConditionRow({
   onRemove: () => void;
 }) {
   const ops = operatorsFor(condition.source);
-  const showValue = condition.operator !== 'exists';
+  // Both presence operators are complete on their own; a value box beside
+  // them would only invite typing something that is then ignored.
+  const showValue = condition.operator !== 'exists' && condition.operator !== 'notExists';
   const isProperty = condition.source === 'property';
   const isQuantity = condition.source === 'quantity';
   const isSpatial = condition.source === 'spatial';
   const isZone = condition.source === 'zone';
+  const isGroup = condition.source === 'group';
   const showSetFields = isProperty || isQuantity;
 
   const setNameOptions = useMemo<string[]>(() => {
@@ -1323,7 +1342,8 @@ function ConditionRow({
       : condition.source === 'model' ? 'model / file'
         : condition.source === 'material' ? 'material'
           : condition.source === 'classification' ? 'code or name'
-            : condition.source === 'zone' ? (condition.propertyName === 'Straddles' ? 'true / false' : 'zone name')
+            : condition.source === 'group' ? 'zone / system name'
+              : condition.source === 'zone' ? (condition.propertyName === 'Straddles' ? 'true / false' : 'zone name')
               : 'value';
 
   return (
@@ -1388,6 +1408,19 @@ function ConditionRow({
             <option value="Straddles">Straddles</option>
           </select>
         </>
+      )}
+
+      {isGroup && (
+        <select
+          value={condition.propertyName || 'Zone'}
+          onChange={(e) => onChange({ ...condition, propertyName: e.target.value, value: '' })}
+          className={SELECT_CLASS}
+          aria-label="Group class"
+        >
+          <option value="Zone">Zone</option>
+          <option value="System">System</option>
+          <option value="All">All</option>
+        </select>
       )}
 
       {showSetFields && (

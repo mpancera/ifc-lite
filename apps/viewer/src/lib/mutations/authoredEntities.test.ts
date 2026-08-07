@@ -72,4 +72,42 @@ describe('authoredEntities', () => {
   it('is empty for an untouched view', () => {
     assert.deepEqual(authoredEntities(view()), []);
   });
+
+  it('applies a named attribute edit', () => {
+    // `setAttribute` is the channel the properties panel and list cells use;
+    // merging only the positional one left a renamed zone stale in half the UI.
+    const v = view();
+    const { expressId } = v.createEntity('IfcZone', ['guid', null, 'AZ-A', null, null, null]);
+    v.setAttribute(expressId, 'Name', 'AZ-B');
+
+    assert.equal(authoredEntities(v)[0].attributes[2], 'AZ-B');
+  });
+
+  it('lets a named edit win over a positional one on the same attribute', () => {
+    const v = view();
+    const { expressId } = v.createEntity('IfcZone', ['guid', null, 'AZ-A', null, null, null]);
+    v.setPositionalAttribute(expressId, 3, 'aus dem Panel');
+    v.setAttribute(expressId, 'Description', 'aus der Liste');
+
+    assert.equal(authoredEntities(v)[0].attributes[3], 'aus der Liste');
+  });
+
+  it('merges both channels when they touch different attributes', () => {
+    const v = view();
+    const { expressId } = v.createEntity('IfcZone', ['guid', null, 'AZ-A', null, null, null]);
+    v.setPositionalAttribute(expressId, 3, 'ZoneDisplay=#472A24');
+    v.setAttribute(expressId, 'Name', 'AZ-B');
+
+    const [entity] = authoredEntities(v);
+    assert.equal(entity.attributes[2], 'AZ-B');
+    assert.equal(entity.attributes[3], 'ZoneDisplay=#472A24');
+  });
+
+  it('ignores an attribute name it has no index for', () => {
+    const v = view();
+    const { expressId } = v.createEntity('IfcZone', ['guid', null, 'AZ-A', null, null, null]);
+    v.setAttribute(expressId, 'LongName', 'egal');
+
+    assert.deepEqual([...authoredEntities(v)[0].attributes], ['guid', null, 'AZ-A', null, null, null]);
+  });
 });

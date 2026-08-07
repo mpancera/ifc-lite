@@ -308,11 +308,11 @@ export function useHierarchyTree({ models, ifcDataStore, isMultiModel, geometryR
         return buildMaterialTree(models, ifcDataStore, expandedNodes, isMultiModel, geometricIds);
       }
       if (groupingMode === 'groups') {
-        return buildGroupTree(models, ifcDataStore, expandedNodes, isMultiModel, geometricIds, groupFilter);
+        return buildGroupTree(models, ifcDataStore, expandedNodes, isMultiModel, geometricIds, groupFilter, mutationViews);
       }
       return buildTreeData(models, ifcDataStore, expandedNodes, isMultiModel, unifiedStoreys, sortMode);
     },
-    [models, ifcDataStore, expandedNodes, isMultiModel, unifiedStoreys, sortMode, groupingMode, geometricIds, classTreeIds, authoredProducts, groupFilter]
+    [models, ifcDataStore, expandedNodes, isMultiModel, unifiedStoreys, sortMode, groupingMode, geometricIds, classTreeIds, authoredProducts, groupFilter, mutationViews, mutationVersion]
   );
 
   // Filter nodes based on search
