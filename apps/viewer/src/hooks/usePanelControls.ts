@@ -61,6 +61,7 @@ function setDockedVisible(id: AnalysisPanelId, visible: boolean): void {
     case 'lists': s.setListPanelVisible(visible); break;
     case 'layers': s.setLayersPanelVisible(visible); break;
     case 'zones': s.setZonesPanelVisible(visible); break;
+    case 'heights': s.setHeightsPanelVisible(visible); break;
   }
 }
 

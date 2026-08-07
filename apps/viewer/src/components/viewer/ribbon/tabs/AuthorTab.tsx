@@ -9,7 +9,7 @@
  * toolbar (viewer/commenter roles cannot unlock authoring).
  */
 
-import { Box, Brush, FileDiff, Library, Wand2 } from 'lucide-react';
+import { Box, Brush, FileDiff, Library, Ruler, Wand2 } from 'lucide-react';
 import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, List, Select, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -148,6 +148,17 @@ export function AuthorTab() {
           activeClassName={EDIT_ACTIVE_CLASS}
           disabled={!ifcDataStore}
           onClick={() => handleToggleRightPanel('zones')}
+        />
+        {/* Next to Compartments because it defines what they extrude to: the
+            storey levels and heights every discipline model has to agree on. */}
+        <RibbonLargeButton
+          icon={Ruler}
+          label="Heights"
+          tooltip="Höhen & Lage der Geschosse — das Bezugssystem des Projekts"
+          active={activeWorkspacePanels.has('heights')}
+          activeClassName={EDIT_ACTIVE_CLASS}
+          disabled={!ifcDataStore}
+          onClick={() => handleToggleRightPanel('heights')}
         />
         <ProductLibraryPanel
           trigger={

@@ -32,6 +32,7 @@ import {
   Users,
   Layers as LayersIcon,
   Box,
+  Ruler,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -54,7 +55,8 @@ export type WorkspacePanelId =
   | 'lists'
   | 'collab'
   | 'layers'
-  | 'zones';
+  | 'zones'
+  | 'heights';
 
 /** Activity-bar clustering — a divider is drawn whenever the group changes. */
 export type PanelGroup = 'navigate' | 'inspect' | 'review' | 'author' | 'work';
@@ -113,6 +115,10 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   // order. The LABEL is what changed — "Location zones" said nothing about
   // what the boxes are for, and collided with the IfcZone tool next to it.
   { id: 'zones', title: 'Compartments', short: 'Sections', Icon: Box, group: 'review', region: 'side' },
+  // The project's reference height system: storey levels and heights that every
+  // discipline model has to agree on. APPENDED so the frozen Alt+1..0 mapping
+  // stays intact (no Alt shortcut).
+  { id: 'heights', title: 'Höhen & Lage', short: 'Heights', Icon: Ruler, group: 'review', region: 'side' },
 ];
 
 /** The bottom-strip panel ids, mapped to their store visibility flag + setter

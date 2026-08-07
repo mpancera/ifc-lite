@@ -58,6 +58,7 @@ import { createSpaceMouseSlice, type SpaceMouseSlice } from './slices/spaceMouse
 import { createLayerStackSlice, type LayerStackSlice } from './slices/layerStackSlice.js';
 import { createZonesSlice, type ZonesSlice } from './slices/zonesSlice.js';
 import { createIfcZonesSlice, type IfcZonesSlice } from './slices/ifcZonesSlice.js';
+import { createHeightsSlice, type HeightsSlice } from './slices/heightsSlice.js';
 import { invalidateVisibleBasketCache } from './basketVisibleSet.js';
 
 // Import constants for reset function
@@ -175,6 +176,7 @@ export type ViewerState = LoadingSlice &
   SpaceMouseSlice &
   ZonesSlice &
   IfcZonesSlice &
+  HeightsSlice &
   ExtensionsSlice & {
     resetViewerState: () => void;
     /**
@@ -264,6 +266,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
   ...createSpaceMouseSlice(...args),
   ...createZonesSlice(...args),
   ...createIfcZonesSlice(...args),
+  ...createHeightsSlice(...args),
   ...createExtensionsSlice(...args),
 
   // Reset all viewer state when loading new file
@@ -581,6 +584,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
       collabPanelVisible: panel === 'collab',
       layersPanelVisible: panel === 'layers',
       zonesPanelVisible: panel === 'zones',
+      heightsPanelVisible: panel === 'heights',
       rightPanelCollapsed: false,
     });
     if (get().sidebarMode !== 'expanded') get().setSidebarMode('expanded');
@@ -617,6 +621,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
         collabPanelVisible: false,
         layersPanelVisible: false,
         zonesPanelVisible: false,
+        heightsPanelVisible: false,
         rightPanelCollapsed: false,
       });
       get().setSidebarActivePanel('properties');
@@ -706,6 +711,7 @@ export const SIDEBAR_PANEL_FLAGS: ReadonlyArray<readonly [keyof ViewerState, Wor
   ['collabPanelVisible', 'collab'],
   ['layersPanelVisible', 'layers'],
   ['zonesPanelVisible', 'zones'],
+  ['heightsPanelVisible', 'heights'],
 ];
 
 /**
