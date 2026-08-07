@@ -28,6 +28,7 @@ import type { AutoColorEvaluationResult } from '@ifc-lite/lens';
 import { useViewerStore } from '@/store';
 import { posthog } from '@/lib/analytics';
 import { createLensDataProvider } from '@/lib/lens';
+import { applyGhostPreference } from '@/lib/lens/ghostPreference';
 import { activePaletteDataViz } from '@/lib/theme/palette';
 import { useLensDiscovery } from './useLensDiscovery';
 
@@ -35,6 +36,14 @@ export function useLens() {
   const activeLensId = useViewerStore((s) => s.activeLensId);
   const savedLenses = useViewerStore((s) => s.savedLenses);
   const mutationVersion = useViewerStore((s) => s.mutationVersion);
+  // Ghost or hide the unmatched. A view preference, so flipping it re-runs the
+  // presentation without re-evaluating the lens against the model.
+  //
+  // `!== false` rather than a plain read: ghosting is the default, and a store
+  // that does not carry the key yet (a hot-reloaded slice, a restored session
+  // from before it existed) must not read as "hide everything" — which is
+  // exactly what a falsy `undefined` would do, blanking the model.
+  const ghostUnmatched = useViewerStore((s) => s.lensGhostUnmatched !== false);
 
   // Derive the active lens object — only re-evaluates when activeLensId or
   // the active lens entry itself changes, not when unrelated lenses are edited.
@@ -85,7 +94,12 @@ export function useLens() {
       ? evaluateAutoColorLens(activeLens.autoColor!, provider, activePaletteDataViz())
       : evaluateLens(activeLens, provider);
 
-    const { colorMap, hiddenIds, ruleCounts, ruleEntityIds } = result;
+    const { ruleCounts, ruleEntityIds } = result;
+    // The engine always ghosts what it did not colour; whether that reaches the
+    // renderer as a pale fill or as "do not draw" is the viewer's call.
+    const { colorMap, hiddenIds } = applyGhostPreference(
+      result.colorMap, result.hiddenIds, ghostUnmatched,
+    );
 
     // Build hex color map for UI legend (exclude ghost entries)
     const hexColorMap = new Map<number, string>();
@@ -128,7 +142,7 @@ export function useLens() {
     }
     // mutationVersion bumps on every committed authoring edit — the signal that
     // recolours a live lens (issue: colours went stale after editing a value).
-  }, [activeLensId, activeLens, mutationVersion]);
+  }, [activeLensId, activeLens, mutationVersion, ghostUnmatched]);
 
   return {
     activeLensId,

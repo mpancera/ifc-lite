@@ -18,7 +18,7 @@
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { X, EyeOff, Palette, Check, Plus, Trash2, Pencil, Copy, Save, Download, Upload, Sparkles, Search, ChevronDown, ArrowUpDown, GripVertical } from 'lucide-react';
+import { X, Eye, EyeOff, Palette, Check, Plus, Trash2, Pencil, Copy, Save, Download, Upload, Sparkles, Search, ChevronDown, ArrowUpDown, GripVertical } from 'lucide-react';
 import { discoverDataSources } from '@ifc-lite/lens';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -1279,6 +1279,8 @@ export function LensPanel({ onClose }: LensPanelProps) {
   const lensRuleIsolation = useViewerStore((s) => s.lensRuleIsolation);
   const setLensRuleIsolation = useViewerStore((s) => s.setLensRuleIsolation);
   // For footer stats — cheap primitive subscriptions
+  const ghostUnmatched = useViewerStore((s) => s.lensGhostUnmatched);
+  const setGhostUnmatched = useViewerStore((s) => s.setLensGhostUnmatched);
   const lensColorMapSize = useViewerStore((s) => s.lensColorMap.size);
   const lensHiddenIdsSize = useViewerStore((s) => s.lensHiddenIds.size);
   const lensRuleCounts = useViewerStore((s) => s.lensRuleCounts);
@@ -1526,6 +1528,27 @@ export function LensPanel({ onClose }: LensPanelProps) {
             className="hidden"
             onChange={handleImport}
           />
+          {/* What happens to everything the lens does NOT colour. Ghosting is
+              the default and right when most elements match; it fails on rooms,
+              where dozens of translucent volumes stack into an opaque block.
+              Placed beside Clear because both answer "what am I looking at". */}
+          {activeLensId && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 text-[10px] uppercase tracking-wider rounded-sm"
+              aria-pressed={!ghostUnmatched}
+              title={ghostUnmatched
+                ? 'Unmatched elements are ghosted — click to hide them instead'
+                : 'Unmatched elements are hidden — click to ghost them instead'}
+              onClick={() => setGhostUnmatched(!ghostUnmatched)}
+            >
+              {ghostUnmatched
+                ? <Eye className="h-3 w-3 mr-1" />
+                : <EyeOff className="h-3 w-3 mr-1" />}
+              {ghostUnmatched ? 'Ghost' : 'Hide'}
+            </Button>
+          )}
           {activeLensId && (
             <Button
               variant="ghost"

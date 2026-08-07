@@ -131,6 +131,21 @@ export interface LensSlice {
   lensAutoColorLegend: AutoColorLegendEntry[];
   /** Discovered data from loaded models (classes instant, rest lazy) */
   discoveredLensData: DiscoveredLensData | null;
+  /**
+   * What happens to the elements a lens does NOT colour: ghost them (default)
+   * or hide them outright.
+   *
+   * Ghosting paints them grey at low alpha so the building stays readable
+   * around the coloured parts, which is right whenever most elements match —
+   * By IFC Class, By Material. It fails on volumetric elements: isolate the
+   * rooms under a zone lens and the dozens of unmatched room volumes stack
+   * their translucency into an opaque block that hides everything behind it.
+   *
+   * A view preference, not a property of the lens: two people looking at the
+   * same lens may reasonably want different amounts of context. Hence a
+   * session switch rather than a field on the saved lens.
+   */
+  lensGhostUnmatched: boolean;
 
   // Actions
   createLens: (lens: Lens) => void;
@@ -145,6 +160,7 @@ export interface LensSlice {
   setActiveLens: (id: string | null) => void;
   toggleLensPanel: () => void;
   setLensPanelVisible: (visible: boolean) => void;
+  setLensGhostUnmatched: (ghost: boolean) => void;
   setLensColorMap: (map: Map<number, string>) => void;
   setLensAppliedColors: (map: Map<number, [number, number, number, number]> | null) => void;
   setLensHiddenIds: (ids: Set<number>) => void;
@@ -191,6 +207,7 @@ export const createLensSlice: StateCreator<LensSlice, [], [], LensSlice> = (set,
   lensRuleEntityIds: new Map(),
   lensAutoColorLegend: [],
   discoveredLensData: null,
+  lensGhostUnmatched: true,
 
   // Actions
   createLens: (lens) => set((state) => {
@@ -233,6 +250,7 @@ export const createLensSlice: StateCreator<LensSlice, [], [], LensSlice> = (set,
 
   toggleLensPanel: () => set((state) => ({ lensPanelVisible: !state.lensPanelVisible })),
   setLensPanelVisible: (lensPanelVisible) => set({ lensPanelVisible }),
+  setLensGhostUnmatched: (lensGhostUnmatched) => set({ lensGhostUnmatched }),
 
   setLensColorMap: (lensColorMap) => set({ lensColorMap }),
   setLensAppliedColors: (lensAppliedColors) => set({ lensAppliedColors }),
