@@ -83,6 +83,17 @@ export interface ZonesSlice {
   updateZone: (setId: string, zoneId: string, patch: Partial<Omit<Zone, 'id'>>) => void;
   removeZone: (setId: string, zoneId: string) => void;
   setEditingZone: (target: { setId: string; zoneId: string } | null) => void;
+  /**
+   * Whether the panel owns the docked sidebar slot.
+   *
+   * Every side panel needs one of these — `openWorkspacePanel` sets the flags
+   * by name, so a panel without one can be registered, iconed and rendered and
+   * still never open. That is exactly what happened here (#1810): the panel was
+   * wired everywhere except the one place that decides visibility, so clicking
+   * its rail icon did nothing at all.
+   */
+  zonesPanelVisible: boolean;
+  setZonesPanelVisible: (visible: boolean) => void;
   /** Written by `useZoneAssignmentSync` after it gathers element bounds and
    *  runs the (pure) assignment engine. Not meant to be called with
    *  hand-computed data from a UI component. */
@@ -101,6 +112,7 @@ const DEFAULT_ZONE: Omit<Zone, 'id'> = {
 
 export const createZonesSlice: StateCreator<ZonesSlice, [], [], ZonesSlice> = (set, get) => ({
   zoneSets: loadPersistedZoneSets(),
+  zonesPanelVisible: false,
   zoneAssignments: new Map(),
   zoneAssignmentTiming: null,
   editingZone: null,
@@ -151,6 +163,8 @@ export const createZonesSlice: StateCreator<ZonesSlice, [], [], ZonesSlice> = (s
       : editing;
     return { zoneSets, editingZone };
   }),
+
+  setZonesPanelVisible: (zonesPanelVisible) => set({ zonesPanelVisible }),
 
   addZone: (setId, zone) => {
     const zoneSet = get().zoneSets.find((zs) => zs.id === setId);

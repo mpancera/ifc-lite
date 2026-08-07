@@ -580,6 +580,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
       extensionsPanelVisible: panel === 'extensions',
       collabPanelVisible: panel === 'collab',
       layersPanelVisible: panel === 'layers',
+      zonesPanelVisible: panel === 'zones',
       rightPanelCollapsed: false,
     });
     if (get().sidebarMode !== 'expanded') get().setSidebarMode('expanded');
@@ -615,6 +616,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
         extensionsPanelVisible: false,
         collabPanelVisible: false,
         layersPanelVisible: false,
+        zonesPanelVisible: false,
         rightPanelCollapsed: false,
       });
       get().setSidebarActivePanel('properties');
@@ -685,7 +687,16 @@ const globalStoreRegistry = globalThis as typeof globalThis & {
  * fallback shown when none of these are on. (Script / Schedule / Lists are
  * NOT here: they live in the bottom panel and stay independent.)
  */
-const SIDEBAR_PANEL_FLAGS: ReadonlyArray<readonly [keyof ViewerState, WorkspacePanelId]> = [
+/**
+ * Every docked side panel and the store flag that shows it.
+ *
+ * Exported so a test can hold it against the panel registry: a panel present
+ * there but missing here is registered, iconed, rendered — and impossible to
+ * open, because `openWorkspacePanel` sets these flags by name and simply has
+ * nothing to set. Location zones shipped that way and looked like a dead
+ * feature for months.
+ */
+export const SIDEBAR_PANEL_FLAGS: ReadonlyArray<readonly [keyof ViewerState, WorkspacePanelId]> = [
   ['bcfPanelVisible', 'bcf'],
   ['idsPanelVisible', 'ids'],
   ['lensPanelVisible', 'lens'],
@@ -694,6 +705,7 @@ const SIDEBAR_PANEL_FLAGS: ReadonlyArray<readonly [keyof ViewerState, WorkspaceP
   ['extensionsPanelVisible', 'extensions'],
   ['collabPanelVisible', 'collab'],
   ['layersPanelVisible', 'layers'],
+  ['zonesPanelVisible', 'zones'],
 ];
 
 /**
