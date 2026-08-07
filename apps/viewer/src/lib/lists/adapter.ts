@@ -25,7 +25,7 @@ import type { PropertySet, QuantitySet } from '@ifc-lite/data';
 import { RelationshipType } from '@ifc-lite/data';
 import { ENTITY_ATTRIBUTES } from '@ifc-lite/lists';
 import type { ListDataProvider, ListClassificationRef, DiscoveredColumns } from '@ifc-lite/lists';
-import { resolveEntityPredefinedType } from '../entity-predefined-type.js';
+import { resolveEntityLongName, resolveEntityPredefinedType } from '../entity-predefined-type.js';
 import { buildSpatialAncestryIndex, type SpatialAncestryIndex } from '../../utils/spatialHierarchy.js';
 import type { ZoneSet, ZoneAssignmentsByElement } from '../zones/index.js';
 
@@ -111,6 +111,19 @@ export function createListDataProvider(
     // payload, issue #1765); the source-gated resolver covers the WASM path.
     const value = store.entities.getPredefinedType?.(id) || resolveEntityPredefinedType(store, id) || '';
     predefCache.set(id, value);
+    return value;
+  }
+
+  // LongName re-parses the entity too, and a room list asks for it on every
+  // row — same cache treatment as PredefinedType.
+  const longNameCache = new Map<number, string>();
+  function getLongNameFor(id: number): string {
+    const cached = longNameCache.get(id);
+    if (cached !== undefined) return cached;
+    // No columnar accessor for LongName — the source-gated resolver is the
+    // only path, exactly as it was for Tag before the table gained one.
+    const value = resolveEntityLongName(store, id) || '';
+    longNameCache.set(id, value);
     return value;
   }
 
@@ -229,6 +242,7 @@ export function createListDataProvider(
     getEntityObjectType: (id) => store.entities.getObjectType(id) || getOnDemandAttrs(id).objectType,
     getEntityPredefinedType: (id) => getPredefinedTypeFor(id),
     getEntityTag: (id) => store.entities.getTag?.(id) || getOnDemandAttrs(id).tag,
+    getEntityLongName: (id) => getLongNameFor(id),
     getEntityTypeName: (id) => store.entities.getTypeName(id),
 
     getPropertySets: getPropertySetsFor,

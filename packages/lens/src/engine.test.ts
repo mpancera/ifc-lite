@@ -635,7 +635,25 @@ describe('evaluateAutoColorLens — By Zone', () => {
     expect(result.legend.map((e) => e.name).sort()).toEqual(['Dwelling A', 'Dwelling B', 'Dwelling C']);
   });
 
-  it('prefers the IfcZone membership when an element is in several groups', () => {
+  it('colours by the IfcZone when an element is in several groups', () => {
+    // The lens is "by zone": the element takes the zone's colour, not the
+    // system's, however the relationship graph happened to order them.
+    const provider = createGroupProvider([
+      { id: 1, groups: [
+        { id: 200, name: 'HVAC', type: 'IfcDistributionSystem' },
+        { id: 201, name: 'Fire Compartment 1', type: 'IfcZone' },
+      ] },
+    ]);
+    const result = evaluateAutoColorLens({ source: 'group' }, provider, ['#111111', '#222222']);
+
+    expect(result.legend[0].name).toBe('Fire Compartment 1');
+    expect(result.colorMap.get(1)).toEqual(hexToRgba('#111111', 1));
+  });
+
+  it('still lists the other memberships in the legend', () => {
+    // An element renders in one colour, but the legend answers "what zones are
+    // there", not "which won a colour". Hiding a zone whose rooms all sit in
+    // another one too makes it look like the zone does not exist.
     const provider = createGroupProvider([
       { id: 1, groups: [
         { id: 200, name: 'HVAC', type: 'IfcDistributionSystem' },
@@ -643,8 +661,37 @@ describe('evaluateAutoColorLens — By Zone', () => {
       ] },
     ]);
     const result = evaluateAutoColorLens({ source: 'group' }, provider);
+
+    expect(result.legend.map((e) => e.name).sort()).toEqual(['Fire Compartment 1', 'HVAC']);
+  });
+
+  it('lists a zone whose members are all in another zone as well', () => {
+    // Marc's case: every room of "Office A" was also painted into "Zone 1",
+    // and Office A vanished from the legend entirely.
+    const provider = createGroupProvider([
+      { id: 1, groups: [
+        { id: 100, name: 'Zone 1', type: 'IfcZone' },
+        { id: 101, name: 'Office A', type: 'IfcZone' },
+      ] },
+      { id: 2, groups: [{ id: 100, name: 'Zone 1', type: 'IfcZone' }] },
+    ]);
+    const result = evaluateAutoColorLens({ source: 'group' }, provider);
+
+    expect(result.legend.map((e) => `${e.name}:${e.count}`).sort())
+      .toEqual(['Office A:1', 'Zone 1:2']);
+  });
+
+  it('de-duplicates a room listed twice under the same zone', () => {
+    const provider = createGroupProvider([
+      { id: 1, groups: [
+        { id: 100, name: 'Zone 1', type: 'IfcZone' },
+        { id: 100, name: 'Zone 1', type: 'IfcZone' },
+      ] },
+    ]);
+    const result = evaluateAutoColorLens({ source: 'group' }, provider);
+
     expect(result.legend).toHaveLength(1);
-    expect(result.legend[0].name).toBe('Fire Compartment 1');
+    expect(result.legend[0].count).toBe(1);
   });
 
   it('falls back to ObjectType (system type) when a group has no name', () => {

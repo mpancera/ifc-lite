@@ -26,6 +26,8 @@ function makeEditor() {
   const store: MutationStoreShape = { entityIndex: { byId } };
   const view = new MutablePropertyView(null, 'm1');
   const editor = new StoreEditor(store, view);
+  // `authoredEntities` is what the app reads with, so the tests read the same
+  // way — a write that only lands in a map no reader consults is not a write.
   return { editor, view, entities: () => authoredEntities(view) };
 }
 
@@ -172,14 +174,25 @@ describe('setZoneColour', () => {
   });
 
   it('leaves no second token behind after repeated recolouring', () => {
-    const { editor, entities, view } = makeEditor();
+    const { editor, entities } = makeEditor();
     const zoneId = createZone(editor, 5, { name: 'AZ-A', colour: '#111111' });
 
     setZoneColour(editor, entities(), zoneId, '#222222');
     setZoneColour(editor, entities(), zoneId, '#472A24');
 
-    const written = view.getPositionalMutationsForEntity(zoneId)!.get(3);
-    assert.equal(written, 'ZoneDisplay=#472A24');
+    assert.equal(entities()[0].attributes[3], 'ZoneDisplay=#472A24');
+  });
+
+  it('still recolours after the Description was edited by name elsewhere', () => {
+    // The masking case: a list cell or the properties panel writes Description
+    // through `setAttribute`. If the panel wrote by index instead, that named
+    // record would win forever and every later recolour would do nothing.
+    const { editor, entities, view } = makeEditor();
+    const zoneId = createZone(editor, 5, { name: 'AZ-A', colour: '#111111' });
+    view.setAttribute(zoneId, 'Description', 'Ostflügel');
+
+    assert.equal(setZoneColour(editor, entities(), zoneId, '#472A24'), true);
+    assert.equal(entities()[0].attributes[3], 'Ostflügel ZoneDisplay=#472A24');
   });
 
   it('refuses a zone that came in with the file', () => {

@@ -124,6 +124,13 @@ export interface ListDataProvider {
    *  the element has none. Used by the `PredefinedType` attribute column. */
   getEntityPredefinedType?(expressId: number): string;
   /**
+   * `LongName` — the readable label on spatial elements and groups
+   * (`IfcSpace`, `IfcZone`, `IfcBuildingStorey`, …), where `Name` is usually
+   * just the number. '' for types that do not declare it. Optional: providers
+   * built before this return nothing, and the column resolves empty.
+   */
+  getEntityLongName?(expressId: number): string;
+  /**
    * Discover EVERY property set / property and quantity set / quantity in
    * the model — complete and independent of entity-type selection — so the
    * column picker can offer all data even with no type chosen. Optional:
@@ -437,6 +444,9 @@ export interface DiscoveredColumns {
 
 export const ENTITY_ATTRIBUTES = [
   'Name',
+  // Rooms carry their readable label here ("Büro") while `Name` holds the
+  // number ("01"). A room list without it is a list of numbers.
+  'LongName',
   'GlobalId',
   'Class',
   'Type',

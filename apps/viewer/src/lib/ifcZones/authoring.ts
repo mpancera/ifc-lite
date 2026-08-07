@@ -20,9 +20,17 @@ import { addZoneToStore, emitRelAssignsToGroup } from '@ifc-lite/create';
 import { planMembership, readZones, type OverlayEntity, type PaintMode, type ZoneInfo } from './membership.js';
 import { formatZoneDescription } from './zoneDisplay.js';
 
-/** Positional attribute indices we write. Named so the calls read. */
-const ZONE_DESCRIPTION = 3;
-const ZONE_NAME = 2;
+/**
+ * `RelatedObjects` on `IfcRelAssignsToGroup` has no name in our attribute
+ * table, so membership is written positionally. The zone's own Name and
+ * Description go through `setAttribute` instead.
+ *
+ * That split matters: an entity edited through BOTH channels has two records
+ * of the same attribute, and whichever a reader prefers wins regardless of
+ * which write came last. The properties panel and list cells write by name, so
+ * a zone panel writing by index would find its recolour silently masked the
+ * moment somebody retyped the Description anywhere else.
+ */
 const REL_RELATED_OBJECTS = 4;
 
 export interface CreateZoneParams {
@@ -70,8 +78,7 @@ export function setZoneColour(
   const zone = findAuthoredZone(entities, zoneId);
   if (!zone) return false;
 
-  const next = formatZoneDescription(zone.description, colour);
-  editor.setPositionalAttribute(zoneId, ZONE_DESCRIPTION, next || null);
+  editor.setAttribute(zoneId, 'Description', formatZoneDescription(zone.description, colour));
   return true;
 }
 
@@ -83,7 +90,7 @@ export function setZoneName(
   name: string,
 ): boolean {
   if (!findAuthoredZone(entities, zoneId)) return false;
-  editor.setPositionalAttribute(zoneId, ZONE_NAME, name);
+  editor.setAttribute(zoneId, 'Name', name);
   return true;
 }
 
@@ -102,8 +109,7 @@ export function setZoneDescription(
   const zone = findAuthoredZone(entities, zoneId);
   if (!zone) return false;
 
-  const next = formatZoneDescription(text, zone.colour);
-  editor.setPositionalAttribute(zoneId, ZONE_DESCRIPTION, next || null);
+  editor.setAttribute(zoneId, 'Description', formatZoneDescription(text, zone.colour));
   return true;
 }
 

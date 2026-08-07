@@ -268,12 +268,20 @@ export function groupBucketValue(
 }
 
 /**
- * Extract every distinct value an entity should be grouped under. Only
- * `material` is multi-valued — an element with a layer / constituent set
- * belongs to each of its individual materials; all other sources collapse to
- * a single value. Values are trimmed and de-duplicated; empties are dropped.
- * Falls back to the single-valued {@link extractAutoColorValue} when the
- * multi-material accessor is unavailable. (#1366)
+ * Extract every distinct value an entity should be grouped under.
+ *
+ * `material` and `group` are multi-valued — an element built from a layer set
+ * belongs to each of its materials, and IFC lets a room belong to several
+ * zones at once. All other sources collapse to a single value. Values are
+ * trimmed and de-duplicated; empties are dropped. Falls back to the
+ * single-valued {@link extractAutoColorValue} when the multi accessor is
+ * unavailable. (#1366)
+ *
+ * A multi-valued element still RENDERS in one colour — the largest bucket it
+ * belongs to (see phase 3). The legend lists every value regardless, because
+ * its job is to say what exists in the model, not to enumerate what happened
+ * to win a colour: hiding a zone because all its rooms are also in another one
+ * makes the zone look like it does not exist.
  */
 function extractAutoColorValues(
   spec: AutoColorSpec,
@@ -299,6 +307,26 @@ function extractAutoColorValues(
     const nameAddsInfo = !!name && name !== c.identification && name !== code;
     const label = code && nameAddsInfo ? `${code} (${name})` : key;
     return [{ key, label }];
+  }
+
+  if (spec.source === 'group' && provider.getEntityGroups) {
+    const groups = provider.getEntityGroups(globalId);
+    if (groups && groups.length > 0) {
+      // Zones before the rest, so the element's colour comes from a zone when
+      // it has one — the picture is "by zone", not "by whichever grouping the
+      // relationship graph listed first".
+      const zonesFirst = [
+        ...groups.filter((g) => g.type === 'IfcZone' || g.type === 'IfcSpatialZone'),
+        ...groups.filter((g) => g.type !== 'IfcZone' && g.type !== 'IfcSpatialZone'),
+      ];
+      const seen = new Set<string>();
+      for (const g of zonesFirst) {
+        const key = groupBucketValue(g).trim();
+        if (key) seen.add(key);
+      }
+      if (seen.size > 0) return [...seen].map((k) => ({ key: k, label: k }));
+    }
+    return [];
   }
 
   if (spec.source === 'material' && provider.getMaterialNames) {

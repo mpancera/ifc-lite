@@ -40,6 +40,7 @@ import { discoverColumns, ENTITY_ATTRIBUTES, groupingColumnIds } from '@ifc-lite
 import { useViewerStore } from '@/store';
 import type { ZoneSet } from '@/lib/zones';
 import { collectScopeTypes } from '@/lib/lists/scope-types';
+import { moveItem, swapItem } from '@/lib/lists/reorder';
 import { rebuildGrouping } from './list-table-utils';
 import {
   isEditableColumn,
@@ -335,13 +336,15 @@ export function ListBuilder({ providers, stores, initial, onSave, onCancel, onEx
   );
 
   const moveColumn = useCallback((idx: number, direction: -1 | 1) => {
-    setColumns(prev => {
-      const target = idx + direction;
-      if (target < 0 || target >= prev.length) return prev;
-      const next = [...prev];
-      [next[idx], next[target]] = [next[target], next[idx]];
-      return next;
-    });
+    setColumns(prev => swapItem(prev, idx, direction) as ColumnDefinition[]);
+  }, []);
+
+  /**
+   * Drop `from` at position `to` — a move, not a swap. See `lib/lists/reorder`
+   * for why the two are not interchangeable beyond neighbours.
+   */
+  const reorderColumn = useCallback((from: number, to: number) => {
+    setColumns(prev => moveItem(prev, from, to) as ColumnDefinition[]);
   }, []);
 
   const addCondition = useCallback((condition: PropertyCondition) => {
@@ -505,6 +508,7 @@ export function ListBuilder({ providers, stores, initial, onSave, onCancel, onEx
                 columns={columns}
                 discovered={discovered}
                 onMove={moveColumn}
+                onReorder={reorderColumn}
                 onRemove={removeColumn}
                 onUpdate={updateColumn}
                 isDuplicate={isDuplicateColumn}
@@ -620,6 +624,7 @@ function SelectedColumns({
   columns,
   discovered,
   onMove,
+  onReorder,
   onRemove,
   onUpdate,
   isDuplicate,
@@ -627,6 +632,7 @@ function SelectedColumns({
   columns: ColumnDefinition[];
   discovered: DiscoveredColumns;
   onMove: (idx: number, dir: -1 | 1) => void;
+  onReorder: (from: number, to: number) => void;
   onRemove: (id: string) => void;
   onUpdate: (id: string, next: ColumnDefinition) => void;
   isDuplicate: (draft: ColumnDraft, excludeId?: string) => boolean;
@@ -635,6 +641,18 @@ function SelectedColumns({
   // edited column is removed or after a save.
   const [editingId, setEditingId] = useState<string | null>(null);
 
+  // Dragging a row to its place. The arrows stay — they are the keyboard path
+  // and the precise one — but moving a column six rows up by clicking six
+  // times is not a thing to ask of anyone, and the row slides out from under
+  // the pointer on every click.
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [overIdx, setOverIdx] = useState<number | null>(null);
+  // The row is only draggable while the grip is held: dragging from anywhere
+  // would swallow text selection and fight the buttons on the same row.
+  const [handleHeld, setHandleHeld] = useState(false);
+
+  const endDrag = () => { setDragIdx(null); setOverIdx(null); setHandleHeld(false); };
+
   return (
     <div className="mb-3 space-y-1">
       {columns.map((col, idx) => {
@@ -642,8 +660,37 @@ function SelectedColumns({
         const editable = isEditableColumn(col);
         return (
           <div key={col.id} className="space-y-1">
-            <div className="group flex items-center gap-1.5 rounded-md border border-border/60 bg-card px-2 py-1 text-xs">
-              <GripVertical className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50" />
+            <div
+              draggable={handleHeld}
+              onDragStart={(e) => { setDragIdx(idx); e.dataTransfer.effectAllowed = 'move'; }}
+              onDragOver={(e) => {
+                if (dragIdx === null) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                if (overIdx !== idx) setOverIdx(idx);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (dragIdx !== null) onReorder(dragIdx, idx);
+                endDrag();
+              }}
+              onDragEnd={endDrag}
+              className={cn(
+                'group flex items-center gap-1.5 rounded-md border border-border/60 bg-card px-2 py-1 text-xs',
+                dragIdx === idx && 'opacity-40',
+                // Which edge the row would land on, so the drop is predictable
+                // rather than a guess about where the pointer counts.
+                overIdx === idx && dragIdx !== null && dragIdx !== idx && (
+                  dragIdx < idx ? 'border-b-2 border-b-primary' : 'border-t-2 border-t-primary'
+                ),
+              )}
+            >
+              <GripVertical
+                onMouseDown={() => setHandleHeld(true)}
+                onMouseUp={() => setHandleHeld(false)}
+                aria-label="Drag to reorder"
+                className="h-3.5 w-3.5 shrink-0 cursor-grab text-muted-foreground/50 active:cursor-grabbing hover:text-muted-foreground"
+              />
               <span className="w-4 shrink-0 text-right tabular-nums text-muted-foreground">{idx + 1}</span>
               <span className="flex-1 truncate font-medium">
                 {col.label ?? col.propertyName}

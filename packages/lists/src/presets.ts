@@ -116,6 +116,10 @@ export const LIST_PRESETS: ListDefinition[] = [
     [IfcTypeEnum.IfcSpace],
     [
       attr('Name'),
+      // `Name` on a room is the number ("01"); the readable label is LongName
+      // ("Büro"). Both, in that order, or the list reads as a numbered nothing.
+      attr('LongName'),
+      attr('Tag'),
       attr('Description'),
       attr('ObjectType'),
       // The zone a room was assigned to. Empty until somebody assigns one,

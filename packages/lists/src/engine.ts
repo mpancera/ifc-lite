@@ -613,6 +613,8 @@ function getAttributeValue(entityId: number, attrName: string, provider: ListDat
       return provider.getEntityPredefinedType?.(entityId) || null;
     case 'Tag':
       return provider.getEntityTag(entityId) || null;
+    case 'LongName':
+      return provider.getEntityLongName?.(entityId) || null;
     default:
       return null;
   }

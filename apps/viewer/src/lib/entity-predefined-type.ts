@@ -37,3 +37,24 @@ export function resolveEntityPredefinedType(
   if (!(store.source?.length > 0) || !store.entityIndex) return undefined;
   return pickPredefinedType(extractAllEntityAttributes(store, expressId));
 }
+
+/**
+ * Resolve an entity's `LongName` from the source buffer.
+ *
+ * Same schema-driven, re-parse-on-demand path as
+ * {@link resolveEntityPredefinedType}: there is no columnar accessor, and the
+ * attribute sits at a different index per class — 5 on an `IfcZone`, 7 on an
+ * `IfcSpace` — so reading it positionally is exactly the bug the name-mapped
+ * extractor exists to prevent.
+ */
+export function resolveEntityLongName(
+  store: IfcDataStore,
+  expressId: number,
+): string | undefined {
+  if (!(store.source?.length > 0) || !store.entityIndex) return undefined;
+  const entry = extractAllEntityAttributes(store, expressId)
+    .find((a) => a.name === 'LongName');
+  if (!entry) return undefined;
+  const value = String(entry.value).trim();
+  return value.length > 0 ? value : undefined;
+}
