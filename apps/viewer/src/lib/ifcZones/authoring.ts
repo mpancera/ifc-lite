@@ -95,6 +95,21 @@ export function setZoneName(
 }
 
 /**
+ * Change a zone's theme — which for an `IfcZone` means its `ObjectType`,
+ * because the schema gives it no PredefinedType. See `themes.ts`.
+ */
+export function setZoneObjectType(
+  editor: StoreEditor,
+  entities: Iterable<OverlayEntity>,
+  zoneId: number,
+  objectType: string,
+): boolean {
+  if (!findAuthoredZone(entities, zoneId)) return false;
+  editor.setAttribute(zoneId, 'ObjectType', objectType);
+  return true;
+}
+
+/**
  * Set the author's text, keeping the colour token attached.
  *
  * Splitting this from {@link setZoneColour} means the panel can offer a plain

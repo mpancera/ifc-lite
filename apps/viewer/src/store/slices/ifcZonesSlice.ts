@@ -26,6 +26,7 @@ import {
   setZoneColour as setZoneColourInStore,
   setZoneDescription as setZoneDescriptionInStore,
   setZoneName as setZoneNameInStore,
+  setZoneObjectType as setZoneObjectTypeInStore,
   type CreateZoneParams,
 } from '@/lib/ifcZones/authoring';
 import { readZones, type PaintMode, type ZoneInfo } from '@/lib/ifcZones/membership';
@@ -58,6 +59,9 @@ export interface IfcZonesSlice {
   renameIfcZone: (modelId: string, zoneId: number, name: string) => boolean;
   setIfcZoneColour: (modelId: string, zoneId: number, colour: string | null) => boolean;
   setIfcZoneDescription: (modelId: string, zoneId: number, text: string) => boolean;
+  /** Change the zone's theme. `ObjectType`, since `IfcZone` has no
+   *  PredefinedType — see `lib/ifcZones/themes`. */
+  setIfcZoneObjectType: (modelId: string, zoneId: number, objectType: string) => boolean;
   deleteIfcZone: (modelId: string, zoneId: number) => boolean;
   /**
    * Paint rooms into (or out of) a zone. Returns what changed, or `null` when
@@ -187,6 +191,13 @@ export const createIfcZonesSlice: StateCreator<ViewerState, [], [], IfcZonesSlic
     setIfcZoneDescription: (modelId, zoneId, text) => {
       const ctx = writable(modelId);
       if (!ctx || !setZoneDescriptionInStore(ctx.editor, ctx.entities, zoneId, text)) return false;
+      commit(set, modelId, null);
+      return true;
+    },
+
+    setIfcZoneObjectType: (modelId, zoneId, objectType) => {
+      const ctx = writable(modelId);
+      if (!ctx || !setZoneObjectTypeInStore(ctx.editor, ctx.entities, zoneId, objectType)) return false;
       commit(set, modelId, null);
       return true;
     },

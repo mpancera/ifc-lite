@@ -30,6 +30,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useViewerStore } from '@/store';
 import { parseIfcZoneKey } from '@/store/slices/ifcZonesSlice';
 import { nextZoneColour } from '@/lib/ifcZones/authoring';
+import { DEFAULT_THEME_ID, ZONE_THEMES, themeOfZone } from '@/lib/ifcZones/themes';
 import {
   ZONE_MEMBER_TYPES, describeZoneTargets, eligibleZoneMembers,
 } from '@/lib/ifcZones/selectionTargets';
@@ -70,9 +71,15 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
   const selectedEntitiesSet = useViewerStore((s) => s.selectedEntitiesSet);
   const selectedEntities = useViewerStore((s) => s.selectedEntities);
   const setIfcZoneDescription = useViewerStore((s) => s.setIfcZoneDescription);
+  const setIfcZoneObjectType = useViewerStore((s) => s.setIfcZoneObjectType);
 
   const [note, setNote] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<number | null>(null);
+  // The theme the next new zone gets. Kept for the whole session because
+  // zones are made in runs — six trigger zones, then four compartments — and
+  // re-picking the same theme each time is the kind of friction that makes
+  // people leave it wrong.
+  const [newThemeId, setNewThemeId] = useState<string>(DEFAULT_THEME_ID);
 
   const zones = useMemo(
     () => (activeModelId ? ifcZonesOf(activeModelId) : []),
@@ -181,10 +188,14 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
   const handleCreate = () => {
     if (!activeModelId) return;
     const colour = nextZoneColour(zones, [...LENS_PALETTE]);
+    // The theme is mandatory but never guessed: a new zone starts at
+    // "Nicht definiert" and the author picks. A wrong theme mixes zones that
+    // must stay apart, which is worse than an unclassified one.
+    const theme = ZONE_THEMES.find((t) => t.id === newThemeId) ?? ZONE_THEMES[ZONE_THEMES.length - 1];
     const zoneId = createIfcZone(activeModelId, {
       name: `Zone ${zones.length + 1}`,
       colour,
-      objectType: 'TriggerZone',
+      objectType: theme.zoneObjectType,
     });
     if (zoneId === null) {
       setNote('Zone konnte nicht angelegt werden — prüfe die Fachrolle.');
@@ -216,6 +227,17 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
           <Plus className="mr-1 h-3.5 w-3.5" />
           Neue Zone
         </Button>
+        <select
+          value={newThemeId}
+          onChange={(e) => setNewThemeId(e.target.value)}
+          aria-label="Thema der neuen Zone"
+          title="Thema — landet in IfcZone.ObjectType"
+          className="h-7 min-w-0 flex-1 rounded-md border border-border bg-background px-1.5 text-[11px]"
+        >
+          {ZONE_THEMES.map((t) => (
+            <option key={t.id} value={t.id}>{t.label}</option>
+          ))}
+        </select>
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -342,6 +364,31 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
                           />
                         ))}
                       </div>
+                      {/* The theme is what keeps zones of different kinds apart.
+                          Shown on the open zone rather than in every row: it
+                          changes rarely, and the row is already dense. */}
+                      <select
+                        value={themeOfZone(zone.objectType)?.id ?? ''}
+                        onChange={(e) => {
+                          const next = ZONE_THEMES.find((th) => th.id === e.target.value);
+                          if (!activeModelId || !next) return;
+                          setIfcZoneObjectType(activeModelId, zone.expressId, next.zoneObjectType);
+                        }}
+                        aria-label="Thema"
+                        className="h-6 w-full rounded-md border border-border bg-background px-1.5 text-[11px]"
+                      >
+                        {/* A zone authored elsewhere may carry a convention we
+                            do not know. Show it rather than silently
+                            re-labelling it as something we recognise. */}
+                        {themeOfZone(zone.objectType) === null && (
+                          <option value="">
+                            {zone.objectType ? `${zone.objectType} (fremd)` : 'ohne Thema'}
+                          </option>
+                        )}
+                        {ZONE_THEMES.map((th) => (
+                          <option key={th.id} value={th.id}>{th.label}</option>
+                        ))}
+                      </select>
                       {/* Plain text only — the colour rides along in the same
                           IFC attribute, but the author never sees the token.
                           Keyed by the current text so an outside change (undo)

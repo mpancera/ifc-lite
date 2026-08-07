@@ -13,7 +13,8 @@ import {
 import { authoredEntities } from '../mutations/authoredEntities.js';
 import { readZones, zoneOfSpace } from './membership.js';
 import {
-  createZone, deleteZone, nextZoneColour, paintZone, setZoneColour, setZoneDescription, setZoneName,
+  createZone, deleteZone, nextZoneColour, paintZone, setZoneColour, setZoneDescription,
+  setZoneName, setZoneObjectType,
 } from './authoring.js';
 
 function makeEditor() {
@@ -221,6 +222,37 @@ describe('setZoneName / setZoneDescription', () => {
     const [zone] = readZones(entities());
     assert.equal(zone.description, 'neu');
     assert.equal(zone.colour, '#472A24');
+  });
+});
+
+describe('setZoneObjectType', () => {
+  it('changes the theme', () => {
+    // `IfcZone` has no PredefinedType, so the theme IS the ObjectType.
+    const { editor, entities } = makeEditor();
+    const zoneId = createZone(editor, 5, { name: 'AZ-A', objectType: 'Notdefined' });
+
+    setZoneObjectType(editor, entities(), zoneId, 'FireCompartment');
+
+    assert.equal(readZones(entities())[0].objectType, 'FireCompartment');
+  });
+
+  it('leaves the colour and the text alone', () => {
+    const { editor, entities } = makeEditor();
+    const zoneId = createZone(editor, 5, {
+      name: 'AZ-A', description: 'Ostflügel', colour: '#472A24', objectType: 'Notdefined',
+    });
+
+    setZoneObjectType(editor, entities(), zoneId, 'FireCompartment');
+
+    const [zone] = readZones(entities());
+    assert.equal(zone.colour, '#472A24');
+    assert.equal(zone.description, 'Ostflügel');
+  });
+
+  it('refuses a zone that is not ours', () => {
+    const { editor, entities } = makeEditor();
+
+    assert.equal(setZoneObjectType(editor, entities(), 42, 'FireCompartment'), false);
   });
 });
 
