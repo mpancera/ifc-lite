@@ -36,7 +36,11 @@ import { downloadFile, sanitizeFilename } from '@/lib/export/download';
 import { toast } from '@/components/ui/toast';
 import { generateZonesFromStoreys } from '@/hooks/useZoneStoreyGeneration';
 import { selectElementsInZone } from '@/hooks/useZoneSelection';
-import type { Zone } from '@/lib/zones';
+import { getGlobalRenderer } from '@/hooks/useBCF';
+import {
+  defaultZoneGeometry, mergeBounds, preferBounds, toWorldBounds,
+  type WorldBounds, type Zone,
+} from '@/lib/zones';
 
 interface ZonesPanelProps {
   onClose?: () => void;
@@ -160,6 +164,35 @@ function ZoneRow({
       </div>
     </div>
   );
+}
+
+/**
+ * Where to put a freshly added zone.
+ *
+ * Rooms first, the whole scene only as a fallback. A site plate routinely
+ * dwarfs what stands on it — measured on a real project, terrain 138 × 149 m
+ * against a building of 44 × 38 m sitting off to one side — so centring on the
+ * scene drops the new zone onto empty ground and it classifies nothing. That
+ * is the same failure as the old fixed box at the world origin, just less
+ * obvious about it.
+ */
+function newZoneBounds(): WorldBounds | null {
+  const renderer = getGlobalRenderer();
+  const scene = renderer?.getScene();
+  const sceneBounds = toWorldBounds(renderer?.getCamera?.()?.getSceneBounds() ?? null);
+  if (!scene) return sceneBounds;
+
+  const state = useViewerStore.getState();
+  const boxes: WorldBounds[] = [];
+  for (const [modelId, model] of state.models) {
+    const roomIds = model.ifcDataStore?.entityIndex?.byType?.get('IFCSPACE');
+    if (!roomIds) continue;
+    for (const expressId of roomIds) {
+      const box = toWorldBounds(scene.getEntityBoundingBox(state.toGlobalId(modelId, expressId)));
+      if (box) boxes.push(box);
+    }
+  }
+  return preferBounds(mergeBounds(boxes), sceneBounds);
 }
 
 export function ZonesPanel({ onClose }: ZonesPanelProps) {
@@ -311,7 +344,10 @@ export function ZonesPanel({ onClose }: ZonesPanelProps) {
                 size="icon"
                 className="h-6 w-6"
                 title="Add zone"
-                onClick={() => addZone(zs.id, { name: `Zone ${zs.zones.length + 1}` })}
+                onClick={() => addZone(zs.id, {
+                  name: `Zone ${zs.zones.length + 1}`,
+                  ...defaultZoneGeometry(newZoneBounds()),
+                })}
               >
                 <Plus className="h-3.5 w-3.5" />
               </Button>

@@ -67,6 +67,16 @@ export const ZONE_THEMES: readonly ZoneTheme[] = [
   },
 
   {
+    // Lean-construction takt planning. Shares CONSTRUCTION with the building
+    // phase above, so it needs the refinement to stay distinguishable in the
+    // file. "Takt" is the international term in lean construction, not a
+    // Germanism — hence TaktArea rather than a translation.
+    id: 'takt', label: 'Taktbereich (Taktplanung)',
+    zoneObjectType: 'TaktArea',
+    spatialPredefinedType: 'CONSTRUCTION', spatialObjectType: 'TaktArea',
+  },
+
+  {
     id: 'fire-compartment', label: 'Brandabschnitt',
     // One of the four values IFC itself documents for IfcZone.
     zoneObjectType: 'FireCompartment',

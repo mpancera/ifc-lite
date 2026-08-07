@@ -39,3 +39,13 @@ export {
 export { serializeZoneSets, parseZoneSetFile, type ParseZoneSetFileResult } from './persistence.js';
 
 export { zoneColorForIndex } from './colors.js';
+
+export {
+  defaultZoneGeometry,
+  toWorldBounds,
+  mergeBounds,
+  preferBounds,
+  NEW_ZONE_FOOTPRINT_FRACTION,
+  FALLBACK_ZONE_SIZE,
+  type WorldBounds,
+} from './default-zone.js';
