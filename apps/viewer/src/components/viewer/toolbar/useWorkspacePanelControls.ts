@@ -19,8 +19,8 @@ import {
 } from '@/services/analysis-extensions';
 import { closePanelWindow } from '@/services/panel-windows';
 
-export type BottomPanel = 'script' | 'list' | 'gantt';
-export type RightPanel = 'bcf' | 'ids' | 'lens' | 'clash' | 'compare' | 'addElement' | 'zonePaint' | 'zones' | 'heights' | 'extensions';
+export type BottomPanel = 'script' | 'list' | 'gantt' | 'heights';
+export type RightPanel = 'bcf' | 'ids' | 'lens' | 'clash' | 'compare' | 'addElement' | 'zonePaint' | 'zones' | 'extensions';
 export type WorkspacePanel = BottomPanel | RightPanel | string;
 
 /**
@@ -95,15 +95,19 @@ export function useWorkspacePanelControls() {
     const nextScriptVisible = panel === 'script' ? !scriptPanelVisible : false;
     const nextListVisible = panel === 'list' ? !listPanelVisible : false;
     const nextGanttVisible = panel === 'gantt' ? !ganttPanelVisible : false;
+    const nextHeightsVisible = panel === 'heights' ? !heightsPanelVisible : false;
 
     setScriptPanelVisible(nextScriptVisible);
     setListPanelVisible(nextListVisible);
     setGanttPanelVisible(nextGanttVisible);
+    setHeightsPanelVisible(nextHeightsVisible);
 
-    if (nextScriptVisible || nextListVisible || nextGanttVisible) {
+    if (nextScriptVisible || nextListVisible || nextGanttVisible || nextHeightsVisible) {
       setRightPanelCollapsed(false);
     }
   }, [
+    heightsPanelVisible,
+    setHeightsPanelVisible,
     activeAnalysisExtension?.placement,
     ganttPanelVisible,
     listPanelVisible,
@@ -126,7 +130,6 @@ export function useWorkspacePanelControls() {
     const nextCompareVisible = panel === 'compare' ? !comparePanelVisible : false;
     const nextExtensionsVisible = panel === 'extensions' ? !extensionsPanelVisible : false;
     const nextZonesVisible = panel === 'zones' ? !zonesPanelVisible : false;
-    const nextHeightsVisible = panel === 'heights' ? !heightsPanelVisible : false;
     // A tool panel is "open" when its tool is active. Toggling any panel closes
     // whichever tool panel was running, so the right slot stays single-tenant.
     const activeToolPanel = isToolPanel(activeTool) ? activeTool : null;
@@ -139,7 +142,6 @@ export function useWorkspacePanelControls() {
     setComparePanelVisible(nextCompareVisible);
     setExtensionsPanelVisible(nextExtensionsVisible);
     setZonesPanelVisible(nextZonesVisible);
-    setHeightsPanelVisible(nextHeightsVisible);
     // Keep the float + window channels in sync (#1200/#1201/#1208): toggling a
     // workspace panel from the toolbar re-docks it if it was floating or popped
     // out, instead of leaving an orphaned floating panel or OS window.
@@ -154,7 +156,7 @@ export function useWorkspacePanelControls() {
       setActiveTool('select');
     }
 
-    if (nextBcfVisible || nextIdsVisible || nextLensVisible || nextClashVisible || nextCompareVisible || nextExtensionsVisible || nextZonesVisible || nextHeightsVisible || nextToolPanel) {
+    if (nextBcfVisible || nextIdsVisible || nextLensVisible || nextClashVisible || nextCompareVisible || nextExtensionsVisible || nextZonesVisible || nextToolPanel) {
       setRightPanelCollapsed(false);
     }
   }, [
@@ -165,7 +167,6 @@ export function useWorkspacePanelControls() {
     comparePanelVisible,
     extensionsPanelVisible,
     zonesPanelVisible,
-    heightsPanelVisible,
     idsPanelVisible,
     lensPanelVisible,
     setActiveTool,
@@ -209,7 +210,6 @@ export function useWorkspacePanelControls() {
     setComparePanelVisible(false);
     setExtensionsPanelVisible(false);
     setZonesPanelVisible(false);
-    setHeightsPanelVisible(false);
     // The right slot is single-tenant: when an analysis extension takes
     // it over, a tool panel must release it too, otherwise its 3D click
     // handler keeps writing to the model behind the extension panel.

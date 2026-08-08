@@ -18,8 +18,9 @@ import { type StateCreator } from 'zustand';
 import { deriveHeightSystem } from '@/lib/heights/derive';
 import { readRawStoreys } from '@/lib/heights/read';
 import {
-  setDatumAboveSeaLevel, setElevation, setReferenceLevels, setStoreyHeight,
-  setStoreyLevels, setStoreyName,
+  addReferenceLevel, removeReferenceLevel, setDatumAboveSeaLevel, setElevation,
+  setReferenceLevels, setStoreyHeight, setStoreyLevels, setStoreyName,
+  updateReferenceLevel,
 } from '@/lib/heights/edit';
 import type { HeightSystem, ReferenceLevel } from '@/lib/heights/types';
 import type { ViewerState } from '../index.js';
@@ -48,6 +49,11 @@ export interface HeightsSlice {
   setHeightDatum: (datum: number | null) => void;
   setHeightReferenceLevels: (levels: readonly ReferenceLevel[]) => void;
   setHeightStoreyLevels: (storeyId: string, levels: readonly ReferenceLevel[] | null) => void;
+  addHeightReferenceLevel: (label: string, offset: number) => void;
+  removeHeightReferenceLevel: (key: string) => void;
+  updateHeightReferenceLevel: (
+    key: string, patch: Partial<Pick<ReferenceLevel, 'label' | 'offset'>>,
+  ) => void;
 }
 
 export const createHeightsSlice: StateCreator<ViewerState, [], [], HeightsSlice> = (set, get) => {
@@ -101,5 +107,8 @@ export const createHeightsSlice: StateCreator<ViewerState, [], [], HeightsSlice>
     setHeightDatum: (datum) => edit((s) => setDatumAboveSeaLevel(s, datum)),
     setHeightReferenceLevels: (levels) => edit((s) => setReferenceLevels(s, levels)),
     setHeightStoreyLevels: (storeyId, levels) => edit((s) => setStoreyLevels(s, storeyId, levels)),
+    addHeightReferenceLevel: (label, offset) => edit((s) => addReferenceLevel(s, label, offset)),
+    removeHeightReferenceLevel: (key) => edit((s) => removeReferenceLevel(s, key)),
+    updateHeightReferenceLevel: (key, patch) => edit((s) => updateReferenceLevel(s, key, patch)),
   };
 };

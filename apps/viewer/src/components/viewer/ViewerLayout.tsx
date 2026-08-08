@@ -36,7 +36,9 @@ import { IDSPanel } from './IDSPanel';
 import { LensPanel } from './LensPanel';
 import { ClashPanel } from './ClashPanel';
 import { ComparePanel } from './ComparePanel';
+import type { BottomPanelId } from '@/lib/panels/registry';
 import { ListPanel } from './lists/ListPanel';
+import { HeightsPanel } from './HeightsPanel';
 import { ScriptPanel } from './ScriptPanel';
 import { GanttPanel } from './schedule/GanttPanel';
 import { ExtensionsPanel } from '@/components/extensions/ExtensionsPanel';
@@ -59,7 +61,7 @@ const BOTTOM_PANEL_MAX_RATIO = 0.7; // max 70% of container
 
 /** Slim grip atop a bottom-strip panel — drag to lift it into a floating window,
  *  or drag onto another screen to pop it out (#1208). */
-function BottomPanelGrip({ id }: { id: 'gantt' | 'script' | 'lists' }) {
+function BottomPanelGrip({ id }: { id: BottomPanelId }) {
   const onPointerDown = usePanelDetachDrag(id);
   // Pointer-only drag affordance — not a real button (no keyboard action);
   // keyboard users dock / float via the sidebar rail / Alt+N (#1208).
@@ -206,6 +208,8 @@ export function ViewerLayout() {
   const extensionsPanelVisible = useViewerStore((s) => s.extensionsPanelVisible);
   const setExtensionsPanelVisible = useViewerStore((s) => s.setExtensionsPanelVisible);
   const listPanelVisible = useViewerStore((s) => s.listPanelVisible);
+  const heightsPanelVisible = useViewerStore((s) => s.heightsPanelVisible);
+  const setHeightsPanelVisible = useViewerStore((s) => s.setHeightsPanelVisible);
   const setListPanelVisible = useViewerStore((s) => s.setListPanelVisible);
   const lensPanelVisible = useViewerStore((s) => s.lensPanelVisible);
   const setLensPanelVisible = useViewerStore((s) => s.setLensPanelVisible);
@@ -229,6 +233,7 @@ export function ViewerLayout() {
   const ganttDocked = ganttPanelVisible && !detachedIds.has('gantt');
   const scriptDocked = scriptPanelVisible && !detachedIds.has('script');
   const listDocked = listPanelVisible && !detachedIds.has('lists');
+  const heightsDocked = heightsPanelVisible && !detachedIds.has('heights');
   const analysisExtensionState = useSyncExternalStore(
     subscribeAnalysisExtensions,
     getAnalysisExtensionsSnapshot,
@@ -430,7 +435,7 @@ export function ViewerLayout() {
             {/* Bottom Panel - Lists / Script / Gantt / analysis ext (custom resizable).
                 Launched from the sidebar rail but docked here (their home region).
                 A panel that's been dragged out to float / another screen is skipped. */}
-            {(listDocked || scriptDocked || ganttDocked || !!activeBottomAnalysisExtension) && (
+            {(listDocked || scriptDocked || ganttDocked || heightsDocked || !!activeBottomAnalysisExtension) && (
               <div data-detach-root style={{ height: bottomHeight, flexShrink: 0 }} className="relative">
                 {/* Drag handle (resize height) */}
                 <div
@@ -441,7 +446,7 @@ export function ViewerLayout() {
                   {/* Detach grip — drag to float / pop the bottom panel onto another
                       screen (hidden for analysis extensions, which own their chrome). */}
                   {!activeBottomAnalysisExtension && (
-                    <BottomPanelGrip id={ganttDocked ? 'gantt' : scriptDocked ? 'script' : 'lists'} />
+                    <BottomPanelGrip id={ganttDocked ? 'gantt' : scriptDocked ? 'script' : heightsDocked ? 'heights' : 'lists'} />
                   )}
                   <div className="flex-1 min-h-0 overflow-hidden">
                     {activeBottomAnalysisExtension ? (
@@ -450,6 +455,8 @@ export function ViewerLayout() {
                       <GanttPanel onClose={() => setGanttPanelVisible(false)} />
                     ) : scriptDocked ? (
                       <ScriptPanel onClose={() => setScriptPanelVisible(false)} />
+                    ) : heightsDocked ? (
+                      <HeightsPanel onClose={() => setHeightsPanelVisible(false)} />
                     ) : (
                       <ListPanel onClose={() => setListPanelVisible(false)} />
                     )}

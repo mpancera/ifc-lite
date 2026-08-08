@@ -584,7 +584,6 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
       collabPanelVisible: panel === 'collab',
       layersPanelVisible: panel === 'layers',
       zonesPanelVisible: panel === 'zones',
-      heightsPanelVisible: panel === 'heights',
       rightPanelCollapsed: false,
     });
     if (get().sidebarMode !== 'expanded') get().setSidebarMode('expanded');
@@ -604,6 +603,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
         scriptPanelVisible: panel === 'script',
         ganttPanelVisible: panel === 'gantt',
         listPanelVisible: panel === 'lists',
+        heightsPanelVisible: panel === 'heights',
         rightPanelCollapsed: false,
       });
       return;
@@ -621,7 +621,6 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
         collabPanelVisible: false,
         layersPanelVisible: false,
         zonesPanelVisible: false,
-        heightsPanelVisible: false,
         rightPanelCollapsed: false,
       });
       get().setSidebarActivePanel('properties');
@@ -646,7 +645,10 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
   toggleBottomPanel: (panel) => {
     const [set, get] = args;
     const s = get();
-    const flagActive = panel === 'script' ? s.scriptPanelVisible : panel === 'gantt' ? s.ganttPanelVisible : s.listPanelVisible;
+    const flagActive = panel === 'script' ? s.scriptPanelVisible
+      : panel === 'gantt' ? s.ganttPanelVisible
+        : panel === 'heights' ? s.heightsPanelVisible
+          : s.listPanelVisible;
     const detached = s.floatingPanels.some((p) => p.id === panel) || s.poppedOutIds.includes(panel);
     // Re-dock any float / OS window for it first.
     get().closeFloatingPanel(panel);
@@ -711,7 +713,6 @@ export const SIDEBAR_PANEL_FLAGS: ReadonlyArray<readonly [keyof ViewerState, Wor
   ['collabPanelVisible', 'collab'],
   ['layersPanelVisible', 'layers'],
   ['zonesPanelVisible', 'zones'],
-  ['heightsPanelVisible', 'heights'],
 ];
 
 /**

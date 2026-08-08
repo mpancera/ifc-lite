@@ -6,8 +6,9 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { withStoreyHeights } from './derive.js';
 import {
-  setDatumAboveSeaLevel, setElevation, setReferenceLevels, setStoreyHeight,
-  setStoreyLevels, setStoreyName,
+  addReferenceLevel, referenceLevelKey, removeReferenceLevel, setDatumAboveSeaLevel,
+  setElevation, setReferenceLevels, setStoreyHeight, setStoreyLevels, setStoreyName,
+  updateReferenceLevel,
 } from './edit.js';
 import type { HeightSystem } from './types.js';
 
@@ -218,5 +219,94 @@ describe('editing keeps elevations and heights consistent', () => {
     assert.deepEqual(elevationsOf(s), [-2.43, 0.1, 3.7]);
     assert.deepEqual(heightsOf(s), [2.53, 3.6, null]);
     assert.equal(s.storeys[2].name, 'OG');
+  });
+});
+
+describe('referenceLevelKey', () => {
+  it('derives a readable key from the label', () => {
+    // Derived, not random: the exported JSON has to stay legible, and `ffl`
+    // is what the industry already says out loud.
+    assert.equal(referenceLevelKey('OK Fertigboden', []), 'ok-fertigboden');
+  });
+
+  it('strips diacritics and punctuation', () => {
+    assert.equal(referenceLevelKey('UK Rohböden (roh)', []), 'uk-rohboden-roh');
+  });
+
+  it('suffixes rather than colliding', () => {
+    // Two levels sharing a key would make levelElevation answer for whichever
+    // came first — a wrong number, silently.
+    assert.equal(referenceLevelKey('FFL', ['ffl']), 'ffl-2');
+    assert.equal(referenceLevelKey('FFL', ['ffl', 'ffl-2']), 'ffl-3');
+  });
+
+  it('falls back for a label with nothing usable in it', () => {
+    assert.equal(referenceLevelKey('±—', []), 'level');
+  });
+});
+
+describe('addReferenceLevel', () => {
+  it('appends with a derived key', () => {
+    const next = addReferenceLevel(system(), 'OK Decke', 2.7);
+    const added = next.referenceLevels.at(-1)!;
+
+    assert.equal(added.key, 'ok-decke');
+    assert.equal(added.offset, 2.7);
+  });
+
+  it('refuses a non-finite offset', () => {
+    const before = system();
+    assert.equal(addReferenceLevel(before, 'x', Number.NaN), before);
+  });
+
+  it('falls back to the key when the label is blank', () => {
+    assert.equal(addReferenceLevel(system(), '   ', 0).referenceLevels.at(-1)!.label, 'level');
+  });
+});
+
+describe('removeReferenceLevel', () => {
+  it('removes it from the system', () => {
+    const next = removeReferenceLevel(system(), 'ssl');
+
+    assert.deepEqual(next.referenceLevels.map((l) => l.key), ['ffl']);
+  });
+
+  it('also removes it from every storey override', () => {
+    // A leftover in an override would keep the level alive on exactly those
+    // storeys — gone from the system list, still in the export.
+    const withOverride = setStoreyLevels(system(), 'b', [
+      { key: 'ffl', label: 'OK-FB', offset: 0 },
+      { key: 'ssl', label: 'UK-RB', offset: -0.25 },
+    ]);
+
+    const next = removeReferenceLevel(withOverride, 'ssl');
+
+    assert.deepEqual(next.storeys.find((s) => s.id === 'b')!.levels!.map((l) => l.key), ['ffl']);
+  });
+
+  it('ignores an unknown key', () => {
+    const before = system();
+    assert.equal(removeReferenceLevel(before, 'nope'), before);
+  });
+});
+
+describe('updateReferenceLevel', () => {
+  it('changes the offset', () => {
+    const next = updateReferenceLevel(system(), 'ssl', { offset: -0.25 });
+
+    assert.equal(next.referenceLevels.find((l) => l.key === 'ssl')!.offset, -0.25);
+  });
+
+  it('changes the label without touching the key', () => {
+    const next = updateReferenceLevel(system(), 'ssl', { label: 'UK Rohbeton' });
+    const level = next.referenceLevels.find((l) => l.key === 'ssl')!;
+
+    assert.equal(level.label, 'UK Rohbeton');
+    assert.equal(level.key, 'ssl');
+  });
+
+  it('refuses a non-finite offset', () => {
+    const before = system();
+    assert.equal(updateReferenceLevel(before, 'ssl', { offset: Number.NaN }), before);
   });
 });

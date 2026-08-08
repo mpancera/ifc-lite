@@ -8,7 +8,7 @@
  */
 
 import React from 'react';
-import { HardHat, Palette, ShieldCheck } from 'lucide-react';
+import { HardHat, Palette, Ruler, ShieldCheck } from 'lucide-react';
 import { AddFile, Loading, OpenFile, Refresh, Screenshot, FileCsv, FileIfc, FileGlb, FileKmz, FileJson, FileHbjson, Share, CollabsRoom } from '@/icons';
 import {
   DropdownMenu,
@@ -25,6 +25,7 @@ import { GLBExportDialog } from '../../GLBExportDialog';
 import { KmzExportDialog } from '../../KmzExportDialog';
 import { HbjsonExportDialog } from '../../HbjsonExportDialog';
 import { ColorPalettePanel } from '../../ColorPalettePanel';
+import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
 import { DataPrivacyPanel } from '../../DataPrivacyPanel';
 import { DisciplineRolePanel } from '../../DisciplineRolePanel';
 import type { FileCommands } from '../../toolbar/useFileCommands';
@@ -41,6 +42,7 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
   const { handleOpenClick, handleAddModelClick, handleRefresh, canRefresh, hasModelsLoaded, openShareDialog } = fileCommands;
   const { loading, models, ifcDataStore } = useIfc();
   const { handleExportCSV, handleExportJSON, handleScreenshot } = useExportCommands();
+  const { handleToggleBottomPanel } = useWorkspacePanelControls();
 
   // Collaboration: the Share cluster is gated behind the collab feature flag.
   // The ShareDialog itself (and its `ifc-lite:open-share-dialog` listener)
@@ -208,6 +210,16 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
                 tooltip="Which installation new elements join, and whether the reference model may be changed"
               />
             }
+          />
+          {/* A verification view rather than a tool: what the storey levels and
+              units in this project actually are. Opens in the bottom strip like
+              Lists, because it is a wide table one consults, not something one
+              works beside. */}
+          <RibbonSmallButton
+            icon={Ruler}
+            label="Höhen & Lage"
+            tooltip="Geschosskoten, Stockwerkshöhen und die geltenden Einheiten dieses Projekts"
+            onClick={() => handleToggleBottomPanel('heights')}
           />
         </RibbonSmallStack>
       </RibbonGroup>

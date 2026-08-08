@@ -145,3 +145,72 @@ export function setStoreyLevels(
   }
   return replaceStorey(system, { ...storey, levels: [...levels] });
 }
+
+/**
+ * A key for a new reference level, derived from its label.
+ *
+ * Derived rather than random so the exported JSON stays readable and a
+ * hand-written system can use the same keys — `ffl`, `ssl` are the ones the
+ * industry already says out loud. Collisions get a numeric suffix rather than
+ * silently overwriting, because two levels with one key would make
+ * `levelElevation` answer for whichever came first.
+ */
+export function referenceLevelKey(label: string, taken: Iterable<string>): string {
+  const used = new Set(taken);
+  const base = label
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    || 'level';
+
+  if (!used.has(base)) return base;
+  for (let i = 2; ; i++) {
+    const candidate = `${base}-${i}`;
+    if (!used.has(candidate)) return candidate;
+  }
+}
+
+/** Append a reference level to the system-wide list. */
+export function addReferenceLevel(
+  system: HeightSystem,
+  label: string,
+  offset: number,
+): HeightSystem {
+  if (!Number.isFinite(offset)) return system;
+  const key = referenceLevelKey(label, system.referenceLevels.map((l) => l.key));
+  return {
+    ...system,
+    referenceLevels: [...system.referenceLevels, { key, label: label.trim() || key, offset }],
+  };
+}
+
+/** Remove a system-wide reference level, and with it any storey override of it. */
+export function removeReferenceLevel(system: HeightSystem, key: string): HeightSystem {
+  if (!system.referenceLevels.some((l) => l.key === key)) return system;
+
+  return {
+    ...system,
+    referenceLevels: system.referenceLevels.filter((l) => l.key !== key),
+    // A storey override that still carried the removed level would keep it
+    // alive on exactly those storeys — invisible in the system list and
+    // present in the export.
+    storeys: system.storeys.map((s) => (
+      s.levels ? { ...s, levels: s.levels.filter((l) => l.key !== key) } : s
+    )),
+  };
+}
+
+/** Change one system-wide reference level in place. */
+export function updateReferenceLevel(
+  system: HeightSystem,
+  key: string,
+  patch: Partial<Pick<ReferenceLevel, 'label' | 'offset'>>,
+): HeightSystem {
+  if (patch.offset !== undefined && !Number.isFinite(patch.offset)) return system;
+
+  return {
+    ...system,
+    referenceLevels: system.referenceLevels.map((l) => (l.key === key ? { ...l, ...patch } : l)),
+  };
+}

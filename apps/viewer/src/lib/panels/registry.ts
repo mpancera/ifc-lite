@@ -118,15 +118,18 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   // The project's reference height system: storey levels and heights that every
   // discipline model has to agree on. APPENDED so the frozen Alt+1..0 mapping
   // stays intact (no Alt shortcut).
-  { id: 'heights', title: 'Höhen & Lage', short: 'Heights', Icon: Ruler, group: 'review', region: 'side' },
+  // Bottom strip, like Lists: it is a verification view — a wide table one
+  // consults occasionally, not a tool one works beside. Reached from File ▸
+  // Settings rather than an authoring tab, for the same reason.
+  { id: 'heights', title: 'Höhen & Lage', short: 'Heights', Icon: Ruler, group: 'review', region: 'bottom' },
 ];
 
 /** The bottom-strip panel ids, mapped to their store visibility flag + setter
  *  names — these stay independent of the single-tenant right pane. */
-export type BottomPanelId = Extract<WorkspacePanelId, 'script' | 'gantt' | 'lists'>;
+export type BottomPanelId = Extract<WorkspacePanelId, 'script' | 'gantt' | 'lists' | 'heights'>;
 
 export function isBottomPanel(id: WorkspacePanelId): id is BottomPanelId {
-  return id === 'script' || id === 'gantt' || id === 'lists';
+  return id === 'script' || id === 'gantt' || id === 'lists' || id === 'heights';
 }
 
 /** The left-slot nav panel (Hierarchy, #1267): toggled via `leftPanelCollapsed`,
