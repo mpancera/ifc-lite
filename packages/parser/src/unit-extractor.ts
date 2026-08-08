@@ -325,3 +325,114 @@ export function describeLengthUnit(
   // A unit assignment that names no length unit at all.
   return null;
 }
+
+/** One entry of a file's `IfcUnitAssignment`. */
+export interface DeclaredUnit {
+  /** `IfcUnitEnum` / `IfcDerivedUnitEnum` token, e.g. `'LENGTHUNIT'`. */
+  unitType: string;
+  /** Readable name: `'MILLI.METRE'`, `'SQUARE_METRE'`, `'FOOT'`, `'DEGREE'`. */
+  name: string;
+  /** Which IFC entity declared it. */
+  kind: 'IfcSIUnit' | 'IfcConversionBasedUnit' | 'IfcDerivedUnit' | 'IfcMonetaryUnit' | 'other';
+}
+
+/**
+ * Everything a file declares in its `IfcUnitAssignment` — length, area,
+ * volume, angle, mass, and the derived units.
+ *
+ * The other two readers here answer only about LENGTH, because that is what
+ * geometry needs. This one exists for the question a person asks: *what do the
+ * numbers in this file mean?* IFC declares no defaults and no country table,
+ * and `IfcContext.UnitsInContext` is OPTIONAL — a valid file may say nothing at
+ * all — so the honest answer can only be read, never assumed.
+ *
+ * Returns `null` when there is no unit assignment to read, which is a
+ * different statement from "an empty one".
+ */
+export function describeAllUnits(
+  source: Uint8Array,
+  entityIndex: { byId: { get(expressId: number): EntityRef | undefined }; byType: Map<string, number[]> },
+): DeclaredUnit[] | null {
+  const extractor = new EntityExtractor(source);
+
+  const projectIds = entityIndex.byType.get('IFCPROJECT') || [];
+  if (projectIds.length === 0) return null;
+  const projectRef = entityIndex.byId.get(projectIds[0]);
+  if (!projectRef) return null;
+  const project = extractor.extractEntity(projectRef);
+  const unitsRef = project?.attributes?.[8];
+  if (typeof unitsRef !== 'number') return null;
+
+  const assignmentRef = entityIndex.byId.get(unitsRef);
+  if (!assignmentRef) return null;
+  const assignment = extractor.extractEntity(assignmentRef);
+  if (!assignment || assignment.type.toUpperCase() !== 'IFCUNITASSIGNMENT') return null;
+
+  const units = assignment.attributes?.[0];
+  if (!Array.isArray(units)) return null;
+
+  const out: DeclaredUnit[] = [];
+  for (const ref of units) {
+    if (typeof ref !== 'number') continue;
+    const unitRef = entityIndex.byId.get(ref);
+    if (!unitRef) continue;
+    const unit = extractor.extractEntity(unitRef);
+    if (!unit) continue;
+
+    const attrs = unit.attributes || [];
+    const type = unit.type.toUpperCase();
+
+    if (type === 'IFCSIUNIT') {
+      // [1] UnitType, [2] Prefix, [3] Name
+      const name = enumToken(attrs[3]) || 'METRE';
+      const prefix = enumToken(attrs[2]);
+      out.push({
+        unitType: enumToken(attrs[1]) || 'UNKNOWN',
+        name: prefix ? `${prefix}.${name}` : name,
+        kind: 'IfcSIUnit',
+      });
+      continue;
+    }
+
+    if (type === 'IFCCONVERSIONBASEDUNIT') {
+      // [1] UnitType, [2] Name — quoted in the STEP text.
+      out.push({
+        unitType: enumToken(attrs[1]) || 'UNKNOWN',
+        name: typeof attrs[2] === 'string' ? attrs[2].replace(/'/g, '').trim().toUpperCase() : 'UNKNOWN',
+        kind: 'IfcConversionBasedUnit',
+      });
+      continue;
+    }
+
+    if (type === 'IFCDERIVEDUNIT') {
+      // [1] UnitType, [2] UserDefinedType, [3] Name (IFC4+).
+      const declared = enumToken(attrs[1]) || 'UNKNOWN';
+      const userDefined = typeof attrs[2] === 'string' ? attrs[2].replace(/'/g, '').trim() : '';
+      out.push({
+        unitType: declared,
+        name: userDefined || (typeof attrs[3] === 'string' ? attrs[3].replace(/'/g, '').trim() : '') || declared,
+        kind: 'IfcDerivedUnit',
+      });
+      continue;
+    }
+
+    if (type === 'IFCMONETARYUNIT') {
+      // [0] Currency.
+      out.push({
+        unitType: 'CURRENCY',
+        name: typeof attrs[0] === 'string' ? attrs[0].replace(/'/g, '').trim().toUpperCase() : 'UNKNOWN',
+        kind: 'IfcMonetaryUnit',
+      });
+      continue;
+    }
+
+    out.push({ unitType: 'UNKNOWN', name: unit.type, kind: 'other' });
+  }
+
+  return out;
+}
+
+/** `.LENGTHUNIT.` → `LENGTHUNIT`; anything not a STEP enum → `''`. */
+function enumToken(value: unknown): string {
+  return typeof value === 'string' ? value.replace(/\./g, '').trim().toUpperCase() : '';
+}

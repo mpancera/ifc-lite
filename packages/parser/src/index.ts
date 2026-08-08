@@ -26,7 +26,7 @@ export { PropertyExtractor } from './property-extractor.js';
 export { QuantityExtractor } from './quantity-extractor.js';
 export { RelationshipExtractor } from './relationship-extractor.js';
 export { SpatialHierarchyBuilder } from './spatial-hierarchy-builder.js';
-export { extractLengthUnitScale, describeLengthUnit } from './unit-extractor.js';
+export { extractLengthUnitScale, describeLengthUnit, describeAllUnits, type DeclaredUnit } from './unit-extractor.js';
 export {
   extractProjectUnits,
   measureUnit,

@@ -33,6 +33,8 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useViewerStore } from '@/store';
 import { levelsFor, withStoreyHeights } from '@/lib/heights/derive';
+import { findUnitIssues, unitOf, unitTypeColumns, type ModelUnits } from '@/lib/heights/units';
+import { describeAllUnits } from '@ifc-lite/parser';
 import type { ElevationSource } from '@/lib/heights/types';
 
 /** Millimetre resolution: the honest precision for a building level, and it
@@ -81,6 +83,31 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
   const setStoreyLevels = useViewerStore((s) => s.setHeightStoreyLevels);
 
   const [editingName, setEditingName] = useState<string | null>(null);
+  const [showUnits, setShowUnits] = useState(false);
+  const models = useViewerStore((s) => s.models);
+
+  /**
+   * What every loaded model declares. Read on demand rather than kept in the
+   * store: it changes only when a model is loaded, and re-reading is a few
+   * entity lookups against an index that is already in memory.
+   */
+  const modelUnits = useMemo<ModelUnits[]>(() => {
+    const out: ModelUnits[] = [];
+    for (const [modelId, model] of models) {
+      const store = model.ifcDataStore;
+      out.push({
+        modelId,
+        fileName: model.name ?? modelId,
+        units: store?.source && store.entityIndex
+          ? describeAllUnits(store.source, store.entityIndex)
+          : null,
+      });
+    }
+    return out;
+  }, [models]);
+
+  const unitColumns = useMemo(() => unitTypeColumns(modelUnits), [modelUnits]);
+  const unitIssues = useMemo(() => findUnitIssues(modelUnits), [modelUnits]);
 
   const rows = useMemo(
     // Top storey first: that is how a building is read on a section, and it
@@ -313,6 +340,86 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
           </ScrollArea>
         </>
       )}
+
+      {/* Current units. Folded away by default — it is the answer to a
+          question you ask once per project, and it would otherwise push the
+          storeys off the strip. The issue count stays visible, because that is
+          the part nobody would think to look for. */}
+      <div className="border-t">
+        <button
+          type="button"
+          onClick={() => setShowUnits(!showUnits)}
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent/50"
+        >
+          <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            Current units
+          </span>
+          <span className="font-mono text-[10px] text-muted-foreground">
+            {modelUnits.length} {modelUnits.length === 1 ? 'Modell' : 'Modelle'}
+          </span>
+          {unitIssues.length > 0 && (
+            <span className="rounded-sm bg-amber-100 px-1.5 py-px text-[10px] text-amber-900 dark:bg-amber-950/50 dark:text-amber-200">
+              {unitIssues.length} {unitIssues.length === 1 ? 'Auffälligkeit' : 'Auffälligkeiten'}
+            </span>
+          )}
+          <span className="ml-auto text-[10px] text-muted-foreground">
+            {showUnits ? 'zuklappen' : 'aufklappen'}
+          </span>
+        </button>
+
+        {showUnits && (
+          <div className="max-h-56 overflow-auto border-t px-3 py-2">
+            <table className="w-full text-[11px]">
+              <thead>
+                <tr className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <th className="py-1 pr-3 text-left font-normal">Modell</th>
+                  {unitColumns.map((c) => (
+                    <th key={c} className="py-1 pr-3 text-left font-normal">
+                      {c.replace(/UNIT$/, '')}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="font-mono">
+                {modelUnits.map((m) => (
+                  <tr key={m.modelId} className="border-t">
+                    <td className="max-w-[16rem] truncate py-1 pr-3" title={m.fileName}>
+                      {m.fileName}
+                    </td>
+                    {m.units === null ? (
+                      <td colSpan={Math.max(1, unitColumns.length)} className="py-1 text-amber-600 dark:text-amber-400">
+                        keine Einheitenzuweisung
+                      </td>
+                    ) : (
+                      unitColumns.map((c) => (
+                        <td key={c} className="py-1 pr-3">
+                          {unitOf(m, c)?.name ?? <span className="text-muted-foreground">—</span>}
+                        </td>
+                      ))
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            {unitIssues.length > 0 && (
+              <ul className="mt-2 space-y-1">
+                {unitIssues.map((issue, i) => (
+                  <li key={`${issue.kind}:${issue.modelId}:${i}`} className="text-[10px] leading-relaxed text-amber-700 dark:text-amber-300">
+                    {issue.message}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <p className="mt-2 text-[10px] leading-relaxed text-muted-foreground">
+              IFC schreibt keine Einheit vor und kennt keine Ländertabelle — die
+              Zuweisung ist sogar optional. Was hier steht, ist deshalb das
+              Einzige, worauf sich die Zahlen im Modell berufen können.
+            </p>
+          </div>
+        )}
+      </div>
 
       <div className="border-t px-3 py-1.5">
         <p className="text-[10px] leading-relaxed text-muted-foreground">
