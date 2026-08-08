@@ -26,7 +26,7 @@
  */
 
 import { useMemo, useState } from 'react';
-import { Plus, RefreshCw, Ruler, Trash2, X } from 'lucide-react';
+import { Download, Plus, RefreshCw, Ruler, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -34,6 +34,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useViewerStore } from '@/store';
 import { levelsFor, withStoreyHeights } from '@/lib/heights/derive';
 import { findUnitIssues, unitOf, unitTypeColumns, type ModelUnits } from '@/lib/heights/units';
+import { HEIGHTS_FILE_NAME, serializeHeightSystem } from '@/lib/heights/serialize';
+import { downloadFile } from '@/lib/export/download';
+import { toast } from '@/components/ui/toast';
 import { describeAllUnits } from '@ifc-lite/parser';
 import type { ElevationSource } from '@/lib/heights/types';
 
@@ -133,6 +136,26 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
           </span>
         )}
         <div className="ml-auto flex items-center gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline" size="sm" className="h-6 px-2 text-[11px]"
+                disabled={!system}
+                onClick={() => {
+                  if (!system) return;
+                  downloadFile(serializeHeightSystem(system), HEIGHTS_FILE_NAME, 'application/json');
+                  toast.success(`${HEIGHTS_FILE_NAME} exportiert`);
+                }}
+              >
+                <Download className="mr-1 h-3 w-3" />
+                Export
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              Als {HEIGHTS_FILE_NAME} sichern — alle Längen in Metern, bezogen auf ±0.00.
+              Jederzeit wiederholbar; die Datei trägt den Zeitpunkt ihrer Erzeugung.
+            </TooltipContent>
+          </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
