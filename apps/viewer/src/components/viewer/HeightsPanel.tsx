@@ -35,9 +35,11 @@ import { useViewerStore } from '@/store';
 import { levelsFor, withStoreyHeights } from '@/lib/heights/derive';
 import { findUnitIssues, unitOf, unitTypeColumns, type ModelUnits } from '@/lib/heights/units';
 import { heightsFileName, serializeHeightSystem } from '@/lib/heights/serialize';
+import { collectModelStoreys, serializeModelStoreys } from '@/lib/heights/modelStoreys';
 import { downloadFile, sanitizeFilename } from '@/lib/export/download';
 import { toast } from '@/components/ui/toast';
 import { describeAllUnits } from '@ifc-lite/parser';
+import { sidecarFileName } from '@ifc-lite/project';
 import type { ElevationSource } from '@/lib/heights/types';
 
 /** Millimetre resolution: the honest precision for a building level, and it
@@ -112,6 +114,59 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
   const unitColumns = useMemo(() => unitTypeColumns(modelUnits), [modelUnits]);
   const unitIssues = useMemo(() => findUnitIssues(modelUnits), [modelUnits]);
 
+  /**
+   * One storeys file per loaded model.
+   *
+   * The height system says how it should be; these say how each discipline
+   * model actually is. Separate files because merging them would mean deciding
+   * here which model wins a disagreement, and that is the reader's call.
+   *
+   * The architecture model is included deliberately. Comparing the reference
+   * against its own height system must produce nothing — if it produces
+   * something, the derivation is wrong, and that is far cheaper to notice here
+   * than on somebody else's model.
+   */
+  const exportModelStoreys = () => {
+    let written = 0;
+    const skipped: string[] = [];
+    const refused: string[] = [];
+
+    for (const [modelId, model] of models) {
+      const store = model.ifcDataStore;
+      const fileName = model.name ?? modelId;
+      if (!store) {
+        refused.push(`${fileName}: keine gelesene IFC-Struktur`);
+        continue;
+      }
+
+      const result = collectModelStoreys({ store, modelId, fileName });
+      if (result.status === 'no-storeys') {
+        skipped.push(fileName);
+        continue;
+      }
+      if (result.status === 'refused') {
+        refused.push(`${fileName}: ${result.reason}`);
+        continue;
+      }
+
+      downloadFile(
+        serializeModelStoreys(result.storeys),
+        sidecarFileName('storeys', { subject: fileName, sanitize: sanitizeFilename }),
+        'application/json',
+      );
+      written += 1;
+    }
+
+    if (written > 0) toast.success(`${written} Geschossliste(n) exportiert`);
+    // Reported, not swallowed: a model that produced no file is exactly what
+    // somebody needs to know about before trusting the comparison.
+    if (skipped.length > 0) toast.info(`Ohne Geschosse, keine Datei: ${skipped.join(', ')}`);
+    for (const reason of refused) toast.error(reason);
+    if (written === 0 && skipped.length === 0 && refused.length === 0) {
+      toast.info('Kein Modell geladen.');
+    }
+  };
+
   const rows = useMemo(
     // Top storey first: that is how a building is read on a section, and it
     // puts the "no height" row where the eye already expects the roof.
@@ -143,7 +198,7 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
                 disabled={!system}
                 onClick={() => {
                   if (!system) return;
-                  const name = heightsFileName(system, sanitizeFilename);
+                  const name = heightsFileName();
                   downloadFile(serializeHeightSystem(system), name, 'application/json');
                   toast.success(`${name} exportiert`);
                 }}
@@ -153,9 +208,27 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
               </Button>
             </TooltipTrigger>
             <TooltipContent>
-              Als {system ? heightsFileName(system, sanitizeFilename) : 'heights.json'} sichern
-              — alle Längen in Metern, bezogen auf ±0.00. Jederzeit wiederholbar;
-              die Datei trägt den Zeitpunkt ihrer Erzeugung.
+              Als {heightsFileName()} sichern — alle Längen in Metern, bezogen auf
+              ±0.00. Jederzeit wiederholbar; die Datei trägt den Zeitpunkt ihrer
+              Erzeugung.
+            </TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline" size="sm" className="h-6 px-2 text-[11px]"
+                disabled={models.size === 0}
+                onClick={exportModelStoreys}
+              >
+                <Download className="mr-1 h-3 w-3" />
+                Geschosse je Modell
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              Je geladenes Modell eine Datei, damit sich die Fachmodelle gegen das
+              Höhensystem prüfen lassen — auch das Architekturmodell selbst, als
+              Gegenprobe. Modelle ohne Geschosse (Gelände, Georeferenzierung)
+              bekommen keine Datei.
             </TooltipContent>
           </Tooltip>
           <Tooltip>
