@@ -34,8 +34,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useViewerStore } from '@/store';
 import { levelsFor, withStoreyHeights } from '@/lib/heights/derive';
 import { findUnitIssues, unitOf, unitTypeColumns, type ModelUnits } from '@/lib/heights/units';
-import { HEIGHTS_FILE_NAME, serializeHeightSystem } from '@/lib/heights/serialize';
-import { downloadFile } from '@/lib/export/download';
+import { heightsFileName, serializeHeightSystem } from '@/lib/heights/serialize';
+import { downloadFile, sanitizeFilename } from '@/lib/export/download';
 import { toast } from '@/components/ui/toast';
 import { describeAllUnits } from '@ifc-lite/parser';
 import type { ElevationSource } from '@/lib/heights/types';
@@ -143,8 +143,9 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
                 disabled={!system}
                 onClick={() => {
                   if (!system) return;
-                  downloadFile(serializeHeightSystem(system), HEIGHTS_FILE_NAME, 'application/json');
-                  toast.success(`${HEIGHTS_FILE_NAME} exportiert`);
+                  const name = heightsFileName(system, sanitizeFilename);
+                  downloadFile(serializeHeightSystem(system), name, 'application/json');
+                  toast.success(`${name} exportiert`);
                 }}
               >
                 <Download className="mr-1 h-3 w-3" />
@@ -152,8 +153,9 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
               </Button>
             </TooltipTrigger>
             <TooltipContent>
-              Als {HEIGHTS_FILE_NAME} sichern — alle Längen in Metern, bezogen auf ±0.00.
-              Jederzeit wiederholbar; die Datei trägt den Zeitpunkt ihrer Erzeugung.
+              Als {system ? heightsFileName(system, sanitizeFilename) : 'heights.json'} sichern
+              — alle Längen in Metern, bezogen auf ±0.00. Jederzeit wiederholbar;
+              die Datei trägt den Zeitpunkt ihrer Erzeugung.
             </TooltipContent>
           </Tooltip>
           <Tooltip>

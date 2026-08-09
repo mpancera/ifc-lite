@@ -27,12 +27,40 @@
 import type { HeightSystem, ReferenceLevel, Storey } from './types.js';
 
 /**
- * Deliberately generic. The contract between the two applications is the JSON
+ * The suffix every exported height system carries.
+ *
+ * Deliberately generic: the contract between the two applications is the JSON
  * SHAPE, not the file name — the receiving side reads whatever file it is
  * given, and a product-specific name in a public repository would say more
  * about who wrote it than about what it is.
  */
+export const HEIGHTS_FILE_SUFFIX = '.heights.json';
+
+/** When there is nothing to name the file after. */
 export const HEIGHTS_FILE_NAME = 'heights.json';
+
+/**
+ * What the save dialog should propose.
+ *
+ * Named after the SOURCE FILE, not after `IfcProject.Name`: measured on a real
+ * model, the project name was `"Project Number"` — a Revit template
+ * placeholder — with the site called `Default` and the building unnamed. The
+ * file name is the thing a person recognises in a folder, and the one that
+ * survives being sent around.
+ *
+ * `MuseumLangmatt_UG.ifc` → `MuseumLangmatt_UG.heights.json`. Without a usable
+ * source name it falls back to the bare suffix, which is still unambiguous
+ * about what the file is.
+ */
+export function heightsFileName(
+  system: Pick<HeightSystem, 'derivedFrom'>,
+  sanitize: (name: string) => string = (n) => n,
+): string {
+  // Strip a trailing .ifc / .ifcx / .ifczip — the new extension replaces it.
+  const base = system.derivedFrom.fileName.replace(/\.ifc(x|zip)?$/i, '').trim();
+  const safe = sanitize(base).trim();
+  return safe ? `${safe}${HEIGHTS_FILE_SUFFIX}` : HEIGHTS_FILE_NAME;
+}
 
 /** Millimetre resolution. `-0` is normalised away: it survives JSON and reads
  *  as a different number to a human. */

@@ -81,16 +81,24 @@ export const createHeightsSlice: StateCreator<ViewerState, [], [], HeightsSlice>
         return false;
       }
 
+      const fileName = model.name ?? modelId;
       const { storeys, lengthUnitScale, lengthUnitName } = readRawStoreys(store, modelId);
+
+      // Carry the datum and the level names forward when re-deriving the SAME
+      // project, so an update does not throw away what somebody set up — but
+      // NOT across projects. These three models are three different buildings
+      // on three different sites; inheriting one's height above sea level into
+      // another would be a wrong number that looks like a filled-in field.
+      const previous = get().heightSystem;
+      const sameProject = previous?.derivedFrom.fileName === fileName;
+
       const result = deriveHeightSystem({
-        fileName: model.name ?? modelId,
+        fileName,
         storeys,
         lengthUnitScale,
         lengthUnitName,
-        // Carried over so re-deriving does not silently drop a datum and the
-        // level names somebody set up.
-        datumAboveSeaLevel: get().heightSystem?.datumAboveSeaLevel,
-        referenceLevels: get().heightSystem?.referenceLevels,
+        datumAboveSeaLevel: sameProject ? previous?.datumAboveSeaLevel : undefined,
+        referenceLevels: sameProject ? previous?.referenceLevels : undefined,
       });
 
       if (!result.ok) {
