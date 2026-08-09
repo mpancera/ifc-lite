@@ -124,7 +124,12 @@ function genPackageIndex(currentDoc) {
  * literal into a name + one-line-description table.
  */
 function genCliCommands() {
-  const cliSrc = readFileSync(join(ROOT, 'packages', 'cli', 'src', 'index.ts'), 'utf-8');
+  // Normalised to LF first: on a Windows checkout with core.autocrlf the file
+  // arrives CRLF, and every `\n`-anchored pattern below then matches nothing —
+  // which surfaced as "Could not find the Commands: block", i.e. as if the
+  // help text had been deleted.
+  const cliSrc = readFileSync(join(ROOT, 'packages', 'cli', 'src', 'index.ts'), 'utf-8')
+    .replace(/\r\n/g, '\n');
   const helpMatch = cliSrc.match(/const HELP = `([\s\S]*?)`;/);
   if (!helpMatch) {
     throw new Error('Could not find the HELP template literal in packages/cli/src/index.ts');
