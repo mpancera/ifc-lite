@@ -66,7 +66,16 @@ export interface HeightSystem {
   formatVersion: 1;
   derivedFrom: {
     documentId?: string;
-    fileName: string;
+    /**
+     * The model this was read from.
+     *
+     * Absent for a system somebody built by hand before any model existed —
+     * the ordinary case when a project starts from 2D drawings. A made-up name
+     * would be worse than the gap: the reading side shows an absent one as
+     * unknown, which is true, whereas a plausible file name is a claim that a
+     * file was consulted.
+     */
+    fileName?: string;
     /** e.g. `'MILLI.METRE'`. Recorded so a reader can tell what was assumed
      *  rather than having to trust that someone got it right. */
     sourceLengthUnit?: string;

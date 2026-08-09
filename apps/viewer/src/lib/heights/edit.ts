@@ -214,3 +214,59 @@ export function updateReferenceLevel(
     referenceLevels: system.referenceLevels.map((l) => (l.key === key ? { ...l, ...patch } : l)),
   };
 }
+
+/**
+ * A storey somebody adds by hand, at a level they type.
+ *
+ * The 2.5D case: a project starts from 2D drawings, and the storeys have to
+ * exist before there is any model to read them from. Everything downstream —
+ * where a plan is stacked, how tall a room is extruded — hangs off these
+ * numbers, so they come first rather than last.
+ *
+ * `source: 'manual'` from the outset, which is not decoration: when a model
+ * does arrive, the comparison has to be able to say which levels a person
+ * decided and which a file claimed.
+ */
+export function addStorey(
+  system: HeightSystem,
+  storey: { name: string; elevation: number },
+): HeightSystem {
+  const next: Storey = {
+    id: manualStoreyId(system),
+    name: storey.name.trim() || 'Neues Geschoss',
+    elevation: storey.elevation,
+    source: 'manual',
+  };
+  return {
+    ...system,
+    storeys: [...system.storeys, next].sort((a, b) => a.elevation - b.elevation),
+  };
+}
+
+/** Remove a storey. Reference levels defined on it go with it — they were
+ *  offsets from a level that no longer exists. */
+export function removeStorey(system: HeightSystem, storeyId: string): HeightSystem {
+  const storeys = system.storeys.filter((s) => s.id !== storeyId);
+  return storeys.length === system.storeys.length ? system : { ...system, storeys };
+}
+
+/**
+ * An id for a hand-added storey.
+ *
+ * Two properties, both deliberate:
+ *
+ * 1. **Not the `<model>:<expressId>` shape.** Nothing in any model corresponds
+ *    to this storey, and a reader seeing that shape would go looking for an
+ *    entity that does not exist.
+ * 2. **Never reused.** A counting scheme hands `manual:1` straight back after
+ *    the first storey is deleted, so anything still holding that id — an
+ *    in-flight edit, a selection — silently lands on a different storey. A
+ *    random suffix costs nothing and removes the whole class.
+ */
+function manualStoreyId(system: HeightSystem): string {
+  const taken = new Set(system.storeys.map((s) => s.id));
+  for (;;) {
+    const id = `manual:${Math.random().toString(16).slice(2, 10)}`;
+    if (!taken.has(id)) return id;
+  }
+}

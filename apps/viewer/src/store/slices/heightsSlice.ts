@@ -15,11 +15,11 @@
  */
 
 import { type StateCreator } from 'zustand';
-import { deriveHeightSystem } from '@/lib/heights/derive';
+import { createEmptyHeightSystem, deriveHeightSystem } from '@/lib/heights/derive';
 import { readRawStoreys } from '@/lib/heights/read';
 import {
-  addReferenceLevel, removeReferenceLevel, setDatumAboveSeaLevel, setElevation,
-  setReferenceLevels, setStoreyHeight, setStoreyLevels, setStoreyName,
+  addReferenceLevel, addStorey, removeReferenceLevel, removeStorey, setDatumAboveSeaLevel,
+  setElevation, setReferenceLevels, setStoreyHeight, setStoreyLevels, setStoreyName,
   updateReferenceLevel,
 } from '@/lib/heights/edit';
 import { sameProject as isSameProject, type ProjectKey } from '@ifc-lite/project';
@@ -51,6 +51,15 @@ export interface HeightsSlice {
   setHeightsPanelVisible: (visible: boolean) => void;
   /** Read the storeys from a model and replace the system. Discards edits. */
   deriveHeightSystemFrom: (modelId: string) => boolean;
+  /**
+   * Start an empty system, for a project that has drawings but no model yet.
+   *
+   * Refuses to replace an existing system: that would throw away levels
+   * somebody typed, and there is no undo here.
+   */
+  startManualHeightSystem: () => boolean;
+  addHeightStorey: (name: string, elevation: number) => void;
+  removeHeightStorey: (storeyId: string) => void;
   setHeightSystem: (system: HeightSystem | null) => void;
 
   setStoreyElevation: (storeyId: string, elevation: number) => void;
@@ -132,6 +141,18 @@ export const createHeightsSlice: StateCreator<ViewerState, [], [], HeightsSlice>
       set({ heightSystem: result.system, heightSystemError: null, heightSystemProject: projectKey });
       return true;
     },
+
+    startManualHeightSystem: () => {
+      if (get().heightSystem) return false;
+      set({
+        heightSystem: createEmptyHeightSystem(),
+        heightSystemError: null,
+        heightSystemProject: get().currentProjectKey(),
+      });
+      return true;
+    },
+    addHeightStorey: (name, elevation) => edit((s) => addStorey(s, { name, elevation })),
+    removeHeightStorey: (storeyId) => edit((s) => removeStorey(s, storeyId)),
 
     setStoreyElevation: (storeyId, elevation) => edit((s) => setElevation(s, storeyId, elevation)),
     setStoreyHeightValue: (storeyId, height) => edit((s) => setStoreyHeight(s, storeyId, height)),

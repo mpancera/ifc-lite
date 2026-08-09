@@ -80,7 +80,12 @@ export function heightSystemPayload(
       ...(system.derivedFrom.documentId !== undefined
         ? { documentId: system.derivedFrom.documentId }
         : {}),
-      fileName: system.derivedFrom.fileName,
+      // Omitted for a hand-built system. The reading side reports an absent
+      // name as unknown, which is the truth; inventing one would claim a file
+      // was consulted.
+      ...(system.derivedFrom.fileName !== undefined
+        ? { fileName: system.derivedFrom.fileName }
+        : {}),
       ...(system.derivedFrom.sourceLengthUnit !== undefined
         ? { sourceLengthUnit: system.derivedFrom.sourceLengthUnit }
         : {}),

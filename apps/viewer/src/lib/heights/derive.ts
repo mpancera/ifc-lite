@@ -180,3 +180,25 @@ export function levelElevation(
   const level = levelsFor(storey, system).find((l) => l.key === key);
   return level ? storey.elevation + level.offset : null;
 }
+
+/**
+ * A height system with no storeys, not read from anything.
+ *
+ * The starting point when a project has drawings but no model — which is how
+ * most projects actually start, and the case the 2.5D flow is built around.
+ * Storeys are then added by hand with `addStorey`.
+ *
+ * `derivedFrom.fileName` stays absent on purpose: there is no file. The
+ * reference levels are the same defaults a derived system gets, because they
+ * are a project convention and have nothing to do with where the storeys came
+ * from.
+ */
+export function createEmptyHeightSystem(now: Date = new Date()): HeightSystem {
+  return {
+    formatVersion: 1,
+    derivedFrom: {},
+    updatedAt: now.toISOString(),
+    referenceLevels: DEFAULT_REFERENCE_LEVELS.map((l) => ({ ...l })),
+    storeys: [],
+  };
+}

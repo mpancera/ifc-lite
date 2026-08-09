@@ -94,6 +94,9 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
   const [showUnits, setShowUnits] = useState(false);
   const models = useViewerStore((s) => s.models);
   const folder = useViewerStore((s) => s.projectFolder);
+  const startManual = useViewerStore((s) => s.startManualHeightSystem);
+  const addStoreyToSystem = useViewerStore((s) => s.addHeightStorey);
+  const removeStoreyFromSystem = useViewerStore((s) => s.removeHeightStorey);
 
   /**
    * What every loaded model declares. Read on demand rather than kept in the
@@ -209,7 +212,9 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
         <span className="text-[13px] font-medium">Höhen &amp; Lage</span>
         {system && (
           <span className="font-mono text-[10px] text-muted-foreground">
-            {system.derivedFrom.fileName} · {system.derivedFrom.sourceLengthUnit ?? '—'}
+            {system.derivedFrom.fileName ?? 'von Hand'}
+            {' · '}
+            {system.derivedFrom.sourceLengthUnit ?? '—'}
           </span>
         )}
         <div className="ml-auto flex items-center gap-1">
@@ -291,12 +296,28 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
       )}
 
       {!system && !error && (
-        <p className="px-3 py-6 text-center text-[11px] leading-relaxed text-muted-foreground">
-          Noch nicht abgeleitet.
-          <br />
-          Das Architekturmodell gibt die Koten vor, an denen sich die übrigen
-          Fachmodelle messen lassen.
-        </p>
+        <div className="px-3 py-6 text-center">
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            Noch nicht abgeleitet.
+            <br />
+            Das Architekturmodell gibt die Koten vor, an denen sich die übrigen
+            Fachmodelle messen lassen.
+          </p>
+          {/* A project usually starts before any model exists: 2D drawings and
+              a set of levels somebody knows. Everything downstream hangs off
+              these numbers, so they have to be enterable first, not last. */}
+          <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
+            Noch kein Modell? Geschosse lassen sich auch von Hand festlegen —
+            als Grundlage, an der sich die Modelle später messen.
+          </p>
+          <Button
+            variant="outline" size="sm" className="mt-2 h-6 px-2 text-[11px]"
+            onClick={() => startManual()}
+          >
+            <Plus className="mr-1 h-3 w-3" />
+            Geschosse von Hand festlegen
+          </Button>
+        </div>
       )}
 
       {system && (
@@ -459,10 +480,64 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
                           eigene
                         </Button>
                       )}
+                      {/* Only storeys a person ADDED can be deleted, not ones
+                          read from a model. There is no undo here, and a
+                          mis-click that removes a derived level would be
+                          repaired by re-deriving — which throws away every
+                          other correction along with it. */}
+                      {storey.id.startsWith('manual:') && (
+                        <Button
+                          variant="ghost" size="icon" className="h-5 w-5"
+                          title="Dieses von Hand angelegte Geschoss entfernen"
+                          onClick={() => removeStoreyFromSystem(storey.id)}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
+                      )}
                     </div>
                   </li>
                 );
               })}
+              {/* Adding a storey is always available, not only for a
+                  hand-built system: a derived one is regularly incomplete,
+                  and a missing attic is the ordinary case rather than a
+                  special one. */}
+              <li className="px-3 py-1.5">
+                <form
+                  className="flex items-center gap-1"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const form = e.currentTarget;
+                    const name = form.elements.namedItem('storeyName');
+                    const elevation = form.elements.namedItem('storeyElevation');
+                    if (!(name instanceof HTMLInputElement)
+                      || !(elevation instanceof HTMLInputElement)) return;
+                    const metres = Number(elevation.value.replace(',', '.'));
+                    // Refuses rather than defaulting to 0: an unparsed level
+                    // silently placed at ±0.00 is a storey nobody put there.
+                    if (!Number.isFinite(metres)) {
+                      toast.error('Kote konnte nicht gelesen werden.');
+                      return;
+                    }
+                    addStoreyToSystem(name.value, metres);
+                    form.reset();
+                    name.focus();
+                  }}
+                >
+                  <Input
+                    name="storeyName" placeholder="Geschoss, z.B. EG"
+                    className="h-6 flex-1 text-[12px]"
+                  />
+                  <Input
+                    name="storeyElevation" placeholder="Kote in m"
+                    inputMode="decimal"
+                    className="h-6 w-24 text-right text-[12px]"
+                  />
+                  <Button type="submit" variant="outline" size="sm" className="h-6 px-2 text-[11px]">
+                    <Plus className="h-3 w-3" />
+                  </Button>
+                </form>
+              </li>
             </ul>
           </ScrollArea>
         </>
