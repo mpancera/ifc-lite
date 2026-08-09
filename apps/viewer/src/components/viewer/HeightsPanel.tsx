@@ -36,7 +36,10 @@ import { levelsFor, withStoreyHeights } from '@/lib/heights/derive';
 import { findUnitIssues, unitOf, unitTypeColumns, type ModelUnits } from '@/lib/heights/units';
 import { heightsFileName, serializeHeightSystem } from '@/lib/heights/serialize';
 import { collectModelStoreys, serializeModelStoreys } from '@/lib/heights/modelStoreys';
-import { downloadFile, sanitizeFilename } from '@/lib/export/download';
+import { sanitizeFilename } from '@/lib/export/download';
+import {
+  describeSidecarSave, saveSidecar, type SidecarSaveResult,
+} from '@/lib/project/saveSidecar';
 import { toast } from '@/components/ui/toast';
 import { describeAllUnits } from '@ifc-lite/parser';
 import { sidecarFileName } from '@ifc-lite/project';
@@ -90,6 +93,7 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
   const [editingName, setEditingName] = useState<string | null>(null);
   const [showUnits, setShowUnits] = useState(false);
   const models = useViewerStore((s) => s.models);
+  const folder = useViewerStore((s) => s.projectFolder);
 
   /**
    * What every loaded model declares. Read on demand rather than kept in the
@@ -126,8 +130,8 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
    * something, the derivation is wrong, and that is far cheaper to notice here
    * than on somebody else's model.
    */
-  const exportModelStoreys = () => {
-    let written = 0;
+  const exportModelStoreys = async () => {
+    const landed: SidecarSaveResult[] = [];
     const skipped: string[] = [];
     const refused: string[] = [];
 
@@ -149,20 +153,38 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
         continue;
       }
 
-      downloadFile(
-        serializeModelStoreys(result.storeys),
-        sidecarFileName('storeys', { subject: fileName, sanitize: sanitizeFilename }),
-        'application/json',
-      );
-      written += 1;
+      const name = sidecarFileName('storeys', { subject: fileName, sanitize: sanitizeFilename });
+      try {
+        // Sequential, not Promise.all: the first one may have to ask for
+        // folder access, and several prompts at once is not a question anybody
+        // can answer.
+        landed.push(await saveSidecar(folder, name, serializeModelStoreys(result.storeys)));
+      } catch (err) {
+        refused.push(`${name}: ${(err as Error).message}`);
+      }
     }
 
-    if (written > 0) toast.success(`${written} Geschossliste(n) exportiert`);
-    // Reported, not swallowed: a model that produced no file is exactly what
-    // somebody needs to know about before trusting the comparison.
+    // Summarised by outcome rather than one toast per file: with a federation
+    // open this is a dozen files, and a dozen identical messages is noise.
+    const inFolder = landed.filter((r) => r.to === 'folder');
+    const downloaded = landed.filter((r) => r.to === 'download');
+    if (inFolder.length > 0) {
+      toast.success(`${inFolder.length} Geschossliste(n) in ${
+        (inFolder[0] as { folder: string }).folder} geschrieben`);
+    }
+    // Never folded into the success line: a download where a folder was
+    // expected means the file the other side waits for is not there.
+    if (downloaded.length > 0) {
+      toast.info(`${downloaded.length} Geschossliste(n) heruntergeladen — ${
+        downloaded[0].to === 'download' && downloaded[0].reason === 'no-folder'
+          ? 'kein Projektordner gebunden'
+          : 'kein Schreibzugriff auf den Projektordner'}`);
+    }
+    // A model that produced no file is exactly what somebody needs to know
+    // before trusting the comparison.
     if (skipped.length > 0) toast.info(`Ohne Geschosse, keine Datei: ${skipped.join(', ')}`);
     for (const reason of refused) toast.error(reason);
-    if (written === 0 && skipped.length === 0 && refused.length === 0) {
+    if (landed.length === 0 && skipped.length === 0 && refused.length === 0) {
       toast.info('Kein Modell geladen.');
     }
   };
@@ -199,8 +221,15 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
                 onClick={() => {
                   if (!system) return;
                   const name = heightsFileName();
-                  downloadFile(serializeHeightSystem(system), name, 'application/json');
-                  toast.success(`${name} exportiert`);
+                  // The click is the user gesture the browser needs before it
+                  // will hand back write access to a remembered folder.
+                  void saveSidecar(folder, name, serializeHeightSystem(system))
+                    .then((result) => {
+                      const message = describeSidecarSave(name, result);
+                      if (result.to === 'folder') toast.success(message);
+                      else toast.info(message);
+                    })
+                    .catch((err: Error) => toast.error(`${name}: ${err.message}`));
                 }}
               >
                 <Download className="mr-1 h-3 w-3" />
@@ -218,7 +247,7 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
               <Button
                 variant="outline" size="sm" className="h-6 px-2 text-[11px]"
                 disabled={models.size === 0}
-                onClick={exportModelStoreys}
+                onClick={() => { void exportModelStoreys(); }}
               >
                 <Download className="mr-1 h-3 w-3" />
                 Geschosse je Modell
