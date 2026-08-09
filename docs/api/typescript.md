@@ -2,7 +2,7 @@
 
 API documentation for the published TypeScript packages.
 
-ifc-lite ships 36 public npm packages: 35 scoped `@ifc-lite/*` packages plus the `create-ifc-lite` scaffolder. This page lists all of them, with API detail for the core packages. Exact type signatures live in each package's `src/index.ts` and shipped `.d.ts` files.
+ifc-lite ships 38 public npm packages: 37 scoped `@ifc-lite/*` packages plus the `create-ifc-lite` scaffolder. This page lists all of them, with API detail for the core packages. Exact type signatures live in each package's `src/index.ts` and shipped `.d.ts` files.
 
 ## Package Index
 
@@ -46,6 +46,7 @@ ifc-lite ships 36 public npm packages: 35 scoped `@ifc-lite/*` packages plus the
 | [`@ifc-lite/codegen`](#ifc-litecodegen) | TypeScript code generator from IFC EXPRESS schemas |
 | [`create-ifc-lite`](#create-ifc-lite) | Create IFC-Lite projects with one command |
 | [`@ifc-lite/merge`](https://www.npmjs.com/package/@ifc-lite/merge) | Three-way merge engine for IFCX layers — MergePlan with auto-merged ops and explicit conflict records, merge-layer emission, rebase, and revert. |
+| [`@ifc-lite/project`](https://www.npmjs.com/package/@ifc-lite/project) | Project identity and folder binding for IFC-Lite: an opaque project key, a durable folder binding, and sidecar file naming |
 <!-- END GENERATED: package-index -->
 
 ---

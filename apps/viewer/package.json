@@ -46,6 +46,7 @@
     "@ifc-lite/lists": "workspace:^",
     "@ifc-lite/mcp": "workspace:^",
     "@ifc-lite/mutations": "workspace:^",
+    "@ifc-lite/project": "workspace:^",
     "@ifc-lite/parser": "workspace:^",
     "@ifc-lite/pointcloud": "workspace:^",
     "@ifc-lite/query": "workspace:^",

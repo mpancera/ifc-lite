@@ -5,10 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { setElevation, setStoreyLevels } from './edit.js';
-import {
-  HEIGHTS_FILE_NAME, HEIGHTS_FILE_SUFFIX, heightSystemPayload, heightsFileName,
-  serializeHeightSystem,
-} from './serialize.js';
+import { heightSystemPayload, heightsFileName, serializeHeightSystem } from './serialize.js';
 import type { HeightSystem } from './types.js';
 
 const NOW = new Date('2026-08-08T09:30:00.000Z');
@@ -137,41 +134,17 @@ describe('serializeHeightSystem', () => {
 });
 
 describe('heightsFileName', () => {
-  const from = (fileName: string, sanitize?: (n: string) => string) =>
-    heightsFileName({ derivedFrom: { fileName } }, sanitize);
-
-  it('names the file after the source model', () => {
-    // NOT after IfcProject.Name: measured on a real model that was
-    // "Project Number", a Revit template placeholder.
-    assert.equal(from('MuseumLangmatt_UG.ifc'), 'MuseumLangmatt_UG.heights.json');
+  it('is the name the reading side looks for', () => {
+    // A contract, not a proposal. An earlier version named the file after the
+    // source model — `ARC-01.heights.json` — which no reader was
+    // looking for and which would therefore never have been picked up.
+    assert.equal(heightsFileName(), 'dc.heights.json');
   });
 
-  it('replaces the IFC extension rather than stacking on it', () => {
-    for (const name of ['a.ifc', 'a.IFC', 'a.ifcx', 'a.ifczip']) {
-      assert.equal(from(name), `a${HEIGHTS_FILE_SUFFIX}`, name);
-    }
-  });
-
-  it('leaves a name that is not an IFC file alone', () => {
-    assert.equal(from('export 2026'), `export 2026${HEIGHTS_FILE_SUFFIX}`);
-  });
-
-  it("runs the caller's sanitiser over the base name", () => {
-    // The viewer passes the shared one; the library must not assume a
-    // particular filesystem's rules.
-    assert.equal(from('a/b:c.ifc', (n) => n.replace(/[^a-z]/gi, '-')), 'a-b-c.heights.json');
-  });
-
-  it('falls back when there is nothing usable to name it after', () => {
-    assert.equal(from(''), HEIGHTS_FILE_NAME);
-    assert.equal(from('   .ifc'), HEIGHTS_FILE_NAME);
-    assert.equal(from('x.ifc', () => ''), HEIGHTS_FILE_NAME);
-  });
-
-  it('keeps the suffix generic', () => {
-    // The contract is the JSON SHAPE; a product-specific name in a public
-    // repository would say more about who wrote it than what it is.
-    assert.equal(HEIGHTS_FILE_SUFFIX, '.heights.json');
-    assert.equal(HEIGHTS_FILE_NAME, 'heights.json');
+  it('does not depend on which model the system was read from', () => {
+    // One height system per PROJECT. Every discipline model is compared
+    // against it, so a name taken from whichever model it came out of would
+    // be wrong even when it looked helpful.
+    assert.equal(heightsFileName(), heightsFileName());
   });
 });

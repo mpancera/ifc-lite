@@ -24,42 +24,24 @@
  * Pure — a system in, a string out. The caller does the download.
  */
 
+import { sidecarFileName } from '@ifc-lite/project';
 import type { HeightSystem, ReferenceLevel, Storey } from './types.js';
 
 /**
- * The suffix every exported height system carries.
+ * What the height system is called on disk.
  *
- * Deliberately generic: the contract between the two applications is the JSON
- * SHAPE, not the file name — the receiving side reads whatever file it is
- * given, and a product-specific name in a public repository would say more
- * about who wrote it than about what it is.
+ * **One per project, not one per model.** The system is the project's
+ * reference — the thing every discipline model gets compared against — so a
+ * name derived from whichever model it happened to be read from would be
+ * wrong even when it looked helpful.
+ *
+ * The name is fixed rather than proposed, because it is a contract: the
+ * reading side looks for this name. An earlier version proposed
+ * `ARC-01.heights.json`, which no reader was looking for and which
+ * would therefore simply never have been picked up.
  */
-export const HEIGHTS_FILE_SUFFIX = '.heights.json';
-
-/** When there is nothing to name the file after. */
-export const HEIGHTS_FILE_NAME = 'heights.json';
-
-/**
- * What the save dialog should propose.
- *
- * Named after the SOURCE FILE, not after `IfcProject.Name`: measured on a real
- * model, the project name was `"Project Number"` — a Revit template
- * placeholder — with the site called `Default` and the building unnamed. The
- * file name is the thing a person recognises in a folder, and the one that
- * survives being sent around.
- *
- * `MuseumLangmatt_UG.ifc` → `MuseumLangmatt_UG.heights.json`. Without a usable
- * source name it falls back to the bare suffix, which is still unambiguous
- * about what the file is.
- */
-export function heightsFileName(
-  system: Pick<HeightSystem, 'derivedFrom'>,
-  sanitize: (name: string) => string = (n) => n,
-): string {
-  // Strip a trailing .ifc / .ifcx / .ifczip — the new extension replaces it.
-  const base = system.derivedFrom.fileName.replace(/\.ifc(x|zip)?$/i, '').trim();
-  const safe = sanitize(base).trim();
-  return safe ? `${safe}${HEIGHTS_FILE_SUFFIX}` : HEIGHTS_FILE_NAME;
+export function heightsFileName(): string {
+  return sidecarFileName('heights');
 }
 
 /** Millimetre resolution. `-0` is normalised away: it survives JSON and reads

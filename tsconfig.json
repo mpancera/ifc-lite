@@ -73,6 +73,12 @@
       "@ifc-lite/encoding/*": [
         "packages/encoding/dist/*"
       ],
+      "@ifc-lite/project": [
+        "packages/project/dist/index.d.ts"
+      ],
+      "@ifc-lite/project/*": [
+        "packages/project/dist/*"
+      ],
       "@ifc-lite/ids": [
         "packages/ids/dist/index.d.ts"
       ],

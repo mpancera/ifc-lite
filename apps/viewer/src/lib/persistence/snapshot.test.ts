@@ -98,7 +98,7 @@ function authorSession() {
 function capture() {
   const s = authorSession();
   const snapshot = captureOverlaySnapshot({
-    view: s.view, source: s.source, sourceHash: 'hash-v1', modelName: '004_MOD_ARC.ifc', now: () => 1000,
+    view: s.view, source: s.source, sourceHash: 'hash-v1', modelName: 'ARC-01.ifc', now: () => 1000,
   });
   assert.ok(snapshot, 'expected a snapshot');
   return { ...s, snapshot: snapshot! };
