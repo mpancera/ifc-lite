@@ -22,6 +22,7 @@ import {
   setReferenceLevels, setStoreyHeight, setStoreyLevels, setStoreyName,
   updateReferenceLevel,
 } from '@/lib/heights/edit';
+import { sameProject as isSameProject, type ProjectKey } from '@ifc-lite/project';
 import type { HeightSystem, ReferenceLevel } from '@/lib/heights/types';
 import type { ViewerState } from '../index.js';
 
@@ -36,6 +37,15 @@ export interface HeightsSlice {
    * of showing an empty list that looks like "no storeys".
    */
   heightSystemError: string | null;
+  /**
+   * Which project the current system belongs to.
+   *
+   * Beside the system rather than in it: `HeightSystem` is the file format
+   * agreed with the reading side, and an id that means nothing there has no
+   * business in it. `null` when the project is unknown, which is never treated
+   * as a match.
+   */
+  heightSystemProject: ProjectKey | null;
   heightsPanelVisible: boolean;
 
   setHeightsPanelVisible: (visible: boolean) => void;
@@ -68,10 +78,13 @@ export const createHeightsSlice: StateCreator<ViewerState, [], [], HeightsSlice>
   return {
     heightSystem: null,
     heightSystemError: null,
+    heightSystemProject: null,
     heightsPanelVisible: false,
 
     setHeightsPanelVisible: (heightsPanelVisible) => set({ heightsPanelVisible }),
-    setHeightSystem: (heightSystem) => set({ heightSystem, heightSystemError: null }),
+    setHeightSystem: (heightSystem) => set({
+      heightSystem, heightSystemError: null, heightSystemProject: get().currentProjectKey(),
+    }),
 
     deriveHeightSystemFrom: (modelId) => {
       const model = get().models.get(modelId);
@@ -86,11 +99,22 @@ export const createHeightsSlice: StateCreator<ViewerState, [], [], HeightsSlice>
 
       // Carry the datum and the level names forward when re-deriving the SAME
       // project, so an update does not throw away what somebody set up — but
-      // NOT across projects. These three models are three different buildings
-      // on three different sites; inheriting one's height above sea level into
-      // another would be a wrong number that looks like a filled-in field.
+      // NOT across projects. Different buildings sit on different sites;
+      // inheriting one's height above sea level into another would be a wrong
+      // number that looks like a filled-in field.
+      //
+      // Decided on the PROJECT KEY, not on the file name. The file name was a
+      // stand-in from before there was a project: it treats a renamed file as
+      // a new project and, worse, two projects that both call their
+      // architecture model the same thing as one.
+      //
+      // The key is held BESIDE the system rather than inside it: `HeightSystem`
+      // is a file format agreed with the reading side, and an id that means
+      // nothing there does not belong in it.
       const previous = get().heightSystem;
-      const sameProject = previous?.derivedFrom.fileName === fileName;
+      const projectKey = get().currentProjectKey();
+      const sameProject = previous !== null
+        && isSameProject(get().heightSystemProject, projectKey);
 
       const result = deriveHeightSystem({
         fileName,
@@ -102,10 +126,10 @@ export const createHeightsSlice: StateCreator<ViewerState, [], [], HeightsSlice>
       });
 
       if (!result.ok) {
-        set({ heightSystem: null, heightSystemError: result.reason });
+        set({ heightSystem: null, heightSystemError: result.reason, heightSystemProject: null });
         return false;
       }
-      set({ heightSystem: result.system, heightSystemError: null });
+      set({ heightSystem: result.system, heightSystemError: null, heightSystemProject: projectKey });
       return true;
     },
 

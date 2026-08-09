@@ -8,7 +8,7 @@
  */
 
 import React from 'react';
-import { HardHat, Palette, Ruler, ShieldCheck } from 'lucide-react';
+import { FolderOpen, HardHat, Palette, Ruler, ShieldCheck } from 'lucide-react';
 import { AddFile, Loading, OpenFile, Refresh, Screenshot, FileCsv, FileIfc, FileGlb, FileKmz, FileJson, FileHbjson, Share, CollabsRoom } from '@/icons';
 import {
   DropdownMenu,
@@ -25,6 +25,7 @@ import { GLBExportDialog } from '../../GLBExportDialog';
 import { KmzExportDialog } from '../../KmzExportDialog';
 import { HbjsonExportDialog } from '../../HbjsonExportDialog';
 import { ColorPalettePanel } from '../../ColorPalettePanel';
+import { ProjectFolderPanel } from '../../ProjectFolderPanel';
 import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
 import { DataPrivacyPanel } from '../../DataPrivacyPanel';
 import { DisciplineRolePanel } from '../../DisciplineRolePanel';
@@ -199,6 +200,19 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
                 icon={ShieldCheck}
                 label="Data privacy"
                 tooltip="Control whether the app may contact third-party services"
+              />
+            }
+          />
+          {/* The project is a folder. Placed first in Settings because it is
+              the thing the others hang off: the height system and the zones
+              belong to a project, and the boundary decides what survives a
+              model switch. */}
+          <ProjectFolderPanel
+            trigger={
+              <RibbonSmallButton
+                icon={FolderOpen}
+                label="Projekt"
+                tooltip="Diese Sitzung an einen Projektordner binden — entscheidet, was ein Modellwechsel behält"
               />
             }
           />

@@ -59,6 +59,7 @@ import { createLayerStackSlice, type LayerStackSlice } from './slices/layerStack
 import { createZonesSlice, type ZonesSlice } from './slices/zonesSlice.js';
 import { createIfcZonesSlice, type IfcZonesSlice } from './slices/ifcZonesSlice.js';
 import { createHeightsSlice, type HeightsSlice } from './slices/heightsSlice.js';
+import { createProjectSlice, type ProjectSlice } from './slices/projectSlice.js';
 import { invalidateVisibleBasketCache } from './basketVisibleSet.js';
 
 // Import constants for reset function
@@ -177,6 +178,7 @@ export type ViewerState = LoadingSlice &
   ZonesSlice &
   IfcZonesSlice &
   HeightsSlice &
+  ProjectSlice &
   ExtensionsSlice & {
     resetViewerState: () => void;
     /**
@@ -267,6 +269,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
   ...createZonesSlice(...args),
   ...createIfcZonesSlice(...args),
   ...createHeightsSlice(...args),
+  ...createProjectSlice(...args),
   ...createExtensionsSlice(...args),
 
   // Reset all viewer state when loading new file
