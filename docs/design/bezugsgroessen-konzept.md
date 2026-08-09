@@ -56,7 +56,7 @@ Fassaden bekommen zusätzlich eine von acht Himmelsrichtungen.
 
 In Swiss GIS-BIM lief ein Stand davon auf swissBUILDINGS3D. Er ist dort
 entfernt, der Code steht aber im Repo `mpancera/swiss-gis-bim` im Commit
-`1b00df0`:
+`7a6d1f0`:
 
 | Datei | Inhalt |
 | --- | --- |
