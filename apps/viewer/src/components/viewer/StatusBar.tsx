@@ -145,7 +145,7 @@ export function StatusBar() {
         {activeRole && (
           <span
             className="flex items-center gap-1 px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-700 dark:text-emerald-400 text-[10px]"
-            title="Referenzmodell geschützt — nur Ergänzungen. Umschalten unter File › Settings › Discipline role."
+            title="Referenzmodell geschützt — nur Ergänzungen. Umschalten unter File › Settings › Disziplin."
           >
             <Lock className="h-2.5 w-2.5" />
             {activeRole.label}
@@ -157,7 +157,7 @@ export function StatusBar() {
         {isViewerRole && (
           <span
             className="flex items-center gap-1 px-1.5 py-0.5 rounded border border-sky-500/40 text-sky-700 dark:text-sky-400 text-[10px]"
-            title="Schreibgeschützt. Umschalten unter File › Settings › Discipline role."
+            title="Schreibgeschützt. Umschalten unter File › Settings › Disziplin."
           >
             <Eye className="h-2.5 w-2.5" />
             Viewer

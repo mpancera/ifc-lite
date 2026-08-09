@@ -183,7 +183,44 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
       {/* Application-wide preferences. Deliberately here rather than in View:
           these outlive a viewing session and are not about what is on screen.
           Further settings topics are meant to join this group. */}
+      {/* Laid out like Export: the one setting that is changed constantly gets
+          the large button, the occasional ones sit small beside it. Five equal
+          small buttons read as five equally important things, which they are
+          not — the discipline role governs what may be written at all. */}
       <RibbonGroup label="Settings">
+        <DisciplineRolePanel
+          trigger={
+            <RibbonLargeButton
+              icon={HardHat}
+              label="Disziplin"
+              tooltip="Welcher Anlage neue Bauteile beitreten, und ob das Referenzmodell geändert werden darf"
+            />
+          }
+        />
+        <RibbonSmallStack>
+          {/* The project is a folder, and the thing the others hang off: the
+              height system and the zones belong to a project, and the boundary
+              decides what survives a model switch. */}
+          <ProjectFolderPanel
+            trigger={
+              <RibbonSmallButton
+                icon={FolderOpen}
+                label="Projekt"
+                tooltip="Diese Sitzung an einen Projektordner binden — entscheidet, was ein Modellwechsel behält"
+              />
+            }
+          />
+          {/* A verification view rather than a tool: what the storey levels and
+              units in this project actually are. Opens in the bottom strip like
+              Lists, because it is a wide table one consults, not something one
+              works beside. */}
+          <RibbonSmallButton
+            icon={Ruler}
+            label="Höhen & Lage"
+            tooltip="Geschosskoten, Stockwerkshöhen und die geltenden Einheiten dieses Projekts"
+            onClick={() => handleToggleBottomPanel('heights')}
+          />
+        </RibbonSmallStack>
         <RibbonSmallStack>
           <ColorPalettePanel
             trigger={
@@ -202,38 +239,6 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
                 tooltip="Control whether the app may contact third-party services"
               />
             }
-          />
-          {/* The project is a folder. Placed first in Settings because it is
-              the thing the others hang off: the height system and the zones
-              belong to a project, and the boundary decides what survives a
-              model switch. */}
-          <ProjectFolderPanel
-            trigger={
-              <RibbonSmallButton
-                icon={FolderOpen}
-                label="Projekt"
-                tooltip="Diese Sitzung an einen Projektordner binden — entscheidet, was ein Modellwechsel behält"
-              />
-            }
-          />
-          <DisciplineRolePanel
-            trigger={
-              <RibbonSmallButton
-                icon={HardHat}
-                label="Discipline role"
-                tooltip="Which installation new elements join, and whether the reference model may be changed"
-              />
-            }
-          />
-          {/* A verification view rather than a tool: what the storey levels and
-              units in this project actually are. Opens in the bottom strip like
-              Lists, because it is a wide table one consults, not something one
-              works beside. */}
-          <RibbonSmallButton
-            icon={Ruler}
-            label="Höhen & Lage"
-            tooltip="Geschosskoten, Stockwerkshöhen und die geltenden Einheiten dieses Projekts"
-            onClick={() => handleToggleBottomPanel('heights')}
           />
         </RibbonSmallStack>
       </RibbonGroup>
