@@ -229,6 +229,7 @@ export function ViewportOverlays({ hideViewCube = false }: { hideViewCube?: bool
             rotationY={initialRotationY}
           />
           <BasepointToggleButton />
+          <ViewModeToggle />
         </div>
       )}
 
@@ -236,6 +237,48 @@ export function ViewportOverlays({ hideViewCube = false }: { hideViewCube?: bool
           Hidden by default; component returns null when the toggle is off. */}
       <BasepointOverlay />
     </>
+  );
+}
+
+/**
+ * Plan or building.
+ *
+ * Two labelled buttons rather than one toggle: the current mode has to be
+ * readable at a glance, and a single button that says "2D" is ambiguous about
+ * whether that is the state or the action.
+ */
+function ViewModeToggle() {
+  const viewMode = useViewerStore((s) => s.viewMode);
+  const setViewMode = useViewerStore((s) => s.setViewMode);
+  const modelCount = useViewerStore((s) => s.models.size);
+  if (modelCount === 0) return null;
+
+  const button = (mode: '2d' | '3d', label: string, hint: string) => (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={() => setViewMode(mode)}
+          aria-pressed={viewMode === mode}
+          className={cn(
+            'h-6 px-1.5 inline-flex items-center justify-center border text-[10px] font-medium transition-colors',
+            viewMode === mode
+              ? 'border-sky-500 bg-sky-50 dark:bg-sky-950/40 text-sky-700 dark:text-sky-300'
+              : 'border-zinc-300 dark:border-zinc-700 bg-white/80 dark:bg-zinc-900/80 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800',
+          )}
+        >
+          {label}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top" className="text-xs">{hint}</TooltipContent>
+    </Tooltip>
+  );
+
+  return (
+    <div className="inline-flex">
+      {button('2d', '2D', 'Grundriss: ein Geschoss, geschnitten, orthogonal')}
+      {button('3d', '3D', 'Das Gebäude als Ganzes')}
+    </div>
   );
 }
 

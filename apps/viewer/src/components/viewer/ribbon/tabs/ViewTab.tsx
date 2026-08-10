@@ -54,10 +54,34 @@ export function ViewTab() {
   const basketViewCount = useViewerStore((state) => state.basketViews.length);
   const basketPresentationVisible = useViewerStore((state) => state.basketPresentationVisible);
   const toggleBasketPresentationVisible = useViewerStore((state) => state.toggleBasketPresentationVisible);
+  const viewMode = useViewerStore((state) => state.viewMode);
+  const setViewMode = useViewerStore((state) => state.setViewMode);
   const hasModels = useViewerStore((state) => state.models.size > 0 || (state.geometryResult?.meshes.length ?? 0) > 0);
 
   return (
     <>
+      {/* First, before Projection: which of the two things you are looking at
+          decides what every other control in this tab means. */}
+      <RibbonGroup label="Mode">
+        <RibbonLargeButton
+          icon={TopView}
+          label="2D"
+          tooltip="Grundriss: ein Geschoss, geschnitten, orthogonal — ergänzt das 2D-Section-Werkzeug, ersetzt es nicht"
+          active={viewMode === '2d'}
+          onClick={() => setViewMode('2d')}
+          disabled={!hasModels}
+        />
+        <RibbonLargeButton
+          icon={IsometricView}
+          label="3D"
+          tooltip="Das Gebäude als Ganzes"
+          active={viewMode === '3d'}
+          onClick={() => setViewMode('3d')}
+        />
+      </RibbonGroup>
+
+      <RibbonGroupDivider />
+
       <RibbonGroup label="Projection">
         <RibbonLargeButton
           icon={Orthographic}
