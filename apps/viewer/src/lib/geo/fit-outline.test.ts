@@ -188,3 +188,18 @@ describe('fitOutline', () => {
     );
   });
 });
+
+describe('fit quality figures', () => {
+  it('never reports a maximum below the mean', () => {
+    // Found by a live run on a real site plate: the mean was measured both
+    // ways and the max only one way, so the max came out SMALLER (0.386 m
+    // against a mean of 0.503 m), which reads as a broken number.
+    const truth = { eastings: 2621834.586, northings: 1259822.023, rotationDeg: 0, scale: 1 };
+    const local = resample(localRingFor(parcel, truth), 60); // coarser than the parcel
+    const fit = expectOk(fitOutline(local, parcel, { lockScale: 1 }));
+    assert.ok(
+      fit.maxDistance >= fit.meanDistance,
+      `max ${fit.maxDistance} must not be below mean ${fit.meanDistance}`,
+    );
+  });
+});

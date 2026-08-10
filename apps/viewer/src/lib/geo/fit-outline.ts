@@ -74,7 +74,16 @@ export type FitOutlineResult =
     solution: GeoreferenceSolution;
     /** Symmetric mean boundary distance after fitting, in map units. */
     meanDistance: number;
-    /** Worst single-vertex distance, in map units. */
+    /**
+     * Worst single-vertex distance in EITHER direction, in map units.
+     *
+     * Symmetric like the mean, and for the same reason — but also because the
+     * two are read side by side, and a max measured one way while the mean is
+     * measured both ways can come out SMALLER than the mean. A live run on a
+     * real site plate produced exactly that (mean 0.503 m against max 0.386 m),
+     * which reads as a broken number rather than as the two different
+     * measurements it was.
+     */
     maxDistance: number;
   }
   | { ok: false; reason: 'degenerate-local' | 'degenerate-map' };
@@ -301,6 +310,13 @@ export function fitOutline(
   let maxDistance = 0;
   for (const p of placedFull) {
     const { distance } = closestPointOnRing(p, mapRing);
+    if (distance > maxDistance) maxDistance = distance;
+  }
+  // The other direction too: a parcel corner the outline never reaches is a
+  // mismatch the forward pass cannot see, and leaving it out lets the max
+  // fall below the symmetric mean.
+  for (const p of mapRing) {
+    const { distance } = closestPointOnRing(p, placedFull);
     if (distance > maxDistance) maxDistance = distance;
   }
 
