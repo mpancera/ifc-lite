@@ -20,6 +20,7 @@ import { Suspense, lazy, useEffect, useState } from 'react';
 import { Analytics } from '@vercel/analytics/react';
 import { useViewerStore } from './store';
 import { useOpenerProject } from './hooks/useOpenerProject';
+import { useProjectScopedState } from './hooks/useProjectScopedState';
 
 // The /mcp marketing surface pulls in three.js (HeroScene / PlaygroundViewer)
 // and its own component tree — none of which the main `/` viewer route needs.
@@ -52,6 +53,10 @@ export function App() {
   // case here.
   const adoptOfferedProject = useViewerStore((s) => s.adoptOfferedProject);
   useOpenerProject({ onProject: adoptOfferedProject });
+
+  // Scoping where things are stored is only half of it: without this the
+  // previous project's zones stay on screen after a switch.
+  useProjectScopedState();
 
   useEffect(() => {
     const onRouteChange = () => setPathname(window.location.pathname);

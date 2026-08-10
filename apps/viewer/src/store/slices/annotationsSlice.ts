@@ -18,6 +18,9 @@
  */
 
 import { type StateCreator } from 'zustand';
+import type { ProjectKey } from '@ifc-lite/project';
+import type { ViewerState } from '../index.js';
+import { readScoped, writeScoped } from '../../lib/project/scopedStorage.js';
 
 const STORAGE_KEY = 'ifc-lite:annotations:v1';
 const MAX_NOTE_LEN = 2000;
@@ -63,6 +66,8 @@ export interface AnnotationDraft {
 export interface AnnotationsSlice {
   // State
   annotations: Map<string, Annotation>;
+  /** Swap in the annotations of the project that is now open. */
+  loadAnnotationsForProject: () => void;
   /** Pending pin awaiting a note — drives the inline drop input. */
   draft: AnnotationDraft | null;
   /** Currently expanded pin (popover open). */
@@ -136,10 +141,10 @@ function isValidAnnotation(v: unknown): v is Annotation {
   return true;
 }
 
-function loadFromStorage(): Map<string, Annotation> {
+function loadFromStorage(project: ProjectKey | null): Map<string, Annotation> {
   try {
     if (typeof localStorage === 'undefined') return new Map();
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = readScoped(STORAGE_KEY, project);
     if (!raw) return new Map();
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return new Map();
@@ -160,27 +165,28 @@ function loadFromStorage(): Map<string, Annotation> {
   }
 }
 
-function saveToStorage(annotations: Map<string, Annotation>): void {
-  try {
-    if (typeof localStorage === 'undefined') return;
-    // Persist only locally-authored pins; peers' synced pins are session-only.
-    const arr = Array.from(annotations.values()).filter((a) => !a.remote);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
-  } catch (err) {
-    // Quota exceeded / private mode — annotations stay in memory but
-    // the warning makes the failure debuggable.
-    // eslint-disable-next-line no-console
-    console.warn(`[annotations] failed to persist to ${STORAGE_KEY}`, err);
-  }
+function saveToStorage(annotations: Map<string, Annotation>, project: ProjectKey | null): void {
+  // Persist only locally-authored pins; peers' synced pins are session-only.
+  const arr = Array.from(annotations.values()).filter((a) => !a.remote);
+  // Quota and private mode are handled inside writeScoped; annotations then
+  // stay in memory, with a warning that makes the failure debuggable.
+  writeScoped(STORAGE_KEY, project, JSON.stringify(arr));
 }
 
 // ── Slice ────────────────────────────────────────────────────────────
 
-export const createAnnotationsSlice: StateCreator<AnnotationsSlice, [], [], AnnotationsSlice> = (
+export const createAnnotationsSlice: StateCreator<ViewerState, [], [], AnnotationsSlice> = (
   set,
   get,
 ) => ({
-  annotations: loadFromStorage(),
+  // Empty at boot: whose annotations these are is not known until a project
+  // is, and showing the last project's pins meanwhile would put them on a
+  // building they were never made about.
+  annotations: new Map(),
+
+  loadAnnotationsForProject: () => {
+    set({ annotations: loadFromStorage(get().currentProjectKey()) });
+  },
   draft: null,
   selectedAnnotationId: null,
 
@@ -226,7 +232,7 @@ export const createAnnotationsSlice: StateCreator<AnnotationsSlice, [], [], Anno
     set((state) => {
       const next = new Map(state.annotations);
       next.set(id, annotation);
-      saveToStorage(next);
+      saveToStorage(next, get().currentProjectKey());
       return {
         annotations: next,
         draft: null,
@@ -253,12 +259,12 @@ export const createAnnotationsSlice: StateCreator<AnnotationsSlice, [], [], Anno
         // to delete via the trash icon explicitly.
         const next = new Map(state.annotations);
         next.set(id, { ...existing, note: '', updatedAt: Date.now() });
-        saveToStorage(next);
+        saveToStorage(next, get().currentProjectKey());
         return { annotations: next };
       }
       const next = new Map(state.annotations);
       next.set(id, { ...existing, note: clamped, updatedAt: Date.now() });
-      saveToStorage(next);
+      saveToStorage(next, get().currentProjectKey());
       return { annotations: next };
     });
     // Mirror the edited pin to the room (works for your own and, with permission,
@@ -273,7 +279,7 @@ export const createAnnotationsSlice: StateCreator<AnnotationsSlice, [], [], Anno
       if (!state.annotations.has(id)) return {};
       const next = new Map(state.annotations);
       next.delete(id);
-      saveToStorage(next);
+      saveToStorage(next, get().currentProjectKey());
       return {
         annotations: next,
         selectedAnnotationId: state.selectedAnnotationId === id ? null : state.selectedAnnotationId,
@@ -288,7 +294,7 @@ export const createAnnotationsSlice: StateCreator<AnnotationsSlice, [], [], Anno
   },
 
   clearAllAnnotations: () => {
-    saveToStorage(new Map());
+    saveToStorage(new Map(), get().currentProjectKey());
     set({ annotations: new Map(), draft: null, selectedAnnotationId: null });
   },
 
@@ -299,7 +305,7 @@ export const createAnnotationsSlice: StateCreator<AnnotationsSlice, [], [], Anno
       // peers' pins are session-only; a peer's edit to one of OUR pins arrives
       // as non-remote, so persist it to localStorage like any local edit.
       next.set(annotation.id, annotation);
-      if (!annotation.remote) saveToStorage(next);
+      if (!annotation.remote) saveToStorage(next, get().currentProjectKey());
       return { annotations: next };
     });
   },

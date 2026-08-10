@@ -20,6 +20,9 @@ function installStubStorage(): { wipe: () => void } {
   return { wipe: () => data.clear() };
 }
 
+/** The stub store's project. Storage is scoped per project now. */
+const PROJECT = 'proj_test0000test0000' as never;
+
 describe('AnnotationsSlice', () => {
   let state: AnnotationsSlice;
   let setState: (partial: Partial<AnnotationsSlice> | ((s: AnnotationsSlice) => Partial<AnnotationsSlice>)) => void;
@@ -33,7 +36,14 @@ describe('AnnotationsSlice', () => {
       const next = typeof partial === 'function' ? partial(state) : partial;
       state = { ...state, ...next };
     };
-    state = createAnnotationsSlice(setState as never, () => state, {} as never);
+    // The slice reads the current project to scope its storage; the rest of
+    // the store is not exercised here.
+    state = createAnnotationsSlice(
+      setState as never,
+      (() => ({ ...state, currentProjectKey: () => PROJECT })) as never,
+      {} as never,
+    );
+    state.loadAnnotationsForProject();
   });
 
   describe('beginDraft + commitDraft', () => {
@@ -105,11 +115,24 @@ describe('AnnotationsSlice', () => {
       state.beginDraft({ x: 7, y: 8, z: 9 }, 1, 'm1');
       const id = state.commitDraft('persistent')!;
 
-      // Spin up a brand-new slice — it should pick up the saved entry
-      // without us threading state through ourselves.
+      // A brand-new slice starts EMPTY and picks the saved entry up only when
+      // told which project it is in. Loading at construction was the old
+      // behaviour and is exactly what leaked one project's pins into the next.
       let s2: AnnotationsSlice;
-      const setState2: (p: never) => void = () => {};
-      s2 = createAnnotationsSlice(setState2 as never, () => s2, {} as never);
+      const setState2: (p: never) => void = (partial) => {
+        const next = typeof partial === 'function'
+          ? (partial as (s: AnnotationsSlice) => Partial<AnnotationsSlice>)(s2)
+          : partial;
+        s2 = { ...s2, ...(next as Partial<AnnotationsSlice>) };
+      };
+      s2 = createAnnotationsSlice(
+        setState2 as never,
+        (() => ({ ...s2, currentProjectKey: () => PROJECT })) as never,
+        {} as never,
+      );
+      assert.strictEqual(s2.annotations.size, 0, 'empty until a project is known');
+
+      s2.loadAnnotationsForProject();
       assert.strictEqual(s2.annotations.size, 1);
       assert.strictEqual(s2.annotations.get(id)?.note, 'persistent');
     });

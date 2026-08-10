@@ -27,6 +27,9 @@ function importFileJSON(zoneSets: ZoneSet[]): string {
   return JSON.stringify({ version: 1, exportedAt: new Date(0).toISOString(), zoneSets });
 }
 
+/** The stub store's project. Zone storage is scoped per project now. */
+const PROJECT = 'proj_test0000test0000' as never;
+
 describe('ZonesSlice editingZone lifecycle', () => {
   let state: ZonesSlice;
 
@@ -37,7 +40,9 @@ describe('ZonesSlice editingZone lifecycle', () => {
       const updates = typeof partial === 'function' ? partial(state) : partial;
       state = { ...state, ...updates };
     };
-    const getState = (): ZonesSlice => state;
+    // The slice reads the current project to scope its persistence; the rest
+    // of the store is not exercised here.
+    const getState = () => ({ ...state, currentProjectKey: () => PROJECT });
     state = createZonesSlice(setState as never, getState as never, {} as never);
     // Seed one set with two zones and start an edit session on zone "a".
     state = { ...state, zoneSets: [makeSet('set-1', [makeZone('a'), makeZone('b')])] };

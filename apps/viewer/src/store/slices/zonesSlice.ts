@@ -18,15 +18,18 @@
  */
 
 import type { StateCreator } from 'zustand';
+import type { ProjectKey } from '@ifc-lite/project';
+import type { ViewerState } from '../index.js';
+import { readScoped, writeScoped } from '../../lib/project/scopedStorage.js';
 import type { Zone, ZoneSet, ZoneAssignmentsByElement } from '../../lib/zones/types.js';
 import { serializeZoneSets, parseZoneSetFile } from '../../lib/zones/persistence.js';
 
 const ZONE_SETS_STORAGE_KEY = 'ifc-lite:zone-sets';
 
-function loadPersistedZoneSets(): ZoneSet[] {
+function loadPersistedZoneSets(project: ProjectKey | null): ZoneSet[] {
   if (typeof window === 'undefined') return [];
   try {
-    const raw = window.localStorage.getItem(ZONE_SETS_STORAGE_KEY);
+    const raw = readScoped(ZONE_SETS_STORAGE_KEY, project);
     if (!raw) return [];
     const result = parseZoneSetFile(JSON.parse(raw));
     return result.ok ? result.zoneSets : [];
@@ -36,15 +39,10 @@ function loadPersistedZoneSets(): ZoneSet[] {
   }
 }
 
-function savePersistedZoneSets(zoneSets: ZoneSet[]): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(ZONE_SETS_STORAGE_KEY, JSON.stringify(serializeZoneSets(zoneSets)));
-  } catch (error) {
-    // Quota exceeded / private mode — best effort; the explicit JSON export
-    // is the durable path for anyone who needs guarantees.
-    console.warn('[zones] failed to persist zone sets to localStorage', error);
-  }
+function savePersistedZoneSets(zoneSets: ZoneSet[], project: ProjectKey | null): void {
+  // Quota and private mode are handled inside writeScoped — best effort by
+  // design; the explicit JSON export is the durable path.
+  writeScoped(ZONE_SETS_STORAGE_KEY, project, JSON.stringify(serializeZoneSets(zoneSets)));
 }
 
 /** Diagnostics from the last `setZoneAssignments` call — surfaced in the
@@ -59,6 +57,8 @@ export interface ZoneAssignmentTiming {
 
 export interface ZonesSlice {
   zoneSets: ZoneSet[];
+  /** Swap in the zone sets of the project that is now open. */
+  loadZoneSetsForProject: () => void;
   /** Last computed classification, keyed by federated global id ->
    *  (zoneSetId -> assignment). Recomputed by `useZoneAssignmentSync`
    *  whenever the loaded models or the zone sets change. */
@@ -110,12 +110,26 @@ const DEFAULT_ZONE: Omit<Zone, 'id'> = {
   rotationY: 0,
 };
 
-export const createZonesSlice: StateCreator<ZonesSlice, [], [], ZonesSlice> = (set, get) => ({
-  zoneSets: loadPersistedZoneSets(),
+export const createZonesSlice: StateCreator<ViewerState, [], [], ZonesSlice> = (set, get) => ({
+  // Empty at boot: which project's zones these are is not known until a model
+  // or a folder says so, and guessing would show one project's zones in
+  // another for as long as it took to find out.
+  zoneSets: [],
   zonesPanelVisible: false,
   zoneAssignments: new Map(),
   zoneAssignmentTiming: null,
   editingZone: null,
+
+  /**
+   * Load the zone sets belonging to the project that is now open.
+   *
+   * Called when the project changes, which is also the moment the previous
+   * project's zones have to LEAVE the store — they are still on disk under
+   * their own key, and showing them here would be the leak in person.
+   */
+  loadZoneSetsForProject: () => {
+    set({ zoneSets: loadPersistedZoneSets(get().currentProjectKey()) });
+  },
 
   createZoneSet: (name) => {
     const id = crypto.randomUUID();
@@ -123,7 +137,7 @@ export const createZonesSlice: StateCreator<ZonesSlice, [], [], ZonesSlice> = (s
     const zoneSet: ZoneSet = { id, name: name.trim() || 'Untitled set', zones: [], visible: true, createdAt: now, updatedAt: now };
     set((state) => {
       const zoneSets = [...state.zoneSets, zoneSet];
-      savePersistedZoneSets(zoneSets);
+      savePersistedZoneSets(zoneSets, get().currentProjectKey());
       return { zoneSets };
     });
     return id;
@@ -131,7 +145,7 @@ export const createZonesSlice: StateCreator<ZonesSlice, [], [], ZonesSlice> = (s
 
   removeZoneSet: (setId) => set((state) => {
     const zoneSets = state.zoneSets.filter((zs) => zs.id !== setId);
-    savePersistedZoneSets(zoneSets);
+    savePersistedZoneSets(zoneSets, get().currentProjectKey());
     const editingZone = state.editingZone?.setId === setId ? null : state.editingZone;
     return { zoneSets, editingZone };
   }),
@@ -140,19 +154,19 @@ export const createZonesSlice: StateCreator<ZonesSlice, [], [], ZonesSlice> = (s
     const trimmed = name.trim();
     if (!trimmed) return state;
     const zoneSets = state.zoneSets.map((zs) => (zs.id === setId ? { ...zs, name: trimmed, updatedAt: Date.now() } : zs));
-    savePersistedZoneSets(zoneSets);
+    savePersistedZoneSets(zoneSets, get().currentProjectKey());
     return { zoneSets };
   }),
 
   setZoneSetVisible: (setId, visible) => set((state) => {
     const zoneSets = state.zoneSets.map((zs) => (zs.id === setId ? { ...zs, visible } : zs));
-    savePersistedZoneSets(zoneSets);
+    savePersistedZoneSets(zoneSets, get().currentProjectKey());
     return { zoneSets };
   }),
 
   replaceZonesInSet: (setId, zones) => set((state) => {
     const zoneSets = state.zoneSets.map((zs) => (zs.id === setId ? { ...zs, zones, updatedAt: Date.now() } : zs));
-    savePersistedZoneSets(zoneSets);
+    savePersistedZoneSets(zoneSets, get().currentProjectKey());
     // Replacing a set's zones wholesale (e.g. "generate from storeys") can
     // remove the zone an edit session points at — same invariant as
     // `removeZone`: never leave `editingZone` dangling on a zone that no
@@ -173,7 +187,7 @@ export const createZonesSlice: StateCreator<ZonesSlice, [], [], ZonesSlice> = (s
     const newZone: Zone = { ...DEFAULT_ZONE, ...zone, id };
     set((state) => {
       const zoneSets = state.zoneSets.map((zs) => (zs.id === setId ? { ...zs, zones: [...zs.zones, newZone], updatedAt: Date.now() } : zs));
-      savePersistedZoneSets(zoneSets);
+      savePersistedZoneSets(zoneSets, get().currentProjectKey());
       return { zoneSets };
     });
     return id;
@@ -188,7 +202,7 @@ export const createZonesSlice: StateCreator<ZonesSlice, [], [], ZonesSlice> = (s
         updatedAt: Date.now(),
       };
     });
-    savePersistedZoneSets(zoneSets);
+    savePersistedZoneSets(zoneSets, get().currentProjectKey());
     return { zoneSets };
   }),
 
@@ -196,7 +210,7 @@ export const createZonesSlice: StateCreator<ZonesSlice, [], [], ZonesSlice> = (s
     const zoneSets = state.zoneSets.map((zs) => (zs.id === setId
       ? { ...zs, zones: zs.zones.filter((z) => z.id !== zoneId), updatedAt: Date.now() }
       : zs));
-    savePersistedZoneSets(zoneSets);
+    savePersistedZoneSets(zoneSets, get().currentProjectKey());
     const editingZone = state.editingZone?.setId === setId && state.editingZone.zoneId === zoneId ? null : state.editingZone;
     return { zoneSets, editingZone };
   }),
@@ -220,7 +234,7 @@ export const createZonesSlice: StateCreator<ZonesSlice, [], [], ZonesSlice> = (s
     const result = parseZoneSetFile(parsed);
     if (!result.ok) return { ok: false, error: result.error };
     set((state) => {
-      savePersistedZoneSets(result.zoneSets);
+      savePersistedZoneSets(result.zoneSets, get().currentProjectKey());
       // Import replaces every set — clear an edit session unless the imported
       // data still contains the exact set + zone it points at (CodeRabbit
       // review of PR #1869; same dangling-`editingZone` invariant as
@@ -237,7 +251,7 @@ export const createZonesSlice: StateCreator<ZonesSlice, [], [], ZonesSlice> = (s
   },
 
   clearAllZoneSets: () => set(() => {
-    savePersistedZoneSets([]);
+    savePersistedZoneSets([], get().currentProjectKey());
     return { zoneSets: [], zoneAssignments: new Map(), zoneAssignmentTiming: null, editingZone: null };
   }),
 });
