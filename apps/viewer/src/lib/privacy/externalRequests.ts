@@ -55,4 +55,5 @@ export const EXTERNAL_ENDPOINTS: ReadonlyArray<{ host: string; purpose: string }
   { host: 'api.open-meteo.com', purpose: 'Geländehöhe an der Gebäudeposition' },
   { host: 'epsg.io', purpose: 'CRS-Definition für exotische EPSG-Codes (Fallback)' },
   { host: 'api.bsdd.buildingsmart.org', purpose: 'bSDD-Klassifikationssuche' },
+  { host: 'api3.geo.admin.ch', purpose: 'Amtliche Parzellengrenze zur E-GRID (Schweiz)' },
 ];
