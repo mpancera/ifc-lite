@@ -61,6 +61,27 @@ export function storeyFloorsFromMeshes(
   meshes: ReadonlyArray<StoreyFloorMesh>,
   elementToStorey: ReadonlyMap<number, number>,
 ): number[] {
+  return [...storeyFloorLevelsFromMeshes(meshes, elementToStorey).values()].sort((a, b) => a - b);
+}
+
+/**
+ * The same derivation, keyed by storey id.
+ *
+ * Plan mode needs to know WHICH storey a level belongs to (it cuts a chosen
+ * storey at a stated height above its floor), while the projection scoping
+ * above only needs the sorted levels. Both must read the floor the same way:
+ * a plan cut computed from `IfcBuildingStorey.Elevation` while the projection
+ * bands come from mesh geometry would put the cut and the band boundary at
+ * different heights on a georeferenced model, and the plan would silently show
+ * the wrong storey's contents. So this is the single home and
+ * `storeyFloorsFromMeshes` is a view onto it.
+ *
+ * Same frame, same caveats, same single-model restriction as above.
+ */
+export function storeyFloorLevelsFromMeshes(
+  meshes: ReadonlyArray<StoreyFloorMesh>,
+  elementToStorey: ReadonlyMap<number, number>,
+): Map<number, number> {
   const storeyMinY = new Map<number, number>();
   for (const mesh of meshes) {
     const storeyId = elementToStorey.get(mesh.expressId);
@@ -78,7 +99,7 @@ export function storeyFloorsFromMeshes(
     const cur = storeyMinY.get(storeyId);
     if (cur === undefined || minY < cur) storeyMinY.set(storeyId, minY);
   }
-  return [...storeyMinY.values()].sort((a, b) => a - b);
+  return storeyMinY;
 }
 
 /**

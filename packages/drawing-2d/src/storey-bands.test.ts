@@ -3,7 +3,12 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { describe, expect, it } from 'vitest';
-import { currentFloorBands, storeyFloorsFromMeshes, type StoreyFloorMesh } from './storey-bands.js';
+import {
+  currentFloorBands,
+  storeyFloorsFromMeshes,
+  storeyFloorLevelsFromMeshes,
+  type StoreyFloorMesh,
+} from './storey-bands.js';
 import { classifyDepthRange, signedAxisDepth } from './projection-bands.js';
 
 // A mesh that occupies world-Y [minY, maxY]; only the Y values matter here.
@@ -30,6 +35,22 @@ describe('storeyFloorsFromMeshes', () => {
     expect(floors).toHaveLength(2);
     expect(floors[0]).toBeCloseTo(0.0, 5);
     expect(floors[1]).toBeCloseTo(2.7, 5);
+  });
+
+  it('is the sorted view of the per-storey levels plan mode reads, so the two cannot drift', () => {
+    // The invariant that lets a plan cut ("this storey's floor + 1.25 m") and the
+    // projection bands ("the storey the cut sits in") agree on where a floor is.
+    const meshes = [meshY(1, 2.7, 5.0), meshY(2, 0.0, 2.6), meshY(3, -3.0, -0.2)];
+    const elementToStorey = new Map([[1, 200], [2, 100], [3, 50]]);
+
+    const levels = storeyFloorLevelsFromMeshes(meshes, elementToStorey);
+    expect(levels.get(50)).toBeCloseTo(-3.0, 5);
+    expect(levels.get(100)).toBeCloseTo(0.0, 5);
+    expect(levels.get(200)).toBeCloseTo(2.7, 5);
+
+    expect(storeyFloorsFromMeshes(meshes, elementToStorey)).toEqual(
+      [...levels.values()].sort((a, b) => a - b),
+    );
   });
 
   it('reflects the slab-underside reality: a slab extruded below the datum lowers the level', () => {

@@ -22,6 +22,7 @@ import { OverlayAutosaveMount } from './OverlayAutosaveMount';
 import { AnnotationLayer } from './annotations/AnnotationLayer';
 import { CollabPresenceLayer } from './CollabPresenceLayer';
 import { Section2DPanel } from './Section2DPanel';
+import { PlanView } from './PlanView';
 import { BasketPresentationDock } from './BasketPresentationDock';
 import { BCFOverlay } from './bcf/BCFOverlay';
 import { CesiumOverlay } from './CesiumOverlay';
@@ -1413,6 +1414,13 @@ export function ViewportContainer() {
         cesiumActive={cesiumEnabled && georef !== null}
         releaseGeometryAfterStream={false}
         onGeometryReleased={releaseGeometryMemory}
+      />
+      {/* Plan mode covers the 3D viewport rather than replacing it: the scene
+          stays loaded and warm, so switching back is instant and nothing that
+          holds a handle to it has to be torn down. */}
+      <PlanView
+        mergedGeometry={mergedGeometryResult}
+        computedIsolatedIds={computedIsolatedIds}
       />
       <AnnotationLayer />
       <CollabPresenceLayer />
