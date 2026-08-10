@@ -355,6 +355,21 @@ interface Drawing2DCanvasProps {
   measureCurrent?: { x: number; y: number } | null;
   measureResults?: Measure2DResultData[];
   measureSnapPoint?: { x: number; y: number } | null;
+  /**
+   * The alignment overlay, already mapped into drawing space by the caller.
+   *
+   * The fitting line is STORED in the underlay's own coordinates; the caller
+   * applies the current placement before handing it over, so the canvas never
+   * has to know that two coordinate systems are in play.
+   */
+  alignmentOverlay?: {
+    reference: { start: Point2D | null; end: Point2D | null } | null;
+    fit: { start: Point2D | null; end: Point2D | null } | null;
+    /** Where the cursor is, for the rubber band from a placed start. */
+    cursor: Point2D | null;
+    /** Which line the next click belongs to, so it can be highlighted. */
+    active: 'reference' | 'fit' | null;
+  } | null;
   // Sheet mode props
   sheetEnabled?: boolean;
   activeSheet?: import('@ifc-lite/drawing-2d').DrawingSheet | null;
@@ -398,6 +413,7 @@ export function Drawing2DCanvas({
   measureCurrent = null,
   measureResults = EMPTY_MEASURE_RESULTS,
   measureSnapPoint = null,
+  alignmentOverlay = null,
   sheetEnabled = false,
   activeSheet = null,
   sectionAxis,
@@ -1406,6 +1422,74 @@ export function Drawing2DCanvas({
       drawMeasureLine(measureStart, measureCurrent, distance, '#FF5722', true);
     }
 
+    // ── Alignment overlay ────────────────────────────────────────────────
+    // Two lines on the same feature: the reference on the model, the fitting
+    // line on the plan. Deliberately different weights and dash patterns —
+    // with both on screen at once, colour alone is not enough to tell which
+    // drawing a line belongs to at a glance.
+    if (alignmentOverlay) {
+      const toScreen = (pt: Point2D) => ({
+        x: pt.x * (sectionAxis === 'side' ? -transform.scale : transform.scale) + transform.x,
+        y: pt.y * (sectionAxis === 'down' ? transform.scale : -transform.scale) + transform.y,
+      });
+
+      /** Start is a filled ring, end is a square. Distinguishable without
+       *  colour, which matters when the two lines overlap. */
+      const drawHandle = (pt: Point2D, kind: 'start' | 'end', color: string) => {
+        const s = toScreen(pt);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = color;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        if (kind === 'start') ctx.arc(s.x, s.y, 5, 0, Math.PI * 2);
+        else ctx.rect(s.x - 4.5, s.y - 4.5, 9, 9);
+        ctx.fill();
+        ctx.stroke();
+      };
+
+      const drawSegment = (
+        a: Point2D, b: Point2D, color: string, width: number, dash: number[],
+      ) => {
+        const s = toScreen(a);
+        const e = toScreen(b);
+        ctx.save();
+        ctx.setLineDash(dash);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(s.x, s.y);
+        ctx.lineTo(e.x, e.y);
+        ctx.stroke();
+        ctx.restore();
+      };
+
+      const REFERENCE = '#1565C0';
+      const FIT = '#E65100';
+
+      // The reference line: thick and solid, because it is the statement the
+      // other line is measured against.
+      const ref = alignmentOverlay.reference;
+      if (ref?.start && ref.end) drawSegment(ref.start, ref.end, REFERENCE, 4, []);
+      else if (ref?.start && alignmentOverlay.active === 'reference' && alignmentOverlay.cursor) {
+        drawSegment(ref.start, alignmentOverlay.cursor, REFERENCE, 2, [6, 4]);
+      }
+
+      // The fitting line: thinner and dashed, so it reads as lying OVER the
+      // reference rather than competing with it.
+      const fit = alignmentOverlay.fit;
+      if (fit?.start && fit.end) drawSegment(fit.start, fit.end, FIT, 2, [8, 5]);
+      else if (fit?.start && alignmentOverlay.active === 'fit' && alignmentOverlay.cursor) {
+        drawSegment(fit.start, alignmentOverlay.cursor, FIT, 2, [6, 4]);
+      }
+
+      // Handles last, so they sit on top of both lines.
+      if (ref?.start) drawHandle(ref.start, 'start', REFERENCE);
+      if (ref?.end) drawHandle(ref.end, 'end', REFERENCE);
+      if (fit?.start) drawHandle(fit.start, 'start', FIT);
+      if (fit?.end) drawHandle(fit.end, 'end', FIT);
+    }
+
     // Draw snap indicator
     if (measureMode && measureSnapPoint) {
       // Use axis-specific transforms (matching canvas rendering)
@@ -1776,7 +1860,7 @@ export function Drawing2DCanvas({
         }
       }
     }
-  }, [drawing, transform, showHiddenLines, canvasSize, overrideEngine, overridesEnabled, entityColorMap, useIfcMaterials, measureMode, measureStart, measureCurrent, measureResults, measureSnapPoint, sheetEnabled, activeSheet, sectionAxis, isPinned, annotation2DActiveTool, annotation2DCursorPos, polygonAreaPoints, polygonAreaResults, textAnnotations, textAnnotationEditing, cloudAnnotationPoints, cloudAnnotations, selectedAnnotation, ifcAnnotationLines, ifcAnnotationTexts, ifcAnnotationFills, dxfUnderlays, scanPoints, scanOpacity]);
+  }, [drawing, transform, showHiddenLines, canvasSize, overrideEngine, overridesEnabled, entityColorMap, useIfcMaterials, measureMode, measureStart, measureCurrent, measureResults, measureSnapPoint, sheetEnabled, activeSheet, sectionAxis, isPinned, annotation2DActiveTool, annotation2DCursorPos, polygonAreaPoints, polygonAreaResults, textAnnotations, textAnnotationEditing, cloudAnnotationPoints, cloudAnnotations, selectedAnnotation, ifcAnnotationLines, ifcAnnotationTexts, ifcAnnotationFills, dxfUnderlays, scanPoints, scanOpacity, alignmentOverlay]);
 
   return (
     <canvas

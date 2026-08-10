@@ -24,7 +24,7 @@ import {
 import { useViewerStore } from '@/store';
 import { assignableStoreys } from '@/lib/heights/underlayStack';
 import {
-  alignmentPairs, alignmentPickCount, alignmentPrompt,
+  alignmentPairs, alignmentPrompt, isLineComplete,
 } from '@/lib/heights/alignmentSession';
 import { describeSolvedScale, solveDxfPlacement } from '@ifc-lite/drawing-2d';
 import { toast } from '@/components/ui/toast';
@@ -95,7 +95,7 @@ function UnderlayCard({
 
   const session = useViewerStore((s) => s.dxfAlignment);
   const startDxfAlignment = useViewerStore((s) => s.startDxfAlignment);
-  const undoDxfAlignmentPick = useViewerStore((s) => s.undoDxfAlignmentPick);
+  const editDxfAlignmentLine = useViewerStore((s) => s.editDxfAlignmentLine);
   const cancelDxfAlignment = useViewerStore((s) => s.cancelDxfAlignment);
   const setAlignmentLockScale = useViewerStore((s) => s.setDxfAlignmentLockScale);
   const aligning = session?.underlayId === state.id;
@@ -293,6 +293,34 @@ function UnderlayCard({
       {aligning ? (
         <div className="rounded-sm border border-primary/50 bg-primary/5 px-2 py-1.5">
           <p className="text-[11px]">{alignmentPrompt(session!)}</p>
+          {/* Each line can be re-drawn on its own. The reference is usually
+              right first time and the fitting line is the one that needs
+              nudging; redoing both to fix one end was the worst part of the
+              earlier four-point version. */}
+          <div className="mt-1 flex flex-wrap items-center gap-1">
+            <Button
+              variant={session!.editing === 'reference' ? 'default' : 'outline'}
+              size="sm" className="h-5 px-1.5 text-[10px]"
+              onClick={() => editDxfAlignmentLine('reference')}
+            >
+              Referenzlinie bearbeiten
+            </Button>
+            <Button
+              variant={session!.editing === 'fit' ? 'default' : 'outline'}
+              size="sm" className="h-5 px-1.5 text-[10px]"
+              onClick={() => editDxfAlignmentLine('fit')}
+            >
+              Passlinie bearbeiten
+            </Button>
+          </div>
+          <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
+            <span className={isLineComplete(session!.reference) ? 'text-blue-700' : ''}>
+              ● Referenz {isLineComplete(session!.reference) ? 'gesetzt' : 'offen'}
+            </span>
+            <span className={isLineComplete(session!.fit) ? 'text-orange-700' : ''}>
+              ┄ Passlinie {isLineComplete(session!.fit) ? 'gesetzt' : 'offen'}
+            </span>
+          </div>
           <label className="mt-1 flex items-center gap-1 text-[10px] text-muted-foreground">
             <input
               type="checkbox"
@@ -302,13 +330,6 @@ function UnderlayCard({
             Massstab beibehalten
           </label>
           <div className="mt-1 flex items-center gap-1">
-            <Button
-              variant="outline" size="sm" className="h-5 px-1.5 text-[10px]"
-              disabled={alignmentPickCount(session!) === 0}
-              onClick={undoDxfAlignmentPick}
-            >
-              Punkt zurück
-            </Button>
             <Button
               variant="outline" size="sm" className="h-5 px-1.5 text-[10px]"
               disabled={alignmentPairs(session!) === null}
@@ -330,7 +351,7 @@ function UnderlayCard({
           onClick={() => startDxfAlignment(state.id)}
         >
           <Crosshair className="mr-1 h-3 w-3" />
-          Über zwei Punkte ausrichten
+          Über Referenz- und Passlinie ausrichten
         </Button>
       )}
 

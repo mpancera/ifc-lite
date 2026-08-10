@@ -29,9 +29,10 @@ import { GraphicOverrideEngine } from '@ifc-lite/drawing-2d';
 import { type GeometryResult } from '@ifc-lite/geometry';
 import { DrawingSettingsPanel } from './DrawingSettingsPanel';
 import { DxfUnderlayPanel } from './DxfUnderlayPanel';
-import { alignmentStep } from '@/lib/heights/alignmentSession';
+import { alignmentStep, alignmentTarget } from '@/lib/heights/alignmentSession';
+import { snapToUnderlay } from '@/lib/heights/underlaySnap';
 import { toast } from '@/components/ui/toast';
-import { inverseDxfPlacement } from '@ifc-lite/drawing-2d';
+import { applyDxfPlacement, inverseDxfPlacement } from '@ifc-lite/drawing-2d';
 import { ScanSectionPanel } from './ScanSectionPanel';
 import { SheetSetupPanel } from './SheetSetupPanel';
 import { TitleBlockEditor } from './TitleBlockEditor';
@@ -364,32 +365,79 @@ export function Section2DPanel({
   });
 
   // Unified mouse handlers that dispatch to the right tool
+  /** Where the cursor is while a line is half-drawn, for the rubber band. */
+  const [alignmentCursor, setAlignmentCursor] = useState<{ x: number; y: number } | null>(null);
+
+  /**
+   * Snap a click to the drawing it belongs to.
+   *
+   * Two separate sources on purpose: the reference line snaps to the MODEL
+   * section, the fitting line to the imported plan. Snapping both to whatever
+   * is nearest would quietly pull a plan point onto the very geometry it is
+   * being aligned against, which looks like a perfect fit and is a tautology.
+   */
+  const snapForAlignment = useCallback((
+    point: { x: number; y: number }, target: 'reference' | 'fit',
+  ): { x: number; y: number } | null => {
+    if (target === 'reference') return measureHandlers.findSnapPoint(point);
+
+    const session = dxfAlignment;
+    const underlay = session && dxfUnderlays.find((u) => u.id === session.underlayId);
+    if (!underlay) return null;
+    // 10 screen pixels, the same feel as the measure tool's snap.
+    return snapToUnderlay(underlay, point, 10 / viewTransform.scale);
+  }, [measureHandlers, dxfAlignment, dxfUnderlays, viewTransform.scale]);
+
+  /** The overlay, mapped into drawing space for the canvas. */
+  const alignmentOverlay = useMemo(() => {
+    if (!dxfAlignment) return null;
+    const underlay = dxfUnderlays.find((u) => u.id === dxfAlignment.underlayId);
+    const place = (pt: { x: number; y: number } | null) => (
+      pt && underlay ? applyDxfPlacement(pt, underlay.placement) : pt
+    );
+    return {
+      reference: dxfAlignment.reference,
+      fit: dxfAlignment.fit
+        ? { start: place(dxfAlignment.fit.start), end: place(dxfAlignment.fit.end) }
+        : null,
+      cursor: alignmentCursor,
+      active: alignmentTarget(dxfAlignment),
+    };
+  }, [dxfAlignment, dxfUnderlays, alignmentCursor]);
+
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     // An alignment session takes the click before anything else: while one is
-    // running the only meaningful thing to do in the canvas is name a point,
+    // running the only meaningful thing to do in the canvas is draw a line,
     // and letting a pan or a selection through would make the picks depend on
     // which tool happened to be active.
-    if (dxfAlignment && alignmentStep(dxfAlignment) !== 'ready') {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (rect) {
-        const drawingPoint = measureHandlers.screenToDrawing(
-          e.clientX - rect.left, e.clientY - rect.top,
-        );
-        if (alignmentStep(dxfAlignment) === 'pick-from') {
-          // Recorded in the underlay's OWN coordinates, so re-aligning a plan
-          // that was already moved replaces its placement rather than
-          // compounding the two.
-          const underlay = dxfUnderlays.find((u) => u.id === dxfAlignment.underlayId);
-          const local = underlay
-            ? inverseDxfPlacement(drawingPoint, underlay.placement)
-            : drawingPoint;
-          if (local) addDxfAlignmentPick(local);
-          else toast.error('Der Massstab dieser Unterlage lässt sich nicht umkehren.');
-        } else {
-          addDxfAlignmentPick(drawingPoint);
+    if (dxfAlignment) {
+      const step = alignmentStep(dxfAlignment);
+      if (step.kind !== 'ready') {
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (rect) {
+          const raw = measureHandlers.screenToDrawing(
+            e.clientX - rect.left, e.clientY - rect.top,
+          );
+          // Snapped against whichever drawing the click belongs to — the model
+          // for the reference line, the plan for the fitting line. Snapping to
+          // the wrong drawing would quietly move the point onto the geometry
+          // being aligned AGAINST.
+          const point = snapForAlignment(raw, step.target) ?? raw;
+
+          if (step.target === 'fit') {
+            // Recorded in the underlay's OWN coordinates, so re-aligning a
+            // plan that was already moved replaces its placement rather than
+            // compounding the two.
+            const underlay = dxfUnderlays.find((u) => u.id === dxfAlignment.underlayId);
+            const local = underlay ? inverseDxfPlacement(point, underlay.placement) : point;
+            if (local) addDxfAlignmentPick(local);
+            else toast.error('Der Massstab dieser Unterlage lässt sich nicht umkehren.');
+          } else {
+            addDxfAlignmentPick(point);
+          }
         }
+        return;
       }
-      return;
     }
 
     if (annotation2DActiveTool === 'measure') {
@@ -404,9 +452,21 @@ export function Section2DPanel({
       annotationHandlers.handleMouseDown(e);
     }
   }, [annotation2DActiveTool, measureHandlers, annotationHandlers,
-      dxfAlignment, dxfUnderlays, addDxfAlignmentPick, containerRef]);
+      dxfAlignment, dxfUnderlays, addDxfAlignmentPick, containerRef,
+      measureHandlers, snapForAlignment]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    if (dxfAlignment) {
+      const step = alignmentStep(dxfAlignment);
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (step.kind === 'end' && rect) {
+        const raw = measureHandlers.screenToDrawing(e.clientX - rect.left, e.clientY - rect.top);
+        setAlignmentCursor(snapForAlignment(raw, step.target) ?? raw);
+      } else if (alignmentCursor !== null) {
+        setAlignmentCursor(null);
+      }
+    }
+
     // If dragging an annotation, let the annotation handler handle it
     if (annotationHandlers.isDraggingRef.current) {
       annotationHandlers.handleMouseMove(e);
@@ -1118,6 +1178,7 @@ export function Section2DPanel({
               measureCurrent={measure2DCurrent}
               measureResults={measure2DResults}
               measureSnapPoint={measure2DSnapPoint}
+              alignmentOverlay={alignmentOverlay}
               sheetEnabled={sheetEnabled}
               activeSheet={activeSheet}
               sectionAxis={sectionPlane.axis}

@@ -43,6 +43,9 @@ export interface UseMeasure2DResult {
    * until somebody changed one of them.
    */
   screenToDrawing: (screenX: number, screenY: number) => { x: number; y: number };
+  /** Nearest model feature within the snap radius, or `null`. Exposed for
+   *  the alignment picker, whose reference line snaps to the same geometry. */
+  findSnapPoint: (drawingCoord: { x: number; y: number }) => { x: number; y: number } | null;
   handleMouseDown: (e: React.MouseEvent) => void;
   handleMouseMove: (e: React.MouseEvent) => void;
   handleMouseUp: () => void;
@@ -364,6 +367,7 @@ export function useMeasure2D({
 
   return {
     screenToDrawing,
+    findSnapPoint,
     handleMouseDown,
     handleMouseMove,
     handleMouseUp,

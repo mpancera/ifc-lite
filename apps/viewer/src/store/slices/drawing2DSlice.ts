@@ -13,6 +13,9 @@ import type { StateCreator } from 'zustand';
 import type { Drawing2D, DxfPlacement, DxfUnderlay, GraphicOverrideRule, GraphicOverridePreset } from '@ifc-lite/drawing-2d';
 import { BUILT_IN_PRESETS, DEFAULT_DXF_PLACEMENT } from '@ifc-lite/drawing-2d';
 import { DEFAULT_SCAN_SECTION_THICKNESS } from '@/hooks/scanSectionMath';
+import {
+  alignmentStep, type AlignmentLine, type DxfAlignmentSession,
+} from '@/lib/heights/alignmentSession';
 
 export type Drawing2DStatus = 'idle' | 'generating' | 'ready' | 'error';
 
@@ -92,24 +95,6 @@ export interface DxfUnderlayState {
    * copy would quietly stop agreeing.
    */
   storeyId?: string;
-}
-
-/**
- * Picking two features on a drawing and saying where each belongs.
- *
- * The picks alternate: a point ON the plan, then where it actually is, twice.
- * `from` holds the plan-side picks in the underlay's OWN coordinates — the
- * caller inverts the current placement before recording, so re-aligning a plan
- * that was already moved replaces its placement instead of compounding it.
- */
-export interface DxfAlignmentSession {
-  underlayId: string;
-  /** Points on the plan, in the underlay's own coordinates. 0-2 entries. */
-  from: { x: number; y: number }[];
-  /** Where each belongs, in drawing space. Never longer than `from`. */
-  to: { x: number; y: number }[];
-  /** Keep the drawing's size and use the picks for position and rotation. */
-  lockScale: boolean;
 }
 
 export interface Drawing2DState {
@@ -329,11 +314,11 @@ export interface Drawing2DSlice extends Drawing2DState {
   dxfAlignment: DxfAlignmentSession | null;
   /** Begin aligning one underlay. Replaces any running session. */
   startDxfAlignment: (underlayId: string) => void;
-  /** Record the next pick. The session tracks which of the four it is. */
+  /** Record the next click. The session decides which end of which line. */
   addDxfAlignmentPick: (point: { x: number; y: number }) => void;
-  /** Drop the last pick, for the mis-click that happens on every plan. */
-  undoDxfAlignmentPick: () => void;
-  /** Hold the drawing's size and use the picks for position and rotation. */
+  /** Re-draw one line, leaving the other alone. */
+  editDxfAlignmentLine: (target: 'reference' | 'fit') => void;
+  /** Hold the drawing's size and use the lines for position and rotation. */
   setDxfAlignmentLockScale: (lockScale: boolean) => void;
   cancelDxfAlignment: () => void;
   clearDxfUnderlays: () => void;
@@ -790,29 +775,44 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
   dxfAlignment: null,
 
   startDxfAlignment: (underlayId) => set({
-    dxfAlignment: { underlayId, from: [], to: [], lockScale: false },
+    dxfAlignment: { underlayId, reference: null, fit: null, editing: null, lockScale: false },
   }),
 
   addDxfAlignmentPick: (point) => set((state) => {
     const session = state.dxfAlignment;
-    // Four picks is the whole session; a fifth would be a click landing after
-    // the solve is already possible, and silently starting over is worse than
-    // ignoring it.
-    if (!session || session.to.length >= 2) return {};
-
-    // They alternate, and `from` is always the one that runs ahead.
-    return session.from.length === session.to.length
-      ? { dxfAlignment: { ...session, from: [...session.from, point] } }
-      : { dxfAlignment: { ...session, to: [...session.to, point] } };
-  }),
-
-  undoDxfAlignmentPick: () => set((state) => {
-    const session = state.dxfAlignment;
     if (!session) return {};
-    return session.from.length > session.to.length
-      ? { dxfAlignment: { ...session, from: session.from.slice(0, -1) } }
-      : { dxfAlignment: { ...session, to: session.to.slice(0, -1) } };
+
+    const step = alignmentStep(session);
+    // A click after both lines are drawn does nothing. Silently restarting
+    // would throw away work on a stray click, and the edit buttons are the
+    // deliberate way back in.
+    if (step.kind === 'ready') return {};
+
+    const key = step.target;
+    const line = session[key];
+    const next: AlignmentLine = step.kind === 'start'
+      // A fresh start clears the old end: half of the previous line would
+      // otherwise survive and pair a new start with a stale end.
+      ? { start: point, end: null }
+      : { start: line?.start ?? null, end: point };
+
+    return {
+      dxfAlignment: {
+        ...session,
+        [key]: next,
+        // The correction is finished the moment its second end lands.
+        editing: step.kind === 'end' ? null : session.editing,
+      },
+    };
   }),
+
+  editDxfAlignmentLine: (target) => set((state) => (
+    state.dxfAlignment
+      // Cleared rather than kept: re-drawing means two fresh clicks, and a
+      // retained start would make the first one look like it did nothing.
+      ? { dxfAlignment: { ...state.dxfAlignment, editing: target, [target]: null } }
+      : {}
+  )),
 
   setDxfAlignmentLockScale: (lockScale) => set((state) => (
     state.dxfAlignment ? { dxfAlignment: { ...state.dxfAlignment, lockScale } } : {}

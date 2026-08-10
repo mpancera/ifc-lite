@@ -5,76 +5,141 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  alignmentPairs, alignmentPickCount, alignmentPrompt, alignmentStep,
+  alignmentPairs, alignmentPrompt, alignmentStep, alignmentTarget, isLineComplete,
+  type DxfAlignmentSession,
 } from './alignmentSession.js';
-import type { DxfAlignmentSession } from '@/store/slices/drawing2DSlice';
 
 const p = (n: number) => ({ x: n, y: n });
 
-function session(fromCount: number, toCount: number): DxfAlignmentSession {
+function session(over: Partial<DxfAlignmentSession> = {}): DxfAlignmentSession {
   return {
-    underlayId: 'u1',
-    from: Array.from({ length: fromCount }, (_, i) => p(i)),
-    to: Array.from({ length: toCount }, (_, i) => p(i + 10)),
-    lockScale: false,
+    underlayId: 'u1', reference: null, fit: null, editing: null, lockScale: false, ...over,
   };
 }
 
-describe('alignmentStep', () => {
-  it('starts on the plan', () => {
-    assert.equal(alignmentStep(session(0, 0)), 'pick-from');
+const line = (a: number, b: number) => ({ start: p(a), end: p(b) });
+const half = (a: number) => ({ start: p(a), end: null });
+
+describe('alignmentStep · the normal order', () => {
+  it('starts with the reference line on the model', () => {
+    assert.deepEqual(alignmentStep(session()), { kind: 'start', target: 'reference' });
   });
 
-  it('alternates plan, model, plan, model', () => {
+  it('asks for the end once the start is down', () => {
+    assert.deepEqual(alignmentStep(session({ reference: half(0) })),
+      { kind: 'end', target: 'reference' });
+  });
+
+  it('moves to the fitting line once the reference is complete', () => {
+    assert.deepEqual(alignmentStep(session({ reference: line(0, 1) })),
+      { kind: 'start', target: 'fit' });
+  });
+
+  it('is ready once both lines are complete', () => {
     assert.deepEqual(
-      [session(0, 0), session(1, 0), session(1, 1), session(2, 1)].map(alignmentStep),
-      ['pick-from', 'pick-to', 'pick-from', 'pick-to'],
+      alignmentStep(session({ reference: line(0, 1), fit: line(2, 3) })), { kind: 'ready' },
     );
   });
+});
 
-  it('is ready once both pairs are in', () => {
-    assert.equal(alignmentStep(session(2, 2)), 'ready');
+describe('alignmentStep · correcting one line', () => {
+  it('sends the next clicks to the line being edited', () => {
+    // The whole reason for named lines: the reference is usually right first
+    // time and the fitting line is the one that needs nudging.
+    const s = session({ reference: line(0, 1), fit: null, editing: 'fit' });
+
+    assert.deepEqual(alignmentStep(s), { kind: 'start', target: 'fit' });
+  });
+
+  it('lets the reference be corrected even though both were drawn', () => {
+    const s = session({ reference: null, fit: line(2, 3), editing: 'reference' });
+
+    assert.deepEqual(alignmentStep(s), { kind: 'start', target: 'reference' });
+  });
+
+  it('does not fall back to the normal order while editing', () => {
+    // Without the explicit target this would say "ready" and swallow the click.
+    const s = session({ reference: line(0, 1), fit: half(2), editing: 'fit' });
+
+    assert.deepEqual(alignmentStep(s), { kind: 'end', target: 'fit' });
+  });
+});
+
+describe('alignmentTarget', () => {
+  it('names the line the next click belongs to', () => {
+    assert.equal(alignmentTarget(session()), 'reference');
+    assert.equal(alignmentTarget(session({ reference: line(0, 1) })), 'fit');
+  });
+
+  it('is null when there is nothing left to draw', () => {
+    assert.equal(alignmentTarget(session({ reference: line(0, 1), fit: line(2, 3) })), null);
   });
 });
 
 describe('alignmentPrompt', () => {
-  it('says WHICH drawing to click, not just "pick a point"', () => {
-    // With a plan lying over a model section, "pick a point" is exactly the
+  it('names the drawing, not just the action', () => {
+    // With a plan lying over a model section, "click a point" is exactly the
     // instruction that cannot be followed.
-    assert.match(alignmentPrompt(session(0, 0)), /Plan/);
-    assert.match(alignmentPrompt(session(1, 0)), /Modell/);
+    assert.match(alignmentPrompt(session()), /Modell/);
+    assert.match(alignmentPrompt(session({ reference: line(0, 1) })), /Plan/);
   });
 
-  it('counts the pairs, not the clicks', () => {
-    // A person thinks in "this feature and where it goes", not in four clicks.
-    assert.match(alignmentPrompt(session(0, 0)), /1 von 2/);
-    assert.match(alignmentPrompt(session(1, 1)), /2 von 2/);
+  it('distinguishes the start from the end', () => {
+    assert.match(alignmentPrompt(session()), /Startpunkt/);
+    assert.match(alignmentPrompt(session({ reference: half(0) })), /Endpunkt/);
   });
 
-  it('says what to do once nothing is left to click', () => {
-    assert.doesNotMatch(alignmentPrompt(session(2, 2)), /anklicken/);
+  it('stops asking for clicks once both lines are down', () => {
+    assert.doesNotMatch(
+      alignmentPrompt(session({ reference: line(0, 1), fit: line(2, 3) })), /anklicken/,
+    );
   });
 });
 
-describe('alignmentPickCount', () => {
-  it('counts every pick made so far', () => {
-    assert.equal(alignmentPickCount(session(2, 1)), 3);
+describe('isLineComplete', () => {
+  it('needs both ends', () => {
+    assert.equal(isLineComplete(line(0, 1)), true);
+    assert.equal(isLineComplete(half(0)), false);
+    assert.equal(isLineComplete(null), false);
   });
 });
 
 describe('alignmentPairs', () => {
-  it('pairs each plan point with its model point in order', () => {
-    const pairs = alignmentPairs(session(2, 2));
+  it('pairs start with start and end with end', () => {
+    const pairs = alignmentPairs(session({
+      reference: { start: { x: 10, y: 10 }, end: { x: 20, y: 10 } },
+      fit: { start: { x: 0, y: 0 }, end: { x: 5, y: 0 } },
+    }));
 
     assert.ok(pairs);
-    assert.deepEqual(pairs[0], { from: p(0), to: p(10) });
-    assert.deepEqual(pairs[1], { from: p(1), to: p(11) });
+    assert.deepEqual(pairs[0], { from: { x: 0, y: 0 }, to: { x: 10, y: 10 } });
+    assert.deepEqual(pairs[1], { from: { x: 5, y: 0 }, to: { x: 20, y: 10 } });
   });
 
-  it('gives nothing while the session is unfinished', () => {
-    // Solving from a half-finished session would produce a placement from one
-    // pair and a guess — which is exactly the trial and error this replaces.
-    for (const s of [session(0, 0), session(1, 0), session(1, 1), session(2, 1)]) {
+  it('lets opposite drawing directions produce a turn rather than fixing it silently', () => {
+    // Drawing the two lines head-to-tail is a real statement about
+    // orientation. Quietly swapping the ends would hide a 180° error that is
+    // obvious on screen from the two arrows.
+    const forward = alignmentPairs(session({
+      reference: { start: { x: 0, y: 0 }, end: { x: 10, y: 0 } },
+      fit: { start: { x: 0, y: 0 }, end: { x: 10, y: 0 } },
+    }));
+    const reversed = alignmentPairs(session({
+      reference: { start: { x: 0, y: 0 }, end: { x: 10, y: 0 } },
+      fit: { start: { x: 10, y: 0 }, end: { x: 0, y: 0 } },
+    }));
+
+    assert.notDeepEqual(forward, reversed);
+  });
+
+  it('gives nothing while either line is unfinished', () => {
+    // Solving from one line and a guess is exactly the trial and error this
+    // replaces.
+    for (const s of [
+      session(),
+      session({ reference: line(0, 1) }),
+      session({ reference: half(0), fit: line(2, 3) }),
+    ]) {
       assert.equal(alignmentPairs(s), null);
     }
   });
