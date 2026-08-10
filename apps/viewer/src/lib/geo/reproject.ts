@@ -504,6 +504,50 @@ export async function reprojectPointToLatLon(
 }
 
 /**
+ * Project a point to WGS84 and straight back, returning how far off the result
+ * lands from where it started, in metres. `null` when the CRS can't be
+ * resolved, when the projection is geographic (nothing to invert), or when
+ * proj4 throws.
+ *
+ * A projection round-trips to well under a millimetre anywhere inside its
+ * usable domain, so a large residual means the coordinates are not
+ * representable there. The converse does NOT hold: transverse Mercator and UTM
+ * invert absurd coordinates perfectly, so a clean round trip is no evidence of
+ * a plausible position. Interpret only the positive result. Used by
+ * `validateGeoreference`, which documents the measured noise floor.
+ *
+ * @param eastings        Easting in the CRS map unit.
+ * @param northings       Northing in the CRS map unit.
+ * @param crs             IfcProjectedCRS.
+ * @param lengthUnitScale IFC project length unit to metres.
+ */
+export async function measureProjectionRoundTripM(
+  eastings: number,
+  northings: number,
+  crs: ProjectedCRS,
+  lengthUnitScale = 1,
+): Promise<number | null> {
+  const projDef = await resolveProjection(crs);
+  if (!projDef || isGeographicProj4(projDef)) return null;
+  if (!Number.isFinite(eastings) || !Number.isFinite(northings)) return null;
+
+  const mapScale = resolveMapUnitToMetreScale(crs.mapUnitScale, lengthUnitScale);
+  const eastingM = eastings * mapScale;
+  const northingM = northings * mapScale;
+
+  try {
+    const forward = proj4(projDef, 'WGS84', [eastingM, northingM]);
+    if (!forward.every(Number.isFinite)) return null;
+    const back = proj4('WGS84', projDef, forward);
+    if (!back.every(Number.isFinite)) return null;
+    return Math.hypot(back[0] - eastingM, back[1] - northingM);
+  } catch (error) {
+    console.warn('[reproject] round-trip probe failed', error);
+    return null;
+  }
+}
+
+/**
  * Derive a primitive cache key for a {@link reprojectPointToLatLon} call.
  *
  * The key must fold **every** input the reprojection reads, or an effect keyed

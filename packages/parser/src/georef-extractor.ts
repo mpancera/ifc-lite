@@ -67,11 +67,34 @@ export interface ProjectedCRS {
   mapUnitScale?: number;
 }
 
+/**
+ * `IfcSite.RefLatitude` / `RefLongitude` / `RefElevation` as decimal degrees.
+ *
+ * Read independently of whether the model also carries an IfcMapConversion.
+ * The two are separate statements about the same place, so they must agree —
+ * and when they don't, one of them is wrong. That comparison is what catches a
+ * model whose authoring tool left its default site location untouched while
+ * writing an unrelated (or broken) coordinate operation.
+ */
+export interface SiteReferenceLocation {
+  /** IfcSite the values were read from. */
+  expressId: number;
+  latitude: number;
+  longitude: number;
+  /** RefElevation in the project length unit; an absent attribute reads as 0. */
+  elevation: number;
+}
+
 export interface GeoreferenceInfo {
   hasGeoreference: boolean;
   mapConversion?: MapConversion;
   projectedCRS?: ProjectedCRS;
   source?: 'mapConversion' | 'ePSetMapConversion' | 'siteLocation';
+  /**
+   * Always populated when the file carries IfcSite reference angles — not only
+   * on the `siteLocation` fallback path.
+   */
+  siteReference?: SiteReferenceLocation;
   // Computed transformation matrix (4x4) from local to world coordinates
   transformMatrix?: number[];
 }
@@ -113,6 +136,8 @@ export function extractGeoreferencing(
     info.transformMatrix = computeTransformMatrix(info.mapConversion);
   }
 
+  const siteReference = readSiteReferenceLocation(entities, entitiesByType);
+
   if (!info.hasGeoreference) {
     // IFC2x3 ePSet_MapConversion fallback BEFORE the legacy site fallback —
     // same precedence as the Rust extractor (ifc_lite_core::GeoRefExtractor),
@@ -120,14 +145,15 @@ export function extractGeoreferencing(
     // reported none (alignment audit).
     const epset = extractEPSetMapConversion(entities, entitiesByType);
     if (epset) {
-      return epset;
+      return siteReference ? { ...epset, siteReference } : epset;
     }
-    const legacySite = extractLegacySiteGeoreference(entities, entitiesByType);
+    const legacySite = extractLegacySiteGeoreference(siteReference);
     if (legacySite) {
       return legacySite;
     }
   }
 
+  if (siteReference) info.siteReference = siteReference;
   return info;
 }
 
@@ -336,10 +362,15 @@ function compoundPlaneAngleToDecimalDegrees(value: unknown): number | undefined 
   return sign * (degrees + (minutes / 60) + ((seconds + (millionths / 1_000_000)) / 3600));
 }
 
-function extractLegacySiteGeoreference(
+/**
+ * Read the reference angles off the first IfcSite that carries both. Shared by
+ * the legacy-site fallback below and by the always-on `siteReference` field, so
+ * the two can never disagree about which site they read.
+ */
+function readSiteReferenceLocation(
   entities: Map<number, IfcEntity>,
   entitiesByType: Map<string, number[]>,
-): GeoreferenceInfo | null {
+): SiteReferenceLocation | null {
   const siteIds = entitiesByType.get('IfcSite') || [];
   for (const siteId of siteIds) {
     const site = entities.get(siteId);
@@ -351,34 +382,46 @@ function extractLegacySiteGeoreference(
     const longitude = compoundPlaneAngleToDecimalDegrees(
       getAttributeValueByName(site, 'RefLongitude'),
     );
-    const elevation = getNumber(getAttributeValueByName(site, 'RefElevation')) ?? 0;
-
     if (latitude === undefined || longitude === undefined) continue;
 
     return {
-      hasGeoreference: true,
-      source: 'siteLocation',
-      projectedCRS: {
-        id: site.expressId,
-        name: 'EPSG:4326',
-        description: 'Legacy IfcSite geolocation',
-        geodeticDatum: 'WGS84',
-        mapProjection: 'Geographic',
-        mapUnit: 'DEGREE',
-      },
-      mapConversion: {
-        id: site.expressId,
-        sourceCRS: 0,
-        targetCRS: site.expressId,
-        eastings: longitude,
-        northings: latitude,
-        orthogonalHeight: elevation,
-        scale: 1,
-      },
+      expressId: site.expressId,
+      latitude,
+      longitude,
+      elevation: getNumber(getAttributeValueByName(site, 'RefElevation')) ?? 0,
     };
   }
 
   return null;
+}
+
+function extractLegacySiteGeoreference(
+  site: SiteReferenceLocation | null,
+): GeoreferenceInfo | null {
+  if (!site) return null;
+
+  return {
+    hasGeoreference: true,
+    source: 'siteLocation',
+    siteReference: site,
+    projectedCRS: {
+      id: site.expressId,
+      name: 'EPSG:4326',
+      description: 'Legacy IfcSite geolocation',
+      geodeticDatum: 'WGS84',
+      mapProjection: 'Geographic',
+      mapUnit: 'DEGREE',
+    },
+    mapConversion: {
+      id: site.expressId,
+      sourceCRS: 0,
+      targetCRS: site.expressId,
+      eastings: site.longitude,
+      northings: site.latitude,
+      orthogonalHeight: site.elevation,
+      scale: 1,
+    },
+  };
 }
 
 function extractMapConversion(entity: IfcEntity): MapConversion {

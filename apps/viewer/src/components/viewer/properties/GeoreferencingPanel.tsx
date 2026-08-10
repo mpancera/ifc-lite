@@ -17,6 +17,8 @@ import { posthog } from '@/lib/analytics';
 import type { CoordinateInfo, GeometryResult } from '@ifc-lite/geometry';
 import { EpsgLookupDialog, type EpsgResult } from './EpsgLookupDialog';
 import { FederationAlignmentControls } from './FederationAlignmentControls';
+import { GeorefFindingsList } from './GeorefFindingsList';
+import { useGeorefFindings } from '@/lib/geo/useGeorefFindings';
 import { PrecisionGridBadge } from './PrecisionGridBadge';
 import { LocationMap, type PickedPosition } from './LocationMap';
 import { computeOrthogonalHeightForBaseAltitude } from '@/lib/geo/cesium-placement';
@@ -387,6 +389,13 @@ export function GeoreferencingPanel({ georef, modelId, enableEditing, schemaVers
     );
   }, [mergedConversion, mergedCRS?.mapUnitScale, lengthUnitScale]);
 
+  const findings = useGeorefFindings(
+    mergedCRS,
+    mergedConversion,
+    georef?.siteReference,
+    lengthUnitScale,
+  );
+
   const mapUnitSuffix = useMemo(() => {
     const mapUnit = mergedCRS?.mapUnit?.toUpperCase();
     if (!mapUnit) return 'm';
@@ -584,6 +593,7 @@ export function GeoreferencingPanel({ georef, modelId, enableEditing, schemaVers
 
   return (
     <div>
+      <GeorefFindingsList findings={findings} />
       {showReloadPrompt && (
         <div className="mx-2 my-2 border border-teal-300 dark:border-teal-700 bg-teal-50 dark:bg-teal-950/40 px-2.5 py-2">
           <div className="flex items-start gap-2">
