@@ -41,6 +41,7 @@ export {
 } from './descriptor.js';
 
 export {
-  isSidecarOf, sidecarFileName, DEFAULT_SIDECAR_PREFIX,
+  isSidecarOf, sidecarFileName, sidecarNameInDir,
+  DEFAULT_SIDECAR_PREFIX, SIDECAR_DIR,
   type SidecarKind, type SidecarNameOptions,
 } from './sidecar.js';

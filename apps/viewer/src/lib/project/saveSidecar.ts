@@ -29,13 +29,19 @@
  * something was already there.
  */
 
-import { folderHasFile, restoreFolderAccess, writeFileToFolder } from '@ifc-lite/project';
+import {
+  folderHasFile, restoreFolderAccess, writeFileToFolder,
+  DEFAULT_SIDECAR_PREFIX, SIDECAR_DIR,
+} from '@ifc-lite/project';
 import type { FolderBinding } from '@ifc-lite/project';
 import { downloadFile } from '@/lib/export/download';
 
 export type SidecarSaveResult =
   /** Landed in the bound folder. */
-  | { to: 'folder'; folder: string; replaced: boolean }
+  | { to: 'folder'; folder: string; replaced: boolean;
+      /** Where it landed, e.g. `dc/heights.json`. Shown so the file can be
+       *  found without going looking. */
+      writtenAs: string }
   /** No folder is bound, so it went to the browser's downloads. */
   | { to: 'download'; reason: 'no-folder' }
   /** A folder is bound but the browser would not grant access to it. */
@@ -66,18 +72,29 @@ export async function saveSidecar(
     return { to: 'download', reason: 'no-permission' };
   }
 
+  // Into `dc/`, where the folder's own files live and where the reading side
+  // looks first. The prefixed flat name is kept for the download: there the
+  // file lands among installers and invoices and has to identify itself, while
+  // here the directory already says what it is.
+  const inDir = fileName.startsWith(DEFAULT_SIDECAR_PREFIX)
+    ? fileName.slice(DEFAULT_SIDECAR_PREFIX.length)
+    : fileName;
+
   // Asked BEFORE writing — afterwards the answer is always yes and says
   // nothing about what was there a moment ago.
-  const replaced = await folderHasFile(folder.handle, fileName);
-  await writeFileToFolder(folder.handle, fileName, contents);
-  return { to: 'folder', folder: folder.label?.trim() || folder.name, replaced };
+  const replaced = await folderHasFile(folder.handle, inDir, { dir: SIDECAR_DIR });
+  await writeFileToFolder(folder.handle, inDir, contents, { dir: SIDECAR_DIR });
+  return {
+    to: 'folder', folder: folder.label?.trim() || folder.name, replaced,
+    writtenAs: `${SIDECAR_DIR}/${inDir}`,
+  };
 }
 
 /** One line a person can act on. Never just "exported": which of the four
  *  outcomes happened is the whole information. */
 export function describeSidecarSave(fileName: string, result: SidecarSaveResult): string {
   if (result.to === 'folder') {
-    return `${fileName} ${result.replaced ? 'ersetzt' : 'geschrieben'} in ${result.folder}`;
+    return `${result.writtenAs} ${result.replaced ? 'ersetzt' : 'geschrieben'} in ${result.folder}`;
   }
   return result.reason === 'no-folder'
     ? `${fileName} heruntergeladen — kein Projektordner gebunden`

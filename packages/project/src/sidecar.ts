@@ -92,3 +92,28 @@ export function isSidecarOf(fileName: string, kind: SidecarKind): boolean {
 function stripIfcExtension(name: string): string {
   return name.replace(/\.ifc(x|zip)?$/i, '').trim();
 }
+
+/**
+ * The subdirectory a project folder's own files live in.
+ *
+ * Writing goes in here; the flat, prefixed name is for the OTHER destination.
+ * The two are not a migration but two contexts:
+ *
+ * - **Into the project folder** the directory already says what these files
+ *   are, so `dc/heights.json` is enough and the folder root stays as the
+ *   person left it.
+ * - **Into a downloads folder** there is no context at all — the file lands
+ *   among installers and invoices — so it keeps `dc.heights.json`, which
+ *   groups and identifies it on its own.
+ */
+export const SIDECAR_DIR = 'dc';
+
+/**
+ * The name a sidecar has INSIDE {@link SIDECAR_DIR}.
+ *
+ * Without the prefix: repeating it inside a directory that already means the
+ * same thing is noise, and `dc/dc.heights.json` reads like a mistake.
+ */
+export function sidecarNameInDir(kind: SidecarKind, options: SidecarNameOptions = {}): string {
+  return sidecarFileName(kind, { ...options, prefix: '' });
+}

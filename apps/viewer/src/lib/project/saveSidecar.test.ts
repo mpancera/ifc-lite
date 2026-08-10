@@ -19,7 +19,7 @@ const NAME = 'dc.heights.json';
 
 describe('describeSidecarSave', () => {
   it('names the folder a file landed in', () => {
-    const msg = describeSidecarSave(NAME, { to: 'folder', folder: 'Neubau', replaced: false });
+    const msg = describeSidecarSave(NAME, { to: 'folder', folder: 'Neubau', replaced: false, writtenAs: 'dc/heights.json' });
 
     assert.match(msg, /Neubau/);
     assert.match(msg, /geschrieben/);
@@ -28,8 +28,8 @@ describe('describeSidecarSave', () => {
   it('distinguishes replacing from writing', () => {
     // A person who did not expect to overwrite anything should be able to see
     // that something was already there.
-    const written = describeSidecarSave(NAME, { to: 'folder', folder: 'A', replaced: false });
-    const replaced = describeSidecarSave(NAME, { to: 'folder', folder: 'A', replaced: true });
+    const written = describeSidecarSave(NAME, { to: 'folder', folder: 'A', replaced: false, writtenAs: 'dc/heights.json' });
+    const replaced = describeSidecarSave(NAME, { to: 'folder', folder: 'A', replaced: true, writtenAs: 'dc/heights.json' });
 
     assert.notEqual(written, replaced);
     assert.match(replaced, /ersetzt/);
@@ -58,14 +58,14 @@ describe('describeSidecarSave', () => {
 
   it('always names the file', () => {
     const all: SidecarSaveResult[] = [
-      { to: 'folder', folder: 'A', replaced: true },
-      { to: 'folder', folder: 'A', replaced: false },
+      { to: 'folder', folder: 'A', replaced: true, writtenAs: 'dc/heights.json' },
+      { to: 'folder', folder: 'A', replaced: false, writtenAs: 'dc/heights.json' },
       { to: 'download', reason: 'no-folder' },
       { to: 'download', reason: 'no-permission' },
     ];
 
     for (const result of all) {
-      assert.match(describeSidecarSave(NAME, result), /dc\.heights\.json/);
+      assert.match(describeSidecarSave(NAME, result), /heights\.json/);
     }
   });
 
@@ -73,7 +73,7 @@ describe('describeSidecarSave', () => {
     // The label is the stand-in for the path; if somebody bothered to set one,
     // that is the name they recognise.
     assert.match(
-      describeSidecarSave(NAME, { to: 'folder', folder: 'Neubau Ost', replaced: false }),
+      describeSidecarSave(NAME, { to: 'folder', folder: 'Neubau Ost', replaced: false, writtenAs: 'dc/heights.json' }),
       /Neubau Ost/,
     );
   });

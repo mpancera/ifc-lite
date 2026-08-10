@@ -129,8 +129,14 @@ export async function writeFileToFolder(
   folder: FileSystemDirectoryHandle,
   fileName: string,
   contents: string,
+  options: { dir?: string } = {},
 ): Promise<void> {
-  const fileHandle = await folder.getFileHandle(fileName, { create: true });
+  // Created on demand: writing the first sidecar into a folder that has never
+  // held one must work without a separate setup step.
+  const place = options.dir
+    ? await folder.getDirectoryHandle(options.dir, { create: true })
+    : folder;
+  const fileHandle = await place.getFileHandle(fileName, { create: true });
   const writable = await fileHandle.createWritable();
   try {
     await writable.write(contents);
@@ -146,9 +152,11 @@ export async function writeFileToFolder(
 export async function folderHasFile(
   folder: FileSystemDirectoryHandle,
   fileName: string,
+  options: { dir?: string } = {},
 ): Promise<boolean> {
   try {
-    await folder.getFileHandle(fileName);
+    const place = options.dir ? await folder.getDirectoryHandle(options.dir) : folder;
+    await place.getFileHandle(fileName);
     return true;
   } catch (err) {
     if (err instanceof DOMException && err.name === 'NotFoundError') return false;
