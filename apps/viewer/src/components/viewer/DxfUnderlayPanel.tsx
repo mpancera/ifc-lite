@@ -23,6 +23,10 @@ import {
 } from '@/components/ui/collapsible';
 import { useViewerStore } from '@/store';
 import { assignableStoreys } from '@/lib/heights/underlayStack';
+import {
+  alignmentPairs, alignmentPickCount, alignmentPrompt,
+} from '@/lib/heights/alignmentSession';
+import { describeSolvedScale, solveDxfPlacement } from '@ifc-lite/drawing-2d';
 import { toast } from '@/components/ui/toast';
 import { posthog } from '@/lib/analytics';
 import { ingestDxfFile } from '@/hooks/ingest/dxfIngest';
@@ -88,6 +92,42 @@ function UnderlayCard({
 
   const [layersOpen, setLayersOpen] = useState(false);
   const [placementOpen, setPlacementOpen] = useState(false);
+
+  const session = useViewerStore((s) => s.dxfAlignment);
+  const startDxfAlignment = useViewerStore((s) => s.startDxfAlignment);
+  const undoDxfAlignmentPick = useViewerStore((s) => s.undoDxfAlignmentPick);
+  const cancelDxfAlignment = useViewerStore((s) => s.cancelDxfAlignment);
+  const setAlignmentLockScale = useViewerStore((s) => s.setDxfAlignmentLockScale);
+  const aligning = session?.underlayId === state.id;
+
+  /**
+   * Solve and apply, then say what the scale turned out to be.
+   *
+   * The scale is reported rather than only applied: a DXF carries no reliable
+   * unit, so a factor of 1000 is the answer to a question the file could not
+   * answer — and a factor silently absorbed is a fact nobody learns.
+   */
+  const applyAlignment = () => {
+    const pairs = session ? alignmentPairs(session) : null;
+    if (!pairs || !session) return;
+
+    const result = solveDxfPlacement(pairs[0], pairs[1],
+      session.lockScale ? { lockScale: state.placement.scale } : {});
+    if (!result.ok) {
+      toast.error(result.reason === 'coincident-source'
+        ? 'Die zwei Punkte auf dem Plan liegen aufeinander.'
+        : 'Die zwei Punkte im Modell liegen aufeinander.');
+      return;
+    }
+
+    updateDxfUnderlayPlacement(state.id, result.placement);
+    cancelDxfAlignment();
+
+    const unit = describeSolvedScale(1 / result.scale);
+    toast.success(unit
+      ? `Ausgerichtet. Massstab ${result.scale.toPrecision(4)} — die Zeichnung war offenbar in ${unit}.`
+      : `Ausgerichtet. Massstab ${result.scale.toPrecision(4)}, Drehung ${result.rotationDeg.toFixed(2)}°.`);
+  };
 
   const { underlay, placement } = state;
   const pathCount = underlay.layers.reduce((n, l) => n + l.paths.length + l.fills.length, 0);
@@ -246,6 +286,53 @@ function UnderlayCard({
           </div>
         </CollapsibleContent>
       </Collapsible>
+
+      {/* Two-point alignment. Typing offset, rotation and scale is trial and
+          error, because the three interact; naming two features settles all
+          three at once. */}
+      {aligning ? (
+        <div className="rounded-sm border border-primary/50 bg-primary/5 px-2 py-1.5">
+          <p className="text-[11px]">{alignmentPrompt(session!)}</p>
+          <label className="mt-1 flex items-center gap-1 text-[10px] text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={session!.lockScale}
+              onChange={(e) => setAlignmentLockScale(e.target.checked)}
+            />
+            Massstab beibehalten
+          </label>
+          <div className="mt-1 flex items-center gap-1">
+            <Button
+              variant="outline" size="sm" className="h-5 px-1.5 text-[10px]"
+              disabled={alignmentPickCount(session!) === 0}
+              onClick={undoDxfAlignmentPick}
+            >
+              Punkt zurück
+            </Button>
+            <Button
+              variant="outline" size="sm" className="h-5 px-1.5 text-[10px]"
+              disabled={alignmentPairs(session!) === null}
+              onClick={applyAlignment}
+            >
+              Übernehmen
+            </Button>
+            <Button
+              variant="ghost" size="sm" className="h-5 px-1.5 text-[10px]"
+              onClick={cancelDxfAlignment}
+            >
+              Abbrechen
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <Button
+          variant="outline" size="sm" className="h-6 w-full text-[11px]"
+          onClick={() => startDxfAlignment(state.id)}
+        >
+          <Crosshair className="mr-1 h-3 w-3" />
+          Über zwei Punkte ausrichten
+        </Button>
+      )}
 
       {/* Placement */}
       <Collapsible open={placementOpen} onOpenChange={setPlacementOpen}>

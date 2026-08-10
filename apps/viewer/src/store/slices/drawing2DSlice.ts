@@ -94,6 +94,24 @@ export interface DxfUnderlayState {
   storeyId?: string;
 }
 
+/**
+ * Picking two features on a drawing and saying where each belongs.
+ *
+ * The picks alternate: a point ON the plan, then where it actually is, twice.
+ * `from` holds the plan-side picks in the underlay's OWN coordinates — the
+ * caller inverts the current placement before recording, so re-aligning a plan
+ * that was already moved replaces its placement instead of compounding it.
+ */
+export interface DxfAlignmentSession {
+  underlayId: string;
+  /** Points on the plan, in the underlay's own coordinates. 0-2 entries. */
+  from: { x: number; y: number }[];
+  /** Where each belongs, in drawing space. Never longer than `from`. */
+  to: { x: number; y: number }[];
+  /** Keep the drawing's size and use the picks for position and rotation. */
+  lockScale: boolean;
+}
+
 export interface Drawing2DState {
   /** Current drawing data (null when not generated) */
   drawing2D: Drawing2D | null;
@@ -300,6 +318,24 @@ export interface Drawing2DSlice extends Drawing2DState {
   updateDxfUnderlayPlacement: (id: string, placement: Partial<DxfPlacement>) => void;
   /** Assign a plan to a storey, or pass `undefined` to detach it. */
   setDxfUnderlayStorey: (id: string, storeyId: string | undefined) => void;
+
+  /**
+   * The running two-point alignment, or `null`.
+   *
+   * A session rather than four separate fields, so it cannot get into a state
+   * with half the picks belonging to a different underlay. Cancelling is one
+   * assignment, and nothing partial survives it.
+   */
+  dxfAlignment: DxfAlignmentSession | null;
+  /** Begin aligning one underlay. Replaces any running session. */
+  startDxfAlignment: (underlayId: string) => void;
+  /** Record the next pick. The session tracks which of the four it is. */
+  addDxfAlignmentPick: (point: { x: number; y: number }) => void;
+  /** Drop the last pick, for the mis-click that happens on every plan. */
+  undoDxfAlignmentPick: () => void;
+  /** Hold the drawing's size and use the picks for position and rotation. */
+  setDxfAlignmentLockScale: (lockScale: boolean) => void;
+  cancelDxfAlignment: () => void;
   clearDxfUnderlays: () => void;
 }
 
@@ -750,6 +786,39 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
     set((state) => ({ dxfUnderlays: [...state.dxfUnderlays, entry] }));
     return id;
   },
+
+  dxfAlignment: null,
+
+  startDxfAlignment: (underlayId) => set({
+    dxfAlignment: { underlayId, from: [], to: [], lockScale: false },
+  }),
+
+  addDxfAlignmentPick: (point) => set((state) => {
+    const session = state.dxfAlignment;
+    // Four picks is the whole session; a fifth would be a click landing after
+    // the solve is already possible, and silently starting over is worse than
+    // ignoring it.
+    if (!session || session.to.length >= 2) return {};
+
+    // They alternate, and `from` is always the one that runs ahead.
+    return session.from.length === session.to.length
+      ? { dxfAlignment: { ...session, from: [...session.from, point] } }
+      : { dxfAlignment: { ...session, to: [...session.to, point] } };
+  }),
+
+  undoDxfAlignmentPick: () => set((state) => {
+    const session = state.dxfAlignment;
+    if (!session) return {};
+    return session.from.length > session.to.length
+      ? { dxfAlignment: { ...session, from: session.from.slice(0, -1) } }
+      : { dxfAlignment: { ...session, to: session.to.slice(0, -1) } };
+  }),
+
+  setDxfAlignmentLockScale: (lockScale) => set((state) => (
+    state.dxfAlignment ? { dxfAlignment: { ...state.dxfAlignment, lockScale } } : {}
+  )),
+
+  cancelDxfAlignment: () => set({ dxfAlignment: null }),
 
   setDxfUnderlayStorey: (id, storeyId) => set((state) => ({
     dxfUnderlays: state.dxfUnderlays.map((u) => (

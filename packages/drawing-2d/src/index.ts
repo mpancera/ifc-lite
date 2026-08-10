@@ -436,6 +436,11 @@ export type {
   DxfUnderlayText,
   DxfPlacement,
 } from './dxf/index.js';
+export {
+  describeSolvedScale, inverseDxfPlacement, solveDxfPlacement,
+  type AlignmentPair, type SolveAlignmentResult,
+} from './dxf/index.js';
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DRAWING SHEETS (Paper, Frames, Title Blocks, Scale Bars)

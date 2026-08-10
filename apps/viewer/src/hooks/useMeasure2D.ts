@@ -34,6 +34,15 @@ export interface UseMeasure2DParams {
 }
 
 export interface UseMeasure2DResult {
+  /**
+   * Screen pixels to drawing coordinates, with the axis flips of the current
+   * section applied.
+   *
+   * Exposed rather than copied: the alignment picker needs exactly this
+   * mapping, and a second implementation of it would agree with this one only
+   * until somebody changed one of them.
+   */
+  screenToDrawing: (screenX: number, screenY: number) => { x: number; y: number };
   handleMouseDown: (e: React.MouseEvent) => void;
   handleMouseMove: (e: React.MouseEvent) => void;
   handleMouseUp: () => void;
@@ -354,6 +363,7 @@ export function useMeasure2D({
   }, [measure2DMode, measure2DStart, screenToDrawing, findSnapPoint, setMeasure2DCurrent]);
 
   return {
+    screenToDrawing,
     handleMouseDown,
     handleMouseMove,
     handleMouseUp,

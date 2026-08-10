@@ -29,6 +29,9 @@ import { GraphicOverrideEngine } from '@ifc-lite/drawing-2d';
 import { type GeometryResult } from '@ifc-lite/geometry';
 import { DrawingSettingsPanel } from './DrawingSettingsPanel';
 import { DxfUnderlayPanel } from './DxfUnderlayPanel';
+import { alignmentStep } from '@/lib/heights/alignmentSession';
+import { toast } from '@/components/ui/toast';
+import { inverseDxfPlacement } from '@ifc-lite/drawing-2d';
 import { ScanSectionPanel } from './ScanSectionPanel';
 import { SheetSetupPanel } from './SheetSetupPanel';
 import { TitleBlockEditor } from './TitleBlockEditor';
@@ -116,6 +119,8 @@ export function Section2DPanel({
   const cancelMeasure2D = useViewerStore((s) => s.cancelMeasure2D);
   const clearMeasure2DResults = useViewerStore((s) => s.clearMeasure2DResults);
   const measure2DSnapPoint = useViewerStore((s) => s.measure2DSnapPoint);
+  const dxfAlignment = useViewerStore((s) => s.dxfAlignment);
+  const addDxfAlignmentPick = useViewerStore((s) => s.addDxfAlignmentPick);
   const setMeasure2DSnapPoint = useViewerStore((s) => s.setMeasure2DSnapPoint);
 
   // Annotation tool state
@@ -360,6 +365,33 @@ export function Section2DPanel({
 
   // Unified mouse handlers that dispatch to the right tool
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    // An alignment session takes the click before anything else: while one is
+    // running the only meaningful thing to do in the canvas is name a point,
+    // and letting a pan or a selection through would make the picks depend on
+    // which tool happened to be active.
+    if (dxfAlignment && alignmentStep(dxfAlignment) !== 'ready') {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (rect) {
+        const drawingPoint = measureHandlers.screenToDrawing(
+          e.clientX - rect.left, e.clientY - rect.top,
+        );
+        if (alignmentStep(dxfAlignment) === 'pick-from') {
+          // Recorded in the underlay's OWN coordinates, so re-aligning a plan
+          // that was already moved replaces its placement rather than
+          // compounding the two.
+          const underlay = dxfUnderlays.find((u) => u.id === dxfAlignment.underlayId);
+          const local = underlay
+            ? inverseDxfPlacement(drawingPoint, underlay.placement)
+            : drawingPoint;
+          if (local) addDxfAlignmentPick(local);
+          else toast.error('Der Massstab dieser Unterlage lässt sich nicht umkehren.');
+        } else {
+          addDxfAlignmentPick(drawingPoint);
+        }
+      }
+      return;
+    }
+
     if (annotation2DActiveTool === 'measure') {
       measureHandlers.handleMouseDown(e);
     } else if (annotation2DActiveTool === 'none') {
@@ -371,7 +403,8 @@ export function Section2DPanel({
     } else {
       annotationHandlers.handleMouseDown(e);
     }
-  }, [annotation2DActiveTool, measureHandlers, annotationHandlers]);
+  }, [annotation2DActiveTool, measureHandlers, annotationHandlers,
+      dxfAlignment, dxfUnderlays, addDxfAlignmentPick, containerRef]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     // If dragging an annotation, let the annotation handler handle it

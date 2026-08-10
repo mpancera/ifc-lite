@@ -47,7 +47,7 @@ const UNITLESS_MM_EXTENT_THRESHOLD = 5000;
  * drawing units are assumed to be in millimetres (with a warning).
  */
 export {
-  describeSolvedScale, solveDxfPlacement,
+  describeSolvedScale, inverseDxfPlacement, solveDxfPlacement,
   type AlignmentPair, type SolveAlignmentResult,
 } from './align.js';
 

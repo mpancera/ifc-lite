@@ -15,7 +15,9 @@
 
 import { describe, it, expect } from 'vitest';
 import { applyDxfPlacement } from './convert.js';
-import { describeSolvedScale, solveDxfPlacement, type AlignmentPair } from './align.js';
+import {
+  describeSolvedScale, inverseDxfPlacement, solveDxfPlacement, type AlignmentPair,
+} from './align.js';
 
 const near = (a: { x: number; y: number }, b: { x: number; y: number }, tol = 1e-9) => {
   expect(a.x).toBeCloseTo(b.x, 9);
@@ -155,5 +157,41 @@ describe('describeSolvedScale', () => {
     // would turn a mistake into a conclusion.
     expect(describeSolvedScale(1.04)).toBeNull();
     expect(describeSolvedScale(870)).toBeNull();
+  });
+});
+
+describe('inverseDxfPlacement', () => {
+  const placement = { offsetX: 12.5, offsetY: -3.25, rotationDeg: 37, scale: 2.5 };
+
+  it('round-trips a point through the forward transform', () => {
+    // The property that matters: whatever applyDxfPlacement does, this undoes.
+    for (const p of [{ x: 0, y: 0 }, { x: 4, y: -9 }, { x: -1.5, y: 0.25 }]) {
+      const there = applyDxfPlacement(p, placement);
+      const back = inverseDxfPlacement(there, placement);
+
+      expect(back).not.toBeNull();
+      near(back!, p);
+    }
+  });
+
+  it('round-trips through the identity placement', () => {
+    const identity = { offsetX: 0, offsetY: 0, rotationDeg: 0, scale: 1 };
+
+    near(inverseDxfPlacement({ x: 3, y: 4 }, identity)!, { x: 3, y: 4 });
+  });
+
+  it('refuses a scale it cannot invert', () => {
+    // Not reachable through the UI, but reachable through a stored placement.
+    // Guessing would put the picked point somewhere arbitrary.
+    expect(inverseDxfPlacement({ x: 1, y: 1 }, { ...placement, scale: 0 })).toBeNull();
+  });
+
+  it('lets a placed underlay be re-aligned without compounding', () => {
+    // Picking on an already-moved plan must express the pick in the drawing's
+    // OWN coordinates; otherwise the new solve stacks on the old placement.
+    const local = { x: 7, y: -2 };
+    const placed = applyDxfPlacement(local, placement);
+
+    near(inverseDxfPlacement(placed, placement)!, local);
   });
 });

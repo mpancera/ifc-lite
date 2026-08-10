@@ -131,3 +131,36 @@ function normaliseDegrees(deg: number): number {
   const wrapped = ((deg % 360) + 360) % 360;
   return wrapped > 180 ? wrapped - 360 : wrapped;
 }
+
+/**
+ * The inverse of `applyDxfPlacement`: from placed drawing space back to the
+ * underlay's own coordinates.
+ *
+ * Needed the moment a person picks a feature ON a placed underlay. What they
+ * clicked is a point in drawing space, but the alignment has to be expressed
+ * in the drawing's OWN coordinates — otherwise every solve would be relative
+ * to wherever the plan happened to sit at the time, and re-aligning a plan
+ * that was already moved would compound the two placements instead of
+ * replacing one.
+ *
+ * Returns `null` for a degenerate scale, which cannot be inverted. A zero
+ * scale is not reachable through the UI (the field rejects it) but is
+ * reachable through a stored placement, and guessing here would put the point
+ * somewhere arbitrary.
+ */
+export function inverseDxfPlacement(p: Point2D, placement: DxfPlacement): Point2D | null {
+  if (!Number.isFinite(placement.scale) || Math.abs(placement.scale) < 1e-12) return null;
+
+  const rad = (placement.rotationDeg * Math.PI) / 180;
+  const c = Math.cos(rad);
+  const s = Math.sin(rad);
+
+  const dx = p.x - placement.offsetX;
+  const dy = p.y - placement.offsetY;
+
+  // The forward rotation is [[c, s], [-s, c]]; its inverse is the transpose.
+  return {
+    x: (dx * c - dy * s) / placement.scale,
+    y: (dx * s + dy * c) / placement.scale,
+  };
+}
