@@ -100,3 +100,29 @@ function hash(text: string): string {
   }
   return (h >>> 0).toString(16).padStart(8, '0');
 }
+
+/**
+ * Whether a value can be trusted as a project key from outside.
+ *
+ * A key that arrives in a file is not a key this application made. Adopting
+ * whatever a file says would let a damaged or hand-edited descriptor put two
+ * different projects under one key — the exact confusion the key exists to
+ * prevent, arriving through the door instead of the window.
+ *
+ * The derived prefix is rejected on purpose: it is how the viewer tells a
+ * person that its project boundary is the weaker, model-derived kind. A stored
+ * key wearing that prefix would explain a guarantee it does not have.
+ */
+export function isValidProjectKey(value: unknown): value is ProjectKey {
+  if (typeof value !== 'string') return false;
+
+  const trimmed = value.trim();
+  // Long enough not to collide by accident, short enough not to be a payload.
+  if (trimmed.length < 8 || trimmed.length > 128) return false;
+  if (trimmed !== value) return false;
+  if (trimmed.startsWith(`${PREFIX}${DERIVED_INFIX}`)) return false;
+
+  // No whitespace or control characters: this ends up in a file name check,
+  // a dialog and a comparison, and none of those want a newline in it.
+  return /^[\w.:-]+$/.test(trimmed);
+}

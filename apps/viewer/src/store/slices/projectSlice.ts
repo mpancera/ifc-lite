@@ -26,7 +26,7 @@ import { type StateCreator } from 'zustand';
 import {
   canBindFolder, createProjectKey, findBindingForHandle, forgetBinding,
   loadBindings, pickFolder, projectKeyFromModels, rememberBinding, restoreFolderAccess,
-  saveBindings, updateBinding,
+  projectDisplayName, readProjectDescriptorResult, saveBindings, updateBinding,
   type FolderBinding, type FolderPermission, type ProjectKey,
 } from '@ifc-lite/project';
 import type { ViewerState } from '../index.js';
@@ -121,14 +121,46 @@ export const createProjectSlice: StateCreator<ViewerState, [], [], ProjectSlice>
         // for it. Handles to one folder are different objects, so identity
         // fails and the name is not unique; isSameEntry is the only test.
         const known = await findBindingForHandle(get().recentProjects, handle);
-        await adopt(known ?? {
-          id: crypto.randomUUID(),
-          projectKey: createProjectKey(),
-          handle,
-          name: handle.name,
-          pinned: false,
-          lastOpenedAt: new Date().toISOString(),
-        });
+
+        // The folder is the one thing both applications hold, so it is where
+        // they agree on what the project IS — no messages, no service, and it
+        // still works when only one of them is running.
+        const { descriptor, malformed } = await readProjectDescriptorResult(handle);
+        if (malformed) {
+          set({
+            projectError: 'Die Projektdatei in diesem Ordner ist unlesbar — der Ordner '
+              + 'bekommt einen eigenen Schlüssel.',
+          });
+        }
+
+        const label = descriptor ? projectDisplayName(descriptor) : null;
+
+        if (known) {
+          // The descriptor wins over the stored key — but the binding is
+          // REKEYED rather than replaced, so everything derived in this folder
+          // travels with it. A changed key in the folder is a re-identification
+          // of the same project, not a move to a different one, and orphaning
+          // a height system somebody corrected by hand would be exactly the
+          // silent loss this whole concept exists to prevent.
+          if (descriptor && descriptor.key !== known.projectKey) {
+            rekeyProjectState(get, set, known.projectKey, descriptor.key);
+          }
+          await adopt({
+            ...known,
+            ...(descriptor ? { projectKey: descriptor.key } : {}),
+            ...(label ? { label } : {}),
+          });
+        } else {
+          await adopt({
+            id: crypto.randomUUID(),
+            projectKey: descriptor?.key ?? createProjectKey(),
+            handle,
+            name: handle.name,
+            ...(label ? { label } : {}),
+            pinned: false,
+            lastOpenedAt: new Date().toISOString(),
+          });
+        }
         set({ projectFolderPermission: 'granted' });
         return true;
       } catch (err) {
@@ -150,7 +182,20 @@ export const createProjectSlice: StateCreator<ViewerState, [], [], ProjectSlice>
           set({ projectError: 'Der Zugriff auf diesen Ordner wurde nicht erteilt.' });
           return false;
         }
-        await adopt(binding);
+        // Re-read on every open, not only when the folder is first picked:
+        // reopening a remembered folder is the everyday path, and the folder
+        // may have become a managed project since it was last used here.
+        const { descriptor } = await readProjectDescriptorResult(binding.handle);
+        if (descriptor && descriptor.key !== binding.projectKey) {
+          rekeyProjectState(get, set, binding.projectKey, descriptor.key);
+        }
+        const label = descriptor ? projectDisplayName(descriptor) : null;
+
+        await adopt({
+          ...binding,
+          ...(descriptor ? { projectKey: descriptor.key } : {}),
+          ...(label ? { label } : {}),
+        });
         return true;
       } catch (err) {
         set({ projectError: `Ordner nicht erreichbar: ${(err as Error).message}` });
@@ -177,3 +222,25 @@ export const createProjectSlice: StateCreator<ViewerState, [], [], ProjectSlice>
     },
   };
 };
+
+/**
+ * Move everything hanging off one project key onto another.
+ *
+ * Called when a bound folder turns out to carry a different key than the one
+ * this viewer issued it — the folder is the project, so a changed key there is
+ * a re-identification, not a different building.
+ *
+ * **Every project-scoped slice must be listed here.** One that is not simply
+ * stops matching after a rekey and gets discarded on the next derivation,
+ * which looks exactly like the silent loss the project key exists to prevent.
+ * Today that is the height system; zones, compartments, lenses, saved lists
+ * and the autosave still have to join (#46).
+ */
+function rekeyProjectState(
+  get: () => ViewerState,
+  set: (partial: Partial<ViewerState>) => void,
+  from: ProjectKey,
+  to: ProjectKey,
+): void {
+  if (get().heightSystemProject === from) set({ heightSystemProject: to });
+}

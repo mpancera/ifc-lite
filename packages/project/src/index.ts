@@ -19,7 +19,8 @@
  */
 
 export {
-  createProjectKey, isDerivedKey, projectKeyFromModels, sameProject, type ProjectKey,
+  createProjectKey, isDerivedKey, isValidProjectKey, projectKeyFromModels, sameProject,
+  type ProjectKey,
 } from './key.js';
 
 export {
@@ -32,6 +33,12 @@ export {
   evictUnpinned, findBindingForHandle, forgetBinding, loadBindings, rememberBinding,
   saveBindings, updateBinding, MAX_UNPINNED,
 } from './folderStore.js';
+
+export {
+  parseProjectDescriptor, projectDisplayName, readProjectDescriptor,
+  readProjectDescriptorResult, PROJECT_DESCRIPTOR_LOCATIONS,
+  type ProjectDescriptor, type ProjectDescriptorResult,
+} from './descriptor.js';
 
 export {
   isSidecarOf, sidecarFileName, DEFAULT_SIDECAR_PREFIX,

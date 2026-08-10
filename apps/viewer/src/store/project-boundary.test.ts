@@ -170,3 +170,43 @@ describe('unbinding', () => {
     assert.deepEqual(useViewerStore.getState().recentProjects.map((b) => b.id), [a.id]);
   });
 });
+
+describe('a folder that names its own project', () => {
+  it('carries the height system over when the folder is re-identified', () => {
+    // The decision behind this: the FOLDER is the project. A different key
+    // arriving in it is a re-identification of the same project, not a move to
+    // another one — so work derived there travels rather than being orphaned.
+    // Orphaning would discard a hand-corrected height system on the next
+    // derivation, which is exactly the silent loss the key exists to prevent.
+    const a = binding('Neubau');
+    useViewerStore.setState({
+      projectFolder: a,
+      heightSystem: system('arch.ifc', 412.35),
+      heightSystemProject: a.projectKey,
+    });
+
+    // What bindProjectFolder does once a descriptor turns up with another key.
+    const fromFile = createProjectKey();
+    useViewerStore.setState({
+      projectFolder: { ...a, projectKey: fromFile, label: '017 Nordbau' },
+      heightSystemProject: fromFile,
+    });
+
+    const s = useViewerStore.getState();
+    assert.equal(s.currentProjectKey(), fromFile);
+    assert.equal(s.heightSystemProject, fromFile, 'the system followed the folder');
+    assert.equal(s.heightSystem?.datumAboveSeaLevel, 412.35, 'and kept its datum');
+  });
+
+  it('still separates two folders that carry different keys', () => {
+    // Re-keying must not blur the boundary it exists to draw.
+    const a = binding('Neubau');
+    const b = binding('Umbau');
+
+    useViewerStore.setState({ projectFolder: a });
+    const first = useViewerStore.getState().currentProjectKey();
+    useViewerStore.setState({ projectFolder: b });
+
+    assert.notEqual(useViewerStore.getState().currentProjectKey(), first);
+  });
+});
