@@ -18,7 +18,10 @@ import type { CoordinateInfo, GeometryResult } from '@ifc-lite/geometry';
 import { EpsgLookupDialog, type EpsgResult } from './EpsgLookupDialog';
 import { FederationAlignmentControls } from './FederationAlignmentControls';
 import { GeorefFindingsList } from './GeorefFindingsList';
+import { ControlPointsPanel } from './ControlPointsPanel';
 import { useGeorefFindings } from '@/lib/geo/useGeorefFindings';
+import { resolveMapUnitToMetreScale } from '@/lib/geo/geo-scale';
+import type { GeoreferenceSolution } from '@/lib/geo/solve-georeference';
 import { PrecisionGridBadge } from './PrecisionGridBadge';
 import { LocationMap, type PickedPosition } from './LocationMap';
 import { computeOrthogonalHeightForBaseAltitude } from '@/lib/geo/cesium-placement';
@@ -396,6 +399,16 @@ export function GeoreferencingPanel({ georef, modelId, enableEditing, schemaVers
     lengthUnitScale,
   );
 
+  /**
+   * The Scale the IFC schema requires: project length unit ÷ map unit. The
+   * control-point solve locks onto it, so what the points imply about size
+   * becomes a check on the picks instead of a fourth free parameter.
+   */
+  const expectedScale = useMemo(() => {
+    const projectScale = lengthUnitScale ?? 1;
+    return projectScale / resolveMapUnitToMetreScale(mergedCRS?.mapUnitScale, projectScale);
+  }, [mergedCRS?.mapUnitScale, lengthUnitScale]);
+
   const mapUnitSuffix = useMemo(() => {
     const mapUnit = mergedCRS?.mapUnit?.toUpperCase();
     if (!mapUnit) return 'm';
@@ -522,6 +535,26 @@ export function GeoreferencingPanel({ georef, modelId, enableEditing, schemaVers
     setConversionOpen(true);
     requestAlignmentReload();
   }, [modelId, setGeorefFields, mergedConversion, requestAlignmentReload, oHeightForBaseAltitude]);
+
+  // Apply a solve from named reference points. Writes all five numbers of the
+  // placement together: they are one answer, and leaving a stale Scale behind
+  // would put the model at the right spot in the wrong size.
+  const handleApplySolution = useCallback((solution: GeoreferenceSolution) => {
+    if (!modelId || !setGeorefFields) return;
+    setGeorefFields(modelId, 'mapConversion', [
+      { field: 'eastings', value: solution.eastings, oldValue: mergedConversion?.eastings },
+      { field: 'northings', value: solution.northings, oldValue: mergedConversion?.northings },
+      { field: 'xAxisAbscissa', value: solution.xAxisAbscissa, oldValue: mergedConversion?.xAxisAbscissa },
+      { field: 'xAxisOrdinate', value: solution.xAxisOrdinate, oldValue: mergedConversion?.xAxisOrdinate },
+      { field: 'scale', value: solution.scale, oldValue: mergedConversion?.scale },
+    ]);
+    posthog.capture('georeference_set', {
+      method: 'control_points',
+      pair_count: solution.residuals.length,
+    });
+    setConversionOpen(true);
+    requestAlignmentReload();
+  }, [modelId, setGeorefFields, mergedConversion, requestAlignmentReload]);
 
   const initializeMapConversionDefaults = useCallback(() => {
     if (!modelId || !setGeorefFields) return;
@@ -774,6 +807,14 @@ export function GeoreferencingPanel({ georef, modelId, enableEditing, schemaVers
           </button>
         </div>
       )}
+
+      {/* Derive the placement from named points instead of typing cos/sin. */}
+      <ControlPointsPanel
+        editable={editable}
+        mapUnitSuffix={mapUnitSuffix}
+        expectedScale={expectedScale}
+        onApply={handleApplySolution}
+      />
 
       {/* Sampled surface height — only when Cesium overlay is active */}
       {cesiumEnabled && isActiveCesiumModel && mergedConversion && (
