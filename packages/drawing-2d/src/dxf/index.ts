@@ -46,6 +46,11 @@ const UNITLESS_MM_EXTENT_THRESHOLD = 5000;
  * Unitless files whose extents exceed {@link UNITLESS_MM_EXTENT_THRESHOLD}
  * drawing units are assumed to be in millimetres (with a warning).
  */
+export {
+  describeSolvedScale, solveDxfPlacement,
+  type AlignmentPair, type SolveAlignmentResult,
+} from './align.js';
+
 export function importDxf(text: string, name = 'DXF'): DxfUnderlay {
   const doc = parseDxf(text);
   const underlay = convertDxfToUnderlay(doc, name);

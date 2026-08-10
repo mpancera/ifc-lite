@@ -23,6 +23,7 @@ import {
 } from '@/components/ui/collapsible';
 import { useViewerStore } from '@/store';
 import { assignableStoreys } from '@/lib/heights/underlayStack';
+import { toast } from '@/components/ui/toast';
 import { posthog } from '@/lib/analytics';
 import { ingestDxfFile } from '@/hooks/ingest/dxfIngest';
 import type { DxfUnderlayState } from '@/store/slices/drawing2DSlice';
@@ -79,6 +80,9 @@ function UnderlayCard({
   const setDxfUnderlayStorey = useViewerStore((s) => s.setDxfUnderlayStorey);
   const heightSystem = useViewerStore((s) => s.heightSystem);
   const storeyOptions = useMemo(() => assignableStoreys(heightSystem), [heightSystem]);
+  const activeModelId = useViewerStore((s) => s.activeModelId);
+  const deriveHeights = useViewerStore((s) => s.deriveHeightSystemFrom);
+  const startManualHeights = useViewerStore((s) => s.startManualHeightSystem);
   const toggleDxfUnderlayLayer = useViewerStore((s) => s.toggleDxfUnderlayLayer);
   const updateDxfUnderlayPlacement = useViewerStore((s) => s.updateDxfUnderlayPlacement);
 
@@ -158,9 +162,32 @@ function UnderlayCard({
         </div>
       )}
       {storeyOptions.length === 0 && (
-        <div className="px-1 text-[10px] text-muted-foreground">
-          Noch keine Geschosse. Unter File › Settings › Höhen &amp; Lage festlegen —
-          auch ohne Modell.
+        // A dead end otherwise: the list is empty and the hint sends somebody
+        // to another panel to do a thing they can just as well do here. Which
+        // of the two offers appears depends on whether there is a model to
+        // read levels FROM — the two are different acts, not two buttons for
+        // the same one.
+        <div className="flex items-center gap-2 px-1">
+          <span className="text-[10px] text-muted-foreground">Noch keine Geschosse.</span>
+          {activeModelId ? (
+            <Button
+              variant="outline" size="sm" className="h-5 px-1.5 text-[10px]"
+              onClick={() => {
+                if (!deriveHeights(activeModelId)) {
+                  toast.error('Aus diesem Modell liessen sich keine Geschosse lesen.');
+                }
+              }}
+            >
+              Aus Modell ableiten
+            </Button>
+          ) : (
+            <Button
+              variant="outline" size="sm" className="h-5 px-1.5 text-[10px]"
+              onClick={() => startManualHeights()}
+            >
+              Von Hand festlegen
+            </Button>
+          )}
         </div>
       )}
 
