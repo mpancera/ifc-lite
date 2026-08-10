@@ -20,8 +20,10 @@ import { FederationAlignmentControls } from './FederationAlignmentControls';
 import { GeorefFindingsList } from './GeorefFindingsList';
 import { ControlPointsPanel } from './ControlPointsPanel';
 import { useGeorefFindings } from '@/lib/geo/useGeorefFindings';
+import { ParcelFitPanel } from './ParcelFitPanel';
 import { resolveMapUnitToMetreScale } from '@/lib/geo/geo-scale';
 import type { GeoreferenceSolution } from '@/lib/geo/solve-georeference';
+import type { MapConversionAttributes } from '@/lib/geo/mesh-to-map';
 import { PrecisionGridBadge } from './PrecisionGridBadge';
 import { LocationMap, type PickedPosition } from './LocationMap';
 import { computeOrthogonalHeightForBaseAltitude } from '@/lib/geo/cesium-placement';
@@ -536,25 +538,37 @@ export function GeoreferencingPanel({ georef, modelId, enableEditing, schemaVers
     requestAlignmentReload();
   }, [modelId, setGeorefFields, mergedConversion, requestAlignmentReload, oHeightForBaseAltitude]);
 
-  // Apply a solve from named reference points. Writes all five numbers of the
-  // placement together: they are one answer, and leaving a stale Scale behind
-  // would put the model at the right spot in the wrong size.
-  const handleApplySolution = useCallback((solution: GeoreferenceSolution) => {
+  /**
+   * Write a derived placement. All five numbers go together: they are one
+   * answer, and leaving a stale Scale behind would put the model at the right
+   * spot in the wrong size. Shared by every path that derives a placement
+   * rather than having it typed in.
+   */
+  const writePlacement = useCallback((
+    attributes: MapConversionAttributes,
+    method: string,
+    detail: Record<string, number> = {},
+  ) => {
     if (!modelId || !setGeorefFields) return;
     setGeorefFields(modelId, 'mapConversion', [
-      { field: 'eastings', value: solution.eastings, oldValue: mergedConversion?.eastings },
-      { field: 'northings', value: solution.northings, oldValue: mergedConversion?.northings },
-      { field: 'xAxisAbscissa', value: solution.xAxisAbscissa, oldValue: mergedConversion?.xAxisAbscissa },
-      { field: 'xAxisOrdinate', value: solution.xAxisOrdinate, oldValue: mergedConversion?.xAxisOrdinate },
-      { field: 'scale', value: solution.scale, oldValue: mergedConversion?.scale },
+      { field: 'eastings', value: attributes.eastings, oldValue: mergedConversion?.eastings },
+      { field: 'northings', value: attributes.northings, oldValue: mergedConversion?.northings },
+      { field: 'xAxisAbscissa', value: attributes.xAxisAbscissa, oldValue: mergedConversion?.xAxisAbscissa },
+      { field: 'xAxisOrdinate', value: attributes.xAxisOrdinate, oldValue: mergedConversion?.xAxisOrdinate },
+      { field: 'scale', value: attributes.scale, oldValue: mergedConversion?.scale },
     ]);
-    posthog.capture('georeference_set', {
-      method: 'control_points',
-      pair_count: solution.residuals.length,
-    });
+    posthog.capture('georeference_set', { method, ...detail });
     setConversionOpen(true);
     requestAlignmentReload();
   }, [modelId, setGeorefFields, mergedConversion, requestAlignmentReload]);
+
+  const handleApplySolution = useCallback((solution: GeoreferenceSolution) => {
+    writePlacement(solution, 'control_points', { pair_count: solution.residuals.length });
+  }, [writePlacement]);
+
+  const handleApplyParcelFit = useCallback((attributes: MapConversionAttributes) => {
+    writePlacement(attributes, 'parcel_fit');
+  }, [writePlacement]);
 
   const initializeMapConversionDefaults = useCallback(() => {
     if (!modelId || !setGeorefFields) return;
@@ -814,6 +828,17 @@ export function GeoreferencingPanel({ georef, modelId, enableEditing, schemaVers
         mapUnitSuffix={mapUnitSuffix}
         expectedScale={expectedScale}
         onApply={handleApplySolution}
+      />
+
+      {/* Or from the model's own plot outline, laid onto the surveyed one. */}
+      <ParcelFitPanel
+        modelId={modelId}
+        editable={editable}
+        crsName={mergedCRS?.name}
+        geometryResult={geometryResult}
+        mapUnitScale={resolveMapUnitToMetreScale(mergedCRS?.mapUnitScale, lengthUnitScale ?? 1)}
+        lengthUnitScale={lengthUnitScale ?? 1}
+        onApply={handleApplyParcelFit}
       />
 
       {/* Sampled surface height — only when Cesium overlay is active */}
