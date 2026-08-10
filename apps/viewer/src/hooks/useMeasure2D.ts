@@ -272,6 +272,15 @@ export function useMeasure2D({
   // ═══════════════════════════════════════════════════════════════════════
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    // Right button pans, whatever tool is active. Left stays free for the
+    // tool, so a plan can be picked at precisely without first putting a tool
+    // down — which is what "the cursor is a pointer, not a hand" means in
+    // practice.
+    if (e.button === 2) {
+      isPanning.current = true;
+      lastPanPoint.current = { x: e.clientX, y: e.clientY };
+      return;
+    }
     if (e.button !== 0) return;
 
     isMouseButtonDown.current = true;
@@ -288,11 +297,9 @@ export function useMeasure2D({
       const startPoint = snapPoint || drawingCoord;
       setMeasure2DStart(startPoint);
       setMeasure2DCurrent(startPoint);
-    } else {
-      // Pan mode
-      isPanning.current = true;
-      lastPanPoint.current = { x: e.clientX, y: e.clientY };
     }
+    // No left-button panning: it would fight every pick, and the right button
+    // does the job without a mode.
   }, [measure2DMode, screenToDrawing, findSnapPoint, setMeasure2DStart, setMeasure2DCurrent]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {

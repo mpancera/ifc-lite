@@ -5,7 +5,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  alignmentPairs, alignmentPrompt, alignmentStep, alignmentTarget, isLineComplete,
+  alignmentPairs, alignmentPrompt, alignmentStep, alignmentTarget, constrainToAxis,
+  isLineComplete,
   type DxfAlignmentSession,
 } from './alignmentSession.js';
 
@@ -142,5 +143,40 @@ describe('alignmentPairs', () => {
     ]) {
       assert.equal(alignmentPairs(s), null);
     }
+  });
+});
+
+describe('constrainToAxis', () => {
+  const start = { x: 10, y: 10 };
+
+  it('holds the horizontal when the line runs mostly sideways', () => {
+    assert.deepEqual(constrainToAxis(start, { x: 30, y: 12 }), { x: 30, y: 10 });
+  });
+
+  it('holds the vertical when it runs mostly up or down', () => {
+    assert.deepEqual(constrainToAxis(start, { x: 12, y: 30 }), { x: 10, y: 30 });
+  });
+
+  it('follows the gesture rather than overriding it', () => {
+    // Snapping always to one axis would fight the hand; the point is to
+    // tidy up what was already meant.
+    assert.equal(constrainToAxis(start, { x: 0, y: 11 }).y, 10);
+    assert.equal(constrainToAxis(start, { x: 11, y: 0 }).x, 10);
+  });
+
+  it('makes two constrained lines differ by exactly 0 or 90 degrees', () => {
+    // The reason it exists: freehand, two orthogonal drawings end up a
+    // fraction of a degree apart, and the solver reports that fraction as a
+    // rotation — leaving a square plan very slightly askew.
+    const a = constrainToAxis({ x: 0, y: 0 }, { x: 10, y: 0.3 });
+    const b = constrainToAxis({ x: 5, y: 5 }, { x: 15, y: 5.2 });
+    const angle = (p: { x: number; y: number }, q: { x: number; y: number }) =>
+      Math.atan2(q.y - p.y, q.x - p.x);
+
+    assert.equal(angle({ x: 0, y: 0 }, a), angle({ x: 5, y: 5 }, b));
+  });
+
+  it('leaves a degenerate line where it is', () => {
+    assert.deepEqual(constrainToAxis(start, start), start);
   });
 });

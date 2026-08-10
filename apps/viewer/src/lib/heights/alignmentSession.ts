@@ -147,3 +147,30 @@ export function alignmentPairs(
     { from: fit!.end!, to: reference!.end! },
   ];
 }
+
+/**
+ * Constrain a line to the horizontal or vertical while Shift is held.
+ *
+ * The everyday case this exists for: two drawings that are both orthogonal and
+ * merely shifted against each other. Freehand, the two lines end up a fraction
+ * of a degree apart, and the solver dutifully reports that fraction as a
+ * rotation — so a plan that was square to the model arrives very slightly
+ * askew, which is worse than either leaving it alone or turning it properly.
+ *
+ * Snaps to whichever axis the line is already closer to, so the constraint
+ * follows the gesture rather than overriding it.
+ *
+ * Note this constrains the line in DRAWING space, which is what a person sees.
+ * Two lines each snapped to an axis then differ by exactly 0° or 90°, and the
+ * solve comes out as a pure translation and scale.
+ */
+export function constrainToAxis(
+  start: { x: number; y: number },
+  cursor: { x: number; y: number },
+): { x: number; y: number } {
+  const dx = cursor.x - start.x;
+  const dy = cursor.y - start.y;
+  return Math.abs(dx) >= Math.abs(dy)
+    ? { x: cursor.x, y: start.y }
+    : { x: start.x, y: cursor.y };
+}

@@ -29,7 +29,9 @@ import { GraphicOverrideEngine } from '@ifc-lite/drawing-2d';
 import { type GeometryResult } from '@ifc-lite/geometry';
 import { DrawingSettingsPanel } from './DrawingSettingsPanel';
 import { DxfUnderlayPanel } from './DxfUnderlayPanel';
-import { alignmentStep, alignmentTarget } from '@/lib/heights/alignmentSession';
+import {
+  alignmentStep, alignmentTarget, constrainToAxis,
+} from '@/lib/heights/alignmentSession';
 import { snapToUnderlay } from '@/lib/heights/underlaySnap';
 import { toast } from '@/components/ui/toast';
 import { applyDxfPlacement, inverseDxfPlacement } from '@ifc-lite/drawing-2d';
@@ -388,6 +390,19 @@ export function Section2DPanel({
     return snapToUnderlay(underlay, point, 10 / viewTransform.scale);
   }, [measureHandlers, dxfAlignment, dxfUnderlays, viewTransform.scale]);
 
+  /**
+   * A stored fitting-line point in DRAWING space.
+   *
+   * The fitting line is kept in the underlay's own coordinates, but the
+   * cursor and the axis constraint live in drawing space — comparing the two
+   * directly would constrain against a point in the wrong coordinate system.
+   */
+  const placedFitPoint = useCallback((pt: { x: number; y: number }) => {
+    const underlay = dxfAlignment
+      && dxfUnderlays.find((u) => u.id === dxfAlignment.underlayId);
+    return underlay ? applyDxfPlacement(pt, underlay.placement) : pt;
+  }, [dxfAlignment, dxfUnderlays]);
+
   /** The overlay, mapped into drawing space for the canvas. */
   const alignmentOverlay = useMemo(() => {
     if (!dxfAlignment) return null;
@@ -422,7 +437,13 @@ export function Section2DPanel({
           // for the reference line, the plan for the fitting line. Snapping to
           // the wrong drawing would quietly move the point onto the geometry
           // being aligned AGAINST.
-          const point = snapForAlignment(raw, step.target) ?? raw;
+          const line = step.target === 'reference' ? dxfAlignment.reference : dxfAlignment.fit;
+          const anchor = step.target === 'fit' && line?.start
+            ? placedFitPoint(line.start)
+            : line?.start ?? null;
+          const point = e.shiftKey && step.kind === 'end' && anchor
+            ? constrainToAxis(anchor, raw)
+            : snapForAlignment(raw, step.target) ?? raw;
 
           if (step.target === 'fit') {
             // Recorded in the underlay's OWN coordinates, so re-aligning a
@@ -461,7 +482,17 @@ export function Section2DPanel({
       const rect = containerRef.current?.getBoundingClientRect();
       if (step.kind === 'end' && rect) {
         const raw = measureHandlers.screenToDrawing(e.clientX - rect.left, e.clientY - rect.top);
-        setAlignmentCursor(snapForAlignment(raw, step.target) ?? raw);
+        const line = step.target === 'reference' ? dxfAlignment.reference : dxfAlignment.fit;
+        const anchor = step.target === 'fit' && line?.start
+          ? placedFitPoint(line.start)
+          : line?.start ?? null;
+        // Shift before snapping: an axis lock the snap can still pull off
+        // would look like the lock failed.
+        setAlignmentCursor(
+          e.shiftKey && anchor
+            ? constrainToAxis(anchor, raw)
+            : snapForAlignment(raw, step.target) ?? raw,
+        );
       } else if (alignmentCursor !== null) {
         setAlignmentCursor(null);
       }
@@ -599,6 +630,9 @@ export function Section2DPanel({
 
   // Cursor style based on active tool
   const cursorClass = useMemo(() => {
+    // A crosshair while aligning, whatever else is going on: the whole task
+    // is putting points exactly somewhere.
+    if (dxfAlignment) return 'cursor-crosshair';
     if (selectedAnnotation2D && annotation2DActiveTool === 'none') return 'cursor-move';
     switch (annotation2DActiveTool) {
       case 'measure':
@@ -608,9 +642,12 @@ export function Section2DPanel({
       case 'text':
         return 'cursor-text';
       default:
-        return 'cursor-grab active:cursor-grabbing';
+        // A pointer, not a hand. Panning moved to the right button, so the
+        // left one is free to pick — and a hand cursor over a drawing you are
+        // about to click precisely is a promise about the wrong gesture.
+        return 'cursor-default';
     }
-  }, [annotation2DActiveTool, selectedAnnotation2D]);
+  }, [annotation2DActiveTool, selectedAnnotation2D, dxfAlignment]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // RESIZE HANDLING
@@ -1129,6 +1166,8 @@ export function Section2DPanel({
         ref={containerRef}
         className={`relative flex-1 overflow-hidden bg-white dark:bg-zinc-950 rounded-b-lg ${cursorClass}`}
         onMouseDown={handleMouseDown}
+        // The right button pans, so its menu would fire on every pan.
+        onContextMenu={(e) => e.preventDefault()}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseEnter={handleMouseEnter}
