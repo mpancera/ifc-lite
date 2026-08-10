@@ -34,7 +34,7 @@
  * The drawing lives in local state for the same reason.
  */
 
-import React, { useMemo, useRef, useState, useCallback } from 'react';
+import React, { useMemo, useRef, useState, useCallback, useEffect } from 'react';
 import { Loader2, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useViewerStore } from '@/store';
@@ -49,6 +49,9 @@ import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/
 import { pickInPlan, planScreenToDrawing } from '@/lib/plan/planPick';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import { resolveEntityRef } from '@/store/resolveEntityRef';
+import { applyLevelDisplayMode } from '@/store/levelDisplay';
+import type { LevelDisplayMode } from '@/store/slices/levelDisplaySlice';
+import type { EntityRef } from '@/store/types';
 
 interface PlanViewProps {
   mergedGeometry?: GeometryResult | null;
@@ -130,25 +133,35 @@ export function PlanView({
   // Single-model only: `elementToStorey` keys are LOCAL express ids, so on a
   // federation they would collide with another model's mesh ids and derive
   // floors for the wrong building. Federated plan mode is its own problem.
-  const storeys = useMemo((): PlanStorey[] => {
-    const single = models.size === 1 ? [...models.values()][0]?.ifcDataStore : null;
-    const dataStore = (single ?? (models.size === 0 ? ifcDataStore : null)) as
+  const { storeys, storeyModelId } = useMemo((): {
+    storeys: PlanStorey[];
+    /** Which model the storeys belong to, for the isolation ref. */
+    storeyModelId: string | null;
+  } => {
+    const singleEntry = models.size === 1 ? [...models.entries()][0] : null;
+    const modelId = singleEntry ? singleEntry[0] : models.size === 0 ? 'legacy' : null;
+    const dataStore = (singleEntry?.[1]?.ifcDataStore ?? (models.size === 0 ? ifcDataStore : null)) as
       | { spatialHierarchy?: { elementToStorey: Map<number, number>; storeyElevations: Map<number, number>; byStorey: Map<number, number[]> }; entities?: { getName(id: number): string | undefined } }
       | null
       | undefined;
     const sh = dataStore?.spatialHierarchy;
-    if (!sh || !geometryResult?.meshes) return [];
+    if (!sh || !geometryResult?.meshes || modelId === null) {
+      return { storeys: [], storeyModelId: null };
+    }
 
     const names = new Map<number, string>();
     for (const storeyId of sh.byStorey.keys()) {
       const name = dataStore?.entities?.getName(storeyId);
       if (name) names.set(storeyId, name);
     }
-    return planStoreys(geometryResult.meshes, {
-      names,
-      elevations: sh.storeyElevations,
-      elementToStorey: sh.elementToStorey,
-    });
+    return {
+      storeys: planStoreys(geometryResult.meshes, {
+        names,
+        elevations: sh.storeyElevations,
+        elementToStorey: sh.elementToStorey,
+      }),
+      storeyModelId: modelId,
+    };
   }, [models, ifcDataStore, geometryResult]);
 
   // The chosen storey, or the default. Resolving rather than writing state on
@@ -162,6 +175,34 @@ export function PlanView({
     }
     return defaultPlanStorey(storeys);
   }, [planStoreyId, storeys]);
+
+  // ── Solo ────────────────────────────────────────────────────────────────
+  // "The storey is solo, as if isolated in 3D" (#50) — and it IS the 3D one,
+  // through `applyLevelDisplayMode`, which the viewer requires as the single
+  // transition for storey isolation. Plan mode adding a second isolation
+  // channel is exactly what left models stuck isolated before.
+  //
+  // The previous mode is restored on the way out. Plan mode is a mode, not an
+  // edit: switching to a plan and back should leave the building looking the
+  // way it did, not silently isolated to whichever floor was last drawn.
+  const soloBackupRef = useRef<{ mode: LevelDisplayMode; storey: EntityRef | null } | null>(null);
+  useEffect(() => {
+    if (!active || !storey || !storeyModelId) return;
+
+    const state = useViewerStore.getState();
+    if (soloBackupRef.current === null) {
+      soloBackupRef.current = { mode: state.levelDisplayMode, storey: state.activeStorey };
+    }
+    applyLevelDisplayMode('solo', { modelId: storeyModelId, expressId: storey.expressId });
+  }, [active, storey, storeyModelId]);
+
+  useEffect(() => {
+    if (active) return;
+    const backup = soloBackupRef.current;
+    if (!backup) return;
+    soloBackupRef.current = null;
+    applyLevelDisplayMode(backup.mode, backup.storey);
+  }, [active]);
 
   // ── The cut ─────────────────────────────────────────────────────────────
   const bounds = geometryResult?.coordinateInfo?.shiftedBounds;
