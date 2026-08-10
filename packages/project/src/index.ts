@@ -41,6 +41,12 @@ export {
 } from './descriptor.js';
 
 export {
+  mayAcceptOffer, parseProjectOffer, projectHelloMessage,
+  PROJECT_HANDSHAKE_PROTOCOL, PROJECT_HELLO, PROJECT_OFFER, PROJECT_OFFER_TIMEOUT_MS,
+  type OfferAcceptance,
+} from './openerOffer.js';
+
+export {
   isSidecarOf, sidecarFileName, sidecarNameInDir,
   DEFAULT_SIDECAR_PREFIX, SIDECAR_DIR,
   type SidecarKind, type SidecarNameOptions,

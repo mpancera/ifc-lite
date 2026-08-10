@@ -18,6 +18,8 @@ import { ExtensionHostProvider } from './sdk/ExtensionHostProvider';
 import { Toaster } from './components/ui/toast';
 import { Suspense, lazy, useEffect, useState } from 'react';
 import { Analytics } from '@vercel/analytics/react';
+import { useViewerStore } from './store';
+import { useOpenerProject } from './hooks/useOpenerProject';
 
 // The /mcp marketing surface pulls in three.js (HeroScene / PlaygroundViewer)
 // and its own component tree — none of which the main `/` viewer route needs.
@@ -43,6 +45,13 @@ function RouteFallback() {
 
 export function App() {
   const [pathname, setPathname] = useState(() => window.location.pathname);
+
+  // When another application opened this window with a model, it is the only
+  // thing that knows which project the model belongs to — there is no folder
+  // to read. Silent and instant when nobody opened us, which is the normal
+  // case here.
+  const adoptOfferedProject = useViewerStore((s) => s.adoptOfferedProject);
+  useOpenerProject({ onProject: adoptOfferedProject });
 
   useEffect(() => {
     const onRouteChange = () => setPathname(window.location.pathname);

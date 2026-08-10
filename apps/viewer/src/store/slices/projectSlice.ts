@@ -27,7 +27,7 @@ import {
   canBindFolder, createProjectKey, findBindingForHandle, forgetBinding,
   loadBindings, pickFolder, projectKeyFromModels, rememberBinding, restoreFolderAccess,
   projectDisplayName, readProjectDescriptorResult, saveBindings, updateBinding,
-  type FolderBinding, type FolderPermission, type ProjectKey,
+  type FolderBinding, type FolderPermission, type ProjectDescriptor, type ProjectKey,
 } from '@ifc-lite/project';
 import type { ViewerState } from '../index.js';
 
@@ -46,6 +46,14 @@ export interface ProjectSlice {
   /** Set when a folder was remembered but access has to be asked for again. */
   projectFolderPermission: FolderPermission | null;
   projectError: string | null;
+  /**
+   * The project the opening window named, when there is no folder.
+   *
+   * Weaker than a binding and stronger than the model set: somebody said which
+   * project this is, but nothing on disk records it, so it lasts only as long
+   * as the window does.
+   */
+  offeredProject: ProjectDescriptor | null;
 
   /**
    * The project the viewer is in, or `null` when nothing is loaded.
@@ -56,6 +64,9 @@ export interface ProjectSlice {
    */
   currentProjectKey: () => ProjectKey | null;
 
+  /** Take the project an opener named. Ignored once a folder is bound — an
+   *  explicit pick outranks being told. */
+  adoptOfferedProject: (project: ProjectDescriptor) => void;
   loadRecentProjects: () => Promise<void>;
   /** Choose a folder. Must be called from a user gesture. */
   bindProjectFolder: () => Promise<boolean>;
@@ -96,12 +107,28 @@ export const createProjectSlice: StateCreator<ViewerState, [], [], ProjectSlice>
     canBindProjectFolder: canBindFolder(),
     projectFolderPermission: null,
     projectError: null,
+    offeredProject: null,
 
+    // Three sources, strongest first. A bound folder is an explicit choice
+    // that survives restarts; an offer is somebody telling us and lasts as
+    // long as the window; the model set is a guess that at least notices a
+    // change. Deriving rather than storing keeps the three from disagreeing.
     currentProjectKey: () => {
       const bound = get().projectFolder;
       if (bound) return bound.projectKey;
-      // No binding: fall back to the loaded set. `model.name` is the file name.
+
+      const offered = get().offeredProject;
+      if (offered) return offered.key;
+
       return projectKeyFromModels([...get().models.values()].map((m) => m.name));
+    },
+
+    adoptOfferedProject: (project) => {
+      // A folder already bound wins: it was picked deliberately and it
+      // outlives this window, so letting a message override it would make a
+      // deliberate choice depend on how the window happened to be opened.
+      if (get().projectFolder) return;
+      set({ offeredProject: project });
     },
 
     loadRecentProjects: async () => {
