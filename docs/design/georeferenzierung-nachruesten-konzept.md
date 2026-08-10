@@ -141,13 +141,18 @@ Georeferenzabfragen gehören unter dieselbe Zustimmung.
 
 ## Reihenfolge
 
-1. Plausibilisierung. Unabhängig von allem anderen, sofort nützlich, deckt den
-   Anlassfall auf.
-2. Referenzpunkt-Paarung (A). Der allgemeine Weg, ohne Landesbezug.
+1. ~~Plausibilisierung.~~ **Erledigt.** `georef-validation.ts` — Widerspruch
+   zwischen den beiden Ortsangaben, Werksvorgabe-Erkennung, Rückweg-Probe,
+   dazu die bestehende Massstabsprüfung in derselben Liste.
+2. ~~Referenzpunkt-Paarung (A).~~ **Erledigt.** `solve-georeference.ts` mit der
+   Tabelle im Panel. Ausgleichung über beliebig viele Paare, Restklaffe je
+   Zeile, Massstab gesperrt und die Abweichung als Probe in ppm.
 3. Parzelleneinpassung (B). Der bequeme Weg für die Schweiz, braucht die
-   Anbindung an die Geodaten.
+   Anbindung an die Geodaten. **Als Nächstes.**
 4. Beschriftungen entschärfen: Nordwinkel vor die Rohfelder, verständliche
    Bezeichnungen, Rohwerte einklappbar für alle, die sie wirklich brauchen.
+5. Punkte im 3D-Viewport anklicken, statt die lokalen Koordinaten abzutippen.
+   Ausbaustufe zu 2 — die Tabelle bleibt der Unterbau.
 
 ## Offene Punkte
 
