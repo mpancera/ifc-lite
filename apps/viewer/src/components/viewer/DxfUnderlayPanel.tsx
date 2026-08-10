@@ -11,7 +11,7 @@
  * system. Underlays render on plan ('down') sections.
  */
 
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { X, Eye, EyeOff, FileUp, Trash2, Layers, ChevronDown, ChevronRight, Loader2, AlertTriangle, Crosshair } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -22,6 +22,7 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible';
 import { useViewerStore } from '@/store';
+import { assignableStoreys } from '@/lib/heights/underlayStack';
 import { posthog } from '@/lib/analytics';
 import { ingestDxfFile } from '@/hooks/ingest/dxfIngest';
 import type { DxfUnderlayState } from '@/store/slices/drawing2DSlice';
@@ -75,6 +76,9 @@ function UnderlayCard({
   const removeDxfUnderlay = useViewerStore((s) => s.removeDxfUnderlay);
   const setDxfUnderlayVisible = useViewerStore((s) => s.setDxfUnderlayVisible);
   const setDxfUnderlayOpacity = useViewerStore((s) => s.setDxfUnderlayOpacity);
+  const setDxfUnderlayStorey = useViewerStore((s) => s.setDxfUnderlayStorey);
+  const heightSystem = useViewerStore((s) => s.heightSystem);
+  const storeyOptions = useMemo(() => assignableStoreys(heightSystem), [heightSystem]);
   const toggleDxfUnderlayLayer = useViewerStore((s) => s.toggleDxfUnderlayLayer);
   const updateDxfUnderlayPlacement = useViewerStore((s) => s.updateDxfUnderlayPlacement);
 
@@ -124,6 +128,39 @@ function UnderlayCard({
         <div className="flex items-start gap-1 text-[10px] text-amber-600 dark:text-amber-500 px-1">
           <AlertTriangle className="h-3 w-3 mt-px shrink-0" />
           <span>{underlay.warnings[0]}{underlay.warnings.length > 1 ? ` (+${underlay.warnings.length - 1} more)` : ''}</span>
+        </div>
+      )}
+
+      {/* Which storey this plan is. The step that turns a pile of drawings
+          into a building: assigned plans sit at their storey's elevation and
+          stack, unassigned ones lie at zero on top of each other. */}
+      <div className="flex items-center gap-2 px-1">
+        <Label className="w-12 text-[10px] text-muted-foreground">Geschoss</Label>
+        <select
+          className="h-6 flex-1 rounded-sm border bg-transparent px-1 text-[11px]"
+          value={state.storeyId ?? ''}
+          onChange={(e) => setDxfUnderlayStorey(state.id, e.target.value || undefined)}
+        >
+          <option value="">— nicht zugeordnet —</option>
+          {storeyOptions.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name} · {s.elevation.toFixed(3)} m
+            </option>
+          ))}
+        </select>
+      </div>
+      {state.storeyId !== undefined && !storeyOptions.some((s) => s.id === state.storeyId) && (
+        // A broken assignment is shown, not silently treated as unassigned:
+        // the two mean different things, and only this one is a mistake.
+        <div className="flex items-start gap-1 px-1 text-[10px] text-amber-600 dark:text-amber-500">
+          <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
+          <span>Das zugeordnete Geschoss gibt es nicht mehr — bitte neu zuordnen.</span>
+        </div>
+      )}
+      {storeyOptions.length === 0 && (
+        <div className="px-1 text-[10px] text-muted-foreground">
+          Noch keine Geschosse. Unter File › Settings › Höhen &amp; Lage festlegen —
+          auch ohne Modell.
         </div>
       )}
 

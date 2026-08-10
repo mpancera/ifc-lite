@@ -81,6 +81,17 @@ export interface DxfUnderlayState {
   layerVisibility: Record<string, boolean>;
   /** User placement (offset/rotation/scale) in drawing space */
   placement: DxfPlacement;
+  /**
+   * Which storey of the height system this plan belongs to, or `undefined`
+   * while it belongs to none.
+   *
+   * The step that turns a pile of drawings into a building: a plan assigned to
+   * a storey sits at that storey's elevation, so several stack instead of
+   * lying on top of each other at zero. Deliberately the storey ID rather than
+   * a copied elevation — moving a storey has to move its plan with it, and a
+   * copy would quietly stop agreeing.
+   */
+  storeyId?: string;
 }
 
 export interface Drawing2DState {
@@ -287,6 +298,8 @@ export interface Drawing2DSlice extends Drawing2DState {
   /** Toggle one DXF layer within an underlay */
   toggleDxfUnderlayLayer: (id: string, layerName: string) => void;
   updateDxfUnderlayPlacement: (id: string, placement: Partial<DxfPlacement>) => void;
+  /** Assign a plan to a storey, or pass `undefined` to detach it. */
+  setDxfUnderlayStorey: (id: string, storeyId: string | undefined) => void;
   clearDxfUnderlays: () => void;
 }
 
@@ -737,6 +750,16 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
     set((state) => ({ dxfUnderlays: [...state.dxfUnderlays, entry] }));
     return id;
   },
+
+  setDxfUnderlayStorey: (id, storeyId) => set((state) => ({
+    dxfUnderlays: state.dxfUnderlays.map((u) => (
+      // The key is REMOVED when detaching rather than set to undefined, so a
+      // detached plan and one that was never assigned are the same thing.
+      u.id === id
+        ? { ...u, ...(storeyId === undefined ? { storeyId: undefined } : { storeyId }) }
+        : u
+    )),
+  })),
 
   removeDxfUnderlay: (id) => set((state) => ({
     dxfUnderlays: state.dxfUnderlays.filter((u) => u.id !== id),
