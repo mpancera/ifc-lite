@@ -1421,6 +1421,7 @@ export function ViewportContainer() {
       <PlanView
         mergedGeometry={mergedGeometryResult}
         computedIsolatedIds={computedIsolatedIds}
+        modelIdToIndex={modelIdToIndex}
       />
       <AnnotationLayer />
       <CollabPresenceLayer />

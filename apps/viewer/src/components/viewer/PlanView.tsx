@@ -46,11 +46,29 @@ import { useDrawingGeneration } from '@/hooks/useDrawingGeneration';
 import { useViewControls } from '@/hooks/useViewControls';
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
+import { pickInPlan, planScreenToDrawing } from '@/lib/plan/planPick';
+import { toGlobalIdFromModels } from '@/store/globalId';
+import { resolveEntityRef } from '@/store/resolveEntityRef';
 
 interface PlanViewProps {
   mergedGeometry?: GeometryResult | null;
   computedIsolatedIds?: Set<number> | null;
+  /** Model id → the `modelIndex` the drawing pipeline stamps on its geometry. */
+  modelIdToIndex?: Map<string, number>;
 }
+
+/**
+ * Grab radius for a click, in SCREEN pixels.
+ *
+ * Converted to drawing units against the live zoom so it stays the same size
+ * under the cursor whether the plan is at 1:20 or 1:500 — a tolerance fixed in
+ * metres would be unusably fat zoomed out and unhittable zoomed in.
+ */
+const PICK_TOLERANCE_PX = 6;
+
+/** How far the cursor may travel between press and release and still count as a
+ *  click rather than the start of a pan. */
+const CLICK_SLOP_PX = 4;
 
 /**
  * Display options for a plan, fixed rather than exposed.
@@ -76,6 +94,7 @@ const PLAN_AXIS = 'down' as const;
 export function PlanView({
   mergedGeometry,
   computedIsolatedIds,
+  modelIdToIndex,
 }: PlanViewProps): React.ReactElement | null {
   const viewMode = useViewerStore((s) => s.viewMode);
   const planStoreyId = useViewerStore((s) => s.planStoreyId);
@@ -199,13 +218,70 @@ export function PlanView({
     cachedSheetTransformRef,
   });
 
-  // ── Pan ─────────────────────────────────────────────────────────────────
-  // Right button, matching the 2D Section panel: the left button stays free to
-  // pick, which is what this mode is for.
+  // ── Selecting ───────────────────────────────────────────────────────────
+  // The drawing carries LOCAL express ids plus the model they came from; the
+  // store selects on GLOBAL ids. This inverts the map the drawing pipeline was
+  // given, so the two agree even under federation.
+  const indexToModelId = useMemo(() => {
+    const out = new Map<number, string>();
+    for (const [modelId, index] of modelIdToIndex ?? []) out.set(index, modelId);
+    return out;
+  }, [modelIdToIndex]);
+
+  const selectAt = useCallback((clientX: number, clientY: number, additive: boolean) => {
+    const container = containerRef.current;
+    if (!container || !drawing) return;
+    const rect = container.getBoundingClientRect();
+    const point = planScreenToDrawing(clientX - rect.left, clientY - rect.top, viewTransform);
+    const hit = pickInPlan(drawing, point, PICK_TOLERANCE_PX / viewTransform.scale);
+
+    const state = useViewerStore.getState();
+    if (!hit) {
+      // Clicking empty paper clears, exactly as clicking empty space does in 3D.
+      if (!additive) {
+        useViewerStore.setState({ selectedEntitiesSet: new Set(), selectedEntityIds: new Set() });
+        state.setSelectedEntityId(null);
+        state.setSelectedEntity(null);
+      }
+      return;
+    }
+
+    // Single model keeps the identity mapping the registry documents; a
+    // federated drawing resolves through the index it was stamped with.
+    const modelId =
+      indexToModelId.get(hit.modelIndex) ??
+      (state.models.size === 1 ? [...state.models.keys()][0] : null);
+    const globalId = modelId
+      ? toGlobalIdFromModels(state.models, modelId, hit.entityId)
+      : hit.entityId;
+
+    if (additive) {
+      state.toggleEntitySelection(resolveEntityRef(globalId));
+      state.toggleSelection(globalId);
+      return;
+    }
+
+    // Both channels, per the viewer's selection contract: the global-id set
+    // drives the renderer highlight, the EntityRef drives property lookup.
+    // Writing only one leaves the plan and the panels disagreeing.
+    useViewerStore.setState({ selectedEntitiesSet: new Set(), selectedEntityIds: new Set() });
+    state.setSelectedEntityId(globalId);
+    state.setSelectedEntity(resolveEntityRef(globalId));
+  }, [drawing, viewTransform, indexToModelId]);
+
+  // ── Pan and click ───────────────────────────────────────────────────────
+  // Right button pans, matching the 2D Section panel: the left button stays
+  // free to pick, which is what this mode is for.
   const panRef = useRef<{ x: number; y: number } | null>(null);
+  // A left press is only a click if the cursor barely moved — otherwise it was
+  // a drag, and selecting at the release point would be a surprise.
+  const pressRef = useRef<{ x: number; y: number } | null>(null);
+
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button === 2) panRef.current = { x: e.clientX, y: e.clientY };
+    if (e.button === 0) pressRef.current = { x: e.clientX, y: e.clientY };
   }, []);
+
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     const from = panRef.current;
     if (!from) return;
@@ -214,7 +290,21 @@ export function PlanView({
     panRef.current = { x: e.clientX, y: e.clientY };
     setViewTransform((prev) => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
   }, [setViewTransform]);
-  const endPan = useCallback(() => { panRef.current = null; }, []);
+
+  const handleMouseUp = useCallback((e: React.MouseEvent) => {
+    panRef.current = null;
+    const press = pressRef.current;
+    pressRef.current = null;
+    if (e.button !== 0 || !press) return;
+    if (Math.abs(e.clientX - press.x) > CLICK_SLOP_PX) return;
+    if (Math.abs(e.clientY - press.y) > CLICK_SLOP_PX) return;
+    selectAt(e.clientX, e.clientY, e.ctrlKey || e.metaKey);
+  }, [selectAt]);
+
+  const handleMouseLeave = useCallback(() => {
+    panRef.current = null;
+    pressRef.current = null;
+  }, []);
 
   const overrideEngine = useMemo(() => new GraphicOverrideEngine([]), []);
   const emptyColorMap = useMemo(() => new Map<number, [number, number, number, number]>(), []);
@@ -232,8 +322,8 @@ export function PlanView({
       ref={containerRef}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
-      onMouseUp={endPan}
-      onMouseLeave={endPan}
+      onMouseUp={handleMouseUp}
+      onMouseLeave={handleMouseLeave}
       // The right button pans, so its menu would fire on every pan.
       onContextMenu={(e) => e.preventDefault()}
     >
