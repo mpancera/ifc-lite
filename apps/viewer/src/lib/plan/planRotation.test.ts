@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import {
   rotatePoint, rotationToNearestAxis, rotationToDirection, normalizeAngle,
   rotatedBounds, DEG_TO_RAD, RAD_TO_DEG,
+  bearingToAngle, angleToBearing, normalizeBearing,
 } from './planRotation.js';
 
 const near = (a: number, b: number, tol = 1e-9) => Math.abs(a - b) < tol;
@@ -71,6 +72,64 @@ describe('rotationToDirection', () => {
 
   it('refuses a degenerate line', () => {
     assert.equal(rotationToDirection({ x: 1, y: 1 }, { x: 1, y: 1 }, 0), null);
+  });
+});
+
+describe('bearings — the vocabulary, not the trigonometry', () => {
+  /** Where a bearing points on screen, as a unit vector (y grows downward). */
+  const screenDir = (bearingDeg: number) => {
+    const a = bearingToAngle(bearingDeg * DEG_TO_RAD);
+    return { x: Math.cos(a), y: Math.sin(a) };
+  };
+
+  it('reads 0° as UP and 90° as RIGHT, the way a plan is read', () => {
+    // The whole bug: 90° meant "right" to the maths and "east" to the user,
+    // and those are the same — but 0° meant "right" to the maths and "north"
+    // to the user, which are a quarter turn apart.
+    const up = screenDir(0);
+    assert.ok(near(up.x, 0, 1e-12) && near(up.y, -1, 1e-12), JSON.stringify(up));
+
+    const right = screenDir(90);
+    assert.ok(near(right.x, 1, 1e-12) && near(right.y, 0, 1e-12), JSON.stringify(right));
+
+    const down = screenDir(180);
+    assert.ok(near(down.x, 0, 1e-12) && near(down.y, 1, 1e-12), JSON.stringify(down));
+
+    const left = screenDir(270);
+    assert.ok(near(left.x, -1, 1e-12) && near(left.y, 0, 1e-12), JSON.stringify(left));
+  });
+
+  it('round-trips a bearing through the angle it names', () => {
+    for (const deg of [0, 37, 90, 180, 271, 359]) {
+      const back = angleToBearing(bearingToAngle(deg * DEG_TO_RAD));
+      assert.ok(near(back * RAD_TO_DEG, deg, 1e-9), `${deg}`);
+    }
+  });
+
+  it('reads a bearing in [0, 360), never as a negative', () => {
+    assert.ok(near(normalizeBearing(-90 * DEG_TO_RAD) * RAD_TO_DEG, 270, 1e-9));
+    assert.ok(near(normalizeBearing(450 * DEG_TO_RAD) * RAD_TO_DEG, 90, 1e-9));
+  });
+
+  it('lays a line drawn up-and-right onto due east when asked for 90°', () => {
+    // Marc's case, end to end. The line runs up-right on screen (screen y
+    // decreasing), and 90° means east, so it must end up pointing right.
+    const from = { x: 0, y: 0 };
+    const to = { x: 4, y: -4 };            // up and to the right
+    const delta = rotationToDirection(from, to, bearingToAngle(90 * DEG_TO_RAD));
+    assert.ok(delta !== null);
+
+    const turned = rotatePoint(to, delta);
+    assert.ok(near(turned.y, 0, 1e-9), `y=${turned.y}`);   // horizontal…
+    assert.ok(turned.x > 0, `x=${turned.x}`);              // …and pointing RIGHT
+  });
+
+  it('lays that same line onto due north when asked for 0°', () => {
+    const delta = rotationToDirection({ x: 0, y: 0 }, { x: 4, y: -4 }, bearingToAngle(0));
+    assert.ok(delta !== null);
+    const turned = rotatePoint({ x: 4, y: -4 }, delta);
+    assert.ok(near(turned.x, 0, 1e-9), `x=${turned.x}`);
+    assert.ok(turned.y < 0, `y=${turned.y}`);              // up the screen
   });
 });
 

@@ -80,6 +80,35 @@ export function rotationToDirection(from: Point2, to: Point2, target: number): n
   return normalizeAngle(target - Math.atan2(dy, dx));
 }
 
+/**
+ * A compass bearing, as the maths here needs it.
+ *
+ * People give a direction on a plan as a bearing: **0° is up, and it grows
+ * clockwise** — 90° points right, 180° down, 270° left. The trigonometry
+ * underneath measures from the +x axis instead, so 0° points RIGHT. The two
+ * differ by a quarter turn, and taking one for the other lays an alignment
+ * line ninety degrees away from where it was asked to go — which looks like a
+ * sign error but is a vocabulary error.
+ *
+ * Screen y grows downward, so `atan2` angles already increase clockwise on
+ * screen and the whole conversion is one offset.
+ */
+export function bearingToAngle(bearingRad: number): number {
+  return bearingRad - Math.PI / 2;
+}
+
+/** The inverse, for readouts. */
+export function angleToBearing(angleRad: number): number {
+  return angleRad + Math.PI / 2;
+}
+
+/** Fold a bearing into [0, 360), the range a compass reading is read in. */
+export function normalizeBearing(bearingRad: number): number {
+  const twoPi = Math.PI * 2;
+  const b = bearingRad % twoPi;
+  return b < 0 ? b + twoPi : b;
+}
+
 /** Fold an angle into (-π, π], so a readout never shows 350° for -10°. */
 export function normalizeAngle(angleRad: number): number {
   const twoPi = Math.PI * 2;

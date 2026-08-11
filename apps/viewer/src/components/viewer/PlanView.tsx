@@ -59,7 +59,10 @@ import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds } fr
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { useLensColorKeys } from '@/hooks/useLensColorKeys';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
-import { rotationToDirection, normalizeAngle, RAD_TO_DEG, DEG_TO_RAD } from '@/lib/plan/planRotation';
+import {
+  rotationToDirection, normalizeAngle, bearingToAngle, angleToBearing, normalizeBearing,
+  RAD_TO_DEG, DEG_TO_RAD,
+} from '@/lib/plan/planRotation';
 import { pickInPlan, planScreenToDrawing, planPointToRenderer, planPointToStoreyLocal } from '@/lib/plan/planPick';
 import { handleAddElementDrop } from './selectionHandlers';
 import { toGlobalIdFromModels, fromGlobalIdFromModels } from '@/store/globalId';
@@ -603,10 +606,14 @@ export function PlanView({
    * picking one of the two is the kind of guess that costs more time than the
    * question does.
    */
-  const applyRotationTo = useCallback((targetDeg: number) => {
+  const applyRotationTo = useCallback((targetBearingDeg: number) => {
     const line = rotationLine;
     if (!line) return;
-    const delta = rotationToDirection(line.from, line.to, targetDeg * DEG_TO_RAD);
+    // A BEARING, not a maths angle: 0° is up and it grows clockwise, which is
+    // how a direction on a plan is given. The two differ by a quarter turn,
+    // and confusing them lays the line ninety degrees from where it was asked
+    // to go — which reads as a bug but is a vocabulary mistake.
+    const delta = rotationToDirection(line.from, line.to, bearingToAngle(targetBearingDeg * DEG_TO_RAD));
     if (delta === null) {
       toast.error('Zu kurze Linie — bitte entlang einem Bauteil ziehen.');
       return;
@@ -627,7 +634,10 @@ export function PlanView({
     const dx = rotationLine.to.x - rotationLine.from.x;
     const dy = rotationLine.to.y - rotationLine.from.y;
     if (Math.hypot(dx, dy) < 1e-9) return null;
-    return normalizeAngle(Math.atan2(dy, dx) + planRotation) * RAD_TO_DEG;
+    // Reported in the same vocabulary the answer is given in, so the two
+    // numbers on screen can be compared without converting between them.
+    const onScreen = Math.atan2(dy, dx) + planRotation;
+    return normalizeBearing(angleToBearing(onScreen)) * RAD_TO_DEG;
   }, [rotationLine, planRotation]);
 
   // ── Pan and click ───────────────────────────────────────────────────────
@@ -910,7 +920,7 @@ export function PlanView({
 
       {/* The reference line: the placed point, the snapped preview, and once
           it is finished, the question of where it should go. */}
-      {(rotationStart || rotationLine) && (() => {
+      {(planRotationPicking && (rotationStart || rotationCursor || rotationLine)) && (() => {
         const toScreen = (p: Point2D) => {
           const sx = p.x * viewTransform.scale;
           const sy = p.y * viewTransform.scale;
@@ -918,17 +928,20 @@ export function PlanView({
           const sn = Math.sin(planRotation);
           return { x: sx * c - sy * sn + viewTransform.x, y: sx * sn + sy * c + viewTransform.y };
         };
-        const from = rotationLine ? rotationLine.from : rotationStart!;
+        // Before the FIRST click there is no line yet — only the snap the first
+        // point would take. Showing it then is the whole point: you place the
+        // start knowing what it caught, instead of finding out afterwards.
+        const from = rotationLine ? rotationLine.from : rotationStart;
         const to = rotationLine ? rotationLine.to : rotationCursor;
-        const a = toScreen(from);
+        const a = from ? toScreen(from) : null;
         const b = to ? toScreen(to) : null;
         return (
           <svg className="absolute inset-0 h-full w-full pointer-events-none">
-            {b && (
+            {a && b && (
               <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="stroke-sky-500"
                     strokeWidth={1.5} strokeDasharray={rotationLine ? undefined : '5 3'} />
             )}
-            <circle cx={a.x} cy={a.y} r={3.5} className="fill-sky-500" />
+            {a && <circle cx={a.x} cy={a.y} r={3.5} className="fill-sky-500" />}
             {/* The snap marker: a square, so it is distinguishable from the
                 placed point at a glance and you can see WHAT it caught. */}
             {b && !rotationLine && (
@@ -946,6 +959,7 @@ export function PlanView({
         <div className="absolute left-1/2 top-16 z-50 -translate-x-1/2 rounded-md border bg-background/95 px-3 py-2 shadow-lg backdrop-blur-sm">
           <div className="mb-1.5 text-[11px] text-muted-foreground">
             Ausrichtlinie liegt bei {rotationLineDeg !== null ? rotationLineDeg.toFixed(2) : '—'}° — wohin damit?
+            <span className="ml-1 opacity-70">(0° = oben, im Uhrzeigersinn)</span>
           </div>
           <div className="flex items-center gap-1">
             {[0, 90, 180, 270].map((deg) => (
