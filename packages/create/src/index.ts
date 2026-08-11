@@ -32,6 +32,7 @@ export { addBeamToStore, type BeamInStoreParams, type BeamBuildResult } from './
 export { addDoorToStore, type DoorInStoreParams, type DoorBuildResult } from './in-store/door.js';
 export { addWindowToStore, type WindowInStoreParams, type WindowBuildResult } from './in-store/window.js';
 export { addSensorToStore, type SensorInStoreParams, type SensorBuildResult, type SensorPredefinedType } from './in-store/sensor.js';
+export { addAnnotationToStore, type AnnotationInStoreParams, type AnnotationBuildResult, type AnnotationGeometry, type AnnotationPoint2D } from './in-store/annotation.js';
 export { addLibraryElementToStore, type LibraryElementInStoreParams, type LibraryElementBuildResult } from './in-store/library-element.js';
 export { addLibraryTypeToStore, emitRelDefinesByType, type LibraryTypeInStoreParams, type LibraryTypeBuildResult } from './in-store/library-type.js';
 export { addDistributionSystemToStore, emitRelAssignsToGroup, findDistributionSystem, type DistributionSystemInStoreParams } from './in-store/distribution-system.js';

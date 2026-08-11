@@ -234,3 +234,20 @@ export function planPointToRenderer(
 ): { x: number; y: number; z: number } {
   return { x: point.x, y: worldY, z: point.y };
 }
+
+/**
+ * A point on the plan, in the storey-local IFC coordinates a builder wants.
+ *
+ * This is the same chain placement already goes through, collapsed: the plan
+ * point becomes a renderer point (`planPointToRenderer`), and the renderer
+ * point becomes storey-local IFC as `[x, -z, 0]`. Substituting z = the plan's
+ * y leaves `[x, -y]`.
+ *
+ * Written out rather than composed so the negation is visible, and pinned by a
+ * test against the real `rendererPointToIfcStoreyLocal` — this is the one sign
+ * in the whole path that is easy to get wrong and produces output that looks
+ * completely plausible, just mirrored.
+ */
+export function planPointToStoreyLocal(point: Point2D): readonly [number, number] {
+  return [point.x, -point.y];
+}

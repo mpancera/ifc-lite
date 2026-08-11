@@ -756,6 +756,10 @@
     "snapshotToIfcx: function"
   ],
   "@ifc-lite/create": [
+    "AnnotationBuildResult: interface",
+    "AnnotationGeometry: type",
+    "AnnotationInStoreParams: interface",
+    "AnnotationPoint2D: type",
     "ArbitraryProfile: interface",
     "AutoSpaceDetectOptions: interface",
     "AutoSpaceSegment: interface",
@@ -890,6 +894,7 @@
     "WorkScheduleParams: interface",
     "WorkScheduleType: type",
     "ZoneInStoreParams: interface",
+    "addAnnotationToStore: function",
     "addBeamToStore: function",
     "addColumnToStore: function",
     "addDistributionSystemToStore: function",
@@ -2058,6 +2063,7 @@
     "discoverDataSources: function",
     "evaluateAutoColorLens: function",
     "evaluateLens: function",
+    "groupBucketValue: function",
     "hexToRgba: function",
     "isGhostColor: function",
     "matchesCriteria: function",

@@ -26,7 +26,7 @@ import React from 'react';
 import {
   Box, Shapes, Tag, Layers, PenTool, FileText, ZoomIn, ZoomOut,
   Maximize2, Download, FileDown, Printer, RefreshCw, Ruler,
-  Hexagon, Type, Cloud, Trash2,
+  Hexagon, Type, Cloud, Trash2, FilePlus2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -56,6 +56,9 @@ export interface PlanToolbarProps {
   onSetTool: (tool: Annotation2DTool) => void;
   hasAnnotations: boolean;
   onClearAnnotations: () => void;
+  /** True when a mark is selected and can be written into the model. */
+  canCommitAnnotation: boolean;
+  onCommitAnnotation: () => void;
 
   zoomPercent: number;
   onZoomIn: () => void;
@@ -108,6 +111,7 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
     displayOptions, onToggleSymbolic, onToggleIfcAnnotations,
     onToggleConstructionProjection, settingsOpen, onToggleSettings, dxfOpen, onToggleDxf,
     activeTool, onSetTool, hasAnnotations, onClearAnnotations,
+    canCommitAnnotation, onCommitAnnotation,
     zoomPercent, onZoomIn, onZoomOut, onFitToView,
     onExportSVG, onExportDXF, onPrint, onRegenerate, busy, children,
   } = props;
@@ -193,6 +197,14 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
       >
         <Cloud className="h-4 w-4" />
       </ToolButton>
+      {canCommitAnnotation && (
+        // Only offered with a mark selected, because it acts on THAT mark. The
+        // wording says what happens to it: the mark stays where it is and the
+        // model gains a copy, so this is never a one-way door.
+        <ToolButton onClick={onCommitAnnotation} title="Als IfcAnnotation ins Modell übernehmen (Markierung bleibt)">
+          <FilePlus2 className="h-4 w-4" />
+        </ToolButton>
+      )}
       {hasAnnotations && (
         <ToolButton onClick={onClearAnnotations} title="Alle Anmerkungen löschen">
           <Trash2 className="h-4 w-4" />

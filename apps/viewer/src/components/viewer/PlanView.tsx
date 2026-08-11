@@ -39,6 +39,8 @@ import { Loader2 } from 'lucide-react';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
 import { GraphicOverrideEngine, type Drawing2D } from '@ifc-lite/drawing-2d';
+import type { AnnotationGeometry } from '@ifc-lite/create';
+import { toast } from '@/components/ui/toast';
 import type { GeometryResult } from '@ifc-lite/geometry';
 import { Drawing2DCanvas } from './Drawing2DCanvas';
 import { PlanToolbar } from './PlanToolbar';
@@ -55,7 +57,7 @@ import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds } fr
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { useLensColorKeys } from '@/hooks/useLensColorKeys';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
-import { pickInPlan, planScreenToDrawing, planPointToRenderer } from '@/lib/plan/planPick';
+import { pickInPlan, planScreenToDrawing, planPointToRenderer, planPointToStoreyLocal } from '@/lib/plan/planPick';
 import { handleAddElementDrop } from './selectionHandlers';
 import { toGlobalIdFromModels, fromGlobalIdFromModels } from '@/store/globalId';
 import { resolveEntityRef } from '@/store/resolveEntityRef';
@@ -465,6 +467,75 @@ export function PlanView({
     updateDxfUnderlayPlacement(id, { offsetX: modelCx - underlayCx, offsetY: modelCy - underlayCy });
   }, [dxfUnderlays, drawing, geometryResult, updateDxfUnderlayPlacement]);
 
+  // ── Commit a mark to the model ──────────────────────────────────────────
+  // The mark STAYS. Committing adds an IfcAnnotation carrying the same
+  // geometry; it does not move the mark into the model and take it off the
+  // screen. Keeping both is the point — the same note is often wanted as a
+  // working scribble first and as a deliverable later, and having to decide up
+  // front is what makes markup tools annoying.
+  const addAnnotation = useViewerStore((s) => s.addAnnotation);
+  const commitSelectedAnnotation = useCallback(() => {
+    const sel = selectedAnnotation2D;
+    if (!sel || !storey || !storeyModelId) return;
+
+    const asLocal = (p: { x: number; y: number }) => planPointToStoreyLocal(p);
+    let geometry: AnnotationGeometry | null = null;
+    let name = 'Annotation';
+
+    if (sel.type === 'measure') {
+      const m = measure2DResults.find((r) => r.id === sel.id);
+      if (m) {
+        geometry = { kind: 'polyline', points: [asLocal(m.start), asLocal(m.end)] };
+        name = `Mass ${m.distance.toFixed(3)} m`;
+      }
+    } else if (sel.type === 'polygon') {
+      const a = polygonArea2DResults.find((r) => r.id === sel.id);
+      if (a && a.points.length >= 3) {
+        geometry = { kind: 'polyline', points: a.points.map(asLocal), closed: true };
+        name = `Fläche ${a.area.toFixed(2)} m²`;
+      }
+    } else if (sel.type === 'cloud') {
+      const c = cloudAnnotations2D.find((r) => r.id === sel.id);
+      if (c && c.points.length >= 2) {
+        // Stored as two opposite corners; a rectangle is what the mark means.
+        const [p1, p2] = c.points;
+        geometry = {
+          kind: 'polyline',
+          points: [asLocal(p1), asLocal({ x: p2.x, y: p1.y }), asLocal(p2), asLocal({ x: p1.x, y: p2.y })],
+          closed: true,
+        };
+        name = c.label ? `Revision ${c.label}` : 'Revision';
+      }
+    } else if (sel.type === 'text') {
+      const t = textAnnotations2D.find((r) => r.id === sel.id);
+      if (t && t.text.trim()) {
+        const local = asLocal(t.position);
+        // The box is stored in SCREEN pixels; convert through the live zoom so
+        // the committed extent is a real size in metres rather than a number
+        // that means something only at the zoom it happened to be typed at.
+        const heightM = t.fontSize / viewTransform.scale;
+        geometry = {
+          kind: 'text',
+          text: t.text,
+          position: [local[0], local[1]],
+          width: Math.max(heightM * t.text.length * 0.6, heightM),
+          height: heightM,
+        };
+        name = t.text.slice(0, 60);
+      }
+    }
+
+    if (!geometry) {
+      toast.error('Diese Markierung lässt sich nicht übernehmen.');
+      return;
+    }
+
+    const result = addAnnotation(storeyModelId, storey.expressId, { geometry, Name: name });
+    if ('error' in result) toast.error(`Übernahme fehlgeschlagen: ${result.error}`);
+    else toast.success(`Als IfcAnnotation #${result.expressId} übernommen — Markierung bleibt`);
+  }, [selectedAnnotation2D, storey, storeyModelId, measure2DResults, polygonArea2DResults,
+      cloudAnnotations2D, textAnnotations2D, viewTransform.scale, addAnnotation]);
+
   const { handleExportSVG, handleExportDXF, handlePrint } = useDrawingExport({
     drawing, displayOptions, sectionPlane, activePresetId,
     entityColorMap, overridesEnabled, overrideEngine,
@@ -750,6 +821,8 @@ export function PlanView({
           activeTool={annotation2DActiveTool}
           onSetTool={setAnnotation2DActiveTool}
           hasAnnotations={hasAnnotations}
+          canCommitAnnotation={selectedAnnotation2D !== null}
+          onCommitAnnotation={commitSelectedAnnotation}
           onClearAnnotations={() => { clearAllAnnotations2D(); clearMeasure2DResults(); }}
           zoomPercent={viewTransform.scale * 100}
           onZoomIn={zoomIn}

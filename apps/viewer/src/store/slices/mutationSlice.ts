@@ -26,6 +26,7 @@ import {
   findDistributionSystem,
   addRoofToStore,
   addSensorToStore,
+  addAnnotationToStore,
   addSlabToStore,
   addSpaceToStore,
   addWallToStore,
@@ -49,6 +50,7 @@ import {
   type PlateInStoreParams,
   type RoofInStoreParams,
   type SensorInStoreParams,
+  type AnnotationInStoreParams,
   type SlabInStoreParams,
   type SpaceInStoreParams,
   type WallInStoreParams,
@@ -671,6 +673,21 @@ export interface MutationSlice {
     modelId: string,
     storeyExpressId: number,
     params: SensorInStoreParams
+  ) => { expressId: number } | { error: string };
+  /**
+   * Commit a drawing mark as an `IfcAnnotation` on a storey.
+   *
+   * The 2D markup tools produce marks that live in the viewer session. This
+   * turns one of them into model content — so it survives, exports, and reaches
+   * whoever opens the file next — without removing the mark, which stays where
+   * it was drawn. Keeping both is the point: the same note is often wanted as
+   * a working scribble first and as a deliverable later, and having to decide
+   * up front is what makes markup tools annoying.
+   */
+  addAnnotation: (
+    modelId: string,
+    storeyExpressId: number,
+    params: AnnotationInStoreParams
   ) => { expressId: number } | { error: string };
   /**
    * Add a free-standing element of any catalog-selected IFC entity, anchored
@@ -2724,6 +2741,14 @@ export const createMutationSlice: StateCreator<
       params: { Width: params.Width ?? 0.1, Depth: params.Depth ?? 0.1, Height: params.Height ?? 0.05, PredefinedType: params.PredefinedType ?? 'NOTDEFINED' },
       position: params.Position,
     },
+  ),
+
+  addAnnotation: (modelId, storeyExpressId, params) => runInStoreElementBuilder(
+    get, set, modelId, storeyExpressId, 'IFCANNOTATION', 'add annotation',
+    (editor, anchor) => addAnnotationToStore(editor, anchor, params).annotationId,
+    // No mesh payload: annotation geometry is 2D curves and text in an
+    // 'Annotation' representation, and asking the mesher to solidify a note
+    // would be asking the wrong question.
   ),
 
   generateSpacesFromDrawing: (modelId, storeyExpressId, segments, options) => {

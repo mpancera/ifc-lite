@@ -4,7 +4,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { pickInPlan, planScreenToDrawing, planPointToRenderer } from './planPick.js';
+import { pickInPlan, planScreenToDrawing, planPointToRenderer, planPointToStoreyLocal } from './planPick.js';
 import { projectTo2D } from '@ifc-lite/drawing-2d';
 import type {
   Drawing2D, DrawingLine, DrawingPolygon, LineCategory, Point2D,
@@ -204,5 +204,30 @@ describe('planPointToRenderer', () => {
 
   it('carries the height it was handed, so the point is a real world point', () => {
     assert.equal(planPointToRenderer({ x: 0, y: 0 }, 4.25).y, 4.25);
+  });
+});
+
+describe('planPointToStoreyLocal', () => {
+  /** What `rendererPointToIfcStoreyLocal` does, restated for the test only. */
+  const rendererToIfcLocal = (p: { x: number; y: number; z: number }) => [p.x, -p.z, 0];
+
+  it('agrees with the chain placement actually takes', () => {
+    // Placement goes plan → renderer → storey-local. This collapses the two
+    // steps, so it has to land in the same place or a committed annotation
+    // sits somewhere a placed element would not.
+    for (const point of [{ x: 3.2, y: -1.6 }, { x: -7, y: 4.25 }, { x: 0, y: 0 }]) {
+      const viaChain = rendererToIfcLocal(planPointToRenderer(point, 1.25));
+      const direct = planPointToStoreyLocal(point);
+      assert.equal(direct[0], viaChain[0]);
+      assert.equal(direct[1], viaChain[1]);
+    }
+  });
+
+  it('flips the sign of y, and only y', () => {
+    // Stated on its own because the round-trip above would also pass if BOTH
+    // sides were mirrored, and the result would be a plan-wide mirror.
+    const local = planPointToStoreyLocal({ x: 5, y: -6 });
+    assert.equal(local[0], 5);
+    assert.equal(local[1], 6);
   });
 });
