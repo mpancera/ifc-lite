@@ -42,6 +42,7 @@ import { GraphicOverrideEngine, type Drawing2D } from '@ifc-lite/drawing-2d';
 import type { AnnotationGeometry } from '@ifc-lite/create';
 import { toast } from '@/components/ui/toast';
 import type { GeometryResult } from '@ifc-lite/geometry';
+import type { Point2D } from '@ifc-lite/drawing-2d';
 import { Drawing2DCanvas } from './Drawing2DCanvas';
 import { PlanToolbar } from './PlanToolbar';
 import { DrawingSettingsPanel } from './DrawingSettingsPanel';
@@ -57,6 +58,7 @@ import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds } fr
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { useLensColorKeys } from '@/hooks/useLensColorKeys';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
+import { rotationToNearestAxis, normalizeAngle, RAD_TO_DEG, DEG_TO_RAD } from '@/lib/plan/planRotation';
 import { pickInPlan, planScreenToDrawing, planPointToRenderer, planPointToStoreyLocal } from '@/lib/plan/planPick';
 import { handleAddElementDrop } from './selectionHandlers';
 import { toGlobalIdFromModels, fromGlobalIdFromModels } from '@/store/globalId';
@@ -112,6 +114,10 @@ export function PlanView({
   const activeStorey = useViewerStore((s) => s.activeStorey);
   const planCutHeight = useViewerStore((s) => s.planCutHeight);
   const setPlanCutHeight = useViewerStore((s) => s.setPlanCutHeight);
+  const planRotation = useViewerStore((s) => s.planRotation);
+  const setPlanRotation = useViewerStore((s) => s.setPlanRotation);
+  const planRotationPicking = useViewerStore((s) => s.planRotationPicking);
+  const setPlanRotationPicking = useViewerStore((s) => s.setPlanRotationPicking);
   const models = useViewerStore((s) => s.models);
   const activeTool = useViewerStore((s) => s.activeTool);
   const addElementPendingPoints = useViewerStore((s) => s.addElementPendingPoints);
@@ -341,7 +347,15 @@ export function PlanView({
     activeSheet: null,
     isPinned: true,
     cachedSheetTransformRef,
+    rotation: planRotation,
   });
+
+  // The transform the canvas paints with, and the one every screen-to-drawing
+  // conversion below inverts. Built once so the two can never disagree.
+  const planTransform = useMemo(
+    () => ({ ...viewTransform, rotation: planRotation }),
+    [viewTransform, planRotation],
+  );
 
   // ── Selecting ───────────────────────────────────────────────────────────
   // The drawing carries LOCAL express ids plus the model they came from; the
@@ -357,7 +371,7 @@ export function PlanView({
     const container = containerRef.current;
     if (!container || !drawing) return;
     const rect = container.getBoundingClientRect();
-    const point = planScreenToDrawing(clientX - rect.left, clientY - rect.top, viewTransform);
+    const point = planScreenToDrawing(clientX - rect.left, clientY - rect.top, planTransform);
     const hit = pickInPlan(drawing, point, PICK_TOLERANCE_PX / viewTransform.scale);
 
     const state = useViewerStore.getState();
@@ -392,7 +406,7 @@ export function PlanView({
     useViewerStore.setState({ selectedEntitiesSet: new Set(), selectedEntityIds: new Set() });
     state.setSelectedEntityId(globalId);
     state.setSelectedEntity(resolveEntityRef(globalId));
-  }, [drawing, viewTransform, indexToModelId]);
+  }, [drawing, planTransform, indexToModelId]);
 
   // ── The overlays the toolbar switches on ────────────────────────────────
   const overrideEngine = useMemo(
@@ -433,7 +447,7 @@ export function PlanView({
   // growing its own. Their results live in the store, so a distance measured
   // on the plan is the same object the section panel and the export see.
   const measureHandlers = useMeasure2D({
-    drawing, viewTransform, setViewTransform, sectionAxis: PLAN_AXIS, containerRef,
+    drawing, viewTransform: planTransform, setViewTransform, sectionAxis: PLAN_AXIS, containerRef,
     measure2DMode: annotation2DActiveTool === 'measure',
     measure2DStart, measure2DCurrent, measure2DShiftLocked, measure2DLockedAxis,
     setMeasure2DStart, setMeasure2DCurrent, setMeasure2DShiftLocked, setMeasure2DSnapPoint,
@@ -441,7 +455,7 @@ export function PlanView({
   });
 
   const annotationHandlers = useAnnotation2D({
-    drawing, viewTransform, sectionAxis: PLAN_AXIS, containerRef,
+    drawing, viewTransform: planTransform, sectionAxis: PLAN_AXIS, containerRef,
     activeTool: annotation2DActiveTool, setActiveTool: setAnnotation2DActiveTool,
     polygonArea2DPoints, addPolygonArea2DPoint, completePolygonArea2D, cancelPolygonArea2D,
     textAnnotations2D, addTextAnnotation2D, setTextAnnotation2DEditing,
@@ -557,6 +571,28 @@ export function PlanView({
     fitToView();
   }, [active, drawing, status, fitToView]);
 
+  // ── Turning the plan ────────────────────────────────────────────────────
+  // One line, not two. The underlay alignment needs a second line because it
+  // solves scale AND rotation AND translation between two different drawings;
+  // here there is a single drawing and a single unknown, so the second line
+  // would carry one number — and that number is almost always "horizontal".
+  // Drawing one line along a wall and letting it snap to the axis it is
+  // ALREADY nearer tidies the gesture up instead of overruling it.
+  const [rotationLine, setRotationLine] = useState<{ from: Point2D; to: Point2D } | null>(null);
+
+  const applyRotationFromLine = useCallback((from: Point2D, to: Point2D) => {
+    const delta = rotationToNearestAxis(from, to);
+    if (delta === null) {
+      toast.error('Zu kurze Linie — bitte entlang einem Bauteil ziehen.');
+      return;
+    }
+    setPlanRotation(normalizeAngle(planRotation + delta));
+    // Marc's "FitToAll danach": turning about the project origin can swing the
+    // building well outside the viewport, and a correct plan you cannot see
+    // reads exactly like a broken one.
+    setTimeout(fitToView, 0);
+  }, [planRotation, setPlanRotation, fitToView]);
+
   // ── Pan and click ───────────────────────────────────────────────────────
   // Right button pans, matching the 2D Section panel: the left button stays
   // free to pick, which is what this mode is for.
@@ -575,6 +611,19 @@ export function PlanView({
     if (e.button === 2) { panRef.current = { x: e.clientX, y: e.clientY }; return; }
     if (e.button !== 0) return;
 
+    // An armed rotation takes the click outright: while it is running the only
+    // meaningful thing to do on the canvas is draw the reference line, and
+    // letting a selection through would make the result depend on what the
+    // cursor happened to be over.
+    if (planRotationPicking) {
+      const container = containerRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      const p = planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, planTransform);
+      setRotationLine({ from: p, to: p });
+      return;
+    }
+
     if (annotating) {
       if (annotation2DActiveTool === 'measure') measureHandlers.handleMouseDown(e);
       else annotationHandlers.handleMouseDown(e);
@@ -584,7 +633,7 @@ export function PlanView({
     // dragged; only if the click misses one does it become a model selection.
     if (annotationHandlers.handleMouseDown(e)) return;
     pressRef.current = { x: e.clientX, y: e.clientY };
-  }, [annotating, annotation2DActiveTool, measureHandlers, annotationHandlers]);
+  }, [annotating, annotation2DActiveTool, measureHandlers, annotationHandlers, planRotationPicking, planTransform]);
 
   // Where the cursor is, in drawing units — only tracked while placing, since
   // that is the only thing that needs to redraw on every mouse move.
@@ -597,6 +646,16 @@ export function PlanView({
       const dy = e.clientY - from.y;
       panRef.current = { x: e.clientX, y: e.clientY };
       setViewTransform((prev) => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+      return;
+    }
+    if (planRotationPicking && rotationLine) {
+      const container = containerRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      setRotationLine({
+        from: rotationLine.from,
+        to: planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, planTransform),
+      });
       return;
     }
     if (annotationHandlers.isDraggingRef.current) {
@@ -612,9 +671,9 @@ export function PlanView({
     const container = containerRef.current;
     if (!container) return;
     const rect = container.getBoundingClientRect();
-    setCursor(planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, viewTransform));
-  }, [setViewTransform, activeTool, viewTransform, annotating, annotation2DActiveTool,
-      measureHandlers, annotationHandlers]);
+    setCursor(planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, planTransform));
+  }, [setViewTransform, activeTool, planTransform, annotating, annotation2DActiveTool,
+      measureHandlers, annotationHandlers, planRotationPicking, rotationLine]);
 
   // ── Placing ─────────────────────────────────────────────────────────────
   // Straight into the SAME state machine 3D clicks drive, which is why every
@@ -630,15 +689,21 @@ export function PlanView({
     const container = containerRef.current;
     if (!container || !storey || !storeyModelId || !cut?.ok) return;
     const rect = container.getBoundingClientRect();
-    const point = planScreenToDrawing(clientX - rect.left, clientY - rect.top, viewTransform);
+    const point = planScreenToDrawing(clientX - rect.left, clientY - rect.top, planTransform);
     void handleAddElementDrop(
       planPointToRenderer(point, cut.worldY),
       { modelId: storeyModelId, storeyId: storey.expressId },
     );
-  }, [storey, storeyModelId, cut, viewTransform]);
+  }, [storey, storeyModelId, cut, planTransform]);
 
   const handleMouseUp = useCallback((e: React.MouseEvent) => {
     panRef.current = null;
+    if (planRotationPicking) {
+      const line = rotationLine;
+      setRotationLine(null);
+      if (line) applyRotationFromLine(line.from, line.to);
+      return;
+    }
     if (annotating || annotationHandlers.isDraggingRef.current) {
       if (annotation2DActiveTool === 'measure') measureHandlers.handleMouseUp();
       else annotationHandlers.handleMouseUp(e);
@@ -655,7 +720,7 @@ export function PlanView({
     }
     selectAt(e.clientX, e.clientY, e.ctrlKey || e.metaKey);
   }, [activeTool, placeAt, selectAt, annotating, annotation2DActiveTool,
-      measureHandlers, annotationHandlers]);
+      measureHandlers, annotationHandlers, planRotationPicking, rotationLine, applyRotationFromLine]);
 
   const handleMouseLeave = useCallback(() => {
     panRef.current = null;
@@ -736,7 +801,7 @@ export function PlanView({
       {hasDrawing && drawing && (
         <Drawing2DCanvas
           drawing={drawing}
-          transform={viewTransform}
+          transform={planTransform}
           showHiddenLines={displayOptions.showHiddenLines}
           overrideEngine={overrideEngine}
           overridesEnabled={overridesEnabled}
@@ -800,6 +865,31 @@ export function PlanView({
         </svg>
       )}
 
+      {/* The reference line being drawn, and where it will land. */}
+      {rotationLine && (() => {
+        const toScreen = (p: Point2D) => {
+          const sx = p.x * viewTransform.scale;
+          const sy = p.y * viewTransform.scale;
+          const c = Math.cos(planRotation);
+          const sn = Math.sin(planRotation);
+          return { x: sx * c - sy * sn + viewTransform.x, y: sx * sn + sy * c + viewTransform.y };
+        };
+        const a = toScreen(rotationLine.from);
+        const b = toScreen(rotationLine.to);
+        const delta = rotationToNearestAxis(rotationLine.from, rotationLine.to);
+        return (
+          <svg className="absolute inset-0 h-full w-full pointer-events-none">
+            <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="stroke-sky-500" strokeWidth={1.5} strokeDasharray="5 3" />
+            <circle cx={a.x} cy={a.y} r={3} className="fill-sky-500" />
+            {delta !== null && (
+              <text x={b.x + 8} y={b.y - 8} className="fill-sky-600 text-[11px]">
+                {(delta * RAD_TO_DEG).toFixed(2)}°
+              </text>
+            )}
+          </svg>
+        );
+      })()}
+
       {/* Tools along the top edge, where #50 asks for them. */}
       <div className="absolute top-2 left-2 right-2 flex items-start gap-2 pointer-events-none">
         <PlanToolbar
@@ -821,6 +911,13 @@ export function PlanView({
           activeTool={annotation2DActiveTool}
           onSetTool={setAnnotation2DActiveTool}
           hasAnnotations={hasAnnotations}
+          rotationDeg={planRotation * RAD_TO_DEG}
+          rotationPicking={planRotationPicking}
+          onToggleRotationPick={() => setPlanRotationPicking(!planRotationPicking)}
+          onSetRotationDeg={(deg) => {
+            setPlanRotation(normalizeAngle(deg * DEG_TO_RAD));
+            setTimeout(fitToView, 0);
+          }}
           canCommitAnnotation={selectedAnnotation2D !== null}
           onCommitAnnotation={commitSelectedAnnotation}
           onClearAnnotations={() => { clearAllAnnotations2D(); clearMeasure2DResults(); }}

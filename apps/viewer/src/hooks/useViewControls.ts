@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Drawing2D, DrawingSheet } from '@ifc-lite/drawing-2d';
+import { rotatedBounds } from '@/lib/plan/planRotation';
 
 interface UseViewControlsParams {
   drawing: Drawing2D | null;
@@ -19,6 +20,14 @@ interface UseViewControlsParams {
     translateY: number;
     scaleFactor: number;
   } | null>;
+  /**
+   * Plan view rotation in radians, for fitting a TURNED drawing.
+   *
+   * Fitting has to measure the turned extent: the unrotated bounds of a
+   * 45°-turned building understate its width by up to 40%, and the plan would
+   * be framed with its corners cut off.
+   */
+  rotation?: number;
 }
 
 interface UseViewControlsResult {
@@ -39,6 +48,7 @@ function useViewControls({
   activeSheet,
   isPinned,
   cachedSheetTransformRef,
+  rotation = 0,
 }: UseViewControlsParams): UseViewControlsResult {
   const [viewTransform, setViewTransform] = useState({ x: 0, y: 0, scale: 1 });
   const [needsFit, setNeedsFit] = useState(true); // Force fit on first open and axis change
@@ -117,8 +127,8 @@ function useViewControls({
       return;
     }
 
-    // Non-sheet mode: fit the drawing bounds
-    const { bounds } = drawing;
+    // Non-sheet mode: fit the drawing bounds, as TURNED on screen.
+    const bounds = rotatedBounds(drawing.bounds, rotation);
     const width = bounds.max.x - bounds.min.x;
     const height = bounds.max.y - bounds.min.y;
 
@@ -154,7 +164,7 @@ function useViewControls({
       x: rect.width / 2 - adjustedCenterX * scale,
       y: rect.height / 2 - adjustedCenterY * scale,
     });
-  }, [drawing, sheetEnabled, activeSheet, sectionPlane.axis]);
+  }, [drawing, sheetEnabled, activeSheet, sectionPlane.axis, rotation]);
 
   // Track axis changes for forced fit-to-view
   const lastFitAxisRef = useRef(sectionPlane.axis);

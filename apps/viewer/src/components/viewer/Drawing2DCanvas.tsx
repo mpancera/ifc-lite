@@ -349,7 +349,16 @@ export interface Measure2DResultData {
 
 interface Drawing2DCanvasProps {
   drawing: Drawing2D;
-  transform: { x: number; y: number; scale: number };
+  /**
+   * Pan, zoom and — for a plan — the view rotation, in radians.
+   *
+   * The rotation turns only the PICTURE. Drawing coordinates are never
+   * changed, which is why the DXF export writes true world coordinates
+   * without a special case and why picking, placing and committing an
+   * annotation stay correct by undoing the same angle once, in the
+   * screen-to-drawing mapping.
+   */
+  transform: { x: number; y: number; scale: number; rotation?: number };
   showHiddenLines: boolean;
   overrideEngine: GraphicOverrideEngine;
   overridesEnabled: boolean;
@@ -1136,6 +1145,24 @@ export function Drawing2DCanvas({
       const scaleX = sectionAxis === 'side' ? -transform.scale : transform.scale;
       const scaleY = sectionAxis === 'down' ? transform.scale : -transform.scale;
 
+      // Plan rotation. Only ever non-zero on a plan ('down'), where both scales
+      // are positive and equal — rotation commutes with a uniform scale but NOT
+      // with the axis mirroring a front/side section applies, so it must stay
+      // out of those. `rotate` sits between translate and scale so the angle
+      // acts on screen-space direction, not on scaled drawing units.
+      const rotation = sectionAxis === 'down' ? (transform.rotation ?? 0) : 0;
+      const rotCos = Math.cos(rotation);
+      const rotSin = Math.sin(rotation);
+      /** Drawing point to screen point, rotation included. */
+      const toScreenPt = (x: number, y: number) => {
+        const sx = x * scaleX;
+        const sy = y * scaleY;
+        return {
+          x: sx * rotCos - sy * rotSin + transform.x,
+          y: sx * rotSin + sy * rotCos + transform.y,
+        };
+      };
+
       // DXF reference underlays render first, beneath the cut geometry
       // (issue #1782). Data is pre-mapped drawing space and exists only
       // for plan ('down') sections, where the direct mapping has no axis
@@ -1152,6 +1179,7 @@ export function Drawing2DCanvas({
 
       ctx.save();
       ctx.translate(transform.x, transform.y);
+      if (rotation !== 0) ctx.rotate(rotation);
       ctx.scale(scaleX, scaleY);
 
       // ═══════════════════════════════════════════════════════════════════════
@@ -1355,8 +1383,6 @@ export function Drawing2DCanvas({
 
       ctx.restore();
 
-      const directScaleX = sectionAxis === 'side' ? -transform.scale : transform.scale;
-      const directScaleY = sectionAxis === 'down' ? transform.scale : -transform.scale;
 
       // ═══════════════════════════════════════════════════════════════════════
       // 3b. SELECTED ENTITIES
@@ -1370,8 +1396,8 @@ export function Drawing2DCanvas({
       // colour loses the material it was showing.
       // ═══════════════════════════════════════════════════════════════════════
       if (selectedEntityKeys && selectedEntityKeys.size > 0) {
-        const toX = (x: number) => x * directScaleX + transform.x;
-        const toY = (y: number) => y * directScaleY + transform.y;
+        const toX = (x: number, y: number) => toScreenPt(x, y).x;
+        const toY = (x: number, y: number) => toScreenPt(x, y).y;
         const isSelected = (modelIndex: number, entityId: number) =>
           selectedEntityKeys.has(`${modelIndex}:${entityId}`);
 
@@ -1386,13 +1412,13 @@ export function Drawing2DCanvas({
           const outer = polygon.polygon.outer;
           if (outer.length === 0) continue;
           ctx.beginPath();
-          ctx.moveTo(toX(outer[0].x), toY(outer[0].y));
-          for (let i = 1; i < outer.length; i++) ctx.lineTo(toX(outer[i].x), toY(outer[i].y));
+          ctx.moveTo(toX(outer[0].x, outer[0].y), toY(outer[0].x, outer[0].y));
+          for (let i = 1; i < outer.length; i++) ctx.lineTo(toX(outer[i].x, outer[i].y), toY(outer[i].x, outer[i].y));
           ctx.closePath();
           for (const hole of polygon.polygon.holes) {
             if (hole.length === 0) continue;
-            ctx.moveTo(toX(hole[0].x), toY(hole[0].y));
-            for (let i = 1; i < hole.length; i++) ctx.lineTo(toX(hole[i].x), toY(hole[i].y));
+            ctx.moveTo(toX(hole[0].x, hole[0].y), toY(hole[0].x, hole[0].y));
+            for (let i = 1; i < hole.length; i++) ctx.lineTo(toX(hole[i].x, hole[i].y), toY(hole[i].x, hole[i].y));
             ctx.closePath();
           }
           ctx.fill('evenodd');
@@ -1407,8 +1433,8 @@ export function Drawing2DCanvas({
           if (line.visibility === 'hidden' && !showHiddenLines) continue;
           if (!isSelected(line.modelIndex, line.entityId)) continue;
           ctx.beginPath();
-          ctx.moveTo(toX(line.line.start.x), toY(line.line.start.y));
-          ctx.lineTo(toX(line.line.end.x), toY(line.line.end.y));
+          ctx.moveTo(toX(line.line.start.x, line.line.start.y), toY(line.line.start.x, line.line.start.y));
+          ctx.lineTo(toX(line.line.end.x, line.line.end.y), toY(line.line.end.x, line.line.end.y));
           ctx.stroke();
         }
         ctx.restore();
@@ -1422,7 +1448,7 @@ export function Drawing2DCanvas({
         ifcAnnotationLines,
         ifcAnnotationTexts,
         ifcAnnotationFills,
-        (x, y) => ({ x: x * directScaleX + transform.x, y: y * directScaleY + transform.y }),
+        (x, y) => toScreenPt(x, y),
         // No paper scale here: take a baseline 0.3 px per "default mm" so
         // weights match the heavier projection lines visually. Annotation
         // strokes in IFC are intentionally lighter than projection lines,
@@ -1439,7 +1465,7 @@ export function Drawing2DCanvas({
       drawScanSectionScreenSpace(
         ctx,
         scanPoints,
-        (x, y) => ({ x: x * directScaleX + transform.x, y: y * directScaleY + transform.y }),
+        (x, y) => toScreenPt(x, y),
         scanOpacity,
       );
     }
@@ -1630,8 +1656,24 @@ export function Drawing2DCanvas({
     // ═══════════════════════════════════════════════════════════════════════
     const annotScaleX = sectionAxis === 'side' ? -transform.scale : transform.scale;
     const annotScaleY = sectionAxis === 'down' ? transform.scale : -transform.scale;
-    const drawingToScreenX = (x: number) => x * annotScaleX + transform.x;
-    const drawingToScreenY = (y: number) => y * annotScaleY + transform.y;
+    // The user's own marks are stored in TRUE drawing coordinates — the plan's
+    // screen-to-drawing mapping undoes the rotation when they are made — so
+    // drawing them back has to re-apply it, or a measurement taken on a turned
+    // plan would sit somewhere other than where it was drawn. Positions turn;
+    // glyphs do not, which is what keeps labels upright on a turned plan.
+    const annotRot = sectionAxis === 'down' ? (transform.rotation ?? 0) : 0;
+    const annotCos = Math.cos(annotRot);
+    const annotSin = Math.sin(annotRot);
+    const drawingToScreenX = (x: number, y: number) => {
+      const sx = x * annotScaleX;
+      const sy = y * annotScaleY;
+      return sx * annotCos - sy * annotSin + transform.x;
+    };
+    const drawingToScreenY = (x: number, y: number) => {
+      const sx = x * annotScaleX;
+      const sy = y * annotScaleY;
+      return sx * annotSin + sy * annotCos + transform.y;
+    };
 
     // Draw completed polygon areas
     for (const result of polygonAreaResults) {
@@ -1642,9 +1684,9 @@ export function Drawing2DCanvas({
       ctx.fillStyle = '#2196F3';
       ctx.beginPath();
       const first = result.points[0];
-      ctx.moveTo(drawingToScreenX(first.x), drawingToScreenY(first.y));
+      ctx.moveTo(drawingToScreenX(first.x, first.y), drawingToScreenY(first.x, first.y));
       for (let i = 1; i < result.points.length; i++) {
-        ctx.lineTo(drawingToScreenX(result.points[i].x), drawingToScreenY(result.points[i].y));
+        ctx.lineTo(drawingToScreenX(result.points[i].x, result.points[i].y), drawingToScreenY(result.points[i].x, result.points[i].y));
       }
       ctx.closePath();
       ctx.fill();
@@ -1655,9 +1697,9 @@ export function Drawing2DCanvas({
       ctx.lineWidth = 1.5;
       ctx.setLineDash([6, 3]);
       ctx.beginPath();
-      ctx.moveTo(drawingToScreenX(first.x), drawingToScreenY(first.y));
+      ctx.moveTo(drawingToScreenX(first.x, first.y), drawingToScreenY(first.x, first.y));
       for (let i = 1; i < result.points.length; i++) {
-        ctx.lineTo(drawingToScreenX(result.points[i].x), drawingToScreenY(result.points[i].y));
+        ctx.lineTo(drawingToScreenX(result.points[i].x, result.points[i].y), drawingToScreenY(result.points[i].x, result.points[i].y));
       }
       ctx.closePath();
       ctx.stroke();
@@ -1667,14 +1709,14 @@ export function Drawing2DCanvas({
       ctx.fillStyle = '#2196F3';
       for (const pt of result.points) {
         ctx.beginPath();
-        ctx.arc(drawingToScreenX(pt.x), drawingToScreenY(pt.y), 3, 0, Math.PI * 2);
+        ctx.arc(drawingToScreenX(pt.x, pt.y), drawingToScreenY(pt.x, pt.y), 3, 0, Math.PI * 2);
         ctx.fill();
       }
 
       // Draw area label at centroid
       const centroid = computePolygonCentroid(result.points);
-      const cx = drawingToScreenX(centroid.x);
-      const cy = drawingToScreenY(centroid.y);
+      const cx = drawingToScreenX(centroid.x, centroid.y);
+      const cy = drawingToScreenY(centroid.x, centroid.y);
       const areaText = formatArea(result.area);
       const perimText = `P: ${formatDistance(result.perimeter)}`;
 
@@ -1709,14 +1751,14 @@ export function Drawing2DCanvas({
       ctx.setLineDash([6, 3]);
       ctx.beginPath();
       const first = polygonAreaPoints[0];
-      ctx.moveTo(drawingToScreenX(first.x), drawingToScreenY(first.y));
+      ctx.moveTo(drawingToScreenX(first.x, first.y), drawingToScreenY(first.x, first.y));
       for (let i = 1; i < polygonAreaPoints.length; i++) {
-        ctx.lineTo(drawingToScreenX(polygonAreaPoints[i].x), drawingToScreenY(polygonAreaPoints[i].y));
+        ctx.lineTo(drawingToScreenX(polygonAreaPoints[i].x, polygonAreaPoints[i].y), drawingToScreenY(polygonAreaPoints[i].x, polygonAreaPoints[i].y));
       }
 
       // Draw preview line from last vertex to cursor
       if (annotation2DCursorPos) {
-        ctx.lineTo(drawingToScreenX(annotation2DCursorPos.x), drawingToScreenY(annotation2DCursorPos.y));
+        ctx.lineTo(drawingToScreenX(annotation2DCursorPos.x, annotation2DCursorPos.y), drawingToScreenY(annotation2DCursorPos.x, annotation2DCursorPos.y));
       }
       ctx.stroke();
       ctx.setLineDash([]);
@@ -1726,11 +1768,11 @@ export function Drawing2DCanvas({
         ctx.globalAlpha = 0.08;
         ctx.fillStyle = '#FF5722';
         ctx.beginPath();
-        ctx.moveTo(drawingToScreenX(first.x), drawingToScreenY(first.y));
+        ctx.moveTo(drawingToScreenX(first.x, first.y), drawingToScreenY(first.x, first.y));
         for (let i = 1; i < polygonAreaPoints.length; i++) {
-          ctx.lineTo(drawingToScreenX(polygonAreaPoints[i].x), drawingToScreenY(polygonAreaPoints[i].y));
+          ctx.lineTo(drawingToScreenX(polygonAreaPoints[i].x, polygonAreaPoints[i].y), drawingToScreenY(polygonAreaPoints[i].x, polygonAreaPoints[i].y));
         }
-        ctx.lineTo(drawingToScreenX(annotation2DCursorPos.x), drawingToScreenY(annotation2DCursorPos.y));
+        ctx.lineTo(drawingToScreenX(annotation2DCursorPos.x, annotation2DCursorPos.y), drawingToScreenY(annotation2DCursorPos.x, annotation2DCursorPos.y));
         ctx.closePath();
         ctx.fill();
         ctx.globalAlpha = 1;
@@ -1740,7 +1782,7 @@ export function Drawing2DCanvas({
       ctx.fillStyle = '#FF5722';
       for (const pt of polygonAreaPoints) {
         ctx.beginPath();
-        ctx.arc(drawingToScreenX(pt.x), drawingToScreenY(pt.y), 4, 0, Math.PI * 2);
+        ctx.arc(drawingToScreenX(pt.x, pt.y), drawingToScreenY(pt.x, pt.y), 4, 0, Math.PI * 2);
         ctx.fill();
       }
 
@@ -1749,7 +1791,7 @@ export function Drawing2DCanvas({
         ctx.strokeStyle = '#FF5722';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.arc(drawingToScreenX(first.x), drawingToScreenY(first.y), 8, 0, Math.PI * 2);
+        ctx.arc(drawingToScreenX(first.x, first.y), drawingToScreenY(first.x, first.y), 8, 0, Math.PI * 2);
         ctx.stroke();
       }
     }
@@ -1762,8 +1804,8 @@ export function Drawing2DCanvas({
       if (textAnnotation.id === textAnnotationEditing) continue;
       if (!textAnnotation.text.trim()) continue;
 
-      const sx = drawingToScreenX(textAnnotation.position.x);
-      const sy = drawingToScreenY(textAnnotation.position.y);
+      const sx = drawingToScreenX(textAnnotation.position.x, textAnnotation.position.y);
+      const sy = drawingToScreenY(textAnnotation.position.x, textAnnotation.position.y);
 
       ctx.font = `${textAnnotation.fontSize}px system-ui, sans-serif`;
       const lines = textAnnotation.text.split('\n');
@@ -1827,8 +1869,8 @@ export function Drawing2DCanvas({
 
       // Draw label at center
       if (cloud.label) {
-        const labelX = drawingToScreenX((p1.x + p2.x) / 2);
-        const labelY = drawingToScreenY((p1.y + p2.y) / 2);
+        const labelX = drawingToScreenX((p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
+        const labelY = drawingToScreenY((p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
 
         ctx.font = 'bold 12px system-ui, sans-serif';
         const labelMetrics = ctx.measureText(cloud.label);
@@ -1853,10 +1895,10 @@ export function Drawing2DCanvas({
       const p1 = cloudAnnotationPoints[0];
       const p2 = annotation2DCursorPos;
 
-      const sx1 = drawingToScreenX(p1.x);
-      const sy1 = drawingToScreenY(p1.y);
-      const sx2 = drawingToScreenX(p2.x);
-      const sy2 = drawingToScreenY(p2.y);
+      const sx1 = drawingToScreenX(p1.x, p1.y);
+      const sy1 = drawingToScreenY(p1.x, p1.y);
+      const sx2 = drawingToScreenX(p2.x, p2.y);
+      const sy2 = drawingToScreenY(p2.x, p2.y);
 
       ctx.strokeStyle = '#E53935';
       ctx.lineWidth = 1.5;
@@ -1903,8 +1945,8 @@ export function Drawing2DCanvas({
         case 'measure': {
           const result = measureResults.find((r) => r.id === selectedAnnotation.id);
           if (result) {
-            const sa = { x: drawingToScreenX(result.start.x), y: drawingToScreenY(result.start.y) };
-            const sb = { x: drawingToScreenX(result.end.x), y: drawingToScreenY(result.end.y) };
+            const sa = { x: drawingToScreenX(result.start.x, result.start.y), y: drawingToScreenY(result.start.x, result.start.y) };
+            const sb = { x: drawingToScreenX(result.end.x, result.end.y), y: drawingToScreenY(result.end.x, result.end.y) };
             const minX = Math.min(sa.x, sb.x);
             const minY = Math.min(sa.y, sb.y);
             const w = Math.abs(sb.x - sa.x);
@@ -1918,8 +1960,8 @@ export function Drawing2DCanvas({
           if (result && result.points.length >= 3) {
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
             for (const pt of result.points) {
-              const sx = drawingToScreenX(pt.x);
-              const sy = drawingToScreenY(pt.y);
+              const sx = drawingToScreenX(pt.x, pt.y);
+              const sy = drawingToScreenY(pt.x, pt.y);
               if (sx < minX) minX = sx;
               if (sy < minY) minY = sy;
               if (sx > maxX) maxX = sx;
@@ -1932,8 +1974,8 @@ export function Drawing2DCanvas({
         case 'text': {
           const annotation = textAnnotations.find((a) => a.id === selectedAnnotation.id);
           if (annotation && annotation.text.trim()) {
-            const sx = drawingToScreenX(annotation.position.x);
-            const sy = drawingToScreenY(annotation.position.y);
+            const sx = drawingToScreenX(annotation.position.x, annotation.position.y);
+            const sy = drawingToScreenY(annotation.position.x, annotation.position.y);
             ctx.font = `${annotation.fontSize}px system-ui, sans-serif`;
             const lines = annotation.text.split('\n');
             const lineHeight = annotation.fontSize * 1.3;
@@ -1952,10 +1994,10 @@ export function Drawing2DCanvas({
         case 'cloud': {
           const cloud = cloudAnnotations.find((a) => a.id === selectedAnnotation.id);
           if (cloud && cloud.points.length >= 2) {
-            const sp1x = drawingToScreenX(cloud.points[0].x);
-            const sp1y = drawingToScreenY(cloud.points[0].y);
-            const sp2x = drawingToScreenX(cloud.points[1].x);
-            const sp2y = drawingToScreenY(cloud.points[1].y);
+            const sp1x = drawingToScreenX(cloud.points[0].x, cloud.points[0].y);
+            const sp1y = drawingToScreenY(cloud.points[0].x, cloud.points[0].y);
+            const sp2x = drawingToScreenX(cloud.points[1].x, cloud.points[1].y);
+            const sp2y = drawingToScreenY(cloud.points[1].x, cloud.points[1].y);
             const minX = Math.min(sp1x, sp2x);
             const minY = Math.min(sp1y, sp2y);
             drawSelectionRect(minX, minY, Math.abs(sp2x - sp1x), Math.abs(sp2y - sp1y));

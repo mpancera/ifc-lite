@@ -200,11 +200,23 @@ export function pickInPlan(
 export function planScreenToDrawing(
   screenX: number,
   screenY: number,
-  transform: { x: number; y: number; scale: number },
+  transform: { x: number; y: number; scale: number; rotation?: number },
 ): Point2D {
+  const dx = screenX - transform.x;
+  const dy = screenY - transform.y;
+  const rotation = transform.rotation ?? 0;
+  // Undo the view rotation HERE and nowhere else. Every write-side path —
+  // picking, placing, committing an annotation — comes through this function,
+  // so one inverse keeps all of them in true world coordinates while the
+  // picture stays turned.
+  if (rotation === 0) {
+    return { x: dx / transform.scale, y: dy / transform.scale };
+  }
+  const c = Math.cos(-rotation);
+  const s = Math.sin(-rotation);
   return {
-    x: (screenX - transform.x) / transform.scale,
-    y: (screenY - transform.y) / transform.scale,
+    x: (dx * c - dy * s) / transform.scale,
+    y: (dx * s + dy * c) / transform.scale,
   };
 }
 

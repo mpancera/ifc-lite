@@ -22,7 +22,8 @@ import { computePolygonArea, computePolygonPerimeter, computePolygonCentroid } f
 
 export interface UseAnnotation2DParams {
   drawing: Drawing2D | null;
-  viewTransform: { x: number; y: number; scale: number };
+  /** `rotation` is the plan view's display angle in radians; absent or 0 elsewhere. */
+  viewTransform: { x: number; y: number; scale: number; rotation?: number };
   sectionAxis: 'down' | 'front' | 'side';
   containerRef: React.RefObject<HTMLDivElement | null>;
   activeTool: Annotation2DTool;
@@ -128,20 +129,32 @@ export function useAnnotation2D({
   const txRef = useRef(viewTransform.x);
   const tyRef = useRef(viewTransform.y);
   const axisRef = useRef(sectionAxis);
+  const rotRef = useRef(viewTransform.rotation ?? 0);
   scaleRef.current = viewTransform.scale;
   txRef.current = viewTransform.x;
   tyRef.current = viewTransform.y;
   axisRef.current = sectionAxis;
+  rotRef.current = viewTransform.rotation ?? 0;
 
   /** Convert screen px to drawing coords. Uses refs so it never goes stale. */
   const screenToDrawing = useCallback((screenX: number, screenY: number): Point2D => {
     const axis = axisRef.current;
     const scaleX = axis === 'side' ? -scaleRef.current : scaleRef.current;
     const scaleY = axis !== 'down' ? -scaleRef.current : scaleRef.current;
-    return {
-      x: (screenX - txRef.current) / scaleX,
-      y: (screenY - tyRef.current) / scaleY,
-    };
+    // Undo the plan's display rotation first, so an annotation drawn on a
+    // turned plan is stored in TRUE drawing coordinates.
+    const rotation = axis === 'down' ? rotRef.current : 0;
+    let dx = screenX - txRef.current;
+    let dy = screenY - tyRef.current;
+    if (rotation !== 0) {
+      const c = Math.cos(-rotation);
+      const sn = Math.sin(-rotation);
+      const rx = dx * c - dy * sn;
+      const ry = dx * sn + dy * c;
+      dx = rx;
+      dy = ry;
+    }
+    return { x: dx / scaleX, y: dy / scaleY };
   }, []); // stable — reads from refs
 
   /** Convert drawing coords to screen px. */
@@ -149,9 +162,17 @@ export function useAnnotation2D({
     const axis = axisRef.current;
     const scaleX = axis === 'side' ? -scaleRef.current : scaleRef.current;
     const scaleY = axis === 'down' ? scaleRef.current : -scaleRef.current;
+    const rotation = axis === 'down' ? rotRef.current : 0;
+    const sx = pt.x * scaleX;
+    const sy = pt.y * scaleY;
+    if (rotation === 0) {
+      return { x: sx + txRef.current, y: sy + tyRef.current };
+    }
+    const c = Math.cos(rotation);
+    const sn = Math.sin(rotation);
     return {
-      x: pt.x * scaleX + txRef.current,
-      y: pt.y * scaleY + tyRef.current,
+      x: sx * c - sy * sn + txRef.current,
+      y: sx * sn + sy * c + tyRef.current,
     };
   }, []); // stable
 

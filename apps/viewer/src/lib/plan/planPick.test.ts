@@ -174,6 +174,32 @@ describe('planScreenToDrawing', () => {
     assert.ok(Math.abs(back.y - drawingPoint.y) < 1e-9);
   });
 
+  it('undoes the view rotation, so a click on a turned plan is still a true point', () => {
+    // The whole reason the rotation can be view-only: picking, placing and
+    // committing an annotation all come through here, so one inverse keeps
+    // every one of them writing unturned world coordinates.
+    const t = { x: 120, y: 40, scale: 25, rotation: 31 * (Math.PI / 180) };
+    const drawingPoint = { x: 3.2, y: -1.6 };
+    // Forward, exactly as the canvas paints it: scale, then rotate, then pan.
+    const sx = drawingPoint.x * t.scale;
+    const sy = drawingPoint.y * t.scale;
+    const c = Math.cos(t.rotation);
+    const s = Math.sin(t.rotation);
+    const screenX = sx * c - sy * s + t.x;
+    const screenY = sx * s + sy * c + t.y;
+
+    const back = planScreenToDrawing(screenX, screenY, t);
+    assert.ok(Math.abs(back.x - drawingPoint.x) < 1e-9, `${back.x}`);
+    assert.ok(Math.abs(back.y - drawingPoint.y) < 1e-9, `${back.y}`);
+  });
+
+  it('is unchanged when the plan is not turned', () => {
+    const t = { x: 10, y: 20, scale: 4 };
+    const withZero = planScreenToDrawing(50, 60, { ...t, rotation: 0 });
+    const without = planScreenToDrawing(50, 60, t);
+    assert.deepEqual(withZero, without);
+  });
+
   it('keeps the grab radius constant on screen: 6 px is smaller in metres when zoomed in', () => {
     const near = 6 / 100;  // zoomed in
     const far = 6 / 10;    // zoomed out

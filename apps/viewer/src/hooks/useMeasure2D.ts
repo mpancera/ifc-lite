@@ -15,7 +15,8 @@ import type { Drawing2D } from '@ifc-lite/drawing-2d';
 
 export interface UseMeasure2DParams {
   drawing: Drawing2D | null;
-  viewTransform: { x: number; y: number; scale: number };
+  /** `rotation` is the plan view's display angle in radians; absent or 0 elsewhere. */
+  viewTransform: { x: number; y: number; scale: number; rotation?: number };
   setViewTransform: React.Dispatch<React.SetStateAction<{ x: number; y: number; scale: number }>>;
   sectionAxis: 'down' | 'front' | 'side';
   containerRef: React.RefObject<HTMLDivElement | null>;
@@ -96,9 +97,21 @@ export function useMeasure2D({
     const scaleX = flipX ? -viewTransform.scale : viewTransform.scale;
     const scaleY = flipY ? -viewTransform.scale : viewTransform.scale;
 
-    const x = (screenX - viewTransform.x) / scaleX;
-    const y = (screenY - viewTransform.y) / scaleY;
-    return { x, y };
+    // A plan may be turned for display. Undo the angle before the scale, so a
+    // measurement taken on a turned plan is stored in TRUE drawing coordinates
+    // — the same rule the plan's own picking follows.
+    const rotation = currentAxis === 'down' ? (viewTransform.rotation ?? 0) : 0;
+    let dx = screenX - viewTransform.x;
+    let dy = screenY - viewTransform.y;
+    if (rotation !== 0) {
+      const c = Math.cos(-rotation);
+      const sn = Math.sin(-rotation);
+      const rx = dx * c - dy * sn;
+      const ry = dx * sn + dy * c;
+      dx = rx;
+      dy = ry;
+    }
+    return { x: dx / scaleX, y: dy / scaleY };
   }, [viewTransform, sectionAxis]);
 
   // Find nearest point on a line segment

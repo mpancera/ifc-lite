@@ -56,16 +56,32 @@ export interface ViewModeSlice {
    * look like a plan, not to override a preference the user has since set.
    */
   planDefaultsSeeded: boolean;
+  /**
+   * How far the plan is turned for display, in radians. Project-wide.
+   *
+   * A north deviation is a property of the building, so paging storeys must not
+   * change it. It turns the PICTURE only — every coordinate that gets written
+   * still goes through the un-rotated mapping, so placements and committed
+   * annotations stay in true world coordinates and the georeferencing is
+   * untouched.
+   */
+  planRotation: number;
+  /** True while the two-click rotation gesture is armed. */
+  planRotationPicking: boolean;
 
   setViewMode: (mode: ViewMode) => void;
   toggleViewMode: () => void;
   setPlanCutHeight: (metres: number) => void;
+  setPlanRotation: (radians: number) => void;
+  setPlanRotationPicking: (picking: boolean) => void;
 }
 
 export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlice> = (set, get) => ({
   viewMode: '3d',
   planCutHeight: DEFAULT_PLAN_CUT_HEIGHT,
   planDefaultsSeeded: false,
+  planRotation: 0,
+  planRotationPicking: false,
 
   setViewMode: (viewMode) => {
     if (get().viewMode === viewMode) return;
@@ -96,4 +112,13 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   setPlanCutHeight: (metres) => {
     if (Number.isFinite(metres)) set({ planCutHeight: metres });
   },
+
+  // Refused rather than coerced, for the same reason as the cut height: a NaN
+  // angle turns the whole drawing into NaN coordinates and the plan vanishes
+  // with nothing on screen saying why.
+  setPlanRotation: (radians) => {
+    if (Number.isFinite(radians)) set({ planRotation: radians, planRotationPicking: false });
+  },
+
+  setPlanRotationPicking: (planRotationPicking) => set({ planRotationPicking }),
 });

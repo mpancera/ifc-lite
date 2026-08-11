@@ -135,8 +135,9 @@ export function drawCloudOnCanvas(
   p1: Point2D,
   p2: Point2D,
   arcRadius: number,
-  toScreenX: (x: number) => number,
-  toScreenY: (y: number) => number,
+  /** Both coordinates, because a rotated view mixes them. */
+  toScreenX: (x: number, y: number) => number,
+  toScreenY: (x: number, y: number) => number,
   screenScale: number
 ): void {
   const minX = Math.min(p1.x, p2.x);
@@ -189,15 +190,15 @@ export function drawCloudOnCanvas(
       const cy = (sy + ey) / 2;
 
       // Convert to screen coords
-      const scx = toScreenX(cx);
-      const scy = toScreenY(cy);
+      const scx = toScreenX(cx, cy);
+      const scy = toScreenY(cx, cy);
       const screenRadius = actualRadius * screenScale;
 
       // Angles in screen space (Y may be flipped)
-      const ssx = toScreenX(sx);
-      const ssy = toScreenY(sy);
-      const sex = toScreenX(ex);
-      const sey = toScreenY(ey);
+      const ssx = toScreenX(sx, sy);
+      const ssy = toScreenY(sx, sy);
+      const sex = toScreenX(ex, ey);
+      const sey = toScreenY(ex, ey);
 
       const startAngle = Math.atan2(ssy - scy, ssx - scx);
       const endAngle = Math.atan2(sey - scy, sex - scx);
