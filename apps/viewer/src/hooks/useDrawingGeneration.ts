@@ -30,6 +30,7 @@ import { GeometryProcessor, type GeometryResult } from '@ifc-lite/geometry';
 import type { SpatialHierarchy } from '@ifc-lite/data';
 import * as IfcWasm from '@ifc-lite/wasm';
 import { customPlaneCenter } from '@/store';
+import { hashIdSet } from '@/lib/drawing/idSetHash';
 
 // The winding-robust Rust `meshOutline2d` binding (issue #979) is gitignored →
 // CI-built, so reference it defensively: against an older wasm bundle it's
@@ -75,6 +76,7 @@ export const ANNOTATION_VIEW_DEPTH = 1.2;
 // and anything past this depth. Half the model depth is a sensible default;
 // tune here if sections feel too deep or too shallow.
 export const SECTION_VIEW_DEPTH_FRACTION = 0.5;
+
 
 interface UseDrawingGenerationParams {
   geometryResult: GeometryResult | null | undefined;
@@ -1088,11 +1090,39 @@ export function useDrawingGeneration({
   // cardinal axis/position/flipped triple stays the same.
   const customKey = (sp: { custom?: { normal: [number, number, number]; distance: number } }) =>
     sp.custom ? `${sp.custom.normal.join(',')}|${sp.custom.distance}` : '';
+
+  /**
+   * Which elements are in scope, collapsed to something comparable.
+   *
+   * The cut is not the only input that changes what gets drawn: hiding an
+   * element, isolating one, or soloing a storey all change the answer while the
+   * plane stays exactly where it is. Watching only the plane meant those
+   * changes produced no redraw at all — the drawing kept showing the set from
+   * whenever the plane last moved. Plan mode made this obvious because soloing
+   * a storey is its whole point, but 2D Section had the same silence when
+   * elements were hidden.
+   *
+   * These sets are rebuilt into NEW `Set` objects on many renders, so their
+   * identity cannot be the trigger — that would regenerate continuously. Their
+   * SIZE is not enough either: switching from one storey to another swaps the
+   * whole membership, and two storeys of a building are quite often the same
+   * size. That is not a hypothetical. Measured on a five-storey model, storey
+   * switches landed on a plan cut at the right height but showing the previous
+   * storey's elements, on two of four switches.
+   *
+   * So: content. One pass of a cheap order-independent mix — the sets are
+   * hundreds to a few thousand ids and this runs only when React re-renders the
+   * panel, which is far cheaper than the section cut it guards.
+   */
+  const visibilityKey = `${hashIdSet(combinedHiddenIds)}|${hashIdSet(combinedIsolatedIds)}`
+    + `|${hashIdSet(computedIsolatedIds)}`;
+
   const sectionRef = useRef({
     axis: sectionPlane.axis,
     position: sectionPlane.position,
     flipped: sectionPlane.flipped,
     customKey: customKey(sectionPlane),
+    visibilityKey,
   });
   const isGeneratingRef = useRef(false);
   const latestSectionRef = useRef({
@@ -1100,10 +1130,28 @@ export function useDrawingGeneration({
     position: sectionPlane.position,
     flipped: sectionPlane.flipped,
     customKey: customKey(sectionPlane),
+    visibilityKey,
   });
   const [isRegenerating, setIsRegenerating] = useState(false);
 
-  // Stable regenerate function that handles overlapping calls
+  // `generateDrawing` is a new closure whenever the cut (or the visible set)
+  // changes, and the catch-up path below runs AFTER an await — so it must reach
+  // the newest one, not the one captured when this run started. Going through a
+  // ref is what makes that true.
+  //
+  // Without it the catch-up re-ran the generator it was created with, which
+  // still held the OLD cut: it would finish, notice the cut still did not
+  // match, and queue itself again with the same stale closure. On a small model
+  // generation is fast enough that a fresh render usually breaks the cycle; on
+  // a real one (940 meshes) it showed up as a storey switch that took ~14 s to
+  // appear, or silently never did — a plan of the floor you were looking at
+  // before.
+  const generateDrawingRef = useRef(generateDrawing);
+  useEffect(() => { generateDrawingRef.current = generateDrawing; }, [generateDrawing]);
+
+  // Stable across renders, so the catch-up below always re-enters THIS function
+  // rather than a snapshot of it.
+  const doRegenerateRef = useRef<() => Promise<void>>(async () => {});
   const doRegenerate = useCallback(async () => {
     if (isGeneratingRef.current) {
       // Already generating - the latest position is already tracked in latestSectionRef
@@ -1118,7 +1166,7 @@ export function useDrawingGeneration({
     const targetSection = { ...latestSectionRef.current };
 
     try {
-      await generateDrawing(true);
+      await generateDrawingRef.current(true);
     } finally {
       isGeneratingRef.current = false;
       setIsRegenerating(false);
@@ -1129,14 +1177,16 @@ export function useDrawingGeneration({
         current.axis !== targetSection.axis ||
         current.position !== targetSection.position ||
         current.flipped !== targetSection.flipped ||
-        current.customKey !== targetSection.customKey
+        current.customKey !== targetSection.customKey ||
+        current.visibilityKey !== targetSection.visibilityKey
       ) {
         // Position changed during generation - regenerate immediately with latest
         // Use microtask to avoid blocking
-        queueMicrotask(() => doRegenerate());
+        queueMicrotask(() => doRegenerateRef.current());
       }
     }
-  }, [generateDrawing]);
+  }, []);
+  useEffect(() => { doRegenerateRef.current = doRegenerate; }, [doRegenerate]);
 
   const customKeyValue = customKey(sectionPlane);
   useEffect(() => {
@@ -1146,15 +1196,17 @@ export function useDrawingGeneration({
       position: sectionPlane.position,
       flipped: sectionPlane.flipped,
       customKey: customKeyValue,
+      visibilityKey,
     };
 
-    // Check if section plane actually changed from last processed
+    // Check if anything that changes the drawing actually changed
     const prev = sectionRef.current;
     if (
       prev.axis === sectionPlane.axis &&
       prev.position === sectionPlane.position &&
       prev.flipped === sectionPlane.flipped &&
-      prev.customKey === customKeyValue
+      prev.customKey === customKeyValue &&
+      prev.visibilityKey === visibilityKey
     ) {
       return;
     }
@@ -1165,6 +1217,7 @@ export function useDrawingGeneration({
       position: sectionPlane.position,
       flipped: sectionPlane.flipped,
       customKey: customKeyValue,
+      visibilityKey,
     };
 
     // If panel is visible OR 3D overlay is enabled, and we have geometry, regenerate INSTANTLY
@@ -1173,7 +1226,7 @@ export function useDrawingGeneration({
       // doRegenerate handles preventing overlaps and will auto-regenerate with latest when done
       doRegenerate();
     }
-  }, [panelVisible, displayOptions.show3DOverlay, sectionPlane.axis, sectionPlane.position, sectionPlane.flipped, customKeyValue, geometryResult, combinedHiddenIds, combinedIsolatedIds, computedIsolatedIds, doRegenerate]);
+  }, [panelVisible, displayOptions.show3DOverlay, sectionPlane.axis, sectionPlane.position, sectionPlane.flipped, customKeyValue, visibilityKey, geometryResult, combinedHiddenIds, combinedIsolatedIds, computedIsolatedIds, doRegenerate]);
 
   return {
     generateDrawing,

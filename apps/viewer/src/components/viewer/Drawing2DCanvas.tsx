@@ -334,6 +334,12 @@ function drawScanSectionScreenSpace(
 const CANVAS_STYLE = { imageRendering: 'crisp-edges' as const };
 const EMPTY_MEASURE_RESULTS: Measure2DResultData[] = [];
 
+/** Selection halo. Matches the annotation-selection blue already used below. */
+const SELECTION_COLOR = '#1976D2';
+const SELECTION_FILL = 'rgba(25, 118, 210, 0.22)';
+/** Screen pixels, so the halo reads the same at every zoom. */
+const SELECTION_WEIGHT = 2;
+
 export interface Measure2DResultData {
   id: string;
   start: { x: number; y: number };
@@ -398,6 +404,15 @@ interface Drawing2DCanvasProps {
   // Point-cloud scan overlay, already in drawing space (issue #1805)
   scanPoints?: readonly ScanBandPoint[];
   scanOpacity?: number;
+  /**
+   * Which elements are selected, as `"modelIndex:entityId"` keys.
+   *
+   * Keyed that way rather than by express id because a federated drawing can
+   * hold the same local id from two models, and rather than by global id
+   * because the drawing itself only ever carries the local pair. The caller
+   * translates from whatever the store holds.
+   */
+  selectedEntityKeys?: ReadonlySet<string>;
 }
 
 export function Drawing2DCanvas({
@@ -434,6 +449,7 @@ export function Drawing2DCanvas({
   dxfUnderlays,
   scanPoints,
   scanOpacity = 1,
+  selectedEntityKeys,
 }: Drawing2DCanvasProps): React.ReactElement {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
@@ -1308,11 +1324,68 @@ export function Drawing2DCanvas({
 
       ctx.restore();
 
+      const directScaleX = sectionAxis === 'side' ? -transform.scale : transform.scale;
+      const directScaleY = sectionAxis === 'down' ? transform.scale : -transform.scale;
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // 3b. SELECTED ENTITIES
+      //
+      // After restore, so the halo is a constant width in SCREEN pixels. Inside
+      // the transform it would inverse-scale — invisible on a zoomed-out plan
+      // and a fat blue slab on a zoomed-in one.
+      //
+      // Drawn as an overlay rather than by re-colouring the element: a plan is
+      // read by its line weights, and swapping a wall's fill for a highlight
+      // colour loses the material it was showing.
+      // ═══════════════════════════════════════════════════════════════════════
+      if (selectedEntityKeys && selectedEntityKeys.size > 0) {
+        const toX = (x: number) => x * directScaleX + transform.x;
+        const toY = (y: number) => y * directScaleY + transform.y;
+        const isSelected = (modelIndex: number, entityId: number) =>
+          selectedEntityKeys.has(`${modelIndex}:${entityId}`);
+
+        ctx.save();
+        ctx.strokeStyle = SELECTION_COLOR;
+        ctx.fillStyle = SELECTION_FILL;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+
+        for (const polygon of drawing.cutPolygons) {
+          if (!isSelected(polygon.modelIndex, polygon.entityId)) continue;
+          const outer = polygon.polygon.outer;
+          if (outer.length === 0) continue;
+          ctx.beginPath();
+          ctx.moveTo(toX(outer[0].x), toY(outer[0].y));
+          for (let i = 1; i < outer.length; i++) ctx.lineTo(toX(outer[i].x), toY(outer[i].y));
+          ctx.closePath();
+          for (const hole of polygon.polygon.holes) {
+            if (hole.length === 0) continue;
+            ctx.moveTo(toX(hole[0].x), toY(hole[0].y));
+            for (let i = 1; i < hole.length; i++) ctx.lineTo(toX(hole[i].x), toY(hole[i].y));
+            ctx.closePath();
+          }
+          ctx.fill('evenodd');
+          ctx.lineWidth = SELECTION_WEIGHT;
+          ctx.stroke();
+        }
+
+        // Elements with no cut face — anything below the cut — would otherwise
+        // select invisibly, which reads as the click having missed.
+        ctx.lineWidth = SELECTION_WEIGHT;
+        for (const line of drawing.lines) {
+          if (line.visibility === 'hidden' && !showHiddenLines) continue;
+          if (!isSelected(line.modelIndex, line.entityId)) continue;
+          ctx.beginPath();
+          ctx.moveTo(toX(line.line.start.x), toY(line.line.start.y));
+          ctx.lineTo(toX(line.line.end.x), toY(line.line.end.y));
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
       // IFC annotation overlay (issue #812). Rendered after ctx.restore so we
       // can size lines and text in screen pixels rather than fighting the
       // ctx.scale applied above (which would inverse-scale everything).
-      const directScaleX = sectionAxis === 'side' ? -transform.scale : transform.scale;
-      const directScaleY = sectionAxis === 'down' ? transform.scale : -transform.scale;
       drawIfcAnnotationsScreenSpace(
         ctx,
         ifcAnnotationLines,
@@ -1860,7 +1933,7 @@ export function Drawing2DCanvas({
         }
       }
     }
-  }, [drawing, transform, showHiddenLines, canvasSize, overrideEngine, overridesEnabled, entityColorMap, useIfcMaterials, measureMode, measureStart, measureCurrent, measureResults, measureSnapPoint, sheetEnabled, activeSheet, sectionAxis, isPinned, annotation2DActiveTool, annotation2DCursorPos, polygonAreaPoints, polygonAreaResults, textAnnotations, textAnnotationEditing, cloudAnnotationPoints, cloudAnnotations, selectedAnnotation, ifcAnnotationLines, ifcAnnotationTexts, ifcAnnotationFills, dxfUnderlays, scanPoints, scanOpacity, alignmentOverlay]);
+  }, [drawing, transform, showHiddenLines, canvasSize, overrideEngine, overridesEnabled, entityColorMap, useIfcMaterials, measureMode, measureStart, measureCurrent, measureResults, measureSnapPoint, sheetEnabled, activeSheet, sectionAxis, isPinned, annotation2DActiveTool, annotation2DCursorPos, polygonAreaPoints, polygonAreaResults, textAnnotations, textAnnotationEditing, cloudAnnotationPoints, cloudAnnotations, selectedAnnotation, ifcAnnotationLines, ifcAnnotationTexts, ifcAnnotationFills, dxfUnderlays, scanPoints, scanOpacity, alignmentOverlay, selectedEntityKeys]);
 
   return (
     <canvas

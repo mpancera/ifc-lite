@@ -53,26 +53,83 @@ interface StoreyNames {
   readonly elementToStorey: ReadonlyMap<number, number>;
 }
 
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
+ * How far the whole model's geometry sits from what its storey elevations say,
+ * or `null` when that cannot be established.
+ *
+ * The attribute frame and the render frame differ by ONE rigid shift (the
+ * building/site placement, plus the RTC rebase). So every storey should show
+ * the same difference between its mesh floor and its stated elevation, give or
+ * take the slab thickness the mesh floor sits below the datum by.
+ *
+ * The median is the point. On a real building most storeys agree closely, and
+ * the ones that do not are storeys with an element assigned to them that hangs
+ * down into the floor below — a stair flight, a shaft, a sunken slab. Measured
+ * on a five-storey model: four storeys offset by −0.30, −0.32, −0.28, −0.34 and
+ * one by −0.84. The odd one out is not a different datum, it is a staircase.
+ * A median ignores it; a per-storey minimum believes it and cuts that plan
+ * half a metre too low.
+ */
+function datumOffset(
+  levels: ReadonlyMap<number, number>,
+  elevations: ReadonlyMap<number, number>,
+): number | null {
+  const offsets: number[] = [];
+  for (const [storeyId, floorLevel] of levels) {
+    const stated = elevations.get(storeyId);
+    if (stated !== undefined && Number.isFinite(stated)) offsets.push(floorLevel - stated);
+  }
+  // One storey cannot distinguish a datum shift from a descending element, so
+  // there is nothing for a median to reject and the mesh floor stands alone.
+  return offsets.length >= 2 ? median(offsets) : null;
+}
+
 /**
  * The storeys a plan can be cut at, lowest first.
  *
  * Only storeys that produced geometry appear. That is not a shortcut: a storey
  * with no members has no derivable floor, and offering it would produce an
  * empty plan that looks like a broken one. It also quietly disposes of the
- * empty basement level that many models carry as a datum.
+ * empty datum level that many models carry.
+ *
+ * # Where the floor comes from
+ * `stated elevation + the model's datum offset`, NOT the storey's own mesh
+ * minimum. Both halves are load-bearing:
+ *
+ * - The stated elevations carry the storey SPACING the author drew, exactly.
+ * - The offset carries the placement the attribute omits, which is what makes
+ *   the attribute unusable on a georeferenced model on its own.
+ *
+ * Taking each storey's own mesh minimum instead — the obvious reading of "use
+ * the geometry, not the attribute" — lets one descending element move that
+ * storey's whole plan. That is not hypothetical: it is what put a ground-floor
+ * plan 0.84 m low on the first real model this met.
+ *
+ * With no usable elevations at all, the mesh minima are the only answer left
+ * and are used as before.
  */
 export function planStoreys(
   meshes: ReadonlyArray<StoreyFloorMesh>,
   hierarchy: StoreyNames,
 ): PlanStorey[] {
   const levels = storeyFloorLevelsFromMeshes(meshes, hierarchy.elementToStorey);
+  const offset = datumOffset(levels, hierarchy.elevations);
+
   const storeys: PlanStorey[] = [];
-  for (const [expressId, floorLevel] of levels) {
+  for (const [expressId, meshFloor] of levels) {
+    const stated = hierarchy.elevations.get(expressId);
+    const hasStated = stated !== undefined && Number.isFinite(stated);
     storeys.push({
       expressId,
       name: hierarchy.names.get(expressId) ?? `#${expressId}`,
-      floorLevel,
-      elevation: hierarchy.elevations.get(expressId) ?? null,
+      floorLevel: offset !== null && hasStated ? stated + offset : meshFloor,
+      elevation: hasStated ? stated : null,
     });
   }
   storeys.sort((a, b) => a.floorLevel - b.floorLevel);

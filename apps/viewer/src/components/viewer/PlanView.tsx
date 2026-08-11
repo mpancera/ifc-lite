@@ -42,13 +42,14 @@ import { useIfc } from '@/hooks/useIfc';
 import { GraphicOverrideEngine, type Drawing2D } from '@ifc-lite/drawing-2d';
 import type { GeometryResult } from '@ifc-lite/geometry';
 import { Drawing2DCanvas } from './Drawing2DCanvas';
+import { ViewModeToggle } from './ViewportOverlays';
 import { useDrawingGeneration } from '@/hooks/useDrawingGeneration';
 import { useViewControls } from '@/hooks/useViewControls';
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
 import { pickInPlan, planScreenToDrawing, planPointToRenderer } from '@/lib/plan/planPick';
 import { handleAddElementDrop } from './selectionHandlers';
-import { toGlobalIdFromModels } from '@/store/globalId';
+import { toGlobalIdFromModels, fromGlobalIdFromModels } from '@/store/globalId';
 import { resolveEntityRef } from '@/store/resolveEntityRef';
 import { applyLevelDisplayMode } from '@/store/levelDisplay';
 import type { LevelDisplayMode } from '@/store/slices/levelDisplaySlice';
@@ -107,6 +108,8 @@ export function PlanView({
   const models = useViewerStore((s) => s.models);
   const activeTool = useViewerStore((s) => s.activeTool);
   const addElementPendingPoints = useViewerStore((s) => s.addElementPendingPoints);
+  const selectedEntityId = useViewerStore((s) => s.selectedEntityId);
+  const selectedEntityIds = useViewerStore((s) => s.selectedEntityIds);
   const { geometryResult: legacyGeometryResult, ifcDataStore } = useIfc();
   const geometryResult = mergedGeometry ?? legacyGeometryResult;
 
@@ -250,6 +253,15 @@ export function PlanView({
     setDrawingError: setError,
   });
 
+  // Storeys of a building rarely share a footprint — a basement or a roof plant
+  // room can sit well off the outline of the floor below. Keeping the pan and
+  // zoom across a storey switch can therefore leave the new plan entirely
+  // outside the viewport, which reads exactly like "no view at all". Refit once
+  // per storey, but not on a cut-height change: that is a small adjustment to
+  // the plan you are already looking at, and moving the view under the user
+  // there would be the annoying half of this.
+  const fittedStoreyRef = useRef<number | null>(null);
+
   const { viewTransform, setViewTransform, zoomIn, zoomOut, fitToView } = useViewControls({
     drawing,
     sectionPlane,
@@ -312,6 +324,15 @@ export function PlanView({
     state.setSelectedEntityId(globalId);
     state.setSelectedEntity(resolveEntityRef(globalId));
   }, [drawing, viewTransform, indexToModelId]);
+
+  // Fit once the drawing for a newly chosen storey has actually arrived —
+  // fitting on the switch itself would frame the storey being left behind.
+  useEffect(() => {
+    if (!active || !storey || !drawing || status !== 'ready') return;
+    if (fittedStoreyRef.current === storey.expressId) return;
+    fittedStoreyRef.current = storey.expressId;
+    fitToView();
+  }, [active, storey, drawing, status, fitToView]);
 
   // ── Pan and click ───────────────────────────────────────────────────────
   // Right button pans, matching the 2D Section panel: the left button stays
@@ -402,6 +423,29 @@ export function PlanView({
     return { placed, band: cursor ? toScreen(cursor) : null };
   }, [activeTool, addElementPendingPoints, viewTransform, cursor]);
 
+  // ── Selection, as the canvas wants it ───────────────────────────────────
+  // The store selects on GLOBAL ids; the drawing carries local ids plus the
+  // model index. This is the same translation the pick does, run backwards, so
+  // clicking an element and seeing it light up are the same statement.
+  const selectedEntityKeys = useMemo(() => {
+    const globalIds = new Set<number>(selectedEntityIds);
+    if (selectedEntityId !== null) globalIds.add(selectedEntityId);
+    if (globalIds.size === 0) return undefined;
+
+    const keys = new Set<string>();
+    for (const globalId of globalIds) {
+      const local = fromGlobalIdFromModels(models, globalId);
+      if (local) {
+        const index = modelIdToIndex?.get(local.modelId) ?? 0;
+        keys.add(`${index}:${local.expressId}`);
+      } else {
+        // Single-model fallback: global id IS the express id, model index 0.
+        keys.add(`0:${globalId}`);
+      }
+    }
+    return keys;
+  }, [selectedEntityIds, selectedEntityId, models, modelIdToIndex]);
+
   const overrideEngine = useMemo(() => new GraphicOverrideEngine([]), []);
   const emptyColorMap = useMemo(() => new Map<number, [number, number, number, number]>(), []);
 
@@ -439,6 +483,7 @@ export function PlanView({
           sectionAxis={PLAN_AXIS}
           isPinned
           cachedSheetTransformRef={cachedSheetTransformRef}
+          selectedEntityKeys={selectedEntityKeys}
         />
       )}
 
@@ -476,6 +521,12 @@ export function PlanView({
 
       {/* Controls along the top edge, where #50 asks for them. */}
       <div className="absolute top-2 left-2 right-2 flex items-center gap-2 pointer-events-none">
+        {/* The way back to 3D. The viewport's own copy sits in the overlay
+            cluster this surface covers, so without one here the only exit is
+            the View ribbon. */}
+        <div className="pointer-events-auto rounded-md border bg-background/90 backdrop-blur-sm px-1 py-1 shadow-sm">
+          <ViewModeToggle />
+        </div>
         <div className="pointer-events-auto flex items-center gap-1.5 rounded-md border bg-background/90 backdrop-blur-sm px-2 py-1 shadow-sm">
           <span className="text-[10px] text-muted-foreground">Geschoss</span>
           <select

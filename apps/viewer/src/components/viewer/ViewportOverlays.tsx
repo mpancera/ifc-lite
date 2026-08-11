@@ -246,8 +246,14 @@ export function ViewportOverlays({ hideViewCube = false }: { hideViewCube?: bool
  * Two labelled buttons rather than one toggle: the current mode has to be
  * readable at a glance, and a single button that says "2D" is ambiguous about
  * whether that is the state or the action.
+ *
+ * Exported because plan mode has to carry its own copy. This whole overlay
+ * cluster is 3D furniture — axis helper, scale bar, basepoint markers,
+ * ViewCube — and none of it belongs over a floor plan, so the plan covers it.
+ * That would leave the only way back to 3D buried in the View ribbon. The way
+ * out of a mode has to be inside the mode.
  */
-function ViewModeToggle() {
+export function ViewModeToggle() {
   const viewMode = useViewerStore((s) => s.viewMode);
   const setViewMode = useViewerStore((s) => s.setViewMode);
   const modelCount = useViewerStore((s) => s.models.size);
