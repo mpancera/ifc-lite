@@ -1,3 +1,36 @@
+> ## This is a fork
+>
+> The original is **[LTplus-AG/ifc-lite](https://github.com/LTplus-AG/ifc-lite)**
+> by [@louistrue](https://github.com/louistrue). Everything below this box
+> describes that project, and the credit for it belongs there — try it at
+> [ifclite.com](https://www.ifclite.com/).
+>
+> This fork adds work aimed at one job: making building data usable **early** in
+> a project, when the documentation is still 2D drawings and lists rather than a
+> model.
+>
+> | Added here | What it is for |
+> | --- | --- |
+> | Reference height system | Storey levels as one project-wide reference, definable by hand *before* any model exists, and a per-model comparison against it |
+> | Zones and compartments | Grouping rooms — written as IFC relationships rather than into a private store, so they survive an export |
+> | Project binding | A folder *is* a project, so a height system or a set of zones derived in one cannot quietly appear in the next |
+> | DXF alignment | Placing a scanned or exported plan by drawing two lines on the same feature, instead of guessing offset, rotation and scale |
+> | Plan mode | A floor plan as a mode — one storey, cut, orthographic — rather than a camera looking down |
+> | Smart Properties | Rule-based property values |
+>
+> Plus additions to Add Element, Lists, Lens and the element filter.
+>
+> **Status.** Built for one particular way of working, and **not** reviewed or
+> endorsed by the upstream maintainer. Some of it may be worth contributing
+> back and some of it may not — that is a conversation to have, not a promise
+> made here.
+>
+> **Branches.** `datacontainer` is the default and holds this work.
+> `main` is left untouched as a mirror of upstream, which is what makes
+> "what did this fork change?" answerable at all.
+>
+> Same licence as the original: [MPL-2.0](LICENSE).
+
 <table align="center">
 <tr>
 <td valign="top">
