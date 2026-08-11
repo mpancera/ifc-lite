@@ -58,6 +58,7 @@ import { useSymbolicAnnotationsForDrawing } from '@/hooks/useSymbolicAnnotations
 import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds } from '@/hooks/useDxfUnderlay';
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { useLensColorKeys } from '@/hooks/useLensColorKeys';
+import { useModelOrigins } from '@/hooks/useModelOrigins';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
 import {
   rotationToDirection, normalizeAngle, bearingToAngle, angleToBearing, normalizeBearing,
@@ -208,6 +209,19 @@ export function PlanView({
 
   const { combinedHiddenIds, combinedIsolatedIds } = useCombinedVisibilityIds();
   const lensColorKeys = useLensColorKeys(modelIdToIndex);
+
+  // Adopt this project's saved rotation when the plan opens. A working state,
+  // not model content: nothing is written into the IFC.
+  const restorePlanRotationForProject = useViewerStore((s) => s.restorePlanRotationForProject);
+  useEffect(() => {
+    if (active) restorePlanRotationForProject();
+  }, [active, restorePlanRotationForProject]);
+
+  // Where each model says its IFC (0,0,0) is. Same derivation the 3D
+  // basepoint markers use — a plan that disagreed with the 3D view about the
+  // origin would make the diagnostic itself untrustworthy.
+  const showModelBasepoints = useViewerStore((s) => s.showModelBasepoints);
+  const modelOrigins = useModelOrigins(active && showModelBasepoints);
 
   // ── The storeys this model can be cut at ────────────────────────────────
   // Single-model only: `elementToStorey` keys are LOCAL express ids, so on a
@@ -984,6 +998,36 @@ export function PlanView({
             </Button>
           </div>
         </div>
+      )}
+
+      {/* Model origins. The 3D view draws a triad here; a plan has no third
+          axis to show, so it gets the two it does have — the cross reads as
+          "this is a point AND these are its directions", which is the whole
+          reason to look at it. Viewer x/z map straight onto the drawing's
+          x/y, the same mapping picking and placing use. */}
+      {modelOrigins.length > 0 && (
+        <svg className="absolute inset-0 h-full w-full pointer-events-none" data-plan-origins>
+          {modelOrigins.map((o) => {
+            const sx = o.viewer.x * viewTransform.scale;
+            const sy = o.viewer.z * viewTransform.scale;
+            const c = Math.cos(planRotation);
+            const sn = Math.sin(planRotation);
+            const x = sx * c - sy * sn + viewTransform.x;
+            const y = sx * sn + sy * c + viewTransform.y;
+            // The axes turn with the plan; the LABEL does not, so it stays
+            // readable — same rule the rest of the text follows.
+            const ax = 18 * c, ay = 18 * sn;      // +X on screen
+            const bx = -18 * sn, by = 18 * c;     // +Z on screen
+            return (
+              <g key={o.modelId}>
+                <line x1={x} y1={y} x2={x + ax} y2={y + ay} stroke="#dc2626" strokeWidth={1.5} />
+                <line x1={x} y1={y} x2={x + bx} y2={y + by} stroke="#2563eb" strokeWidth={1.5} />
+                <circle cx={x} cy={y} r={3} fill="#ffffff" stroke="#111827" strokeWidth={1.5} />
+                <text x={x + 6} y={y - 6} className="fill-zinc-700 text-[10px]">{o.modelName}</text>
+              </g>
+            );
+          })}
+        </svg>
       )}
 
       {/* Tools along the top edge, where #50 asks for them. */}

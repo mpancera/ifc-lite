@@ -26,7 +26,7 @@ import React from 'react';
 import {
   Box, Shapes, Tag, Layers, PenTool, FileText, ZoomIn, ZoomOut,
   Maximize2, Download, FileDown, Printer, RefreshCw, Ruler,
-  Hexagon, Type, Cloud, Trash2, FilePlus2, RotateCw, RotateCcw,
+  Hexagon, Type, Cloud, Trash2, FilePlus2, RotateCw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -243,9 +243,18 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
       />
       <span className="text-[10px] text-muted-foreground">°</span>
       {Math.abs(rotationDeg) > 0.001 && (
-        <ToolButton onClick={() => onSetRotationDeg(0)} title="Drehung zurücksetzen">
-          <RotateCcw className="h-4 w-4" />
-        </ToolButton>
+        // Labelled, not an icon. A counter-clockwise arrow next to a rotation
+        // tool reads as "turn left" — it looks like another way to rotate
+        // rather than the way to stop. "0°" says exactly what the button does.
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm" className="h-6 px-1.5 text-[10px]"
+                    onClick={() => onSetRotationDeg(0)}>
+              0°
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="text-xs">Drehung zurücksetzen</TooltipContent>
+        </Tooltip>
       )}
 
       <Divider />

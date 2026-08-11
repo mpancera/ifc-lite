@@ -22,26 +22,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useViewerStore } from '@/store';
 import { getGlobalRenderer } from '@/hooks/useBCF';
-import {
-  computeIfcOriginViewerPosition,
-  type IfcOriginPlacement,
-  type ModelGeorefInput,
-} from '@/lib/geo/ifc-origin';
-import { getEffectiveGeoreference } from '@/lib/geo/effective-georef';
-import { selectAnchorGeoref } from '@/lib/geo/useAnchorGeoreference';
+import { useModelOrigins, type ModelOrigin } from '@/hooks/useModelOrigins';
 import type { FederatedModel } from '@/store/types';
-import type { IfcDataStore } from '@ifc-lite/parser';
 import type { Renderer } from '@ifc-lite/renderer';
 
-interface BasepointDot {
-  modelId: string;
-  modelName: string;
-  status: FederatedModel['federationAlignmentStatus'];
-  /** Viewer-space (Y-up) position of the model's IFC (0,0,0) point. */
-  viewer: { x: number; y: number; z: number };
-  /** Source flag from computeIfcOriginViewerPosition (debug colour hint). */
-  origin: IfcOriginPlacement['source'];
-}
 
 const STATUS_COLOURS: Record<NonNullable<FederatedModel['federationAlignmentStatus']> | 'none', { stroke: string; fill: string }> = {
   anchor:      { stroke: '#f59e0b', fill: '#fef3c7' }, // amber
@@ -62,7 +46,7 @@ export function BasepointOverlay() {
 
   // Cached origin world positions in viewer Y-up space; rebuilt only when the
   // upstream georef data changes, NOT every camera frame.
-  const dotsRef = useRef<BasepointDot[]>([]);
+  const dotsRef = useRef<ModelOrigin[]>([]);
   const [version, setVersion] = useState(0);
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -71,75 +55,13 @@ export function BasepointOverlay() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const rafRef = useRef<number | null>(null);
 
-  // Compute the anchor's georef input once per dependency change. Shares the
-  // "user-pinned anchor, else earliest-loaded model with a usable map-conversion
-  // georef" selection with the measure-tool readout and findReferenceGeorefModel.
-  const anchorInput = useMemo((): { id: string | null; input: ModelGeorefInput | null } => {
-    const selection = selectAnchorGeoref({ models, anchorModelIdOverride, georefMutations });
-    if (!selection) return { id: null, input: null };
-    const model = models.get(selection.modelId);
-    return {
-      id: selection.modelId,
-      input: {
-        coordinateInfo: selection.coordinateInfo,
-        mapConversion: selection.eff.mapConversion,
-        projectedCRS: selection.eff.projectedCRS,
-        lengthUnitScale: selection.eff.lengthUnitScale,
-        preAlignmentCoordinateInfo: model?.preAlignmentCoordinateInfo,
-      },
-    };
-  }, [models, anchorModelIdOverride, georefMutations]);
-
-  // Recompute every model's IFC-origin viewer position when the inputs change.
+  // Where each model thinks its origin is. Shared with the plan's origin
+  // marker so the two views cannot disagree about the very thing this is for.
+  const origins = useModelOrigins(showModelBasepoints);
   useEffect(() => {
-    if (!showModelBasepoints) {
-      dotsRef.current = [];
-      setVersion((v) => v + 1);
-      return;
-    }
-
-    let cancelled = false;
-
-    (async () => {
-      const results: BasepointDot[] = [];
-      for (const [modelId, model] of models) {
-        if (!model.visible) continue;
-        const ds = model.ifcDataStore;
-        if (!ds) continue;
-        const eff = getEffectiveGeoreference(
-          ds as IfcDataStore,
-          model.geometryResult?.coordinateInfo,
-          georefMutations.get(modelId),
-        );
-        const modelInput: ModelGeorefInput = {
-          coordinateInfo: model.geometryResult?.coordinateInfo,
-          mapConversion: eff?.mapConversion,
-          projectedCRS: eff?.projectedCRS,
-          lengthUnitScale: eff?.lengthUnitScale,
-          preAlignmentCoordinateInfo: model.preAlignmentCoordinateInfo,
-        };
-        const anchorIsThis = anchorInput.id === modelId;
-        const placement = await computeIfcOriginViewerPosition(
-          modelInput,
-          anchorIsThis ? null : anchorInput.input,
-        );
-        if (!placement) continue;
-        results.push({
-          modelId,
-          modelName: model.name,
-          status: anchorIsThis ? 'anchor' : (model.federationAlignmentStatus ?? 'none'),
-          viewer: placement.viewer,
-          origin: placement.source,
-        });
-      }
-      if (cancelled) return;
-      dotsRef.current = results;
-      setVersion((v) => v + 1);
-    })();
-
-    return () => { cancelled = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showModelBasepoints, models, anchorInput, georefMutations]);
+    dotsRef.current = origins;
+    setVersion((v) => v + 1);
+  }, [origins]);
 
   // Lazy renderer/canvas lookup + per-frame projection. We poll on RAF
   // (matching BCFOverlay) since the WebGPU renderer doesn't expose a

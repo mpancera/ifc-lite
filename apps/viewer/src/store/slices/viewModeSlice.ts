@@ -23,6 +23,7 @@
 
 import { type StateCreator } from 'zustand';
 import type { ViewerState } from '../index.js';
+import { loadPlanRotation, savePlanRotation } from '@/lib/plan/planRotationStore';
 
 export type ViewMode = '3d' | '2d';
 
@@ -68,12 +69,27 @@ export interface ViewModeSlice {
   planRotation: number;
   /** True while the two-click rotation gesture is armed. */
   planRotationPicking: boolean;
+  /**
+   * Which project the loaded rotation belongs to.
+   *
+   * Beside the angle rather than in it: it exists to notice that the project
+   * changed, and an angle that carries a project id would have to be kept in
+   * step with one. `null` means nothing has been loaded yet.
+   */
+  planRotationProject: string | null;
 
   setViewMode: (mode: ViewMode) => void;
   toggleViewMode: () => void;
   setPlanCutHeight: (metres: number) => void;
   setPlanRotation: (radians: number) => void;
   setPlanRotationPicking: (picking: boolean) => void;
+  /**
+   * Adopt the rotation stored for the current project, once per project.
+   *
+   * Called when a plan opens rather than on every render: re-reading storage
+   * continuously would overwrite an angle the user is in the middle of setting.
+   */
+  restorePlanRotationForProject: () => void;
 }
 
 export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlice> = (set, get) => ({
@@ -82,6 +98,7 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   planDefaultsSeeded: false,
   planRotation: 0,
   planRotationPicking: false,
+  planRotationProject: null,
 
   setViewMode: (viewMode) => {
     if (get().viewMode === viewMode) return;
@@ -117,8 +134,23 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   // angle turns the whole drawing into NaN coordinates and the plan vanishes
   // with nothing on screen saying why.
   setPlanRotation: (radians) => {
-    if (Number.isFinite(radians)) set({ planRotation: radians, planRotationPicking: false });
+    if (!Number.isFinite(radians)) return;
+    set({ planRotation: radians, planRotationPicking: false });
+    // Remembered for the project, never written into the model. The building
+    // keeps the orientation it was modelled with; this records only that
+    // somebody chose to look at it straight while working.
+    savePlanRotation(get().currentProjectKey(), radians);
   },
 
   setPlanRotationPicking: (planRotationPicking) => set({ planRotationPicking }),
+
+  restorePlanRotationForProject: () => {
+    const project = get().currentProjectKey();
+    if (project === null) return;
+    // Once per project. Without the guard, reopening the plan would discard an
+    // angle set and not yet stored, and switching storeys would fight the user.
+    if (get().planRotationProject === project) return;
+    const stored = loadPlanRotation(project);
+    set({ planRotationProject: project, planRotation: stored ?? 0 });
+  },
 });
