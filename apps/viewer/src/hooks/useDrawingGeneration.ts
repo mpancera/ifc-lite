@@ -1117,12 +1117,29 @@ export function useDrawingGeneration({
   const visibilityKey = `${hashIdSet(combinedHiddenIds)}|${hashIdSet(combinedIsolatedIds)}`
     + `|${hashIdSet(computedIsolatedIds)}`;
 
+  /**
+   * The display options that change what the generator PRODUCES, as opposed to
+   * how the canvas paints it.
+   *
+   * Same omission as the visible set: these were not watched, so flipping the
+   * construction projection or the symbolic representation left the previous
+   * drawing standing. The 2D Section panel worked around it by having each
+   * toggle null the drawing by hand, which is a rule every future toggle has
+   * to remember; watching them here is the same fix in one place.
+   *
+   * `show3DOverlay` is deliberately absent — it gates whether generation runs
+   * at all and is already a dependency of the effect below.
+   */
+  const displayKey = `${displayOptions.showHiddenLines}|${displayOptions.useSymbolicRepresentations}`
+    + `|${displayOptions.showConstructionProjection}|${displayOptions.scale}`;
+
   const sectionRef = useRef({
     axis: sectionPlane.axis,
     position: sectionPlane.position,
     flipped: sectionPlane.flipped,
     customKey: customKey(sectionPlane),
     visibilityKey,
+    displayKey,
   });
   const isGeneratingRef = useRef(false);
   const latestSectionRef = useRef({
@@ -1131,6 +1148,7 @@ export function useDrawingGeneration({
     flipped: sectionPlane.flipped,
     customKey: customKey(sectionPlane),
     visibilityKey,
+    displayKey,
   });
   const [isRegenerating, setIsRegenerating] = useState(false);
 
@@ -1178,7 +1196,8 @@ export function useDrawingGeneration({
         current.position !== targetSection.position ||
         current.flipped !== targetSection.flipped ||
         current.customKey !== targetSection.customKey ||
-        current.visibilityKey !== targetSection.visibilityKey
+        current.visibilityKey !== targetSection.visibilityKey ||
+        current.displayKey !== targetSection.displayKey
       ) {
         // Position changed during generation - regenerate immediately with latest
         // Use microtask to avoid blocking
@@ -1197,6 +1216,7 @@ export function useDrawingGeneration({
       flipped: sectionPlane.flipped,
       customKey: customKeyValue,
       visibilityKey,
+      displayKey,
     };
 
     // Check if anything that changes the drawing actually changed
@@ -1206,7 +1226,8 @@ export function useDrawingGeneration({
       prev.position === sectionPlane.position &&
       prev.flipped === sectionPlane.flipped &&
       prev.customKey === customKeyValue &&
-      prev.visibilityKey === visibilityKey
+      prev.visibilityKey === visibilityKey &&
+      prev.displayKey === displayKey
     ) {
       return;
     }
@@ -1218,6 +1239,7 @@ export function useDrawingGeneration({
       flipped: sectionPlane.flipped,
       customKey: customKeyValue,
       visibilityKey,
+      displayKey,
     };
 
     // If panel is visible OR 3D overlay is enabled, and we have geometry, regenerate INSTANTLY
@@ -1226,7 +1248,7 @@ export function useDrawingGeneration({
       // doRegenerate handles preventing overlaps and will auto-regenerate with latest when done
       doRegenerate();
     }
-  }, [panelVisible, displayOptions.show3DOverlay, sectionPlane.axis, sectionPlane.position, sectionPlane.flipped, customKeyValue, visibilityKey, geometryResult, combinedHiddenIds, combinedIsolatedIds, computedIsolatedIds, doRegenerate]);
+  }, [panelVisible, displayOptions.show3DOverlay, sectionPlane.axis, sectionPlane.position, sectionPlane.flipped, customKeyValue, visibilityKey, displayKey, geometryResult, combinedHiddenIds, combinedIsolatedIds, computedIsolatedIds, doRegenerate]);
 
   return {
     generateDrawing,

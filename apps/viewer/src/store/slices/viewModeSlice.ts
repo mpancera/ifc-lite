@@ -42,6 +42,13 @@ export interface ViewModeSlice {
   planStoreyId: string | null;
   /** Metres above the storey's finished floor. */
   planCutHeight: number;
+  /**
+   * Whether the plan-appropriate drawing defaults have been applied yet.
+   *
+   * Session-scoped on purpose: it exists to make the FIRST plan of a session
+   * look like a plan, not to override a preference the user has since set.
+   */
+  planDefaultsSeeded: boolean;
 
   setViewMode: (mode: ViewMode) => void;
   toggleViewMode: () => void;
@@ -53,9 +60,28 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   viewMode: '3d',
   planStoreyId: null,
   planCutHeight: DEFAULT_PLAN_CUT_HEIGHT,
+  planDefaultsSeeded: false,
 
   setViewMode: (viewMode) => {
     if (get().viewMode === viewMode) return;
+    // Plan mode shares the drawing display options with the 2D Section tool —
+    // one set of preferences, one settings panel, one underlay list. But two of
+    // the shipped defaults are section defaults, not plan defaults: a plan does
+    // not show occluded geometry dashed (it shows what is below the cut through
+    // the projection instead), and without the projection it has no floor under
+    // it and reads as a diagram of walls floating in space.
+    //
+    // So they are seeded ONCE, the first time a plan is opened in a session,
+    // and are ordinary toggles from then on. Seeding every time would fight the
+    // user; not seeding at all would make the first plan they ever see the
+    // worst-looking one.
+    if (viewMode === '2d' && !get().planDefaultsSeeded) {
+      get().updateDrawing2DDisplayOptions({
+        showHiddenLines: false,
+        showConstructionProjection: true,
+      });
+      set({ planDefaultsSeeded: true });
+    }
     set({ viewMode });
   },
   toggleViewMode: () => set({ viewMode: get().viewMode === '2d' ? '3d' : '2d' }),

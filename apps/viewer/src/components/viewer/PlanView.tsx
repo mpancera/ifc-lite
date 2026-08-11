@@ -35,16 +35,23 @@
  */
 
 import React, { useMemo, useRef, useState, useCallback, useEffect } from 'react';
-import { Loader2, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+import { Loader2 } from 'lucide-react';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
 import { GraphicOverrideEngine, type Drawing2D } from '@ifc-lite/drawing-2d';
 import type { GeometryResult } from '@ifc-lite/geometry';
 import { Drawing2DCanvas } from './Drawing2DCanvas';
-import { ViewModeToggle } from './ViewportOverlays';
+import { PlanToolbar } from './PlanToolbar';
+import { DrawingSettingsPanel } from './DrawingSettingsPanel';
+import { DxfUnderlayPanel } from './DxfUnderlayPanel';
+import { TextAnnotationEditor } from './TextAnnotationEditor';
 import { useDrawingGeneration } from '@/hooks/useDrawingGeneration';
 import { useViewControls } from '@/hooks/useViewControls';
+import { useMeasure2D } from '@/hooks/useMeasure2D';
+import { useAnnotation2D } from '@/hooks/useAnnotation2D';
+import { useDrawingExport } from '@/hooks/useDrawingExport';
+import { useSymbolicAnnotationsForDrawing } from '@/hooks/useSymbolicAnnotations';
+import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds } from '@/hooks/useDxfUnderlay';
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
 import { pickInPlan, planScreenToDrawing, planPointToRenderer } from '@/lib/plan/planPick';
@@ -75,26 +82,19 @@ const PICK_TOLERANCE_PX = 6;
  *  click rather than the start of a pan. */
 const CLICK_SLOP_PX = 4;
 
-/**
- * Display options for a plan, fixed rather than exposed.
- *
- * A plan is a cut, so the symbolic representations that stand in FOR a cut are
- * off; hidden lines are off because a plan shows what is below the cut through
- * the projection, not through dashed occlusion; the construction projection is
- * on because it is what puts the floor under the cut and is most of the reason
- * the result reads as a drawing. `show3DOverlay` is off: this surface is not
- * decorating the 3D scene.
- */
-const PLAN_DISPLAY_OPTIONS = {
-  showHiddenLines: false,
-  useSymbolicRepresentations: false,
-  show3DOverlay: false,
-  scale: 100,
-  showConstructionProjection: true,
-} as const;
-
 /** The plan is always a horizontal cut. */
 const PLAN_AXIS = 'down' as const;
+
+/**
+ * IFC annotations get a tight view-depth slab so dimension chains from the
+ * storey above do not stack onto this floor. Same convention and same constant
+ * the 2D Section panel uses.
+ */
+const ANNOTATION_VIEW_DEPTH = 1.2;
+
+/** The scan layer is deliberately not offered on a plan yet; the export still
+ *  wants the shape. Module-level so it keeps a stable identity. */
+const EMPTY_SCAN_SECTION = { points: [] as const };
 
 export function PlanView({
   mergedGeometry,
@@ -105,11 +105,68 @@ export function PlanView({
   const planStoreyId = useViewerStore((s) => s.planStoreyId);
   const setPlanStorey = useViewerStore((s) => s.setPlanStorey);
   const planCutHeight = useViewerStore((s) => s.planCutHeight);
+  const setPlanCutHeight = useViewerStore((s) => s.setPlanCutHeight);
   const models = useViewerStore((s) => s.models);
   const activeTool = useViewerStore((s) => s.activeTool);
   const addElementPendingPoints = useViewerStore((s) => s.addElementPendingPoints);
   const selectedEntityId = useViewerStore((s) => s.selectedEntityId);
   const selectedEntityIds = useViewerStore((s) => s.selectedEntityIds);
+
+  // Drawing preferences are SHARED with the 2D Section tool: they describe how
+  // a drawing should look, not which drawing this is, and the settings panel
+  // and underlay list they drive are single instances. Regenerating the other
+  // surface costs nothing while its panel is closed, which is the normal case.
+  const displayOptions = useViewerStore((s) => s.drawing2DDisplayOptions);
+  const updateDisplayOptions = useViewerStore((s) => s.updateDrawing2DDisplayOptions);
+  const activePresetId = useViewerStore((s) => s.activePresetId);
+  const overridesEnabled = useViewerStore((s) => s.overridesEnabled);
+  const getActiveOverrideRules = useViewerStore((s) => s.getActiveOverrideRules);
+  const customOverrideRules = useViewerStore((s) => s.customOverrideRules);
+  const dxfUnderlays = useViewerStore((s) => s.dxfUnderlays);
+
+  // Annotation + measure state, all of it already in the store and already
+  // shaped for these hooks.
+  const annotation2DActiveTool = useViewerStore((s) => s.annotation2DActiveTool);
+  const setAnnotation2DActiveTool = useViewerStore((s) => s.setAnnotation2DActiveTool);
+  const measure2DStart = useViewerStore((s) => s.measure2DStart);
+  const measure2DCurrent = useViewerStore((s) => s.measure2DCurrent);
+  const setMeasure2DStart = useViewerStore((s) => s.setMeasure2DStart);
+  const setMeasure2DCurrent = useViewerStore((s) => s.setMeasure2DCurrent);
+  const setMeasure2DShiftLocked = useViewerStore((s) => s.setMeasure2DShiftLocked);
+  const measure2DShiftLocked = useViewerStore((s) => s.measure2DShiftLocked);
+  const measure2DLockedAxis = useViewerStore((s) => s.measure2DLockedAxis);
+  const measure2DResults = useViewerStore((s) => s.measure2DResults);
+  const completeMeasure2D = useViewerStore((s) => s.completeMeasure2D);
+  const cancelMeasure2D = useViewerStore((s) => s.cancelMeasure2D);
+  const clearMeasure2DResults = useViewerStore((s) => s.clearMeasure2DResults);
+  const measure2DSnapPoint = useViewerStore((s) => s.measure2DSnapPoint);
+  const setMeasure2DSnapPoint = useViewerStore((s) => s.setMeasure2DSnapPoint);
+  const polygonArea2DPoints = useViewerStore((s) => s.polygonArea2DPoints);
+  const polygonArea2DResults = useViewerStore((s) => s.polygonArea2DResults);
+  const addPolygonArea2DPoint = useViewerStore((s) => s.addPolygonArea2DPoint);
+  const completePolygonArea2D = useViewerStore((s) => s.completePolygonArea2D);
+  const cancelPolygonArea2D = useViewerStore((s) => s.cancelPolygonArea2D);
+  const textAnnotations2D = useViewerStore((s) => s.textAnnotations2D);
+  const addTextAnnotation2D = useViewerStore((s) => s.addTextAnnotation2D);
+  const updateTextAnnotation2D = useViewerStore((s) => s.updateTextAnnotation2D);
+  const removeTextAnnotation2D = useViewerStore((s) => s.removeTextAnnotation2D);
+  const textAnnotation2DEditing = useViewerStore((s) => s.textAnnotation2DEditing);
+  const setTextAnnotation2DEditing = useViewerStore((s) => s.setTextAnnotation2DEditing);
+  const cloudAnnotation2DPoints = useViewerStore((s) => s.cloudAnnotation2DPoints);
+  const cloudAnnotations2D = useViewerStore((s) => s.cloudAnnotations2D);
+  const addCloudAnnotation2DPoint = useViewerStore((s) => s.addCloudAnnotation2DPoint);
+  const completeCloudAnnotation2D = useViewerStore((s) => s.completeCloudAnnotation2D);
+  const cancelCloudAnnotation2D = useViewerStore((s) => s.cancelCloudAnnotation2D);
+  const selectedAnnotation2D = useViewerStore((s) => s.selectedAnnotation2D);
+  const setSelectedAnnotation2D = useViewerStore((s) => s.setSelectedAnnotation2D);
+  const deleteSelectedAnnotation2D = useViewerStore((s) => s.deleteSelectedAnnotation2D);
+  const moveAnnotation2D = useViewerStore((s) => s.moveAnnotation2D);
+  const setAnnotation2DCursorPos = useViewerStore((s) => s.setAnnotation2DCursorPos);
+  const annotation2DCursorPos = useViewerStore((s) => s.annotation2DCursorPos);
+  const clearAllAnnotations2D = useViewerStore((s) => s.clearAllAnnotations2D);
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [dxfPanelOpen, setDxfPanelOpen] = useState(false);
   const { geometryResult: legacyGeometryResult, ifcDataStore } = useIfc();
   const geometryResult = mergedGeometry ?? legacyGeometryResult;
 
@@ -236,11 +293,11 @@ export function PlanView({
   // generating at a fallback height would draw a plan of somewhere else.
   const generationActive = active && cut?.ok === true;
 
-  useDrawingGeneration({
+  const { doRegenerate, isRegenerating } = useDrawingGeneration({
     geometryResult,
     ifcDataStore,
     sectionPlane,
-    displayOptions: PLAN_DISPLAY_OPTIONS,
+    displayOptions,
     combinedHiddenIds,
     combinedIsolatedIds,
     computedIsolatedIds,
@@ -325,6 +382,91 @@ export function PlanView({
     state.setSelectedEntity(resolveEntityRef(globalId));
   }, [drawing, viewTransform, indexToModelId]);
 
+  // ── The overlays the toolbar switches on ────────────────────────────────
+  const overrideEngine = useMemo(
+    () => new GraphicOverrideEngine(getActiveOverrideRules()),
+    [getActiveOverrideRules, activePresetId, customOverrideRules, overridesEnabled],
+  );
+
+  const entityColorMap = useMemo(() => {
+    const map = new Map<number, [number, number, number, number]>();
+    for (const mesh of geometryResult?.meshes ?? []) {
+      if (mesh.expressId && mesh.color) map.set(mesh.expressId, mesh.color);
+    }
+    return map;
+  }, [geometryResult]);
+
+  const ifcAnnotationData = useSymbolicAnnotationsForDrawing({
+    enabled: displayOptions.showIfcAnnotations && status === 'ready' && active,
+    axis: PLAN_AXIS,
+    sectionPosWorld: cut?.ok ? cut.worldY : 0,
+    viewDepth: ANNOTATION_VIEW_DEPTH,
+    flipped: false,
+    // Annotations with no resolvable storey land on the cut rather than at the
+    // model's mid-height: on a plan the cut IS the reference elevation.
+    fallbackY: cut?.ok ? cut.worldY : 0,
+  });
+
+  const dxfUnderlayData = useDxfUnderlaysForDrawing({
+    enabled: status === 'ready' && active,
+    sectionAxis: PLAN_AXIS,
+    isCustomPlane: false,
+    flipped: false,
+    coordinateInfo: geometryResult?.coordinateInfo,
+  });
+
+  // ── Measuring and annotating ────────────────────────────────────────────
+  // Both hooks take every dependency as a parameter, so the plan drives the
+  // same measure and annotation tools the 2D Section panel does rather than
+  // growing its own. Their results live in the store, so a distance measured
+  // on the plan is the same object the section panel and the export see.
+  const measureHandlers = useMeasure2D({
+    drawing, viewTransform, setViewTransform, sectionAxis: PLAN_AXIS, containerRef,
+    measure2DMode: annotation2DActiveTool === 'measure',
+    measure2DStart, measure2DCurrent, measure2DShiftLocked, measure2DLockedAxis,
+    setMeasure2DStart, setMeasure2DCurrent, setMeasure2DShiftLocked, setMeasure2DSnapPoint,
+    cancelMeasure2D, completeMeasure2D,
+  });
+
+  const annotationHandlers = useAnnotation2D({
+    drawing, viewTransform, sectionAxis: PLAN_AXIS, containerRef,
+    activeTool: annotation2DActiveTool, setActiveTool: setAnnotation2DActiveTool,
+    polygonArea2DPoints, addPolygonArea2DPoint, completePolygonArea2D, cancelPolygonArea2D,
+    textAnnotations2D, addTextAnnotation2D, setTextAnnotation2DEditing,
+    cloudAnnotation2DPoints, cloudAnnotations2D, addCloudAnnotation2DPoint,
+    completeCloudAnnotation2D, cancelCloudAnnotation2D,
+    measure2DResults, polygonArea2DResults,
+    selectedAnnotation2D, setSelectedAnnotation2D, deleteSelectedAnnotation2D,
+    moveAnnotation2D, setAnnotation2DCursorPos, setMeasure2DSnapPoint,
+  });
+
+  // Centre an underlay on the generated drawing. Same derivation the 2D Section
+  // panel uses, minus the flip cases a plan cannot be in.
+  const updateDxfUnderlayPlacement = useViewerStore((s) => s.updateDxfUnderlayPlacement);
+  const centerDxfUnderlay = useCallback((id: string) => {
+    const entry = dxfUnderlays.find((u) => u.id === id);
+    if (!entry || !drawing) return;
+    const bounds = dxfUnderlayDrawingBounds(entry, dxfWorldShift(geometryResult?.coordinateInfo), false);
+    if (!bounds) return;
+    const modelCx = (drawing.bounds.min.x + drawing.bounds.max.x) / 2;
+    const modelCy = (drawing.bounds.min.y + drawing.bounds.max.y) / 2;
+    const underlayCx = (bounds.min.x + bounds.max.x) / 2;
+    const underlayCy = (bounds.min.y + bounds.max.y) / 2;
+    updateDxfUnderlayPlacement(id, { offsetX: modelCx - underlayCx, offsetY: modelCy - underlayCy });
+  }, [dxfUnderlays, drawing, geometryResult, updateDxfUnderlayPlacement]);
+
+  const { handleExportSVG, handleExportDXF, handlePrint } = useDrawingExport({
+    drawing, displayOptions, sectionPlane, activePresetId,
+    entityColorMap, overridesEnabled, overrideEngine,
+    measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D,
+    // A plan is not a sheet. Laying one out on paper is the 2D Section tool's
+    // job and stays there, so the export writes the drawing itself.
+    sheetEnabled: false, activeSheet: null,
+    dxfUnderlays: dxfUnderlayData,
+    ifcDataStore, coordinateInfo: geometryResult?.coordinateInfo,
+    scanSection: EMPTY_SCAN_SECTION,
+  });
+
   // Fit once the drawing for a newly chosen storey has actually arrived —
   // fitting on the switch itself would frame the storey being left behind.
   useEffect(() => {
@@ -342,10 +484,26 @@ export function PlanView({
   // a drag, and selecting at the release point would be a surprise.
   const pressRef = useRef<{ x: number; y: number } | null>(null);
 
+  // An annotation tool owns the click outright while it is armed: measuring or
+  // drawing a cloud is a different gesture from selecting, and letting a
+  // selection through underneath would make the result depend on what the
+  // cursor happened to be over.
+  const annotating = annotation2DActiveTool !== 'none';
+
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    if (e.button === 2) panRef.current = { x: e.clientX, y: e.clientY };
-    if (e.button === 0) pressRef.current = { x: e.clientX, y: e.clientY };
-  }, []);
+    if (e.button === 2) { panRef.current = { x: e.clientX, y: e.clientY }; return; }
+    if (e.button !== 0) return;
+
+    if (annotating) {
+      if (annotation2DActiveTool === 'measure') measureHandlers.handleMouseDown(e);
+      else annotationHandlers.handleMouseDown(e);
+      return;
+    }
+    // With no tool armed, an existing annotation can still be grabbed and
+    // dragged; only if the click misses one does it become a model selection.
+    if (annotationHandlers.handleMouseDown(e)) return;
+    pressRef.current = { x: e.clientX, y: e.clientY };
+  }, [annotating, annotation2DActiveTool, measureHandlers, annotationHandlers]);
 
   // Where the cursor is, in drawing units — only tracked while placing, since
   // that is the only thing that needs to redraw on every mouse move.
@@ -360,12 +518,22 @@ export function PlanView({
       setViewTransform((prev) => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
       return;
     }
+    if (annotationHandlers.isDraggingRef.current) {
+      annotationHandlers.handleMouseMove(e);
+      return;
+    }
+    if (annotating) {
+      if (annotation2DActiveTool === 'measure') measureHandlers.handleMouseMove(e);
+      else annotationHandlers.handleMouseMove(e);
+      return;
+    }
     if (activeTool !== 'addElement') return;
     const container = containerRef.current;
     if (!container) return;
     const rect = container.getBoundingClientRect();
     setCursor(planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, viewTransform));
-  }, [setViewTransform, activeTool, viewTransform]);
+  }, [setViewTransform, activeTool, viewTransform, annotating, annotation2DActiveTool,
+      measureHandlers, annotationHandlers]);
 
   // ── Placing ─────────────────────────────────────────────────────────────
   // Straight into the SAME state machine 3D clicks drive, which is why every
@@ -390,6 +558,11 @@ export function PlanView({
 
   const handleMouseUp = useCallback((e: React.MouseEvent) => {
     panRef.current = null;
+    if (annotating || annotationHandlers.isDraggingRef.current) {
+      if (annotation2DActiveTool === 'measure') measureHandlers.handleMouseUp();
+      else annotationHandlers.handleMouseUp(e);
+      return;
+    }
     const press = pressRef.current;
     pressRef.current = null;
     if (e.button !== 0 || !press) return;
@@ -400,13 +573,15 @@ export function PlanView({
       return;
     }
     selectAt(e.clientX, e.clientY, e.ctrlKey || e.metaKey);
-  }, [activeTool, placeAt, selectAt]);
+  }, [activeTool, placeAt, selectAt, annotating, annotation2DActiveTool,
+      measureHandlers, annotationHandlers]);
 
   const handleMouseLeave = useCallback(() => {
     panRef.current = null;
     pressRef.current = null;
     setCursor(null);
-  }, []);
+    measureHandlers.handleMouseLeave();
+  }, [measureHandlers]);
 
   // ── Placement preview ───────────────────────────────────────────────────
   // Pending points live in the store in the RENDERER frame, so they come back
@@ -446,8 +621,17 @@ export function PlanView({
     return keys;
   }, [selectedEntityIds, selectedEntityId, models, modelIdToIndex]);
 
-  const overrideEngine = useMemo(() => new GraphicOverrideEngine([]), []);
-  const emptyColorMap = useMemo(() => new Map<number, [number, number, number, number]>(), []);
+  const hasAnnotations = measure2DResults.length > 0 || polygonArea2DResults.length > 0
+    || textAnnotations2D.length > 0 || cloudAnnotations2D.length > 0;
+
+  // A crosshair whenever the task is putting a point exactly somewhere — a
+  // pointer promises the wrong gesture. A text tool gets the text cursor.
+  const cursorClass =
+    activeTool === 'addElement' ? 'cursor-crosshair'
+      : annotation2DActiveTool === 'text' ? 'cursor-text'
+        : annotation2DActiveTool !== 'none' ? 'cursor-crosshair'
+          : selectedAnnotation2D ? 'cursor-move'
+            : 'cursor-default';
 
   if (!active) return null;
 
@@ -457,17 +641,14 @@ export function PlanView({
 
   return (
     <div
-      className={`absolute inset-0 z-30 bg-white dark:bg-zinc-950 ${
-        // A crosshair while placing: the task is putting a point exactly
-        // somewhere, and a pointer promises the wrong gesture.
-        activeTool === 'addElement' ? 'cursor-crosshair' : 'cursor-default'
-      }`}
+      className={`absolute inset-0 z-30 bg-white dark:bg-zinc-950 ${cursorClass}`}
       data-plan-view
       ref={containerRef}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
       onMouseLeave={handleMouseLeave}
+      onDoubleClick={annotationHandlers.handleDoubleClick}
       // The right button pans, so its menu would fire on every pan.
       onContextMenu={(e) => e.preventDefault()}
     >
@@ -475,15 +656,33 @@ export function PlanView({
         <Drawing2DCanvas
           drawing={drawing}
           transform={viewTransform}
-          showHiddenLines={PLAN_DISPLAY_OPTIONS.showHiddenLines}
+          showHiddenLines={displayOptions.showHiddenLines}
           overrideEngine={overrideEngine}
-          overridesEnabled={false}
-          entityColorMap={emptyColorMap}
-          useIfcMaterials={false}
+          overridesEnabled={overridesEnabled}
+          entityColorMap={entityColorMap}
+          useIfcMaterials={activePresetId === 'preset-3d-colors'}
           sectionAxis={PLAN_AXIS}
           isPinned
           cachedSheetTransformRef={cachedSheetTransformRef}
           selectedEntityKeys={selectedEntityKeys}
+          measureMode={annotation2DActiveTool === 'measure'}
+          measureStart={measure2DStart}
+          measureCurrent={measure2DCurrent}
+          measureResults={measure2DResults}
+          measureSnapPoint={measure2DSnapPoint}
+          annotation2DActiveTool={annotation2DActiveTool}
+          annotation2DCursorPos={annotation2DCursorPos}
+          polygonAreaPoints={polygonArea2DPoints}
+          polygonAreaResults={polygonArea2DResults}
+          textAnnotations={textAnnotations2D}
+          textAnnotationEditing={textAnnotation2DEditing}
+          cloudAnnotationPoints={cloudAnnotation2DPoints}
+          cloudAnnotations={cloudAnnotations2D}
+          selectedAnnotation={selectedAnnotation2D}
+          ifcAnnotationLines={ifcAnnotationData.lines}
+          ifcAnnotationTexts={ifcAnnotationData.texts}
+          ifcAnnotationFills={ifcAnnotationData.fills}
+          dxfUnderlays={dxfUnderlayData}
         />
       )}
 
@@ -519,16 +718,42 @@ export function PlanView({
         </svg>
       )}
 
-      {/* Controls along the top edge, where #50 asks for them. */}
-      <div className="absolute top-2 left-2 right-2 flex items-center gap-2 pointer-events-none">
-        {/* The way back to 3D. The viewport's own copy sits in the overlay
-            cluster this surface covers, so without one here the only exit is
-            the View ribbon. */}
-        <div className="pointer-events-auto rounded-md border bg-background/90 backdrop-blur-sm px-1 py-1 shadow-sm">
-          <ViewModeToggle />
-        </div>
-        <div className="pointer-events-auto flex items-center gap-1.5 rounded-md border bg-background/90 backdrop-blur-sm px-2 py-1 shadow-sm">
-          <span className="text-[10px] text-muted-foreground">Geschoss</span>
+      {/* Tools along the top edge, where #50 asks for them. */}
+      <div className="absolute top-2 left-2 right-2 flex items-start gap-2 pointer-events-none">
+        <PlanToolbar
+          displayOptions={displayOptions}
+          onToggle3DOverlay={() => updateDisplayOptions({ show3DOverlay: !displayOptions.show3DOverlay })}
+          onToggleSymbolic={() => {
+            // Clearing the drawing makes the switch visible immediately: the
+            // two representations differ enough that keeping the old one on
+            // screen during the rebuild reads as the toggle not working.
+            setDrawing(null);
+            setStatus('idle');
+            updateDisplayOptions({ useSymbolicRepresentations: !displayOptions.useSymbolicRepresentations });
+          }}
+          onToggleIfcAnnotations={() => updateDisplayOptions({ showIfcAnnotations: !displayOptions.showIfcAnnotations })}
+          onToggleConstructionProjection={() => updateDisplayOptions({ showConstructionProjection: !displayOptions.showConstructionProjection })}
+          settingsOpen={settingsOpen}
+          onToggleSettings={() => setSettingsOpen((v) => !v)}
+          dxfOpen={dxfPanelOpen}
+          onToggleDxf={() => setDxfPanelOpen((v) => !v)}
+          activeTool={annotation2DActiveTool}
+          onSetTool={setAnnotation2DActiveTool}
+          hasAnnotations={hasAnnotations}
+          onClearAnnotations={() => { clearAllAnnotations2D(); clearMeasure2DResults(); }}
+          zoomPercent={viewTransform.scale * 100}
+          onZoomIn={zoomIn}
+          onZoomOut={zoomOut}
+          onFitToView={fitToView}
+          onExportSVG={handleExportSVG}
+          onExportDXF={handleExportDXF}
+          onPrint={handlePrint}
+          onRegenerate={() => void doRegenerate()}
+          busy={isRegenerating || status === 'generating'}
+        >
+          {/* Which floor, and where it is cut — the two things that make this a
+              plan rather than a section, so they sit inside the strip. */}
+          <span className="pl-1 text-[10px] text-muted-foreground">Geschoss</span>
           <select
             className="h-6 rounded-sm border bg-transparent px-1 text-[11px]"
             value={storey ? String(storey.expressId) : ''}
@@ -543,25 +768,58 @@ export function PlanView({
               </option>
             ))}
           </select>
-          <span className="text-[10px] text-muted-foreground pl-1">Schnitt</span>
-          <span className="text-[11px] tabular-nums">{planCutHeight.toFixed(2)} m</span>
-        </div>
-
-        <div className="pointer-events-auto ml-auto flex items-center gap-0.5 rounded-md border bg-background/90 backdrop-blur-sm px-1 py-0.5 shadow-sm">
-          <span className="px-1 text-[10px] text-muted-foreground tabular-nums">
-            {Math.round(viewTransform.scale * 100)}%
-          </span>
-          <Button variant="ghost" size="icon-sm" onClick={zoomOut} title="Verkleinern">
-            <ZoomOut className="h-4 w-4" />
-          </Button>
-          <Button variant="ghost" size="icon-sm" onClick={zoomIn} title="Vergrössern">
-            <ZoomIn className="h-4 w-4" />
-          </Button>
-          <Button variant="ghost" size="icon-sm" onClick={fitToView} title="Einpassen">
-            <Maximize2 className="h-4 w-4" />
-          </Button>
-        </div>
+          <span className="pl-1 text-[10px] text-muted-foreground">Schnitt</span>
+          <input
+            type="number"
+            step={0.05}
+            min={0}
+            value={planCutHeight}
+            onChange={(e) => {
+              const v = Number.parseFloat(e.target.value);
+              if (Number.isFinite(v)) setPlanCutHeight(v);
+            }}
+            className="h-6 w-16 rounded-sm border bg-transparent px-1 text-[11px] tabular-nums"
+            title="Schnitthöhe über Geschossboden, in Metern"
+          />
+          <span className="text-[10px] text-muted-foreground">m</span>
+        </PlanToolbar>
       </div>
+
+      {settingsOpen && <DrawingSettingsPanel onClose={() => setSettingsOpen(false)} />}
+      {dxfPanelOpen && (
+        <DxfUnderlayPanel
+          onClose={() => setDxfPanelOpen(false)}
+          onCenterOnModel={centerDxfUnderlay}
+          // A plan IS the cardinal plan view the underlays are for, always.
+          planViewActive
+        />
+      )}
+
+      {/* Text editor for a box being typed into, positioned over its anchor.
+          A plan is the 'down' axis, where both screen axes take the same
+          positive scale — no flips. */}
+      {textAnnotation2DEditing && (() => {
+        const editing = textAnnotations2D.find((a) => a.id === textAnnotation2DEditing);
+        if (!editing) return null;
+        return (
+          <TextAnnotationEditor
+            annotation={editing}
+            screenX={editing.position.x * viewTransform.scale + viewTransform.x}
+            screenY={editing.position.y * viewTransform.scale + viewTransform.y}
+            onConfirm={(id, text) => {
+              updateTextAnnotation2D(id, { text });
+              setTextAnnotation2DEditing(null);
+            }}
+            onCancel={(id) => {
+              // An empty box was just created and never filled in; keeping it
+              // would leave an invisible thing to click on.
+              const a = textAnnotations2D.find((t) => t.id === id);
+              if (a && !a.text.trim()) removeTextAnnotation2D(id);
+              setTextAnnotation2DEditing(null);
+            }}
+          />
+        );
+      })()}
 
       {status === 'generating' && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-background/60 pointer-events-none">
