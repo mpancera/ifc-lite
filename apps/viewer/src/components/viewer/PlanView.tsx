@@ -53,6 +53,7 @@ import { useDrawingExport } from '@/hooks/useDrawingExport';
 import { useSymbolicAnnotationsForDrawing } from '@/hooks/useSymbolicAnnotations';
 import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds } from '@/hooks/useDxfUnderlay';
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
+import { useLensColorKeys } from '@/hooks/useLensColorKeys';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
 import { pickInPlan, planScreenToDrawing, planPointToRenderer } from '@/lib/plan/planPick';
 import { handleAddElementDrop } from './selectionHandlers';
@@ -102,8 +103,11 @@ export function PlanView({
   modelIdToIndex,
 }: PlanViewProps): React.ReactElement | null {
   const viewMode = useViewerStore((s) => s.viewMode);
-  const planStoreyId = useViewerStore((s) => s.planStoreyId);
-  const setPlanStorey = useViewerStore((s) => s.setPlanStorey);
+  // Which storey the plan shows is `activeStorey` — the same field the
+  // hierarchy, the storey tabs, the command palette and Solo drive. Reading it
+  // rather than keeping a `planStoreyId` beside it is what makes a storey click
+  // in the hierarchy move the plan too.
+  const activeStorey = useViewerStore((s) => s.activeStorey);
   const planCutHeight = useViewerStore((s) => s.planCutHeight);
   const setPlanCutHeight = useViewerStore((s) => s.setPlanCutHeight);
   const models = useViewerStore((s) => s.models);
@@ -191,6 +195,7 @@ export function PlanView({
   } | null>(null);
 
   const { combinedHiddenIds, combinedIsolatedIds } = useCombinedVisibilityIds();
+  const lensColorKeys = useLensColorKeys(modelIdToIndex);
 
   // ── The storeys this model can be cut at ────────────────────────────────
   // Single-model only: `elementToStorey` keys are LOCAL express ids, so on a
@@ -227,17 +232,17 @@ export function PlanView({
     };
   }, [models, ifcDataStore, geometryResult]);
 
-  // The chosen storey, or the default. Resolving rather than writing state on
-  // mount keeps this render-pure; the picker writes the choice when made.
+  // The storey in scope app-wide, or the default. An `activeStorey` that this
+  // model has no geometry for — a stale ref after a model swap, or a storey
+  // with no members — falls through to the default rather than showing
+  // nothing, which would look like a model with no storeys at all.
   const storey = useMemo(() => {
-    if (planStoreyId !== null) {
-      const chosen = storeys.find((s) => String(s.expressId) === planStoreyId);
+    if (activeStorey) {
+      const chosen = storeys.find((s) => s.expressId === activeStorey.expressId);
       if (chosen) return chosen;
-      // A stale id (model swapped) falls through to the default rather than
-      // showing nothing, which would look like a model with no storeys.
     }
     return defaultPlanStorey(storeys);
-  }, [planStoreyId, storeys]);
+  }, [activeStorey, storeys]);
 
   // ── Solo ────────────────────────────────────────────────────────────────
   // "The storey is solo, as if isolated in 3D" (#50) — and it IS the 3D one,
@@ -248,13 +253,13 @@ export function PlanView({
   // The previous mode is restored on the way out. Plan mode is a mode, not an
   // edit: switching to a plan and back should leave the building looking the
   // way it did, not silently isolated to whichever floor was last drawn.
-  const soloBackupRef = useRef<{ mode: LevelDisplayMode; storey: EntityRef | null } | null>(null);
+  const soloBackupRef = useRef<{ mode: LevelDisplayMode } | null>(null);
   useEffect(() => {
     if (!active || !storey || !storeyModelId) return;
 
     const state = useViewerStore.getState();
     if (soloBackupRef.current === null) {
-      soloBackupRef.current = { mode: state.levelDisplayMode, storey: state.activeStorey };
+      soloBackupRef.current = { mode: state.levelDisplayMode };
     }
     applyLevelDisplayMode('solo', { modelId: storeyModelId, expressId: storey.expressId });
   }, [active, storey, storeyModelId]);
@@ -264,7 +269,11 @@ export function PlanView({
     const backup = soloBackupRef.current;
     if (!backup) return;
     soloBackupRef.current = null;
-    applyLevelDisplayMode(backup.mode, backup.storey);
+    // The MODE is restored; the storey deliberately is not. Paging to the third
+    // floor in the plan and switching to 3D should land on the third floor —
+    // that is navigation the user just did, not state the plan borrowed.
+    // Passing no ref lets the transition keep whichever storey is current.
+    applyLevelDisplayMode(backup.mode);
   }, [active]);
 
   // ── The cut ─────────────────────────────────────────────────────────────
@@ -310,14 +319,15 @@ export function PlanView({
     setDrawingError: setError,
   });
 
-  // Storeys of a building rarely share a footprint — a basement or a roof plant
-  // room can sit well off the outline of the floor below. Keeping the pan and
-  // zoom across a storey switch can therefore leave the new plan entirely
-  // outside the viewport, which reads exactly like "no view at all". Refit once
-  // per storey, but not on a cut-height change: that is a small adjustment to
-  // the plan you are already looking at, and moving the view under the user
-  // there would be the annoying half of this.
-  const fittedStoreyRef = useRef<number | null>(null);
+  // Fit ONCE, when the plan opens — never again on a storey change.
+  //
+  // Paging through floors is how a plan is read, and a set of drawings is
+  // compared by looking at the same corner on each sheet. Refitting on every
+  // switch throws away the zoom and the position the user just set, which is a
+  // worse failure than the rare case it was guarding against (a storey whose
+  // footprint sits outside the previous one, leaving the view apparently
+  // empty). "Fit to view" is one click away when that happens.
+  const hasFittedRef = useRef(false);
 
   const { viewTransform, setViewTransform, zoomIn, zoomOut, fitToView } = useViewControls({
     drawing,
@@ -467,14 +477,14 @@ export function PlanView({
     scanSection: EMPTY_SCAN_SECTION,
   });
 
-  // Fit once the drawing for a newly chosen storey has actually arrived —
-  // fitting on the switch itself would frame the storey being left behind.
+  // Fit when the first drawing of this plan session arrives, and then leave the
+  // view alone. Re-armed on the way out so reopening the plan frames it again.
   useEffect(() => {
-    if (!active || !storey || !drawing || status !== 'ready') return;
-    if (fittedStoreyRef.current === storey.expressId) return;
-    fittedStoreyRef.current = storey.expressId;
+    if (!active) { hasFittedRef.current = false; return; }
+    if (hasFittedRef.current || !drawing || status !== 'ready') return;
+    hasFittedRef.current = true;
     fitToView();
-  }, [active, storey, drawing, status, fitToView]);
+  }, [active, drawing, status, fitToView]);
 
   // ── Pan and click ───────────────────────────────────────────────────────
   // Right button pans, matching the 2D Section panel: the left button stays
@@ -665,6 +675,7 @@ export function PlanView({
           isPinned
           cachedSheetTransformRef={cachedSheetTransformRef}
           selectedEntityKeys={selectedEntityKeys}
+          lensColorKeys={lensColorKeys}
           measureMode={annotation2DActiveTool === 'measure'}
           measureStart={measure2DStart}
           measureCurrent={measure2DCurrent}
@@ -722,7 +733,6 @@ export function PlanView({
       <div className="absolute top-2 left-2 right-2 flex items-start gap-2 pointer-events-none">
         <PlanToolbar
           displayOptions={displayOptions}
-          onToggle3DOverlay={() => updateDisplayOptions({ show3DOverlay: !displayOptions.show3DOverlay })}
           onToggleSymbolic={() => {
             // Clearing the drawing makes the switch visible immediately: the
             // two representations differ enough that keeping the old one on
@@ -758,7 +768,15 @@ export function PlanView({
             className="h-6 rounded-sm border bg-transparent px-1 text-[11px]"
             value={storey ? String(storey.expressId) : ''}
             disabled={storeys.length === 0}
-            onChange={(e) => setPlanStorey(e.target.value || null)}
+            onChange={(e) => {
+              // Through the same transition every other storey entry point
+              // uses, so the hierarchy, the storey tabs and the plan can never
+              // disagree about which floor is in scope.
+              const expressId = Number.parseInt(e.target.value, 10);
+              if (storeyModelId && Number.isFinite(expressId)) {
+                applyLevelDisplayMode('solo', { modelId: storeyModelId, expressId });
+              }
+            }}
           >
             {storeys.length === 0 && <option value="">— keine Geschosse —</option>}
             {storeys.map((s) => (
@@ -785,14 +803,22 @@ export function PlanView({
         </PlanToolbar>
       </div>
 
-      {settingsOpen && <DrawingSettingsPanel onClose={() => setSettingsOpen(false)} />}
+      {/* Both panels are `h-full` and bring no positioning of their own, so
+          they need a sized, positioned host or they collapse to nothing. */}
+      {settingsOpen && (
+        <div className="absolute top-0 right-0 bottom-0 w-72 z-50 shadow-xl">
+          <DrawingSettingsPanel onClose={() => setSettingsOpen(false)} />
+        </div>
+      )}
       {dxfPanelOpen && (
-        <DxfUnderlayPanel
-          onClose={() => setDxfPanelOpen(false)}
-          onCenterOnModel={centerDxfUnderlay}
-          // A plan IS the cardinal plan view the underlays are for, always.
-          planViewActive
-        />
+        <div className="absolute top-0 right-0 bottom-0 w-80 z-50 shadow-xl">
+          <DxfUnderlayPanel
+            onClose={() => setDxfPanelOpen(false)}
+            onCenterOnModel={centerDxfUnderlay}
+            // A plan IS the cardinal plan view the underlays are for, always.
+            planViewActive
+          />
+        </div>
       )}
 
       {/* Text editor for a box being typed into, positioned over its anchor.

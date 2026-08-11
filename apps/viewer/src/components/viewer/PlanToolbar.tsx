@@ -24,9 +24,9 @@
 
 import React from 'react';
 import {
-  Eye, EyeOff, Box, Shapes, Tag, Layers, PenTool, FileText, ZoomIn, ZoomOut,
-  Maximize2, Download, FileDown, Printer, RefreshCw, MousePointer2, Ruler,
-  Hexagon, Type, Cloud, Trash2, MoreHorizontal,
+  Box, Shapes, Tag, Layers, PenTool, FileText, ZoomIn, ZoomOut,
+  Maximize2, Download, FileDown, Printer, RefreshCw, Ruler,
+  Hexagon, Type, Cloud, Trash2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -39,12 +39,10 @@ import { ViewModeToggle } from './ViewportOverlays';
 
 export interface PlanToolbarProps {
   displayOptions: {
-    show3DOverlay: boolean;
     useSymbolicRepresentations: boolean;
     showIfcAnnotations: boolean;
     showConstructionProjection: boolean;
   };
-  onToggle3DOverlay: () => void;
   onToggleSymbolic: () => void;
   onToggleIfcAnnotations: () => void;
   onToggleConstructionProjection: () => void;
@@ -107,7 +105,7 @@ function ToolButton({
 
 export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
   const {
-    displayOptions, onToggle3DOverlay, onToggleSymbolic, onToggleIfcAnnotations,
+    displayOptions, onToggleSymbolic, onToggleIfcAnnotations,
     onToggleConstructionProjection, settingsOpen, onToggleSettings, dxfOpen, onToggleDxf,
     activeTool, onSetTool, hasAnnotations, onClearAnnotations,
     zoomPercent, onZoomIn, onZoomOut, onFitToView,
@@ -125,13 +123,6 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
       {children ? <Divider /> : null}
 
       {/* How the drawing is made */}
-      <ToolButton
-        active={displayOptions.show3DOverlay}
-        onClick={onToggle3DOverlay}
-        title="3D-Overlay: den Grundriss zusätzlich in der 3D-Szene zeigen"
-      >
-        {displayOptions.show3DOverlay ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
-      </ToolButton>
       <ToolButton
         active={displayOptions.useSymbolicRepresentations}
         onClick={onToggleSymbolic}
@@ -171,15 +162,9 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
 
       <Divider />
 
-      {/* Annotation tools. Select/Pan is the resting state rather than a
-          separate mode, so it is the tool that is active when no other is. */}
-      <ToolButton
-        active={activeTool === 'none'}
-        onClick={() => onSetTool('none')}
-        title="Auswählen und Schwenken"
-      >
-        <MousePointer2 className="h-4 w-4" />
-      </ToolButton>
+      {/* Annotation tools. There is no select/pan button: selecting is the
+          resting state and panning is the right mouse button, so it would be a
+          control for doing nothing. Clicking an armed tool again disarms it. */}
       <ToolButton
         active={activeTool === 'measure'}
         onClick={() => onSetTool(activeTool === 'measure' ? 'none' : 'measure')}

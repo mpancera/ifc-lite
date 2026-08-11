@@ -38,8 +38,15 @@ export const DEFAULT_PLAN_CUT_HEIGHT = 1.25;
 
 export interface ViewModeSlice {
   viewMode: ViewMode;
-  /** Which storey the plan shows. `null` until one is chosen. */
-  planStoreyId: string | null;
+  /**
+   * Which storey the plan shows is NOT stored here.
+   *
+   * It is `activeStorey`, the same field the hierarchy, the storey tabs, the
+   * command palette and Solo already drive. A `planStoreyId` beside it was a
+   * second channel for one question, and it behaved exactly the way a second
+   * channel does: clicking a storey in the hierarchy moved the building and
+   * left the plan on the floor it was already showing.
+   */
   /** Metres above the storey's finished floor. */
   planCutHeight: number;
   /**
@@ -52,13 +59,11 @@ export interface ViewModeSlice {
 
   setViewMode: (mode: ViewMode) => void;
   toggleViewMode: () => void;
-  setPlanStorey: (storeyId: string | null) => void;
   setPlanCutHeight: (metres: number) => void;
 }
 
 export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlice> = (set, get) => ({
   viewMode: '3d',
-  planStoreyId: null,
   planCutHeight: DEFAULT_PLAN_CUT_HEIGHT,
   planDefaultsSeeded: false,
 
@@ -85,8 +90,6 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
     set({ viewMode });
   },
   toggleViewMode: () => set({ viewMode: get().viewMode === '2d' ? '3d' : '2d' }),
-
-  setPlanStorey: (planStoreyId) => set({ planStoreyId }),
 
   // Refuses a non-finite value rather than defaulting to zero: a cut at the
   // floor shows the slab and nothing else, which reads as a broken plan.

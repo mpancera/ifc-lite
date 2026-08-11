@@ -417,7 +417,28 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
     drawing2DDisplayOptions: { ...state.drawing2DDisplayOptions, ...options },
   })),
 
-  clearDrawing2D: () => set(getDefaultState()),
+  /**
+   * Drop the cached drawing so the next generation rebuilds it.
+   *
+   * Clears the DRAWING, not the slice. It used to reset every field in here,
+   * which also deleted every measurement, area, text box and revision cloud the
+   * user had drawn — and the only caller is the "open the 2D view" button,
+   * which wanted a rebuild, not a wipe. Losing an afternoon of markup to a
+   * button that re-opens a panel is the kind of thing nobody reports as a bug
+   * because it looks like the annotations simply expired.
+   *
+   * The user's own marks are removed only by the tool that says it removes
+   * them (`clearAllAnnotations2D`), and the display options, override presets
+   * and underlays are preferences, not per-drawing state.
+   */
+  clearDrawing2D: () => set({
+    drawing2D: null,
+    drawing2DStatus: 'idle',
+    drawing2DProgress: 0,
+    drawing2DPhase: '',
+    drawing2DError: null,
+    drawing2DSvgContent: null,
+  }),
 
   // Graphic Override Actions
   setActivePreset: (presetId) => set({ activePresetId: presetId }),
