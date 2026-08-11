@@ -36,6 +36,7 @@
 
 import React, { useMemo, useRef, useState, useCallback, useEffect } from 'react';
 import { Loader2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
 import { GraphicOverrideEngine, type Drawing2D } from '@ifc-lite/drawing-2d';
@@ -58,7 +59,7 @@ import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds } fr
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { useLensColorKeys } from '@/hooks/useLensColorKeys';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
-import { rotationToNearestAxis, normalizeAngle, RAD_TO_DEG, DEG_TO_RAD } from '@/lib/plan/planRotation';
+import { rotationToDirection, normalizeAngle, RAD_TO_DEG, DEG_TO_RAD } from '@/lib/plan/planRotation';
 import { pickInPlan, planScreenToDrawing, planPointToRenderer, planPointToStoreyLocal } from '@/lib/plan/planPick';
 import { handleAddElementDrop } from './selectionHandlers';
 import { toGlobalIdFromModels, fromGlobalIdFromModels } from '@/store/globalId';
@@ -560,6 +561,7 @@ export function PlanView({
     dxfUnderlays: dxfUnderlayData,
     ifcDataStore, coordinateInfo: geometryResult?.coordinateInfo,
     scanSection: EMPTY_SCAN_SECTION,
+    viewRotation: planRotation,
   });
 
   // Fit when the first drawing of this plan session arrives, and then leave the
@@ -578,20 +580,55 @@ export function PlanView({
   // would carry one number — and that number is almost always "horizontal".
   // Drawing one line along a wall and letting it snap to the axis it is
   // ALREADY nearer tidies the gesture up instead of overruling it.
+  // Click, preview, click — the same rhythm as the underlay alignment, and for
+  // the same reason: you see the snapped landing point BEFORE committing it, so
+  // you know you set it down where you meant to. A press-drag-release gesture
+  // hides that, and on a long wall the two ends are far apart.
+  const [rotationStart, setRotationStart] = useState<Point2D | null>(null);
+  const [rotationCursor, setRotationCursor] = useState<Point2D | null>(null);
+  /** The finished reference line, waiting for its target direction. */
   const [rotationLine, setRotationLine] = useState<{ from: Point2D; to: Point2D } | null>(null);
 
-  const applyRotationFromLine = useCallback((from: Point2D, to: Point2D) => {
-    const delta = rotationToNearestAxis(from, to);
+  /** Snap to model geometry, exactly as the measure tool and the underlay
+   *  alignment do — the reference line is only as good as its endpoints. */
+  const snapPoint = useCallback((p: Point2D): Point2D => {
+    return measureHandlers.findSnapPoint(p) ?? p;
+  }, [measureHandlers]);
+
+  /**
+   * Lay the finished line onto `targetDeg`.
+   *
+   * Asked rather than assumed. The nearest axis is offered as the default, but
+   * a long edge is very often meant to go the OTHER quarter turn, and silently
+   * picking one of the two is the kind of guess that costs more time than the
+   * question does.
+   */
+  const applyRotationTo = useCallback((targetDeg: number) => {
+    const line = rotationLine;
+    if (!line) return;
+    const delta = rotationToDirection(line.from, line.to, targetDeg * DEG_TO_RAD);
     if (delta === null) {
       toast.error('Zu kurze Linie — bitte entlang einem Bauteil ziehen.');
       return;
     }
+    setRotationLine(null);
+    setPlanRotationPicking(false);
     setPlanRotation(normalizeAngle(planRotation + delta));
-    // Marc's "FitToAll danach": turning about the project origin can swing the
+    // "FitToAll danach": turning about the project origin can swing the
     // building well outside the viewport, and a correct plan you cannot see
     // reads exactly like a broken one.
     setTimeout(fitToView, 0);
-  }, [planRotation, setPlanRotation, fitToView]);
+  }, [rotationLine, planRotation, setPlanRotation, setPlanRotationPicking, fitToView]);
+
+  /** Where the drawn line currently points, in degrees — the readout the
+   *  target choice is made against. */
+  const rotationLineDeg = useMemo(() => {
+    if (!rotationLine) return null;
+    const dx = rotationLine.to.x - rotationLine.from.x;
+    const dy = rotationLine.to.y - rotationLine.from.y;
+    if (Math.hypot(dx, dy) < 1e-9) return null;
+    return normalizeAngle(Math.atan2(dy, dx) + planRotation) * RAD_TO_DEG;
+  }, [rotationLine, planRotation]);
 
   // ── Pan and click ───────────────────────────────────────────────────────
   // Right button pans, matching the 2D Section panel: the left button stays
@@ -618,9 +655,20 @@ export function PlanView({
     if (planRotationPicking) {
       const container = containerRef.current;
       if (!container) return;
+      // A line already drawn is waiting for its target angle; ignore clicks on
+      // the canvas until that is answered, or the answer would be discarded by
+      // the act of reaching for it.
+      if (rotationLine) return;
       const rect = container.getBoundingClientRect();
-      const p = planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, planTransform);
-      setRotationLine({ from: p, to: p });
+      const p = snapPoint(planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, planTransform));
+      if (!rotationStart) {
+        setRotationStart(p);
+        setRotationCursor(p);
+      } else {
+        setRotationLine({ from: rotationStart, to: p });
+        setRotationStart(null);
+        setRotationCursor(null);
+      }
       return;
     }
 
@@ -633,7 +681,7 @@ export function PlanView({
     // dragged; only if the click misses one does it become a model selection.
     if (annotationHandlers.handleMouseDown(e)) return;
     pressRef.current = { x: e.clientX, y: e.clientY };
-  }, [annotating, annotation2DActiveTool, measureHandlers, annotationHandlers, planRotationPicking, planTransform]);
+  }, [annotating, annotation2DActiveTool, measureHandlers, annotationHandlers, planRotationPicking, planTransform, rotationStart, rotationLine, snapPoint]);
 
   // Where the cursor is, in drawing units — only tracked while placing, since
   // that is the only thing that needs to redraw on every mouse move.
@@ -648,14 +696,13 @@ export function PlanView({
       setViewTransform((prev) => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
       return;
     }
-    if (planRotationPicking && rotationLine) {
+    if (planRotationPicking && !rotationLine) {
       const container = containerRef.current;
       if (!container) return;
       const rect = container.getBoundingClientRect();
-      setRotationLine({
-        from: rotationLine.from,
-        to: planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, planTransform),
-      });
+      // Snapped BEFORE it is shown, so the preview is the point that will
+      // actually be taken — the whole reason this is click-preview-click.
+      setRotationCursor(snapPoint(planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, planTransform)));
       return;
     }
     if (annotationHandlers.isDraggingRef.current) {
@@ -673,7 +720,7 @@ export function PlanView({
     const rect = container.getBoundingClientRect();
     setCursor(planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, planTransform));
   }, [setViewTransform, activeTool, planTransform, annotating, annotation2DActiveTool,
-      measureHandlers, annotationHandlers, planRotationPicking, rotationLine]);
+      measureHandlers, annotationHandlers, planRotationPicking, rotationLine, snapPoint]);
 
   // ── Placing ─────────────────────────────────────────────────────────────
   // Straight into the SAME state machine 3D clicks drive, which is why every
@@ -698,12 +745,8 @@ export function PlanView({
 
   const handleMouseUp = useCallback((e: React.MouseEvent) => {
     panRef.current = null;
-    if (planRotationPicking) {
-      const line = rotationLine;
-      setRotationLine(null);
-      if (line) applyRotationFromLine(line.from, line.to);
-      return;
-    }
+    // The rotation gesture is click-to-click, so a release does nothing.
+    if (planRotationPicking) return;
     if (annotating || annotationHandlers.isDraggingRef.current) {
       if (annotation2DActiveTool === 'measure') measureHandlers.handleMouseUp();
       else annotationHandlers.handleMouseUp(e);
@@ -720,7 +763,7 @@ export function PlanView({
     }
     selectAt(e.clientX, e.clientY, e.ctrlKey || e.metaKey);
   }, [activeTool, placeAt, selectAt, annotating, annotation2DActiveTool,
-      measureHandlers, annotationHandlers, planRotationPicking, rotationLine, applyRotationFromLine]);
+      measureHandlers, annotationHandlers, planRotationPicking]);
 
   const handleMouseLeave = useCallback(() => {
     panRef.current = null;
@@ -865,8 +908,9 @@ export function PlanView({
         </svg>
       )}
 
-      {/* The reference line being drawn, and where it will land. */}
-      {rotationLine && (() => {
+      {/* The reference line: the placed point, the snapped preview, and once
+          it is finished, the question of where it should go. */}
+      {(rotationStart || rotationLine) && (() => {
         const toScreen = (p: Point2D) => {
           const sx = p.x * viewTransform.scale;
           const sy = p.y * viewTransform.scale;
@@ -874,21 +918,59 @@ export function PlanView({
           const sn = Math.sin(planRotation);
           return { x: sx * c - sy * sn + viewTransform.x, y: sx * sn + sy * c + viewTransform.y };
         };
-        const a = toScreen(rotationLine.from);
-        const b = toScreen(rotationLine.to);
-        const delta = rotationToNearestAxis(rotationLine.from, rotationLine.to);
+        const from = rotationLine ? rotationLine.from : rotationStart!;
+        const to = rotationLine ? rotationLine.to : rotationCursor;
+        const a = toScreen(from);
+        const b = to ? toScreen(to) : null;
         return (
           <svg className="absolute inset-0 h-full w-full pointer-events-none">
-            <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="stroke-sky-500" strokeWidth={1.5} strokeDasharray="5 3" />
-            <circle cx={a.x} cy={a.y} r={3} className="fill-sky-500" />
-            {delta !== null && (
-              <text x={b.x + 8} y={b.y - 8} className="fill-sky-600 text-[11px]">
-                {(delta * RAD_TO_DEG).toFixed(2)}°
-              </text>
+            {b && (
+              <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="stroke-sky-500"
+                    strokeWidth={1.5} strokeDasharray={rotationLine ? undefined : '5 3'} />
+            )}
+            <circle cx={a.x} cy={a.y} r={3.5} className="fill-sky-500" />
+            {/* The snap marker: a square, so it is distinguishable from the
+                placed point at a glance and you can see WHAT it caught. */}
+            {b && !rotationLine && (
+              <rect x={b.x - 4} y={b.y - 4} width={8} height={8}
+                    className="fill-none stroke-sky-500" strokeWidth={1.5} />
             )}
           </svg>
         );
       })()}
+
+      {/* Where should this line go? Asked, not assumed — a long edge is very
+          often meant to go the other quarter turn, and guessing costs more
+          time than the question does. */}
+      {rotationLine && (
+        <div className="absolute left-1/2 top-16 z-50 -translate-x-1/2 rounded-md border bg-background/95 px-3 py-2 shadow-lg backdrop-blur-sm">
+          <div className="mb-1.5 text-[11px] text-muted-foreground">
+            Ausrichtlinie liegt bei {rotationLineDeg !== null ? rotationLineDeg.toFixed(2) : '—'}° — wohin damit?
+          </div>
+          <div className="flex items-center gap-1">
+            {[0, 90, 180, 270].map((deg) => (
+              <Button key={deg} variant="outline" size="sm" className="h-7 px-2 text-[11px]"
+                      onClick={() => applyRotationTo(deg)}>
+                {deg}°
+              </Button>
+            ))}
+            <input
+              type="number" step={0.5} placeholder="frei"
+              className="h-7 w-16 rounded-sm border bg-transparent px-1 text-[11px] tabular-nums"
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter') return;
+                const v = Number.parseFloat((e.target as HTMLInputElement).value);
+                if (Number.isFinite(v)) applyRotationTo(v);
+              }}
+              title="Zielrichtung in Grad, mit Enter bestätigen"
+            />
+            <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]"
+                    onClick={() => { setRotationLine(null); setPlanRotationPicking(false); }}>
+              Abbrechen
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Tools along the top edge, where #50 asks for them. */}
       <div className="absolute top-2 left-2 right-2 flex items-start gap-2 pointer-events-none">
@@ -913,7 +995,15 @@ export function PlanView({
           hasAnnotations={hasAnnotations}
           rotationDeg={planRotation * RAD_TO_DEG}
           rotationPicking={planRotationPicking}
-          onToggleRotationPick={() => setPlanRotationPicking(!planRotationPicking)}
+          onToggleRotationPick={() => {
+            // Always start from a clean gesture: a half-drawn line left over
+            // from last time would make the next click finish somebody else's
+            // line.
+            setRotationStart(null);
+            setRotationCursor(null);
+            setRotationLine(null);
+            setPlanRotationPicking(!planRotationPicking);
+          }}
           onSetRotationDeg={(deg) => {
             setPlanRotation(normalizeAngle(deg * DEG_TO_RAD));
             setTimeout(fitToView, 0);

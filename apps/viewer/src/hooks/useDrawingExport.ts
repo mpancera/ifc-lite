@@ -4,6 +4,7 @@
 
 import { useCallback } from 'react';
 import { posthog } from '@/lib/analytics';
+import { rotatedBounds } from '@/lib/plan/planRotation';
 import { downloadFile, sanitizeFilename } from '@/lib/export/download';
 import {
   GraphicOverrideEngine,
@@ -52,6 +53,8 @@ function buildDxfUnderlaySvg(
   strokeWidthForMm: (mm: number) => number,
   fontScale: number,
   escapeXml: (s: string) => string,
+  /** Plan rotation in degrees, so underlay labels stay upright inside it. */
+  uprightDeg = 0,
 ): string {
   const visibleUnderlays = underlays.filter((u) => u.opacity > 0);
   if (visibleUnderlays.length === 0) return '';
@@ -164,6 +167,12 @@ interface UseDrawingExportParams {
   coordinateInfo: GeometryResult['coordinateInfo'] | undefined;
   /** Point-cloud scan overlay, already in drawing space (issue #1805) */
   scanSection: { points: readonly ScanBandPoint[] };
+  /**
+   * Plan view rotation in radians, so SVG and PDF export the plan as it is
+   * shown. The DXF export deliberately ignores it and keeps world
+   * coordinates, so the file opens square for whoever receives it.
+   */
+  viewRotation?: number;
 }
 
 interface UseDrawingExportResult {
@@ -191,6 +200,7 @@ function useDrawingExport({
   ifcDataStore,
   coordinateInfo,
   scanSection,
+  viewRotation = 0,
 }: UseDrawingExportParams): UseDrawingExportResult {
   // Georef inputs for the DXF export (PR #1871 review, P1): placement edits
   // applied in CesiumPlacementEditor live in `georefMutations` (per model
@@ -209,7 +219,15 @@ function useDrawingExport({
   const generateExportSVG = useCallback((): string | null => {
     if (!drawing) return null;
 
-    const { bounds } = drawing;
+    // The paper follows the screen: a plan turned for orthogonal work exports
+    // turned, so what you approved is what gets printed. The DXF export does
+    // NOT do this — it writes world coordinates, so the file opens square for
+    // whoever receives it.
+    const planRotation = sectionPlane.axis === 'down' ? (viewRotation ?? 0) : 0;
+    const rotDeg = planRotation * (180 / Math.PI);
+    // Measure the TURNED extent, or a turned plan is framed with its corners
+    // cut off — same reason the on-screen fit does it.
+    const bounds = rotatedBounds(drawing.bounds, planRotation);
     const width = bounds.max.x - bounds.min.x;
     const height = bounds.max.y - bounds.min.y;
 
@@ -229,6 +247,17 @@ function useDrawingExport({
     // At 1:100 scale, 1mm on paper = 0.1m in model space
     // Formula: modelUnits = paperMm * scale / 1000
     const mmToModel = (mm: number) => mm * scale / 1000;
+
+    /**
+     * Keeps a label upright inside the rotated group.
+     *
+     * The whole drawing sits in one `rotate(...)` group, which would tilt the
+     * text with it. Counter-rotating each label about its OWN anchor undoes
+     * exactly that and nothing else — positions turn, glyphs do not, matching
+     * what the canvas does on screen.
+     */
+    const uprightText = (x: number, y: number): string =>
+      rotDeg === 0 ? '' : ` transform="rotate(${(-rotDeg).toFixed(6)} ${x.toFixed(4)} ${y.toFixed(4)})"`;
 
     // Helper to escape XML
     const escapeXml = (str: string): string => {
@@ -290,7 +319,8 @@ function useDrawingExport({
      height="${svgHeightMm.toFixed(2)}mm"
      viewBox="${viewBoxMinX.toFixed(4)} ${viewBoxMinY.toFixed(4)} ${viewWidth.toFixed(4)} ${viewHeight.toFixed(4)}">
   <rect x="${viewBoxMinX.toFixed(4)}" y="${viewBoxMinY.toFixed(4)}" width="${viewWidth.toFixed(4)}" height="${viewHeight.toFixed(4)}" fill="#FFFFFF"/>
-`;
+${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)} 0 0)">
+` : ''}`;
 
     // 0. DXF REFERENCE UNDERLAYS (issue #1782) - beneath everything. Data
     // exists only for plan ('down') sections, where the direct export has
@@ -301,6 +331,7 @@ function useDrawingExport({
       mmToModel,
       1, // text height is already in model units (metres)
       escapeXml,
+      rotDeg,
     );
 
     // 1. FILL CUT POLYGONS (with color from IFC materials or override engine)
@@ -467,7 +498,7 @@ function useDrawingExport({
         const labelStroke = mmToModel(0.2);
 
         svg += `    <rect x="${(midX - labelWidth / 2).toFixed(4)}" y="${(midY - labelHeight / 2).toFixed(4)}" width="${labelWidth.toFixed(4)}" height="${labelHeight.toFixed(4)}" fill="rgba(255,255,255,0.95)" stroke="${measureColor}" stroke-width="${labelStroke.toFixed(4)}"/>\n`;
-        svg += `    <text x="${midX.toFixed(4)}" y="${midY.toFixed(4)}" font-family="Arial, sans-serif" font-size="${fontSize.toFixed(4)}" fill="#000000" text-anchor="middle" dominant-baseline="middle" font-weight="500">${escapeXml(labelText)}</text>\n`;
+        svg += `    <text${uprightText(midX, midY)} x="${midX.toFixed(4)}" y="${midY.toFixed(4)}" font-family="Arial, sans-serif" font-size="${fontSize.toFixed(4)}" fill="#000000" text-anchor="middle" dominant-baseline="middle" font-weight="500">${escapeXml(labelText)}</text>\n`;
       }
       svg += '  </g>\n';
     }
@@ -493,7 +524,7 @@ function useDrawingExport({
         const areaText = formatArea(result.area);
         const fontSize = mmToModel(3);
 
-        svg += `    <text x="${ct.x.toFixed(4)}" y="${ct.y.toFixed(4)}" font-family="Arial, sans-serif" font-size="${fontSize.toFixed(4)}" fill="#000000" text-anchor="middle" dominant-baseline="middle" font-weight="bold">${escapeXml(areaText)}</text>\n`;
+        svg += `    <text${uprightText(ct.x, ct.y)} x="${ct.x.toFixed(4)}" y="${ct.y.toFixed(4)}" font-family="Arial, sans-serif" font-size="${fontSize.toFixed(4)}" fill="#000000" text-anchor="middle" dominant-baseline="middle" font-weight="bold">${escapeXml(areaText)}</text>\n`;
       }
       svg += '  </g>\n';
     }
@@ -513,7 +544,7 @@ function useDrawingExport({
 
         svg += `    <rect x="${pt.x.toFixed(4)}" y="${pt.y.toFixed(4)}" width="${approxWidth.toFixed(4)}" height="${height.toFixed(4)}" fill="${annotation.backgroundColor}" stroke="${annotation.borderColor}" stroke-width="${mmToModel(0.15).toFixed(4)}"/>\n`;
         for (let i = 0; i < lines.length; i++) {
-          svg += `    <text x="${(pt.x + padding).toFixed(4)}" y="${(pt.y + padding + fontSize * 0.8 + i * lineHeight).toFixed(4)}" font-family="Arial, sans-serif" font-size="${fontSize.toFixed(4)}" fill="${annotation.color}">${escapeXml(lines[i])}</text>\n`;
+          svg += `    <text${uprightText(pt.x + padding, pt.y + padding + fontSize * 0.8 + i * lineHeight)} x="${(pt.x + padding).toFixed(4)}" y="${(pt.y + padding + fontSize * 0.8 + i * lineHeight).toFixed(4)}" font-family="Arial, sans-serif" font-size="${fontSize.toFixed(4)}" fill="${annotation.color}">${escapeXml(lines[i])}</text>\n`;
         }
       }
       svg += '  </g>\n';
@@ -539,7 +570,7 @@ function useDrawingExport({
           const cx = transformX((cloud.points[0].x + cloud.points[1].x) / 2);
           const cy = transformY((cloud.points[0].y + cloud.points[1].y) / 2);
           const fontSize = mmToModel(3);
-          svg += `    <text x="${cx.toFixed(4)}" y="${cy.toFixed(4)}" font-family="Arial, sans-serif" font-size="${fontSize.toFixed(4)}" fill="${cloud.color}" text-anchor="middle" dominant-baseline="middle" font-weight="bold">${escapeXml(cloud.label)}</text>\n`;
+          svg += `    <text${uprightText(cx, cy)} x="${cx.toFixed(4)}" y="${cy.toFixed(4)}" font-family="Arial, sans-serif" font-size="${fontSize.toFixed(4)}" fill="${cloud.color}" text-anchor="middle" dominant-baseline="middle" font-weight="bold">${escapeXml(cloud.label)}</text>\n`;
         }
       }
       svg += '  </g>\n';
@@ -557,9 +588,10 @@ function useDrawingExport({
       );
     }
 
+    if (rotDeg !== 0) svg += '  </g>\n';
     svg += '</svg>';
     return svg;
-  }, [drawing, displayOptions, activePresetId, entityColorMap, overridesEnabled, overrideEngine, measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D, sectionPlane.axis, dxfUnderlays, scanSection]);
+  }, [drawing, displayOptions, activePresetId, entityColorMap, overridesEnabled, overrideEngine, measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D, sectionPlane.axis, dxfUnderlays, scanSection, viewRotation]);
 
   // Generate SVG with drawing sheet (frame, title block, scale bar)
   // This generates coordinates directly in paper mm space (like the canvas rendering)
