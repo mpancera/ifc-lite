@@ -651,8 +651,15 @@ function finishAddElement(
  *   - slab (rectangle): 1st click → corner, 2nd click → opposite + place
  *   - slab (polygon): N clicks accumulate; Enter / double-click closes
  *     (handled in the keyboard layer; this function only appends)
+ *
+ * Takes a renderer-frame point and reads everything else from the store — no
+ * camera, no raycast — which is why plan mode (#50) can drive the SAME state
+ * machine from a 2D click instead of growing a second one. A parallel
+ * placement path would drift on every type added here, and the multi-click
+ * types would keep separate pending-point state that the two surfaces could
+ * not hand to each other mid-wall.
  */
-async function handleAddElementDrop(
+export async function handleAddElementDrop(
   point: { x: number; y: number; z: number },
   storeyOverride?: { modelId: string; storeyId: number },
 ): Promise<void> {

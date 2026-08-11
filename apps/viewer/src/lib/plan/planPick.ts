@@ -207,3 +207,30 @@ export function planScreenToDrawing(
     y: (screenY - transform.y) / transform.scale,
   };
 }
+
+/**
+ * A point on the plan, as a point in the renderer's world.
+ *
+ * The section cutter projects a down-cut with `getProjectionAxes('y')`, which
+ * is `{ u: 'x', v: 'z' }`, and `projectTo2D` writes `{ x: u, y: v }` — so
+ * drawing x IS world x and drawing y IS world z, with NO negation.
+ *
+ * That last clause is the trap. A neighbouring comment in the generation hook
+ * describes `worldZ = -(2D y)`, but it is about the SYMBOLIC representation
+ * path, where WASM negates Z into the 2D y axis to match the cutter's
+ * handedness. Applying that rule here would mirror every placement about the
+ * building's X axis — plausible-looking output landing on the wrong side of
+ * the plan. Verified against real geometry: a cut wall whose plan centroid is
+ * y = -3.905 has a mesh centroid at world z = -3.900.
+ *
+ * `worldY` is the height to place at; the caller passes the cut or the storey
+ * floor. Placement currently discards it (a new element sits at its storey's
+ * own datum, exactly as in 3D), but the point is a world point and lying about
+ * one of its components would be a trap for the next reader.
+ */
+export function planPointToRenderer(
+  point: Point2D,
+  worldY: number,
+): { x: number; y: number; z: number } {
+  return { x: point.x, y: worldY, z: point.y };
+}

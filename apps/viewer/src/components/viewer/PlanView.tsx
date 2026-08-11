@@ -46,7 +46,8 @@ import { useDrawingGeneration } from '@/hooks/useDrawingGeneration';
 import { useViewControls } from '@/hooks/useViewControls';
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
-import { pickInPlan, planScreenToDrawing } from '@/lib/plan/planPick';
+import { pickInPlan, planScreenToDrawing, planPointToRenderer } from '@/lib/plan/planPick';
+import { handleAddElementDrop } from './selectionHandlers';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import { resolveEntityRef } from '@/store/resolveEntityRef';
 import { applyLevelDisplayMode } from '@/store/levelDisplay';
@@ -104,6 +105,8 @@ export function PlanView({
   const setPlanStorey = useViewerStore((s) => s.setPlanStorey);
   const planCutHeight = useViewerStore((s) => s.planCutHeight);
   const models = useViewerStore((s) => s.models);
+  const activeTool = useViewerStore((s) => s.activeTool);
+  const addElementPendingPoints = useViewerStore((s) => s.addElementPendingPoints);
   const { geometryResult: legacyGeometryResult, ifcDataStore } = useIfc();
   const geometryResult = mergedGeometry ?? legacyGeometryResult;
 
@@ -323,14 +326,46 @@ export function PlanView({
     if (e.button === 0) pressRef.current = { x: e.clientX, y: e.clientY };
   }, []);
 
+  // Where the cursor is, in drawing units — only tracked while placing, since
+  // that is the only thing that needs to redraw on every mouse move.
+  const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
+
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     const from = panRef.current;
-    if (!from) return;
-    const dx = e.clientX - from.x;
-    const dy = e.clientY - from.y;
-    panRef.current = { x: e.clientX, y: e.clientY };
-    setViewTransform((prev) => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
-  }, [setViewTransform]);
+    if (from) {
+      const dx = e.clientX - from.x;
+      const dy = e.clientY - from.y;
+      panRef.current = { x: e.clientX, y: e.clientY };
+      setViewTransform((prev) => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+      return;
+    }
+    if (activeTool !== 'addElement') return;
+    const container = containerRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    setCursor(planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, viewTransform));
+  }, [setViewTransform, activeTool, viewTransform]);
+
+  // ── Placing ─────────────────────────────────────────────────────────────
+  // Straight into the SAME state machine 3D clicks drive, which is why every
+  // element type — including the two-click wall and the N-click slab polygon —
+  // works here without plan mode knowing any of them exist. It also means a
+  // wall started in 3D can be finished in the plan: the pending points live in
+  // the store, not in either surface.
+  //
+  // The storey is overridden to the one being DRAWN rather than the AddElement
+  // panel's selector: you are looking at a plan of this floor, so a click
+  // belongs to this floor. The same override the smart-placement path uses.
+  const placeAt = useCallback((clientX: number, clientY: number) => {
+    const container = containerRef.current;
+    if (!container || !storey || !storeyModelId || !cut?.ok) return;
+    const rect = container.getBoundingClientRect();
+    const point = planScreenToDrawing(clientX - rect.left, clientY - rect.top, viewTransform);
+    void handleAddElementDrop(
+      planPointToRenderer(point, cut.worldY),
+      { modelId: storeyModelId, storeyId: storey.expressId },
+    );
+  }, [storey, storeyModelId, cut, viewTransform]);
 
   const handleMouseUp = useCallback((e: React.MouseEvent) => {
     panRef.current = null;
@@ -339,13 +374,33 @@ export function PlanView({
     if (e.button !== 0 || !press) return;
     if (Math.abs(e.clientX - press.x) > CLICK_SLOP_PX) return;
     if (Math.abs(e.clientY - press.y) > CLICK_SLOP_PX) return;
+    if (activeTool === 'addElement') {
+      placeAt(e.clientX, e.clientY);
+      return;
+    }
     selectAt(e.clientX, e.clientY, e.ctrlKey || e.metaKey);
-  }, [selectAt]);
+  }, [activeTool, placeAt, selectAt]);
 
   const handleMouseLeave = useCallback(() => {
     panRef.current = null;
     pressRef.current = null;
+    setCursor(null);
   }, []);
+
+  // ── Placement preview ───────────────────────────────────────────────────
+  // Pending points live in the store in the RENDERER frame, so they come back
+  // through the same mapping placement went out through — one rule, one place.
+  // Without this a two-click wall is invisible until it exists, and the first
+  // click looks like it did nothing.
+  const placementPreview = useMemo(() => {
+    if (activeTool !== 'addElement' || addElementPendingPoints.length === 0) return null;
+    const toScreen = (p: { x: number; y: number }) => ({
+      x: p.x * viewTransform.scale + viewTransform.x,
+      y: p.y * viewTransform.scale + viewTransform.y,
+    });
+    const placed = addElementPendingPoints.map((p) => toScreen({ x: p.x, y: p.z }));
+    return { placed, band: cursor ? toScreen(cursor) : null };
+  }, [activeTool, addElementPendingPoints, viewTransform, cursor]);
 
   const overrideEngine = useMemo(() => new GraphicOverrideEngine([]), []);
   const emptyColorMap = useMemo(() => new Map<number, [number, number, number, number]>(), []);
@@ -358,7 +413,11 @@ export function PlanView({
 
   return (
     <div
-      className="absolute inset-0 z-30 bg-white dark:bg-zinc-950 cursor-default"
+      className={`absolute inset-0 z-30 bg-white dark:bg-zinc-950 ${
+        // A crosshair while placing: the task is putting a point exactly
+        // somewhere, and a pointer promises the wrong gesture.
+        activeTool === 'addElement' ? 'cursor-crosshair' : 'cursor-default'
+      }`}
       data-plan-view
       ref={containerRef}
       onMouseDown={handleMouseDown}
@@ -381,6 +440,38 @@ export function PlanView({
           isPinned
           cachedSheetTransformRef={cachedSheetTransformRef}
         />
+      )}
+
+      {/* Points already placed, and the rubber band to the cursor. Drawn over
+          the canvas rather than into it: it changes on every mouse move, and
+          the drawing underneath does not. */}
+      {placementPreview && (
+        <svg className="absolute inset-0 h-full w-full pointer-events-none" data-plan-placement>
+          {placementPreview.band && placementPreview.placed.length > 0 && (
+            <line
+              x1={placementPreview.placed[placementPreview.placed.length - 1].x}
+              y1={placementPreview.placed[placementPreview.placed.length - 1].y}
+              x2={placementPreview.band.x}
+              y2={placementPreview.band.y}
+              stroke="currentColor"
+              className="text-sky-500"
+              strokeWidth={1}
+              strokeDasharray="4 3"
+            />
+          )}
+          {placementPreview.placed.length > 1 && (
+            <polyline
+              points={placementPreview.placed.map((p) => `${p.x},${p.y}`).join(' ')}
+              fill="none"
+              stroke="currentColor"
+              className="text-sky-500"
+              strokeWidth={1}
+            />
+          )}
+          {placementPreview.placed.map((p, i) => (
+            <circle key={i} cx={p.x} cy={p.y} r={3} className="fill-sky-500" />
+          ))}
+        </svg>
       )}
 
       {/* Controls along the top edge, where #50 asks for them. */}

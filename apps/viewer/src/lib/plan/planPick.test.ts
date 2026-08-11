@@ -4,7 +4,8 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { pickInPlan, planScreenToDrawing } from './planPick.js';
+import { pickInPlan, planScreenToDrawing, planPointToRenderer } from './planPick.js';
+import { projectTo2D } from '@ifc-lite/drawing-2d';
 import type {
   Drawing2D, DrawingLine, DrawingPolygon, LineCategory, Point2D,
 } from '@ifc-lite/drawing-2d';
@@ -177,5 +178,31 @@ describe('planScreenToDrawing', () => {
     const near = 6 / 100;  // zoomed in
     const far = 6 / 10;    // zoomed out
     assert.ok(near < far);
+  });
+});
+
+describe('planPointToRenderer', () => {
+  it('inverts the REAL projection the cutter used, not a restated one', () => {
+    // The guard that matters. A sign error here mirrors every placement about
+    // the building's X axis: plausible output, wrong side of the plan. So this
+    // asserts against `projectTo2D` itself rather than a copy of its rule.
+    const world = { x: 7.1, y: 1.0, z: -3.9 };
+    const projected = projectTo2D(world, 'y', false); // 'y' = a down cut
+    const back = planPointToRenderer(projected, world.y);
+
+    assert.ok(Math.abs(back.x - world.x) < 1e-9);
+    assert.ok(Math.abs(back.z - world.z) < 1e-9);
+    assert.ok(Math.abs(back.y - world.y) < 1e-9);
+  });
+
+  it('does not negate: a point south of the origin stays south', () => {
+    // Stated separately from the round-trip because a matching pair of sign
+    // errors would round-trip perfectly and still place everything mirrored.
+    const back = planPointToRenderer({ x: 2, y: -3.9 }, 0);
+    assert.equal(back.z, -3.9);
+  });
+
+  it('carries the height it was handed, so the point is a real world point', () => {
+    assert.equal(planPointToRenderer({ x: 0, y: 0 }, 4.25).y, 4.25);
   });
 });
