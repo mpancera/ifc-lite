@@ -160,8 +160,20 @@ export interface AddElementAutoSpacePreview {
   outlines: Array<Array<[number, number]>>;
   /** Per-region metadata for the panel summary. */
   regions: Array<{ area: number }>;
-  wallsConsidered: number;
-  wallsContributing: number;
+  /**
+   * Where the outlines came from. The two sources fail differently, so the
+   * summary has to say which one is being looked at: too few walls contributing
+   * versus too few segments on the chosen layers.
+   */
+  source?: 'walls' | 'drawing';
+  /** Walls-only. Absent when the outlines came from a drawing. */
+  wallsConsidered?: number;
+  /** Walls-only. Absent when the outlines came from a drawing. */
+  wallsContributing?: number;
+  /** Drawing-only: segments the detector was given. */
+  segmentsConsidered?: number;
+  /** Drawing-only: regions dropped as too narrow — almost always wall cavities. */
+  skippedNarrow?: number;
   /**
    * Diagnostic counts from the planar-graph pipeline. Surfaced
    * verbatim in the Auto Spaces panel so users can spot pipeline

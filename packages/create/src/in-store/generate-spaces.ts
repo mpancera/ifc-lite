@@ -350,8 +350,11 @@ export function offsetRoomFootprint(
   return verts;
 }
 
-/** Ray-cast point-in-polygon test. */
-function pointInPolygon(x: number, y: number, poly: Vec2[]): boolean {
+/**
+ * Ray-cast point-in-polygon test. Shared with the drawing-fed generator, which
+ * dedups against the same footprints.
+ */
+export function pointInPolygon(x: number, y: number, poly: Vec2[]): boolean {
   let inside = false;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
     const xi = poly[i][0], yi = poly[i][1];

@@ -88,6 +88,12 @@ export {
   type GenerateSpacesStoreyResult,
   type StoreyInfo,
 } from './in-store/generate-spaces-all.js';
+export {
+  generateSpacesFromDrawing,
+  DRAWING_SPACE_OBJECTTYPE,
+  type GenerateSpacesFromDrawingOptions,
+  type GenerateSpacesFromDrawingResult,
+} from './in-store/generate-spaces-from-drawing.js';
 
 export type {
   // Geometry primitives

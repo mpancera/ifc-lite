@@ -34,12 +34,16 @@ import {
   duplicateInStore,
   resolveDuplicateSource,
   generateSpacesFromWalls,
+  generateSpacesFromDrawing,
   type BeamInStoreParams,
   type ColumnInStoreParams,
   type DoorInStoreParams,
   type DuplicateInStoreOptions,
   type GenerateSpacesOptions,
   type GenerateSpacesResult,
+  type GenerateSpacesFromDrawingOptions,
+  type GenerateSpacesFromDrawingResult,
+  type AutoSpaceSegment,
   type LibraryElementInStoreParams,
   type MemberInStoreParams,
   type PlateInStoreParams,
@@ -695,6 +699,20 @@ export interface MutationSlice {
     storeyExpressId: number,
     options?: GenerateSpacesOptions,
   ) => GenerateSpacesResult | { error: string };
+  /**
+   * The same, from an imported plan instead of from walls.
+   *
+   * Segments must already be in the model's own metre frame — placing an
+   * underlay is what puts them there. Rooms come out at the drawn wall faces
+   * rather than at wall centrelines, so they carry no gross area and no space
+   * boundaries; see `generate-spaces-from-drawing.ts` for why.
+   */
+  generateSpacesFromDrawing: (
+    modelId: string,
+    storeyExpressId: number,
+    segments: AutoSpaceSegment[],
+    options?: GenerateSpacesFromDrawingOptions,
+  ) => GenerateSpacesFromDrawingResult | { error: string };
   /**
    * Duplicate an existing IfcRoot product in a chosen direction.
    * Offset magnitude is one source-bbox dimension along the picked
@@ -2707,6 +2725,62 @@ export const createMutationSlice: StateCreator<
       position: params.Position,
     },
   ),
+
+  generateSpacesFromDrawing: (modelId, storeyExpressId, segments, options) => {
+    const state = get();
+    const model = state.models.get(modelId);
+    const dataStore = model?.ifcDataStore;
+    if (!dataStore) return { error: `No model loaded for id "${modelId}"` };
+    if (!state.mutationViews.get(modelId)) {
+      return { error: 'Model has no editable mutation view yet' };
+    }
+
+    const editor = getOrCreateStoreEditor(get, set, modelId);
+    if (!editor) return { error: 'Failed to create store editor' };
+
+    let result: GenerateSpacesFromDrawingResult;
+    try {
+      // No overlay reader here, unlike the wall path: the drawing IS the input,
+      // so there is no second source of geometry to merge in.
+      result = generateSpacesFromDrawing(editor, dataStore, storeyExpressId, segments, options);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Failed to generate rooms' };
+    }
+
+    if (!result.emitted.length) return result;
+
+    set((s) => {
+      const newUndoStacks = new Map(s.undoStacks);
+      const stack = [...(newUndoStacks.get(modelId) ?? [])];
+      const ts = Date.now();
+      for (const e of result.emitted) {
+        stack.push({
+          id: `mut_ifcspace_${e.result.spaceId}_${ts}_${Math.random().toString(36).substring(2, 9)}`,
+          type: 'CREATE_ENTITY',
+          timestamp: ts,
+          modelId,
+          entityId: e.result.spaceId,
+          attributeName: 'IFCSPACE',
+        });
+      }
+      newUndoStacks.set(modelId, stack);
+
+      const newRedoStacks = new Map(s.redoStacks);
+      newRedoStacks.set(modelId, []);
+
+      const newDirty = new Set(s.dirtyModels);
+      newDirty.add(modelId);
+
+      return {
+        undoStacks: newUndoStacks,
+        redoStacks: newRedoStacks,
+        dirtyModels: newDirty,
+        mutationVersion: s.mutationVersion + 1,
+      };
+    });
+
+    return result;
+  },
 
   generateSpacesFromWalls: (modelId, storeyExpressId, options) => {
     const state = get();

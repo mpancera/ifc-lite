@@ -35,6 +35,7 @@ import { EntityNode } from '@ifc-lite/query';
 import type { AddElementType } from '@/store/slices/addElementSlice';
 import { useCatalogEntries, type CatalogEntry } from '@/lib/catalog';
 import { CatalogImportControls } from './catalog/CatalogImportControls';
+import { dxfSegments, summariseLayers, suggestWallLayers } from '@/lib/plan/dxfSegments';
 
 interface ElementOption {
   type: AddElementType;
@@ -437,6 +438,16 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
           />
         )}
 
+        {/* The same rooms from an imported plan. A sibling rather than a mode
+            of the section above: the outlines mean different things (drawn wall
+            faces, not wall centrelines) and the two fail in different ways. */}
+        {addElementType === 'space' && (
+          <RoomsFromDrawingSection
+            modelId={effectiveModelId}
+            storeyId={addElementStoreyId ?? storeyOptions[0]?.expressId ?? null}
+          />
+        )}
+
         {/* Click-state guidance — drives the user through the multi-click flow */}
         <DropGuidance
           ready={ready}
@@ -593,6 +604,212 @@ interface NumberFieldProps {
   onChange: (v: number) => void;
 }
 
+interface RoomsFromDrawingSectionProps {
+  modelId: string | null;
+  storeyId: number | null;
+}
+
+/**
+ * Rooms traced from an imported plan instead of from modelled walls.
+ *
+ * Shares the numeric settings with the wall section above — snap, minimum
+ * area, height, naming all mean the same thing whichever the source is — and
+ * adds the two things only a drawing needs: which underlay, and which of its
+ * layers carry the walls.
+ *
+ * The layer choice is the whole feature. A plan carries furniture, dimensions,
+ * hatching and text, and feeding all of it to the detector yields regions
+ * bounded by a dimension line and half a desk. Common naming is offered as a
+ * starting tick, never applied silently.
+ */
+function RoomsFromDrawingSection({ modelId, storeyId }: RoomsFromDrawingSectionProps) {
+  const params = useViewerStore((s) => s.addElementAutoSpaceParams);
+  const setPreview = useViewerStore((s) => s.setAddElementAutoSpacePreview);
+  const generate = useViewerStore((s) => s.generateSpacesFromDrawing);
+  const underlays = useViewerStore((s) => s.dxfUnderlays);
+
+  const [underlayId, setUnderlayId] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [minWidth, setMinWidth] = useState(0.35);
+  const [busy, setBusy] = useState(false);
+
+  const underlay = underlays.find((u) => u.id === underlayId) ?? underlays[0] ?? null;
+
+  // Re-suggest when the underlay changes, not on every render: a suggestion
+  // that keeps reinstating itself would undo the user's own ticks.
+  useEffect(() => {
+    if (!underlay) return;
+    setSelected(suggestWallLayers(underlay));
+  }, [underlay?.id]);
+
+  // The store replaces the underlay object on every change, so its identity
+  // already covers a moved plan — no second dependency needed.
+  const summaries = useMemo(
+    () => (underlay ? summariseLayers(underlay) : []),
+    [underlay],
+  );
+
+  const ready = modelId !== null && storeyId !== null && underlay !== null && selected.length > 0;
+
+  const run = (dryRun: boolean) => {
+    if (!ready || busy) return;
+    setBusy(true);
+    try {
+      const segments = dxfSegments(underlay!, { layers: selected });
+      if (segments.length === 0) {
+        toast.info('No lines on the chosen layers. Pick the layers that carry the walls.');
+        return;
+      }
+
+      const result = generate(modelId!, storeyId!, segments, {
+        snapTolerance: params.SnapTolerance,
+        minArea: params.MinArea,
+        minWidth,
+        height: params.Height,
+        namePattern: params.NamePattern,
+        predefinedType: params.PredefinedType,
+        dryRun,
+      });
+      if ('error' in result) {
+        toast.error(result.error);
+        return;
+      }
+
+      if (dryRun) {
+        setPreview({
+          storeyExpressId: storeyId!,
+          source: 'drawing',
+          outlines: result.detected.map((d) => d.outline.map((p) => [p[0], p[1]])),
+          regions: result.detected.map((d) => ({ area: d.area })),
+          segmentsConsidered: result.segmentsConsidered,
+          skippedNarrow: result.skippedNarrow,
+        });
+        if (result.detected.length === 0) {
+          toast.info('No enclosed regions. Check the layer choice or raise the snap tolerance.');
+        }
+        return;
+      }
+
+      setPreview(null);
+      const count = result.emitted.length;
+      if (count === 0) {
+        toast.info('No rooms to generate.');
+      } else {
+        toast.success(`Generated ${count} room${count === 1 ? '' : 's'} from the plan.`);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (underlays.length === 0) {
+    return (
+      <section className="space-y-2 pt-1">
+        <div className="flex items-center gap-1.5">
+          <Wand2 className="h-3 w-3 text-sky-600" />
+          <Label className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+            Rooms (from a plan)
+          </Label>
+        </div>
+        <p className="text-[10px] font-mono text-zinc-400 dark:text-zinc-600 leading-snug">
+          Import a DXF and align it to the model first — rooms are traced where the
+          plan is placed.
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="space-y-2 pt-1">
+      <div className="flex items-center gap-1.5">
+        <Wand2 className="h-3 w-3 text-sky-600" />
+        <Label className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+          Rooms (from a plan)
+        </Label>
+      </div>
+
+      {underlays.length > 1 && (
+        <Select value={underlay?.id ?? ''} onValueChange={setUnderlayId}>
+          <SelectTrigger className="h-8 font-mono text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {underlays.map((u) => (
+              <SelectItem key={u.id} value={u.id} className="font-mono text-xs">{u.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
+
+      <div className="space-y-1">
+        <Label className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400">
+          Wall layers
+          <span className="text-zinc-400 dark:text-zinc-600 ml-1">
+            ({selected.length} of {summaries.length})
+          </span>
+        </Label>
+        {/* Segment and text counts rather than names alone: a wall layer has
+            hundreds of segments and almost no text, a label layer the reverse.
+            That is what makes the choice decidable at a glance. */}
+        <div className="max-h-40 overflow-y-auto rounded-sm border border-zinc-200 dark:border-zinc-800 divide-y divide-zinc-100 dark:divide-zinc-900">
+          {summaries.map((l) => (
+            <label
+              key={l.name}
+              className="flex items-center gap-1.5 px-1.5 py-1 text-[10px] font-mono cursor-pointer select-none hover:bg-zinc-50 dark:hover:bg-zinc-900"
+            >
+              <input
+                type="checkbox"
+                checked={selected.includes(l.name)}
+                onChange={(e) => setSelected((prev) => (
+                  e.target.checked ? [...prev, l.name] : prev.filter((n) => n !== l.name)
+                ))}
+                className="h-3 w-3 accent-sky-600"
+              />
+              <span className={`flex-1 truncate ${l.visible ? '' : 'opacity-50'}`}>
+                {l.name}
+                {l.suggested && <span className="ml-1 text-sky-600">•</span>}
+              </span>
+              <span className="text-zinc-400 dark:text-zinc-600 shrink-0">
+                {l.segments}
+                {l.texts > 0 && ` / ${l.texts}t`}
+              </span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <NumberField
+        label="Min width" suffix="m"
+        value={minWidth} min={0}
+        onChange={setMinWidth}
+      />
+      <p className="text-[10px] font-mono text-zinc-400 dark:text-zinc-600 leading-snug">
+        A plan draws both faces of a wall, so the gap between them closes too. This
+        drops those — they are long, but never wide.
+      </p>
+
+      <div className="grid grid-cols-2 gap-2 pt-1">
+        <Button
+          variant="outline" size="sm"
+          onClick={() => run(true)}
+          disabled={!ready || busy}
+          className="h-8 text-[11px] font-mono"
+        >
+          Preview
+        </Button>
+        <Button
+          variant="default" size="sm"
+          onClick={() => run(false)}
+          disabled={!ready || busy}
+          className="h-8 text-[11px] font-mono bg-sky-600 hover:bg-sky-700"
+        >
+          Generate
+        </Button>
+      </div>
+    </section>
+  );
+}
+
 interface AutoSpacesSectionProps {
   modelId: string | null;
   storeyId: number | null;
@@ -639,6 +856,7 @@ function AutoSpacesSection({ modelId, storeyId }: AutoSpacesSectionProps) {
       }
       setPreview({
         storeyExpressId: storeyId!,
+        source: 'walls',
         outlines: result.detected.map((d) => d.outline.map((p) => [p[0], p[1]])),
         regions: result.detected.map((d) => ({ area: d.area })),
         wallsConsidered: result.wallsConsidered,
@@ -786,7 +1004,13 @@ function AutoSpacesSection({ modelId, storeyId }: AutoSpacesSectionProps) {
         <div className="rounded-sm border border-emerald-200 dark:border-emerald-900 bg-emerald-50/60 dark:bg-emerald-950/20 px-2 py-1.5 text-[10px] font-mono text-emerald-800 dark:text-emerald-300 leading-snug">
           <div>
             {preview.regions.length} region{preview.regions.length === 1 ? '' : 's'} detected
-            {' · '}{preview.wallsContributing}/{preview.wallsConsidered} walls
+            {/* The two sources fail differently — too few walls contributing, or
+                too few segments on the chosen layers — so the summary names the
+                one being looked at rather than showing "0/0 walls" for a plan. */}
+            {preview.source === 'drawing'
+              ? <>{' · '}{preview.segmentsConsidered ?? 0} segments</>
+              : <>{' · '}{preview.wallsContributing ?? 0}/{preview.wallsConsidered ?? 0} walls</>}
+            {preview.skippedNarrow ? `${' · '}${preview.skippedNarrow} too narrow` : null}
           </div>
           {preview.regions.length > 0 && (
             <div className="opacity-80">
@@ -807,14 +1031,23 @@ function AutoSpacesSection({ modelId, storeyId }: AutoSpacesSectionProps) {
                 .join(', ')}
             </div>
           )}
-          {preview.regions.length === 0 && preview.wallsContributing > 0 && (
+          {preview.regions.length === 0 && (preview.wallsContributing ?? 0) > 0 && (
             <div className="mt-1 text-amber-700 dark:text-amber-400">
               Walls extracted but no enclosed regions formed — check that walls actually meet at corners (try a larger Snap value).
             </div>
           )}
-          {preview.wallsContributing === 0 && preview.wallsConsidered > 0 && (
+          {preview.wallsContributing === 0 && (preview.wallsConsidered ?? 0) > 0 && (
             <div className="mt-1 text-amber-700 dark:text-amber-400">
               No wall axes could be extracted. Toggle &quot;Verbose console logging&quot; for per-wall diagnostics.
+            </div>
+          )}
+          {/* The drawing equivalent: lines were found, nothing closed. Almost
+              always a layer that carries only part of the walls, or corners
+              left open by a gap wider than the snap tolerance. */}
+          {preview.source === 'drawing' && preview.regions.length === 0
+            && (preview.segmentsConsidered ?? 0) > 0 && (
+            <div className="mt-1 text-amber-700 dark:text-amber-400">
+              Lines found but nothing closed — add the layers carrying the rest of the walls, or raise Snap.
             </div>
           )}
         </div>
