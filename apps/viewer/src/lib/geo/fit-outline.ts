@@ -45,7 +45,12 @@
  * them.
  */
 
-import { solveGeoreference, type ControlPointPair, type GeoreferenceSolution } from './solve-georeference';
+import {
+  normaliseDegrees,
+  solveGeoreference,
+  type ControlPointPair,
+  type GeoreferenceSolution,
+} from './solve-georeference';
 
 export interface Point2 { x: number; y: number }
 
@@ -56,6 +61,20 @@ export interface FitOutlineOptions {
    * never solved for.
    */
   lockScale?: number;
+  /**
+   * Hold the rotation at this angle instead of searching for it, degrees CCW.
+   *
+   * For the common correction where the orientation is already right and only
+   * the position is wrong — a model placed at the wrong point but built on the
+   * correct grid bearing. Searching then does harm rather than nothing: two
+   * footprints never agree exactly (survey tolerance, roof overhang, a bay
+   * window in one and not the other), and the sweep spends that disagreement
+   * on a degree or two of spurious rotation that looks like an improved fit.
+   *
+   * With the angle held, the best translation is not searched for either: it
+   * is the one that brings the area centroids together, exactly.
+   */
+  lockRotationDeg?: number;
   /** Rotation sweep step in degrees. */
   coarseStepDeg?: number;
   /**
@@ -217,6 +236,11 @@ export function fitOutline(
   options: FitOutlineOptions = {},
 ): FitOutlineResult {
   const { lockScale, coarseStepDeg, maxSweepVertices, icpIterations } = { ...DEFAULTS, ...options };
+  // Not in DEFAULTS: absent means "search", which is not a value the sweep can
+  // be given. `null` here is therefore the searching case, not a missing one.
+  const lockedTheta = options.lockRotationDeg === undefined
+    ? null
+    : (options.lockRotationDeg * Math.PI) / 180;
 
   if (localRing.length < MIN_RING_VERTICES) return { ok: false, reason: 'degenerate-local' };
   if (mapRing.length < MIN_RING_VERTICES) return { ok: false, reason: 'degenerate-map' };
@@ -232,10 +256,10 @@ export function fitOutline(
   const sweepMap = decimate(mapRing, maxSweepVertices);
 
   // ── Coarse sweep ────────────────────────────────────────────────────────
-  let bestTheta = 0;
+  let bestTheta = lockedTheta ?? 0;
   let bestScore = Infinity;
   const stepRad = (coarseStepDeg * Math.PI) / 180;
-  for (let theta = 0; theta < 2 * Math.PI; theta += stepRad) {
+  for (let theta = 0; lockedTheta === null && theta < 2 * Math.PI; theta += stepRad) {
     const placed = rotateAbout(sweepLocal, localCentroid, Math.cos(theta), Math.sin(theta), mapCentroid);
     const score = symmetricMeanDistance(placed, sweepMap);
     if (score < bestScore) {
@@ -249,7 +273,7 @@ export function fitOutline(
   // for a derivative method, but it is unimodal within one coarse step, which
   // is all bisection needs.
   let span = stepRad;
-  for (let pass = 0; pass < 12; pass += 1) {
+  for (let pass = 0; lockedTheta === null && pass < 12; pass += 1) {
     span /= 2;
     for (const candidate of [bestTheta - span, bestTheta + span]) {
       const placed = rotateAbout(sweepLocal, localCentroid, Math.cos(candidate), Math.sin(candidate), mapCentroid);
@@ -273,7 +297,7 @@ export function fitOutline(
   let northings = mapCentroid.y - (localCentroid.x * sin + localCentroid.y * cos);
   let solution: GeoreferenceSolution | null = null;
 
-  for (let iteration = 0; iteration < icpIterations; iteration += 1) {
+  for (let iteration = 0; lockedTheta === null && iteration < icpIterations; iteration += 1) {
     const pairs: ControlPointPair[] = [];
     for (let i = 0; i < localRing.length; i += 1) {
       const scaled = scaledLocal[i];
@@ -294,6 +318,41 @@ export function fitOutline(
     sin = solution.xAxisOrdinate;
     eastings = solution.eastings;
     northings = solution.northings;
+  }
+
+  if (!solution && lockedTheta !== null) {
+    // Nothing was searched for, so there is nothing for the solver to return:
+    // the angle was given and the translation follows from it in closed form.
+    // `cos`, `sin`, `eastings` and `northings` above already hold it.
+    const residuals = scaledLocal.map(p => closestPointOnRing({
+      x: eastings + p.x * cos - p.y * sin,
+      y: northings + p.x * sin + p.y * cos,
+    }, mapRing).distance);
+
+    let maxResidual = 0;
+    let worstPairIndex = 0;
+    let sumSquared = 0;
+    residuals.forEach((r, i) => {
+      sumSquared += r * r;
+      if (r > maxResidual) { maxResidual = r; worstPairIndex = i; }
+    });
+
+    solution = {
+      eastings,
+      northings,
+      xAxisAbscissa: cos,
+      xAxisOrdinate: sin,
+      rotationDeg: normaliseDegrees(lockedTheta * 180 / Math.PI),
+      scale: lockScale,
+      // Nothing was solved for, so there is no independent scale to compare
+      // against — saying "0 ppm deviation" would claim a check that never ran.
+      solvedScale: lockScale,
+      scaleDeviationPpm: null,
+      residuals,
+      maxResidual,
+      rmsResidual: residuals.length > 0 ? Math.sqrt(sumSquared / residuals.length) : 0,
+      worstPairIndex,
+    };
   }
 
   if (!solution) {

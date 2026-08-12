@@ -203,3 +203,106 @@ describe('fit quality figures', () => {
     );
   });
 });
+
+/**
+ * Holding the rotation — the correction where the bearing is already right and
+ * only the position is wrong.
+ */
+describe('fitOutline with the rotation held', () => {
+  /** The parcel shifted bodily, standing in for a model placed at the wrong point. */
+  const shifted = (dx: number, dy: number): Point2[] =>
+    parcel.map(p => ({ x: p.x + dx, y: p.y + dy }));
+
+  it('recovers a pure shift exactly', () => {
+    const fit = fitOutline(shifted(-40, 25), parcel, { lockScale: 1, lockRotationDeg: 0 });
+    assert.ok(fit.ok);
+
+    // The rings are the same shape, so the centroid match is the exact answer.
+    assert.ok(fit.maxDistance < 1e-6, `expected an exact fit, got ${fit.maxDistance} m`);
+  });
+
+  it('leaves the rotation exactly where it was told to', () => {
+    const fit = fitOutline(shifted(-40, 25), parcel, { lockScale: 1, lockRotationDeg: 0 });
+    assert.ok(fit.ok);
+
+    assert.equal(fit.solution.rotationDeg, 0);
+    assert.equal(fit.solution.xAxisAbscissa, 1);
+    assert.equal(fit.solution.xAxisOrdinate, 0);
+  });
+
+  it('does not spend a mismatch on spurious rotation', () => {
+    // The reason the lock exists. Two footprints never agree exactly — here one
+    // corner is pulled 3 m out, as a bay window in one source and not the other
+    // would be. A free search buys a better mean by rotating; holding the angle
+    // reports the disagreement instead of absorbing it.
+    const dented = shifted(-40, 25);
+    dented[0] = { x: dented[0].x + 3, y: dented[0].y + 3 };
+
+    const held = fitOutline(dented, parcel, { lockScale: 1, lockRotationDeg: 0 });
+    const free = fitOutline(dented, parcel, { lockScale: 1 });
+    assert.ok(held.ok && free.ok);
+
+    assert.equal(held.solution.rotationDeg, 0);
+    assert.ok(
+      Math.abs(free.solution.rotationDeg) > Math.abs(held.solution.rotationDeg),
+      'the free search should have moved the angle; if it did not, this test proves nothing',
+    );
+  });
+
+  it('applies a held angle that is not zero', () => {
+    const theta = (30 * Math.PI) / 180;
+    const centroid = polygonAreaCentroid(parcel);
+    // Turn the parcel about its own centroid by -30°, so a held +30° puts it back.
+    const turned = parcel.map(p => {
+      const dx = p.x - centroid.x;
+      const dy = p.y - centroid.y;
+      return {
+        x: centroid.x + dx * Math.cos(-theta) - dy * Math.sin(-theta),
+        y: centroid.y + dx * Math.sin(-theta) + dy * Math.cos(-theta),
+      };
+    });
+
+    const fit = fitOutline(turned, parcel, { lockScale: 1, lockRotationDeg: 30 });
+    assert.ok(fit.ok);
+
+    assert.ok(Math.abs(fit.solution.rotationDeg - 30) < 1e-9);
+    assert.ok(fit.maxDistance < 1e-6, `expected an exact fit, got ${fit.maxDistance} m`);
+  });
+
+  it('reports no scale deviation, because no scale was measured', () => {
+    // Nothing was solved for, so there is no independent scale to compare
+    // against. Claiming 0 ppm would report a check that never ran.
+    const fit = fitOutline(shifted(10, 10), parcel, { lockScale: 1, lockRotationDeg: 0 });
+    assert.ok(fit.ok);
+
+    assert.equal(fit.solution.scaleDeviationPpm, null);
+  });
+
+  it('still names the worst vertex', () => {
+    // Pulled far enough that it cannot be near the boundary in any direction —
+    // a smaller nudge slides along an edge and stays a good fit, which is the
+    // residual behaving correctly rather than the test finding anything.
+    const dented = shifted(-40, 25);
+    dented[4] = { x: dented[4].x + 30, y: dented[4].y + 30 };
+
+    const fit = fitOutline(dented, parcel, { lockScale: 1, lockRotationDeg: 0 });
+    assert.ok(fit.ok);
+
+    assert.equal(fit.solution.residuals.length, dented.length);
+    assert.equal(fit.solution.worstPairIndex, 4, 'the pulled vertex is the one to re-check');
+    assert.ok(fit.solution.maxResidual > 10, `got ${fit.solution.maxResidual} m`);
+    assert.ok(fit.solution.rmsResidual > 0);
+  });
+
+  it('agrees with the free search when the shape really is unrotated', () => {
+    // A sanity check on the closed form: where the sweep has nothing to find,
+    // both paths must land in the same place.
+    const local = shifted(-40, 25);
+    const held = fitOutline(local, parcel, { lockScale: 1, lockRotationDeg: 0 });
+    const free = fitOutline(local, parcel, { lockScale: 1 });
+    assert.ok(held.ok && free.ok);
+
+    assert.ok(Math.abs(held.solution.eastings - free.solution.eastings) < 0.01);
+    assert.ok(Math.abs(held.solution.northings - free.solution.northings) < 0.01);
+  });
+});

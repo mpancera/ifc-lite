@@ -236,11 +236,12 @@ export function solveGeoreference(
  * To (-180, 180]. Two rotations a full turn apart are the same rotation, and
  * one shown as 359.7° reads as broken.
  *
- * Same convention as `normaliseDegrees` in the DXF aligner — kept local rather
+ * Same convention as `normaliseDegrees` in the DXF aligner — kept here rather
  * than imported, because the georeferencing path has no business depending on
- * a DXF package for four lines of arithmetic.
+ * a DXF package for four lines of arithmetic. Shared with `fit-outline`, which
+ * builds a solution directly when the rotation is held.
  */
-function normaliseDegrees(deg: number): number {
+export function normaliseDegrees(deg: number): number {
   const wrapped = ((deg % 360) + 360) % 360;
   return wrapped > 180 ? wrapped - 360 : wrapped;
 }
