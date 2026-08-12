@@ -190,8 +190,14 @@ export function declaredCrs(payload: unknown): string | null {
   return null;
 }
 
-/** `urn:ogc:def:crs:EPSG::2056` and `EPSG:2056` name the same thing. */
-function normaliseEpsg(raw: string): string | null {
+/**
+ * `urn:ogc:def:crs:EPSG::2056` and `EPSG:2056` name the same thing.
+ *
+ * Returns `null` for a name carrying no code — `CH1903+ / LV95` ends in two
+ * digits, not four, and comparing such a name to another by string would be
+ * guesswork rather than a check.
+ */
+export function normaliseEpsg(raw: string): string | null {
   const match = /(\d{4,6})\s*$/.exec(raw.trim());
   return match ? `EPSG:${match[1]}` : null;
 }

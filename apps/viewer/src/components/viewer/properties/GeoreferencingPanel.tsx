@@ -21,6 +21,7 @@ import { GeorefFindingsList } from './GeorefFindingsList';
 import { ControlPointsPanel } from './ControlPointsPanel';
 import { useGeorefFindings } from '@/lib/geo/useGeorefFindings';
 import { ParcelFitPanel } from './ParcelFitPanel';
+import { BuildingFitPanel } from './BuildingFitPanel';
 import { resolveMapUnitToMetreScale } from '@/lib/geo/geo-scale';
 import type { GeoreferenceSolution } from '@/lib/geo/solve-georeference';
 import type { MapConversionAttributes } from '@/lib/geo/mesh-to-map';
@@ -570,6 +571,10 @@ export function GeoreferencingPanel({ georef, modelId, enableEditing, schemaVers
     writePlacement(attributes, 'parcel_fit');
   }, [writePlacement]);
 
+  const handleApplyBuildingFit = useCallback((attributes: MapConversionAttributes) => {
+    writePlacement(attributes, 'building_fit');
+  }, [writePlacement]);
+
   const initializeMapConversionDefaults = useCallback(() => {
     if (!modelId || !setGeorefFields) return;
     setGeorefFields(modelId, 'mapConversion', [
@@ -839,6 +844,19 @@ export function GeoreferencingPanel({ georef, modelId, enableEditing, schemaVers
         mapUnitScale={resolveMapUnitToMetreScale(mergedCRS?.mapUnitScale, lengthUnitScale ?? 1)}
         lengthUnitScale={lengthUnitScale ?? 1}
         onApply={handleApplyParcelFit}
+      />
+
+      {/* Same idea against a surveyed BUILDING, whose outline comes from a file:
+          the federal services publish parcels by identifier, buildings not. */}
+      <BuildingFitPanel
+        modelId={modelId}
+        editable={editable}
+        crsName={mergedCRS?.name}
+        geometryResult={geometryResult}
+        mapUnitScale={resolveMapUnitToMetreScale(mergedCRS?.mapUnitScale, lengthUnitScale ?? 1)}
+        lengthUnitScale={lengthUnitScale ?? 1}
+        currentConversion={mergedConversion}
+        onApply={handleApplyBuildingFit}
       />
 
       {/* Sampled surface height — only when Cesium overlay is active */}
