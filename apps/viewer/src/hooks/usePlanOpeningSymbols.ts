@@ -31,10 +31,11 @@ import type { GeometryResult, MeshData } from '@ifc-lite/geometry';
 import { RelationshipType } from '@ifc-lite/data';
 import {
   doorOperationFromIfc, planAxes, openingWidth, doorSymbol, windowSymbol,
-  classifyOpeningParts, swingFromGeometry, doorWidths, doorSymbolLines,
+  classifyOpeningParts, swingFromGeometry, doorSymbolLines,
   type SymbolLine, type LocalExtent, type PlanAxes, type LocalBox, type OpeningParts,
 } from '@/lib/plan/openingSymbols';
 import { doorReference, doorSize, doorLabelLines, formatDoorSize } from '@/lib/plan/doorLabels';
+import { doorQuantities } from '@/lib/plan/doorQuantities';
 import type { PlanLabel } from '@/lib/plan/roomLabels';
 
 export interface PlanOpeningSymbol {
@@ -177,13 +178,22 @@ function attribute(store: IfcDataStore, expressId: number, name: string): string
   return value.length > 0 ? value : undefined;
 }
 
-/** What a door's frame measures, as far as the model states it. */
-interface LiningProperties {
-  /** Frame member width, per side, in metres. */
-  readonly thickness?: number;
-  /** How deep the frame sits through the wall, in metres. */
-  readonly depth?: number;
+/** What a door's frame and leaf measure, as far as the model states them. */
+interface DoorDetailProperties {
+  readonly liningThickness?: number;
+  readonly liningDepth?: number;
+  readonly casingThickness?: number;
+  readonly thresholdThickness?: number;
+  /** Blattdicke. */
+  readonly panelDepth?: number;
 }
+
+/** The fields taken off `IfcDoorLiningProperties`, by their schema names. */
+const LINING_FIELDS = [
+  'LiningThickness', 'LiningDepth', 'CasingThickness', 'ThresholdThickness',
+] as const;
+/** …and off `IfcDoorPanelProperties`. */
+const PANEL_FIELDS = ['PanelDepth'] as const;
 
 /**
  * `IfcDoorLiningProperties` for a door, through its type.
@@ -200,9 +210,20 @@ interface LiningProperties {
  * adjacent, both are lengths, and swapping them produces a frame that looks
  * plausible and is wrong in both directions at once.
  */
-function liningFromType(store: IfcDataStore, typeId: number): LiningProperties | null {
+function detailsFromType(store: IfcDataStore, typeId: number): DoorDetailProperties {
   const type = store.getEntity?.(typeId);
-  if (!type?.attributes) return null;
+  if (!type?.attributes) return {};
+
+  const out: Record<string, number> = {};
+  const take = (entityId: number, fields: readonly string[]) => {
+    const named = extractAllEntityAttributes(store, entityId);
+    for (const field of fields) {
+      const entry = named.find((a) => a.name === field);
+      if (!entry) continue;
+      const value = Number.parseFloat(String(entry.value));
+      if (Number.isFinite(value) && value > 0) out[field] = value;
+    }
+  };
 
   for (const attribute of type.attributes) {
     if (!Array.isArray(attribute)) continue;
@@ -211,19 +232,58 @@ function liningFromType(store: IfcDataStore, typeId: number): LiningProperties |
       // `entities.getTypeName` answers "Unknown" here: the columnar table
       // carries products, and a property-set definition is not one. The
       // buffer-backed reader is the one that knows these exist.
-      if (store.getEntity?.(candidate)?.type !== 'IFCDOORLININGPROPERTIES') continue;
-
-      const named = extractAllEntityAttributes(store, candidate);
-      const numeric = (name: string): number | undefined => {
-        const entry = named.find((a) => a.name === name);
-        if (!entry) return undefined;
-        const value = Number.parseFloat(String(entry.value));
-        return Number.isFinite(value) && value > 0 ? value : undefined;
-      };
-      return { thickness: numeric('LiningThickness'), depth: numeric('LiningDepth') };
+      const kind = store.getEntity?.(candidate)?.type;
+      if (kind === 'IFCDOORLININGPROPERTIES') take(candidate, LINING_FIELDS);
+      else if (kind === 'IFCDOORPANELPROPERTIES') take(candidate, PANEL_FIELDS);
     }
   }
-  return null;
+
+  return {
+    liningThickness: out.LiningThickness,
+    liningDepth: out.LiningDepth,
+    casingThickness: out.CasingThickness,
+    thresholdThickness: out.ThresholdThickness,
+    panelDepth: out.PanelDepth,
+  };
+}
+
+/**
+ * The same values where a newer schema keeps them: as property SETS on the
+ * door, `Pset_DoorLiningProperties` and `Pset_DoorPanelProperties`. A model
+ * written either way answers the same questions, so both are read and whatever
+ * the type did not supply is filled in from here.
+ */
+function detailsFromPropertySets(
+  store: IfcDataStore, expressId: number, scale: number,
+): DoorDetailProperties {
+  const read = (setName: string, field: string): number | undefined => {
+    const raw = propertyValue(store, expressId, setName, field);
+    if (raw === undefined) return undefined;
+    const value = Number.parseFloat(raw) * scale;
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  };
+  return {
+    liningThickness: read('Pset_DoorLiningProperties', 'LiningThickness'),
+    liningDepth: read('Pset_DoorLiningProperties', 'LiningDepth'),
+    casingThickness: read('Pset_DoorLiningProperties', 'CasingThickness'),
+    thresholdThickness: read('Pset_DoorLiningProperties', 'ThresholdThickness'),
+    panelDepth: read('Pset_DoorPanelProperties', 'PanelDepth'),
+  };
+}
+
+/** A named quantity out of a named quantity set, in metres, or `undefined`. */
+function quantityValue(
+  store: IfcDataStore, expressId: number, setName: string, name: string, scale: number,
+): number | undefined {
+  for (const set of store.getQuantities?.(expressId) ?? []) {
+    if (set.name !== setName) continue;
+    for (const q of set.quantities ?? []) {
+      if (q.name !== name) continue;
+      const value = q.value * scale;
+      if (Number.isFinite(value) && value > 0) return value;
+    }
+  }
+  return undefined;
 }
 
 /** A named property out of a named property set, or `undefined`. */
@@ -375,16 +435,42 @@ export function usePlanOpeningSymbols({
         expressId, RelationshipType.DefinesByType, 'inverse',
       );
       const typeId = typeIds?.[0];
-      let lining = typeId === undefined ? null : liningFromType(dataStore, typeId);
-      if (lining?.thickness === undefined) {
-        const stated = propertyValue(dataStore, expressId, 'Pset_DoorLiningProperties', 'LiningThickness');
-        const parsed = stated === undefined ? Number.NaN : Number.parseFloat(stated) * scale;
-        if (Number.isFinite(parsed) && parsed > 0) lining = { ...lining, thickness: parsed };
-      }
+      const fromType = typeId === undefined ? {} : detailsFromType(dataStore, typeId);
+      const fromSets = detailsFromPropertySets(dataStore, expressId, scale);
+      const details: DoorDetailProperties = {
+        liningThickness: fromType.liningThickness ?? fromSets.liningThickness,
+        liningDepth: fromType.liningDepth ?? fromSets.liningDepth,
+        casingThickness: fromType.casingThickness ?? fromSets.casingThickness,
+        thresholdThickness: fromType.thresholdThickness ?? fromSets.thresholdThickness,
+        panelDepth: fromType.panelDepth ?? fromSets.panelDepth,
+      };
 
-      const widths = doorWidths(width, lining?.thickness);
-      if (!widths) continue;
-      if (widths.liningSource === 'assumed') assumedLinings += 1;
+      const statedHeightRaw = attribute(dataStore, expressId, 'OverallHeight');
+      const quantities = doorQuantities({
+        nominalWidth: stated === undefined ? null : Number.parseFloat(stated) * scale,
+        nominalHeight: statedHeightRaw === undefined ? null : Number.parseFloat(statedHeightRaw) * scale,
+        frameWidth: quantityValue(dataStore, expressId, 'Qto_DoorBaseQuantities', 'Width', scale),
+        frameHeight: quantityValue(dataStore, expressId, 'Qto_DoorBaseQuantities', 'Height', scale),
+        ...details,
+        leaves: doorOperationFromIfc(operationType).motion === 'double-swing' ? 2 : 1,
+        measuredWidth: width,
+        // A plan wants the WALL, not the frame: `LiningDepth` often runs past
+        // the plaster, which in 3D is truthful and in plan draws frame outside
+        // the wall (Marc, 2026-08-13).
+        measuredDepth: geometry.extent.depth,
+      });
+      if (!quantities) continue;
+      if (quantities.liningSource === 'assumed') assumedLinings += 1;
+
+      const widths = {
+        rough: quantities.nominalWidth,
+        lining: quantities.liningThickness,
+        // The LEAF spans the lichte Breite, so that is what the arc sweeps.
+        // `passageWidth` takes the leaf's own thickness off as well and is the
+        // number for getting furniture through, not for drawing an arc.
+        clear: quantities.clearWidth,
+        liningSource: quantities.liningSource,
+      };
 
       const fromAttribute = doorOperationFromIfc(operationType);
       const drawn = geometry.parts?.leaf
@@ -401,10 +487,12 @@ export function usePlanOpeningSymbols({
         psetReference: propertyValue(dataStore, expressId, 'Pset_DoorCommon', 'Reference'),
         tag: attribute(dataStore, expressId, 'Tag'),
       });
-      const statedHeight = attribute(dataStore, expressId, 'OverallHeight');
+      // Nennbreite and Nennhöhe — the rough opening. Marc's choice for the
+      // stamp for now; every other measurement is on `quantities` and can be
+      // put here instead without touching anything that draws.
       const size = doorSize({
-        statedWidth: stated === undefined ? null : Number.parseFloat(stated) * scale,
-        statedHeight: statedHeight === undefined ? null : Number.parseFloat(statedHeight) * scale,
+        statedWidth: quantities.nominalWidth,
+        statedHeight: quantities.nominalHeight,
         geometricWidth: width,
         // The LEAF's height is the door's; the lining's includes the frame and
         // is a number no schedule contains.
@@ -438,9 +526,9 @@ export function usePlanOpeningSymbols({
 
       const lines = doorSymbolLines(doorSymbol({
         centre: geometry.centre, widths, axes, operation,
-        // The stated frame depth, else what the lining actually measures
-        // through the wall.
-        depth: lining?.depth ?? geometry.extent.depth,
+        // `doorQuantities` has already decided this: the wall as measured,
+        // with the stated `LiningDepth` only as the fallback.
+        depth: quantities.liningDepth ?? geometry.extent.depth,
       }));
       if (lines.length === 0) continue;
 

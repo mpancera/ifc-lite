@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   doorOperationFromIfc, planAxes, openingWidth, doorSymbol, windowSymbol,
-  classifyOpeningParts, swingFromGeometry, doorWidths, ASSUMED_LINING_THICKNESS,
+  classifyOpeningParts, swingFromGeometry,
   type PlanAxes, type SymbolLine, type LocalBox, type DoorWidths,
 } from './openingSymbols.js';
 
@@ -139,35 +139,6 @@ describe('classifyOpeningParts / swingFromGeometry', () => {
 
   it('has nothing to classify without geometry', () => {
     assert.equal(classifyOpeningParts([]), null);
-  });
-});
-
-describe('doorWidths', () => {
-  it('takes the frame width off both sides of the rough opening', () => {
-    assert.deepEqual(doorWidths(1, 0.05), {
-      rough: 1, lining: 0.05, clear: 0.9, liningSource: 'model',
-    });
-  });
-
-  it('assumes a frame, and says so, when the model states none', () => {
-    // The normal case: no model met so far states LiningThickness.
-    const w = doorWidths(1, null)!;
-    assert.equal(w.lining, ASSUMED_LINING_THICKNESS);
-    assert.equal(w.liningSource, 'assumed');
-    assert.equal(round(w.clear), 1 - 2 * ASSUMED_LINING_THICKNESS);
-  });
-
-  it('refuses to let a stated frame eat the doorway', () => {
-    // 0.6 m of frame in a 0.8 m opening leaves −0.4 m of passage, which is not
-    // a door. Capped at a fifth, so something readable is still drawn.
-    const w = doorWidths(0.8, 0.6)!;
-    assert.equal(round(w.lining), 0.16);
-    assert.ok(w.clear > 0);
-  });
-
-  it('has no widths for an opening of no width', () => {
-    assert.equal(doorWidths(0, 0.05), null);
-    assert.equal(doorWidths(-1, 0.05), null);
   });
 });
 
@@ -317,7 +288,7 @@ describe('doorSymbol', () => {
     // A 1.00 opening with a 5 cm frame each side leaves 0.90 of doorway. An
     // arc drawn to 1.00 overhangs its own jambs by the frame, twice.
     const { swing } = doorSymbol({
-      centre, widths: doorWidths(1, 0.05)!, depth: 0.2, axes: AXES,
+      centre, widths: { rough: 1, lining: 0.05, clear: 0.9, liningSource: 'model' as const }, depth: 0.2, axes: AXES,
       operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
     });
     assert.deepEqual(pt(swing[0].start), [-0.45, 0]);
@@ -329,7 +300,7 @@ describe('doorSymbol', () => {
 
   it('sets the frame between the rough opening and the clear passage', () => {
     const { frame } = doorSymbol({
-      centre, widths: doorWidths(1, 0.05)!, depth: 0.2, axes: AXES,
+      centre, widths: { rough: 1, lining: 0.05, clear: 0.9, liningSource: 'model' as const }, depth: 0.2, axes: AXES,
       operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
     });
     const alongs = new Set(frame.flatMap((l) => [round(l.start.x), round(l.end.x)]));

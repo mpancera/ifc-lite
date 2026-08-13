@@ -335,16 +335,6 @@ function swingArc(hinge: Point2D, from: Point2D, to: Point2D, radius: number): S
 }
 
 /**
- * The frame width to assume when the model states none.
- *
- * 5 cm, Marc's figure — and the same number the one model that DOES state it
- * happens to carry (`IfcDoorLiningProperties.LiningThickness` = 0.05 in the
- * FZK-Haus). Where it is assumed rather than read, the plan says so; see
- * `liningSource`.
- */
-export const ASSUMED_LINING_THICKNESS = 0.05;
-
-/**
  * The three widths a door has, which are three different numbers.
  *
  * Conflating them is what makes a derived symbol look almost right: the arc
@@ -361,34 +351,6 @@ export interface DoorWidths {
   readonly clear: number;
   /** Whether {@link lining} was read from the model or assumed. */
   readonly liningSource: 'model' | 'assumed';
-}
-
-/**
- * Split a rough opening into frame and clear passage.
- *
- * A stated `LiningThickness` is believed unless it would leave no doorway —
- * two frames wider than the opening is a number that cannot describe a door,
- * and the plan is better served by a narrower frame than by a negative one. A
- * fifth of the opening is the cap: generous enough for a heavy timber frame,
- * mean enough that nothing degenerate gets through.
- */
-export function doorWidths(
-  rough: number,
-  liningThickness: number | null | undefined,
-): DoorWidths | null {
-  if (!(rough > 0)) return null;
-
-  const stated = typeof liningThickness === 'number' && Number.isFinite(liningThickness)
-    && liningThickness > 0;
-  const wanted = stated ? (liningThickness as number) : ASSUMED_LINING_THICKNESS;
-  const lining = Math.min(wanted, rough * 0.2);
-
-  return {
-    rough,
-    lining,
-    clear: rough - 2 * lining,
-    liningSource: stated ? 'model' : 'assumed',
-  };
 }
 
 export interface DoorSymbolParams {

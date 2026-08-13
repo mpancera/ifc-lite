@@ -37,7 +37,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import type { Annotation2DTool } from '@/store';
 import { ViewModeToggle } from './ViewportOverlays';
 import { ViewportToolStrip, ToolStripDivider } from './ViewportToolStrip';
-import { ASSUMED_LINING_THICKNESS } from '@/lib/plan/openingSymbols';
+import { ASSUMED_LINING_THICKNESS } from '@/lib/plan/doorQuantities';
 
 export interface PlanToolbarProps {
   displayOptions: {
