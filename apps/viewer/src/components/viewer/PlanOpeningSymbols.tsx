@@ -53,8 +53,9 @@ export function PlanOpeningSymbols({
         if (!d) return null;
         return (
           <path
-            key={symbol.expressId}
+            key={symbol.key}
             data-plan-opening-symbol={symbol.expressId}
+            data-plan-opening-key={symbol.key}
             data-opening-kind={symbol.kind}
             d={d}
             fill="none"
@@ -69,6 +70,7 @@ export function PlanOpeningSymbols({
               {symbol.kind === 'door'
                 ? `Tür #${symbol.expressId} — ${symbol.operationType ?? 'ohne OperationType'}`
                 : `Fenster #${symbol.expressId}`}
+              {symbol.mirrored ? ' · gespiegelt platziert' : ''}
             </title>
           </path>
         );

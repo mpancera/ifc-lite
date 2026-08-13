@@ -146,7 +146,7 @@ describe('roomAreaFromQuantities', () => {
 
 describe('roomLabelLines', () => {
   const label = (over: Partial<RoomLabel>): RoomLabel => ({
-    expressId: 1, anchor: { x: 0, y: 0 }, name: '', longName: '',
+    key: '1', expressId: 1, anchor: { x: 0, y: 0 }, name: '', longName: '',
     area: null, width: 4, height: 5, ...over,
   });
 

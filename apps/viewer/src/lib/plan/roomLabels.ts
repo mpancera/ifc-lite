@@ -243,6 +243,8 @@ export function formatRoomArea(squareMetres: number): string {
 }
 
 export interface RoomLabel {
+  /** Identifies this OCCURRENCE — instanced rooms share an express id. */
+  readonly key: string;
   /** Express id of the `IfcSpace`, local to its model. */
   readonly expressId: number;
   /** Where the text goes, in drawing units. */

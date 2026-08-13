@@ -66,7 +66,7 @@ export function PlanRoomLabels({ labels, transform }: PlanRoomLabelsProps): Reac
       : undefined;
 
     return (
-      <g key={label.expressId} data-plan-room-label={label.expressId}>
+      <g key={label.key} data-plan-room-label={label.expressId}>
         {title && <title>{title}</title>}
         {lines.map((line, i) => (
           <text

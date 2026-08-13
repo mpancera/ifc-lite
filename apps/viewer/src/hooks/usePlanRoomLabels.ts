@@ -93,24 +93,31 @@ export function usePlanRoomLabels({
 
     // One pass over the meshes, not one pass per room: a storey of forty rooms
     // against a model of a hundred thousand meshes is forty scans otherwise.
-    const meshesBySpace = new Map<number, RoomMesh[]>();
+    //
+    // Keyed on `occurrenceKey` where there is one. Instanced occurrences all
+    // carry the SAME express id, so keying on that would union two rooms into
+    // one and put a single label, of their combined area, on the wall between
+    // them. Rooms are rarely instanced, but the key costs nothing and the
+    // failure mode is silent.
+    const meshesBySpace = new Map<string, { expressId: number; meshes: RoomMesh[] }>();
     for (const mesh of geometryResult?.meshes ?? []) {
       // Instanced type templates are shape libraries, not placed rooms;
       // including one would put a label wherever its template happens to sit.
       if ((mesh.geometryClass ?? 0) === 2) continue;
       if (!spaces.has(mesh.expressId)) continue;
-      const list = meshesBySpace.get(mesh.expressId);
-      if (list) list.push(mesh);
-      else meshesBySpace.set(mesh.expressId, [mesh]);
+      const key = mesh.occurrenceKey ?? String(mesh.expressId);
+      const entry = meshesBySpace.get(key);
+      if (entry) entry.meshes.push(mesh);
+      else meshesBySpace.set(key, { expressId: mesh.expressId, meshes: [mesh] });
     }
 
     const overlay = modelId ? mutationViews.get(modelId === 'legacy' ? '__legacy__' : modelId) : undefined;
     const lengthUnitScale = dataStore.lengthUnitScale ?? 1;
 
     const labels: RoomLabel[] = [];
-    for (const [expressId, node] of spaces) {
-      const meshes = meshesBySpace.get(expressId);
-      if (!meshes) continue;
+    for (const [key, { expressId, meshes }] of meshesBySpace) {
+      const node = spaces.get(expressId);
+      if (!node) continue;
 
       const footprint = roomFootprint(meshes);
       if (!footprint) continue;
@@ -126,6 +133,7 @@ export function usePlanRoomLabels({
       const longName = node.longName?.trim() ?? '';
 
       labels.push({
+        key,
         expressId,
         anchor: footprint.anchor,
         name,

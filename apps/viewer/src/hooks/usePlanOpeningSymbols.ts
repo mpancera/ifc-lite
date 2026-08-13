@@ -31,10 +31,17 @@ import type { GeometryResult, MeshData } from '@ifc-lite/geometry';
 import { RelationshipType } from '@ifc-lite/data';
 import {
   doorOperationFromIfc, planAxes, openingWidth, doorSymbol, windowSymbol,
-  type SymbolLine, type LocalExtent,
+  type SymbolLine, type LocalExtent, type PlanAxes,
 } from '@/lib/plan/openingSymbols';
 
 export interface PlanOpeningSymbol {
+  /**
+   * Identifies this OCCURRENCE, not this entity.
+   *
+   * Instanced doors share an express id, so the express id alone would give
+   * several symbols the same React key and collapse them to one.
+   */
+  readonly key: string;
   /** Express id of the door or window, local to its model. */
   readonly expressId: number;
   readonly kind: 'door' | 'window';
@@ -42,6 +49,29 @@ export interface PlanOpeningSymbol {
   readonly lines: readonly SymbolLine[];
   /** What the model said, for the tooltip — `null` when it said nothing. */
   readonly operationType: string | null;
+  /**
+   * Whether this occurrence's placement is MIRRORED in plan.
+   *
+   * Reported, not acted on. A mirrored family instance (Revit mirrors doors
+   * routinely) turns left-hung into right-hung as drawn, so if a swing ever
+   * comes out on the wrong jamb this is the first thing to correlate it
+   * against — it shows in the tooltip for exactly that.
+   */
+  readonly mirrored: boolean;
+}
+
+/**
+ * Whether the placement flips handedness as seen in the plan.
+ *
+ * A proper (right-handed) door frame gives one sign for `along × across`; a
+ * mirrored instance gives the other. Measured rather than assumed, because a
+ * mirrored placement is what an authoring tool produces when somebody flips a
+ * door, and nothing else in the file records that it happened.
+ */
+function isMirrored(axes: { along: { x: number; y: number }; across: { x: number; y: number } }): boolean {
+  // Identity and every plain rotation of it give a negative cross product;
+  // see the `planAxes` tests, which pin both.
+  return axes.along.x * axes.across.y - axes.along.y * axes.across.x > 0;
 }
 
 export interface UsePlanOpeningSymbolsOptions {
@@ -55,21 +85,35 @@ export interface UsePlanOpeningSymbolsOptions {
 interface OpeningGeometry {
   readonly centre: { x: number; y: number };
   readonly extent: LocalExtent;
-  readonly localToWorld: number[] | undefined;
+}
+
+/** The placement matrix an element's meshes agree on, or `undefined`. */
+function placementOf(meshes: readonly MeshData[]): number[] | undefined {
+  for (const mesh of meshes) {
+    if (mesh.localToWorld) return mesh.localToWorld;
+  }
+  return undefined;
 }
 
 /**
  * Where the opening is, and how big it is in its own frame.
  *
- * The centre comes from the world bounding box (whose middle is the middle of
- * the element however it is turned), the extents from the local box — so the
- * width is measured along the door rather than along the drawing's axes, which
- * for anything not parallel to X or Z are different numbers.
+ * The centre is the middle of the element measured ALONG ITS OWN AXES, not the
+ * middle of an axis-aligned box round it. For a door parallel to X or Z the two
+ * agree; for one at any other angle the axis-aligned box is the box round a
+ * tilted rectangle, which is bigger than the door and whose middle drifts as
+ * soon as anything about the door is asymmetric — a handle, a threshold, a
+ * frame rebated on one side. That drift is small, which is what makes it worth
+ * removing: a symbol a few centimetres off its doorway looks like a bug in the
+ * symbol rather than in the measurement.
+ *
+ * The extents come from the local box, so the width is measured across the
+ * door rather than across the drawing.
  */
-function openingGeometry(meshes: readonly MeshData[]): OpeningGeometry | null {
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+function openingGeometry(meshes: readonly MeshData[], axes: PlanAxes): OpeningGeometry | null {
+  const { along, across } = axes;
+  let minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity;
   let lMinX = Infinity, lMaxX = -Infinity, lMinZ = Infinity, lMaxZ = -Infinity;
-  let localToWorld: number[] | undefined;
 
   for (const mesh of meshes) {
     const ox = mesh.origin?.[0] ?? 0;
@@ -78,8 +122,10 @@ function openingGeometry(meshes: readonly MeshData[]): OpeningGeometry | null {
     for (let i = 0; i + 2 < p.length; i += 3) {
       const x = p[i] + ox;
       const y = p[i + 2] + oz;
-      if (x < minX) minX = x; if (x > maxX) maxX = x;
-      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      const a = x * along.x + y * along.y;
+      const b = x * across.x + y * across.y;
+      if (a < minA) minA = a; if (a > maxA) maxA = a;
+      if (b < minB) minB = b; if (b > maxB) maxB = b;
     }
     const lb = mesh.localBounds;
     if (lb) {
@@ -88,18 +134,24 @@ function openingGeometry(meshes: readonly MeshData[]): OpeningGeometry | null {
       if (lb.min[2] < lMinZ) lMinZ = lb.min[2];
       if (lb.max[2] > lMaxZ) lMaxZ = lb.max[2];
     }
-    localToWorld ??= mesh.localToWorld;
   }
 
-  if (!Number.isFinite(minX) || !Number.isFinite(minY)) return null;
+  if (!Number.isFinite(minA) || !Number.isFinite(minB)) return null;
+
+  // Back from the (along, across) frame into drawing coordinates. The two axes
+  // are unit and perpendicular, so this is just their weighted sum.
+  const midA = (minA + maxA) / 2;
+  const midB = (minB + maxB) / 2;
 
   return {
-    centre: { x: (minX + maxX) / 2, y: (minY + maxY) / 2 },
+    centre: {
+      x: along.x * midA + across.x * midB,
+      y: along.y * midA + across.y * midB,
+    },
     extent: {
       width: Number.isFinite(lMinX) ? lMaxX - lMinX : 0,
       depth: Number.isFinite(lMinZ) ? lMaxZ - lMinZ : 0,
     },
-    localToWorld,
   };
 }
 
@@ -122,7 +174,16 @@ export function usePlanOpeningSymbols({
     // Group this storey's doors and windows in ONE pass over the meshes. A
     // door arrives as up to thirty submeshes (frame, leaf, glazing, handle),
     // all sharing one express id and one placement.
-    const byOpening = new Map<number, { kind: 'door' | 'window'; meshes: MeshData[] }>();
+    //
+    // Keyed on `occurrenceKey`, NOT on `expressId`. A repeated door type is
+    // GPU-instanced, and instanced occurrences are materialised as one
+    // `MeshData` each, ALL STAMPED WITH THE SAME EXPRESS ID — which is the
+    // collision that field exists to prevent. Keying on the express id merges
+    // several real doors into one blob: the bounding box centre lands between
+    // them, so every symbol sits slightly off its own doorway, and the first
+    // occurrence's placement then decides the hinge for all of them, so some
+    // come out right and some mirrored. One cause, both symptoms.
+    const byOpening = new Map<string, { expressId: number; kind: 'door' | 'window'; meshes: MeshData[] }>();
     for (const mesh of geometryResult?.meshes ?? []) {
       if ((mesh.geometryClass ?? 0) === 2) continue;
       const type = mesh.ifcType;
@@ -130,9 +191,11 @@ export function usePlanOpeningSymbols({
       if (!kind) continue;
       if (elementToStorey.get(mesh.expressId) !== storeyId) continue;
 
-      const entry = byOpening.get(mesh.expressId);
+      // Absent on a flat mesh, where one express id IS one occurrence.
+      const key = mesh.occurrenceKey ?? String(mesh.expressId);
+      const entry = byOpening.get(key);
       if (entry) entry.meshes.push(mesh);
-      else byOpening.set(mesh.expressId, { kind, meshes: [mesh] });
+      else byOpening.set(key, { expressId: mesh.expressId, kind, meshes: [mesh] });
     }
     if (byOpening.size === 0) return [];
 
@@ -142,15 +205,17 @@ export function usePlanOpeningSymbols({
     const operationByType = new Map<number, string | undefined>();
 
     const symbols: PlanOpeningSymbol[] = [];
-    for (const [expressId, { kind, meshes }] of byOpening) {
-      const geometry = openingGeometry(meshes);
-      if (!geometry) continue;
-
-      const axes = planAxes(geometry.localToWorld);
+    for (const [key, { expressId, kind, meshes }] of byOpening) {
+      // The axes come first: the centre is measured along them.
+      //
       // Without a placement there is no way to know which way the door faces,
       // and a symbol laid on the drawing's axes would be confidently wrong for
       // every wall that is not square to them.
+      const axes = planAxes(placementOf(meshes));
       if (!axes) continue;
+
+      const geometry = openingGeometry(meshes, axes);
+      if (!geometry) continue;
 
       const stated = attribute(dataStore, expressId, 'OverallWidth');
       const width = openingWidth(
@@ -161,9 +226,10 @@ export function usePlanOpeningSymbols({
 
       if (kind === 'window') {
         symbols.push({
-          expressId, kind,
+          key, expressId, kind,
           lines: windowSymbol({ centre: geometry.centre, width, depth: geometry.extent.depth, axes }),
           operationType: null,
+          mirrored: isMirrored(axes),
         });
         continue;
       }
@@ -191,7 +257,11 @@ export function usePlanOpeningSymbols({
       });
       if (lines.length === 0) continue;
 
-      symbols.push({ expressId, kind, lines, operationType: operationType ?? null });
+      symbols.push({
+        key, expressId, kind, lines,
+        operationType: operationType ?? null,
+        mirrored: isMirrored(axes),
+      });
     }
 
     return symbols;
