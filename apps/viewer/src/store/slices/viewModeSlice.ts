@@ -90,11 +90,20 @@ export interface ViewModeSlice {
    * produces, and 2D Section has no storey to label rooms on.
    */
   planShowRoomLabels: boolean;
+  /**
+   * Whether doors and windows get a derived plan symbol.
+   *
+   * On by default, and switchable for a reason beyond taste: a model that
+   * carries its OWN 2D plan representation already draws its swings through
+   * the symbolic path, and both at once would double every arc.
+   */
+  planShowOpeningSymbols: boolean;
 
   setViewMode: (mode: ViewMode) => void;
   toggleViewMode: () => void;
   setPlanCutHeight: (metres: number) => void;
   setPlanShowRoomLabels: (show: boolean) => void;
+  setPlanShowOpeningSymbols: (show: boolean) => void;
   setPlanRotation: (radians: number) => void;
   setPlanRotationPicking: (picking: boolean) => void;
   /**
@@ -114,6 +123,7 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   planRotationPicking: false,
   planRotationProject: null,
   planShowRoomLabels: true,
+  planShowOpeningSymbols: true,
 
   setViewMode: (viewMode) => {
     if (get().viewMode === viewMode) return;
@@ -160,6 +170,8 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   setPlanRotationPicking: (planRotationPicking) => set({ planRotationPicking }),
 
   setPlanShowRoomLabels: (planShowRoomLabels) => set({ planShowRoomLabels }),
+
+  setPlanShowOpeningSymbols: (planShowOpeningSymbols) => set({ planShowOpeningSymbols }),
 
   restorePlanRotationForProject: () => {
     const project = get().currentProjectKey();

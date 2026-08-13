@@ -47,6 +47,7 @@ import type { IfcDataStore } from '@ifc-lite/parser';
 import type { Point2D } from '@ifc-lite/drawing-2d';
 import { Drawing2DCanvas } from './Drawing2DCanvas';
 import { PlanRoomLabels } from './PlanRoomLabels';
+import { PlanOpeningSymbols } from './PlanOpeningSymbols';
 import { PlanToolbar } from './PlanToolbar';
 import { DrawingSettingsPanel } from './DrawingSettingsPanel';
 import { DxfUnderlayPanel } from './DxfUnderlayPanel';
@@ -60,6 +61,7 @@ import { useSymbolicAnnotationsForDrawing } from '@/hooks/useSymbolicAnnotations
 import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds } from '@/hooks/useDxfUnderlay';
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { usePlanRoomLabels } from '@/hooks/usePlanRoomLabels';
+import { usePlanOpeningSymbols } from '@/hooks/usePlanOpeningSymbols';
 import { useLensColorKeys } from '@/hooks/useLensColorKeys';
 import { useModelOrigins } from '@/hooks/useModelOrigins';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
@@ -128,6 +130,8 @@ export function PlanView({
   const setPlanRotationPicking = useViewerStore((s) => s.setPlanRotationPicking);
   const planShowRoomLabels = useViewerStore((s) => s.planShowRoomLabels);
   const setPlanShowRoomLabels = useViewerStore((s) => s.setPlanShowRoomLabels);
+  const planShowOpeningSymbols = useViewerStore((s) => s.planShowOpeningSymbols);
+  const setPlanShowOpeningSymbols = useViewerStore((s) => s.setPlanShowOpeningSymbols);
   const models = useViewerStore((s) => s.models);
   const activeTool = useViewerStore((s) => s.activeTool);
   const addElementPendingPoints = useViewerStore((s) => s.addElementPendingPoints);
@@ -287,6 +291,17 @@ export function PlanView({
     geometryResult,
     dataStore: storeyDataStore,
     modelId: storeyModelId,
+    storeyId: storey?.expressId ?? null,
+  });
+
+  // Derived door swings and window sashes, for models that carry no plan
+  // representation of their own. Same reason as the room count above for
+  // deriving them whenever the plan is open: the toolbar reports how many
+  // openings could be given a symbol at all.
+  const openingSymbols = usePlanOpeningSymbols({
+    enabled: active,
+    geometryResult,
+    dataStore: storeyDataStore,
     storeyId: storey?.expressId ?? null,
   });
 
@@ -595,6 +610,7 @@ export function PlanView({
     // Only what is on screen gets exported: switching the labels off is a
     // statement about the drawing, not about the viewport.
     roomLabels: planShowRoomLabels ? roomLabels : undefined,
+    openingSymbols: planShowOpeningSymbols ? openingSymbols : undefined,
     // A plan is not a sheet. Laying one out on paper is the 2D Section tool's
     // job and stays there, so the export writes the drawing itself.
     sheetEnabled: false, activeSheet: null,
@@ -923,6 +939,13 @@ export function PlanView({
         />
       )}
 
+      {/* Door swings and window sashes go UNDER the room labels: both belong
+          to the drawing, but a name is read and an arc is looked at, so where
+          they collide the text should win. */}
+      {planShowOpeningSymbols && (
+        <PlanOpeningSymbols symbols={openingSymbols} transform={planTransform} />
+      )}
+
       {/* Room names and areas. Above the drawing and below the tools, which is
           where a reader expects to find them: part of the plan, not part of
           the application. */}
@@ -1075,6 +1098,9 @@ export function PlanView({
           showRoomLabels={planShowRoomLabels}
           onToggleRoomLabels={() => setPlanShowRoomLabels(!planShowRoomLabels)}
           roomCount={roomLabels.length}
+          showOpeningSymbols={planShowOpeningSymbols}
+          onToggleOpeningSymbols={() => setPlanShowOpeningSymbols(!planShowOpeningSymbols)}
+          openingCount={openingSymbols.length}
           settingsOpen={settingsOpen}
           onToggleSettings={() => setSettingsOpen((v) => !v)}
           dxfOpen={dxfPanelOpen}

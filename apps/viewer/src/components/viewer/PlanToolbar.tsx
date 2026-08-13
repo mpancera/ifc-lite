@@ -27,6 +27,7 @@ import {
   Box, Shapes, Tag, Layers, PenTool, FileText, ZoomIn, ZoomOut,
   Maximize2, Download, FileDown, Printer, RefreshCw, Ruler,
   Hexagon, Type, Cloud, Trash2, FilePlus2, RotateCw, DoorOpen,
+  BetweenHorizonalStart,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -52,6 +53,12 @@ export interface PlanToolbarProps {
   onToggleRoomLabels: () => void;
   /** How many rooms this storey actually has, for the tooltip. */
   roomCount: number;
+
+  /** Derived door swings and window sashes. */
+  showOpeningSymbols: boolean;
+  onToggleOpeningSymbols: () => void;
+  /** How many openings got a symbol on this storey, for the tooltip. */
+  openingCount: number;
 
   settingsOpen: boolean;
   onToggleSettings: () => void;
@@ -122,6 +129,7 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
   const {
     displayOptions, onToggleSymbolic, onToggleIfcAnnotations,
     onToggleConstructionProjection, showRoomLabels, onToggleRoomLabels, roomCount,
+    showOpeningSymbols, onToggleOpeningSymbols, openingCount,
     settingsOpen, onToggleSettings, dxfOpen, onToggleDxf,
     activeTool, onSetTool, hasAnnotations, onClearAnnotations,
     canCommitAnnotation, onCommitAnnotation,
@@ -182,6 +190,18 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
         }
       >
         <DoorOpen className="h-4 w-4" />
+      </ToolButton>
+      <ToolButton
+        active={showOpeningSymbols}
+        onClick={onToggleOpeningSymbols}
+        disabled={openingCount === 0}
+        title={
+          openingCount === 0
+            ? 'Tür-/Fenstersymbole — auf diesem Geschoss liessen sich keine ableiten'
+            : `Tür-/Fenstersymbole für ${openingCount} Öffnung${openingCount === 1 ? '' : 'en'} — abgeleitet, nicht aus dem Modell gezeichnet`
+        }
+      >
+        <BetweenHorizonalStart className="h-4 w-4" />
       </ToolButton>
 
       <Divider />

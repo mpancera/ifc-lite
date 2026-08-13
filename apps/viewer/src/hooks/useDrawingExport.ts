@@ -6,6 +6,7 @@ import { useCallback } from 'react';
 import { posthog } from '@/lib/analytics';
 import { rotatedBounds } from '@/lib/plan/planRotation';
 import { roomLabelLines, labelFits, type RoomLabel } from '@/lib/plan/roomLabels';
+import type { SymbolLine } from '@/lib/plan/openingSymbols';
 import { downloadFile, sanitizeFilename } from '@/lib/export/download';
 import {
   GraphicOverrideEngine,
@@ -30,8 +31,9 @@ import { useViewerStore } from '@/store';
 import { buildDxfExportTransform, resolveDxfExportGeoreference } from '@/hooks/dxfExportGeoref';
 import { DEFAULT_SCAN_SVG_CAP, type ScanBandPoint } from '@/hooks/scanSectionMath';
 
-/** Module-level so the default parameter keeps a stable identity across renders. */
+/** Module-level so the default parameters keep a stable identity across renders. */
 const EMPTY_ROOM_LABELS: readonly RoomLabel[] = [];
+const EMPTY_OPENING_SYMBOLS: readonly { readonly lines: readonly SymbolLine[] }[] = [];
 
 /** Map a DXF vertical justification onto an SVG dominant-baseline. */
 function dxfValignToBaseline(valign: 'baseline' | 'bottom' | 'middle' | 'top'): string {
@@ -167,6 +169,12 @@ interface UseDrawingExportParams {
    * name rooms on.
    */
   roomLabels?: readonly RoomLabel[];
+  /**
+   * Derived door swings and window sashes, already in drawing space (#50).
+   * Plan mode only, for the same reason as the room labels: a swing arc is a
+   * plan convention that means nothing on a vertical section.
+   */
+  openingSymbols?: readonly { readonly lines: readonly SymbolLine[] }[];
   sheetEnabled: boolean;
   activeSheet: DrawingSheet | null;
   /** DXF underlays pre-mapped to drawing space, rendered beneath the drawing (issue #1782) */
@@ -205,6 +213,7 @@ function useDrawingExport({
   textAnnotations2D,
   cloudAnnotations2D,
   roomLabels = EMPTY_ROOM_LABELS,
+  openingSymbols = EMPTY_OPENING_SYMBOLS,
   sheetEnabled,
   activeSheet,
   dxfUnderlays,
@@ -477,6 +486,30 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     }
     svg += '  </g>\n';
 
+    // 3a. DOOR SWINGS AND WINDOW SASHES (#50)
+    //
+    // Real geometry in drawing space, so unlike the room labels there is no
+    // paper-versus-screen question — the arc is the size the door is. Only the
+    // line weight is a paper decision, and 0.25 mm is the thin drafting weight
+    // a symbol is drawn at.
+    if (openingSymbols.length > 0) {
+      const symbolWeight = mmToModel(0.25);
+      svg += '  <g id="opening-symbols">\n';
+      for (const symbol of openingSymbols) {
+        let d = '';
+        for (const line of symbol.lines) {
+          const ax = flipX ? -line.start.x : line.start.x;
+          const ay = flipY ? -line.start.y : line.start.y;
+          const bx = flipX ? -line.end.x : line.end.x;
+          const by = flipY ? -line.end.y : line.end.y;
+          d += `M ${ax.toFixed(4)} ${ay.toFixed(4)} L ${bx.toFixed(4)} ${by.toFixed(4)} `;
+        }
+        if (!d) continue;
+        svg += `    <path d="${d.trim()}" fill="none" stroke="#000000" stroke-width="${symbolWeight.toFixed(4)}"/>\n`;
+      }
+      svg += '  </g>\n';
+    }
+
     // 3b. ROOM NAMES AND AREAS (#50)
     //
     // Model content, so it goes UNDER the user's marks: a measurement drawn
@@ -637,7 +670,7 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     if (rotDeg !== 0) svg += '  </g>\n';
     svg += '</svg>';
     return svg;
-  }, [drawing, displayOptions, activePresetId, entityColorMap, overridesEnabled, overrideEngine, measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D, roomLabels, sectionPlane.axis, dxfUnderlays, scanSection, viewRotation]);
+  }, [drawing, displayOptions, activePresetId, entityColorMap, overridesEnabled, overrideEngine, measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D, roomLabels, openingSymbols, sectionPlane.axis, dxfUnderlays, scanSection, viewRotation]);
 
   // Generate SVG with drawing sheet (frame, title block, scale bar)
   // This generates coordinates directly in paper mm space (like the canvas rendering)
