@@ -48,6 +48,8 @@ import type { Point2D } from '@ifc-lite/drawing-2d';
 import { Drawing2DCanvas } from './Drawing2DCanvas';
 import { PlanLabels } from './PlanLabels';
 import { PlanOpeningSymbols } from './PlanOpeningSymbols';
+import { PlanNorthArrow } from './PlanNorthArrow';
+import { PlanScaleBar } from './PlanScaleBar';
 import { PlanToolbar } from './PlanToolbar';
 import { DrawingSettingsPanel } from './DrawingSettingsPanel';
 import { DxfUnderlayPanel } from './DxfUnderlayPanel';
@@ -1092,6 +1094,30 @@ export function PlanView({
         </svg>
       )}
 
+      {/* North, and the tool that sets it — in the ViewCube's corner. The
+          building has a cube there because it can be turned in three axes; a
+          plan has one angle, so it gets the one thing that shows it. */}
+      <PlanNorthArrow
+        rotation={planRotation}
+        picking={planRotationPicking}
+        onTogglePicking={() => {
+          // Always start from a clean gesture: a half-drawn line left over
+          // from last time would make the next click finish somebody else's
+          // line.
+          setRotationStart(null);
+          setRotationCursor(null);
+          setRotationLine(null);
+          setPlanRotationPicking(!planRotationPicking);
+        }}
+        onSetRotationDeg={(deg) => {
+          setPlanRotation(normalizeAngle(deg * DEG_TO_RAD));
+          setTimeout(fitToView, 0);
+        }}
+      />
+
+      {/* How long a metre is, where the building keeps the same answer. */}
+      <PlanScaleBar pixelsPerMetre={viewTransform.scale} />
+
       {/* Tools along the top edge, where #50 asks for them. The strip brings
           its own positioning now, so that the building's strip can be given
           the same one. */}
@@ -1121,21 +1147,6 @@ export function PlanView({
           activeTool={annotation2DActiveTool}
           onSetTool={setAnnotation2DActiveTool}
           hasAnnotations={hasAnnotations}
-          rotationDeg={planRotation * RAD_TO_DEG}
-          rotationPicking={planRotationPicking}
-          onToggleRotationPick={() => {
-            // Always start from a clean gesture: a half-drawn line left over
-            // from last time would make the next click finish somebody else's
-            // line.
-            setRotationStart(null);
-            setRotationCursor(null);
-            setRotationLine(null);
-            setPlanRotationPicking(!planRotationPicking);
-          }}
-          onSetRotationDeg={(deg) => {
-            setPlanRotation(normalizeAngle(deg * DEG_TO_RAD));
-            setTimeout(fitToView, 0);
-          }}
           canCommitAnnotation={selectedAnnotation2D !== null}
           onCommitAnnotation={commitSelectedAnnotation}
           onClearAnnotations={() => { clearAllAnnotations2D(); clearMeasure2DResults(); }}

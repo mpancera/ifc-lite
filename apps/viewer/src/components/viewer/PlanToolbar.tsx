@@ -26,7 +26,7 @@ import React from 'react';
 import {
   Box, Shapes, Tag, Layers, PenTool, FileText, ZoomIn, ZoomOut,
   Maximize2, Download, FileDown, Printer, RefreshCw, Ruler,
-  Hexagon, Type, Cloud, Trash2, FilePlus2, RotateCw, DoorOpen,
+  Hexagon, Type, Cloud, Trash2, FilePlus2, DoorOpen,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -75,12 +75,6 @@ export interface PlanToolbarProps {
   /** True when a mark is selected and can be written into the model. */
   canCommitAnnotation: boolean;
   onCommitAnnotation: () => void;
-
-  /** Plan rotation, in degrees, for display and direct entry. */
-  rotationDeg: number;
-  rotationPicking: boolean;
-  onToggleRotationPick: () => void;
-  onSetRotationDeg: (deg: number) => void;
 
   zoomPercent: number;
   onZoomIn: () => void;
@@ -135,7 +129,6 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
     settingsOpen, onToggleSettings, dxfOpen, onToggleDxf,
     activeTool, onSetTool, hasAnnotations, onClearAnnotations,
     canCommitAnnotation, onCommitAnnotation,
-    rotationDeg, rotationPicking, onToggleRotationPick, onSetRotationDeg,
     zoomPercent, onZoomIn, onZoomOut, onFitToView,
     onExportSVG, onExportDXF, onPrint, onRegenerate, busy, children,
   } = props;
@@ -285,43 +278,6 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
       )}
 
       <Divider />
-
-      {/* Turning the plan. The angle is shown as well as set: a gesture-only
-          control leaves the current rotation invisible, and "why is my plan
-          crooked" then has no answer on screen. */}
-      <ToolButton
-        active={rotationPicking}
-        onClick={onToggleRotationPick}
-        title="Planrotation: eine Linie entlang einem Bauteil ziehen — sie rastet auf die nächste Achse"
-      >
-        <RotateCw className="h-4 w-4" />
-      </ToolButton>
-      <input
-        type="number"
-        step={0.5}
-        value={Number.isFinite(rotationDeg) ? Math.round(rotationDeg * 100) / 100 : 0}
-        onChange={(e) => {
-          const v = Number.parseFloat(e.target.value);
-          if (Number.isFinite(v)) onSetRotationDeg(v);
-        }}
-        className="h-6 w-16 rounded-sm border bg-transparent px-1 text-[11px] tabular-nums"
-        title="Drehwinkel der Plandarstellung, in Grad"
-      />
-      <span className="text-[10px] text-muted-foreground">°</span>
-      {Math.abs(rotationDeg) > 0.001 && (
-        // Labelled, not an icon. A counter-clockwise arrow next to a rotation
-        // tool reads as "turn left" — it looks like another way to rotate
-        // rather than the way to stop. "0°" says exactly what the button does.
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button variant="ghost" size="sm" className="h-6 px-1.5 text-[10px]"
-                    onClick={() => onSetRotationDeg(0)}>
-              0°
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" className="text-xs">Drehung zurücksetzen</TooltipContent>
-        </Tooltip>
-      )}
 
       <Divider />
 

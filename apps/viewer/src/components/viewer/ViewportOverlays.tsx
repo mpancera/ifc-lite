@@ -201,8 +201,11 @@ export function ViewportOverlays({ hideViewCube = false }: { hideViewCube?: bool
         </div>
       )}
 
-      {/* ViewCube (top-right) */}
-      {!hideViewCube && (
+      {/* ViewCube (top-right) — and in plan mode, the north arrow that takes
+          its corner. A cube turns in three axes; a plan has one angle, so the
+          two are alternatives rather than neighbours, and stacking them would
+          leave the cube unreachable under the plan's own surface. */}
+      {!hideViewCube && !planActive && (
         <div className="absolute top-6 right-6" {...tourAnchor(TOUR_ANCHORS.viewcube)}>
           <ViewCube
             ref={viewCubeRef}
