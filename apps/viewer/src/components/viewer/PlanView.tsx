@@ -299,7 +299,7 @@ export function PlanView({
   // representation of their own. Same reason as the room count above for
   // deriving them whenever the plan is open: the toolbar reports how many
   // openings could be given a symbol at all.
-  const { symbols: openingSymbols, doorLabels } = usePlanOpeningSymbols({
+  const { symbols: openingSymbols, doorLabels, assumedLinings } = usePlanOpeningSymbols({
     enabled: active,
     geometryResult,
     dataStore: storeyDataStore,
@@ -1110,6 +1110,7 @@ export function PlanView({
           showOpeningSymbols={planShowOpeningSymbols}
           onToggleOpeningSymbols={() => setPlanShowOpeningSymbols(!planShowOpeningSymbols)}
           openingCount={openingSymbols.length}
+          assumedLinings={assumedLinings}
           settingsOpen={settingsOpen}
           onToggleSettings={() => setSettingsOpen((v) => !v)}
           dxfOpen={dxfPanelOpen}

@@ -37,6 +37,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import type { Annotation2DTool } from '@/store';
 import { ViewModeToggle } from './ViewportOverlays';
 import { ViewportToolStrip, ToolStripDivider } from './ViewportToolStrip';
+import { ASSUMED_LINING_THICKNESS } from '@/lib/plan/openingSymbols';
 
 export interface PlanToolbarProps {
   displayOptions: {
@@ -59,6 +60,8 @@ export interface PlanToolbarProps {
   onToggleOpeningSymbols: () => void;
   /** How many openings got a symbol on this storey, for the tooltip. */
   openingCount: number;
+  /** How many doors got the assumed frame width because the model states none. */
+  assumedLinings: number;
 
   settingsOpen: boolean;
   onToggleSettings: () => void;
@@ -128,7 +131,7 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
   const {
     displayOptions, onToggleSymbolic, onToggleIfcAnnotations,
     onToggleConstructionProjection, showRoomLabels, onToggleRoomLabels, roomCount,
-    showOpeningSymbols, onToggleOpeningSymbols, openingCount,
+    showOpeningSymbols, onToggleOpeningSymbols, openingCount, assumedLinings,
     settingsOpen, onToggleSettings, dxfOpen, onToggleDxf,
     activeTool, onSetTool, hasAnnotations, onClearAnnotations,
     canCommitAnnotation, onCommitAnnotation,
@@ -205,6 +208,25 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
         {/* A door with its swing — the plan graphic this button draws. */}
         <DoorOpen className="h-4 w-4" />
       </ToolButton>
+      {showOpeningSymbols && assumedLinings > 0 && (
+        // Declared, not hidden in a tooltip. On every model met so far this is
+        // the NORMAL case — no door states a lining thickness — and a plan that
+        // quietly invents one has door openings a couple of centimetres wrong
+        // everywhere without saying so. The number is stated too, because "5 cm"
+        // is checkable and "assumed" is not.
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="ml-0.5 rounded-sm border border-amber-500/40 bg-amber-500/10 px-1 text-[10px] leading-4 text-amber-700 dark:text-amber-300 tabular-nums">
+              Rahmen {Math.round(ASSUMED_LINING_THICKNESS * 100)} cm
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-xs text-xs">
+            {assumedLinings === openingCount
+              ? `Keine Tür auf diesem Geschoss nennt eine Rahmenbreite (IfcDoorLiningProperties). Für alle ${assumedLinings} ist ${Math.round(ASSUMED_LINING_THICKNESS * 100)} cm angenommen — Öffnungsbogen und Durchgangsbreite beruhen darauf.`
+              : `${assumedLinings} von ${openingCount} Öffnungen nennen keine Rahmenbreite; für sie ist ${Math.round(ASSUMED_LINING_THICKNESS * 100)} cm angenommen.`}
+          </TooltipContent>
+        </Tooltip>
+      )}
 
       <Divider />
 

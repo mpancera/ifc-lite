@@ -6,8 +6,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   doorOperationFromIfc, planAxes, openingWidth, doorSymbol, windowSymbol,
-  classifyOpeningParts, swingFromGeometry,
-  type PlanAxes, type SymbolLine, type LocalBox,
+  classifyOpeningParts, swingFromGeometry, doorWidths, ASSUMED_LINING_THICKNESS,
+  type PlanAxes, type SymbolLine, type LocalBox, type DoorWidths,
 } from './openingSymbols.js';
 
 /** Identity rotation: local X along drawing +x, local +Y along drawing −y. */
@@ -142,6 +142,35 @@ describe('classifyOpeningParts / swingFromGeometry', () => {
   });
 });
 
+describe('doorWidths', () => {
+  it('takes the frame width off both sides of the rough opening', () => {
+    assert.deepEqual(doorWidths(1, 0.05), {
+      rough: 1, lining: 0.05, clear: 0.9, liningSource: 'model',
+    });
+  });
+
+  it('assumes a frame, and says so, when the model states none', () => {
+    // The normal case: no model met so far states LiningThickness.
+    const w = doorWidths(1, null)!;
+    assert.equal(w.lining, ASSUMED_LINING_THICKNESS);
+    assert.equal(w.liningSource, 'assumed');
+    assert.equal(round(w.clear), 1 - 2 * ASSUMED_LINING_THICKNESS);
+  });
+
+  it('refuses to let a stated frame eat the doorway', () => {
+    // 0.6 m of frame in a 0.8 m opening leaves −0.4 m of passage, which is not
+    // a door. Capped at a fifth, so something readable is still drawn.
+    const w = doorWidths(0.8, 0.6)!;
+    assert.equal(round(w.lining), 0.16);
+    assert.ok(w.clear > 0);
+  });
+
+  it('has no widths for an opening of no width', () => {
+    assert.equal(doorWidths(0, 0.05), null);
+    assert.equal(doorWidths(-1, 0.05), null);
+  });
+});
+
 describe('planAxes', () => {
   it('reads local X as the width direction', () => {
     assert.deepEqual(pt(planAxes(IDENTITY)!.along), [1, 0]);
@@ -203,10 +232,13 @@ describe('openingWidth', () => {
 describe('doorSymbol', () => {
   const centre = { x: 0, y: 0 };
   const width = 1;
+  /** Widths with no frame, so the swing geometry can be read off round numbers. */
+  const W = (rough: number): DoorWidths =>
+    ({ rough, lining: 0, clear: rough, liningSource: 'model' });
 
   it('stands the leaf on the hinge and opens it towards local +Y', () => {
-    const lines = doorSymbol({
-      centre, width, axes: AXES, operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
+    const { swing: lines } = doorSymbol({
+      centre, widths: W(width), depth: 0.2, axes: AXES, operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
     });
     // Hinge at the local X minimum, i.e. x = −0.5.
     assert.deepEqual(pt(lines[0].start), [-0.5, 0]);
@@ -215,16 +247,16 @@ describe('doorSymbol', () => {
   });
 
   it('hangs a right-hung door at the other jamb, opening the same way', () => {
-    const lines = doorSymbol({
-      centre, width, axes: AXES, operation: { motion: 'swing', hinge: 'end', openTowards: 1 },
+    const { swing: lines } = doorSymbol({
+      centre, widths: W(width), depth: 0.2, axes: AXES, operation: { motion: 'swing', hinge: 'end', openTowards: 1 },
     });
     assert.deepEqual(pt(lines[0].start), [0.5, 0]);
     assert.deepEqual(pt(lines[0].end), [0.5, -1]);
   });
 
   it('sweeps an arc of the leaf width, hinge to closed position', () => {
-    const lines = doorSymbol({
-      centre, width, axes: AXES, operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
+    const { swing: lines } = doorSymbol({
+      centre, widths: W(width), depth: 0.2, axes: AXES, operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
     });
     const hinge = { x: -0.5, y: 0 };
     // Every arc point is one leaf-width from the hinge.
@@ -237,8 +269,8 @@ describe('doorSymbol', () => {
   });
 
   it('takes the short way round, never three quarters of a circle', () => {
-    const lines = doorSymbol({
-      centre, width, axes: AXES, operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
+    const { swing: lines } = doorSymbol({
+      centre, widths: W(width), depth: 0.2, axes: AXES, operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
     });
     const arc = lines.slice(1);
     // A quarter turn of radius 1 is π/2 long; the long way would be 3π/2.
@@ -247,8 +279,8 @@ describe('doorSymbol', () => {
   });
 
   it('gives a two-leaf door one arc per jamb, each half the opening', () => {
-    const lines = doorSymbol({
-      centre, width: 2, axes: AXES, operation: { motion: 'double-swing', hinge: 'start', openTowards: 1 },
+    const { swing: lines } = doorSymbol({
+      centre, widths: W(2), depth: 0.2, axes: AXES, operation: { motion: 'double-swing', hinge: 'start', openTowards: 1 },
     });
     const leaves = lines.filter((l) => Math.abs(l.start.y) < 1e-9 && Math.abs(l.end.y + 1) < 1e-9);
     assert.equal(leaves.length, 2, 'one leaf line per jamb');
@@ -257,29 +289,56 @@ describe('doorSymbol', () => {
   });
 
   it('draws a sliding leaf beside the opening, with no arc', () => {
-    const lines = doorSymbol({
-      centre, width, axes: AXES, operation: { motion: 'sliding', hinge: 'start', openTowards: 1 },
+    const { swing: lines } = doorSymbol({
+      centre, widths: W(width), depth: 0.2, axes: AXES, operation: { motion: 'sliding', hinge: 'start', openTowards: 1 },
     });
     assert.equal(lines.length, 1, 'a sliding door sweeps nothing');
   });
 
-  it('draws no leaf at all when the model never said how it opens', () => {
-    assert.deepEqual(
-      doorSymbol({ centre, width, axes: AXES, operation: { motion: 'none', hinge: 'start', openTowards: 1 } }),
-      [],
-    );
+  it('draws no leaf, but still a frame, when the model never said how it opens', () => {
+    // The frame is measured; the swing is not. Saying nothing about the swing
+    // is honest, drawing no doorway at all would just be less information.
+    const parts = doorSymbol({
+      centre, widths: { rough: 1, lining: 0.05, clear: 0.9, liningSource: 'model' },
+      depth: 0.2, axes: AXES, operation: { motion: 'none', hinge: 'start', openTowards: 1 },
+    });
+    assert.deepEqual(parts.swing, []);
+    assert.equal(parts.frame.length, 8, 'a rectangle at each jamb');
   });
 
   it('has nothing to draw for an opening of no width', () => {
     assert.deepEqual(
-      doorSymbol({ centre, width: 0, axes: AXES, operation: { motion: 'swing', hinge: 'start', openTowards: 1 } }),
-      [],
+      doorSymbol({ centre, widths: W(0), depth: 0.2, axes: AXES, operation: { motion: 'swing', hinge: 'start', openTowards: 1 } }),
+      { frame: [], swing: [] },
     );
   });
 
+  it('sweeps the CLEAR passage, not the rough opening', () => {
+    // A 1.00 opening with a 5 cm frame each side leaves 0.90 of doorway. An
+    // arc drawn to 1.00 overhangs its own jambs by the frame, twice.
+    const { swing } = doorSymbol({
+      centre, widths: doorWidths(1, 0.05)!, depth: 0.2, axes: AXES,
+      operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
+    });
+    assert.deepEqual(pt(swing[0].start), [-0.45, 0]);
+    assert.deepEqual(pt(swing[0].end), [-0.45, -0.9]);
+    for (const r of radii(swing.slice(1), { x: -0.45, y: 0 })) {
+      assert.equal(round(r), 0.9);
+    }
+  });
+
+  it('sets the frame between the rough opening and the clear passage', () => {
+    const { frame } = doorSymbol({
+      centre, widths: doorWidths(1, 0.05)!, depth: 0.2, axes: AXES,
+      operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
+    });
+    const alongs = new Set(frame.flatMap((l) => [round(l.start.x), round(l.end.x)]));
+    assert.deepEqual([...alongs].sort((a, b) => a - b), [-0.5, -0.45, 0.45, 0.5]);
+  });
+
   it('swings the leaf to the other side when the geometry says so', () => {
-    const lines = doorSymbol({
-      centre, width, axes: AXES, operation: { motion: 'swing', hinge: 'start', openTowards: -1 },
+    const { swing: lines } = doorSymbol({
+      centre, widths: W(width), depth: 0.2, axes: AXES, operation: { motion: 'swing', hinge: 'start', openTowards: -1 },
     });
     assert.deepEqual(pt(lines[0].start), [-0.5, 0]);
     // Mirrored through the wall: the leaf now reaches +y instead of −y.
@@ -288,8 +347,8 @@ describe('doorSymbol', () => {
 
   it('turns the whole symbol with the placement', () => {
     const turned: PlanAxes = { along: { x: 0, y: -1 }, across: { x: -1, y: 0 } };
-    const lines = doorSymbol({
-      centre, width, axes: turned, operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
+    const { swing: lines } = doorSymbol({
+      centre, widths: W(width), depth: 0.2, axes: turned, operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
     });
     assert.deepEqual(pt(lines[0].start), [0, 0.5]);
     assert.deepEqual(pt(lines[0].end), [-1, 0.5]);

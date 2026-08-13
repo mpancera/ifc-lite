@@ -334,11 +334,69 @@ function swingArc(hinge: Point2D, from: Point2D, to: Point2D, radius: number): S
   return lines;
 }
 
+/**
+ * The frame width to assume when the model states none.
+ *
+ * 5 cm, Marc's figure — and the same number the one model that DOES state it
+ * happens to carry (`IfcDoorLiningProperties.LiningThickness` = 0.05 in the
+ * FZK-Haus). Where it is assumed rather than read, the plan says so; see
+ * `liningSource`.
+ */
+export const ASSUMED_LINING_THICKNESS = 0.05;
+
+/**
+ * The three widths a door has, which are three different numbers.
+ *
+ * Conflating them is what makes a derived symbol look almost right: the arc
+ * has to sweep the CLEAR passage, because that is what the leaf spans, while
+ * the jambs sit at the ROUGH opening where the frame meets the wall. Drawing
+ * the arc to the rough width overhangs the doorway by the frame on each side.
+ */
+export interface DoorWidths {
+  /** Outer width of the opening in the wall — where the jambs are drawn. */
+  readonly rough: number;
+  /** Frame member width, per side. */
+  readonly lining: number;
+  /** Clear passage: what the leaf spans and the arc sweeps. */
+  readonly clear: number;
+  /** Whether {@link lining} was read from the model or assumed. */
+  readonly liningSource: 'model' | 'assumed';
+}
+
+/**
+ * Split a rough opening into frame and clear passage.
+ *
+ * A stated `LiningThickness` is believed unless it would leave no doorway —
+ * two frames wider than the opening is a number that cannot describe a door,
+ * and the plan is better served by a narrower frame than by a negative one. A
+ * fifth of the opening is the cap: generous enough for a heavy timber frame,
+ * mean enough that nothing degenerate gets through.
+ */
+export function doorWidths(
+  rough: number,
+  liningThickness: number | null | undefined,
+): DoorWidths | null {
+  if (!(rough > 0)) return null;
+
+  const stated = typeof liningThickness === 'number' && Number.isFinite(liningThickness)
+    && liningThickness > 0;
+  const wanted = stated ? (liningThickness as number) : ASSUMED_LINING_THICKNESS;
+  const lining = Math.min(wanted, rough * 0.2);
+
+  return {
+    rough,
+    lining,
+    clear: rough - 2 * lining,
+    liningSource: stated ? 'model' : 'assumed',
+  };
+}
+
 export interface DoorSymbolParams {
   /** Middle of the opening, in drawing units. */
   readonly centre: Point2D;
-  /** Clear width of the opening, in metres. */
-  readonly width: number;
+  readonly widths: DoorWidths;
+  /** How deep the frame sits through the wall, in metres. */
+  readonly depth: number;
   readonly axes: PlanAxes;
   readonly operation: DoorOperation;
 }
@@ -351,8 +409,32 @@ export interface DoorSymbolParams {
  * claim about how far the door actually opens — it is the position that shows
  * both the hinge side and the space the door needs.
  */
-export function doorSymbol({ centre, width, axes, operation }: DoorSymbolParams): SymbolLine[] {
-  if (!(width > 0)) return [];
+/**
+ * A door symbol, in its two parts.
+ *
+ * Named rather than one flat bundle because they answer to different things:
+ * the frame is measured and always drawable, the swing depends on the model
+ * having said how the door opens. Keeping them apart also means a test can
+ * point at one without counting past the other.
+ */
+export interface DoorSymbolParts {
+  /** The lining at each jamb. Always present for a real opening. */
+  readonly frame: SymbolLine[];
+  /** Leaf and arc. Empty when the model states no operation. */
+  readonly swing: SymbolLine[];
+}
+
+/** The whole symbol as one stroke list: swing over frame. */
+export function doorSymbolLines(parts: DoorSymbolParts): SymbolLine[] {
+  return [...parts.swing, ...parts.frame];
+}
+
+export function doorSymbol({
+  centre, widths, depth, axes, operation,
+}: DoorSymbolParams): DoorSymbolParts {
+  const empty: DoorSymbolParts = { frame: [], swing: [] };
+  const { rough, lining, clear } = widths;
+  if (!(rough > 0) || !(clear > 0)) return empty;
   const { along } = axes;
   // The side the leaf actually goes to. `across` alone is the schema's answer;
   // multiplying by `openTowards` lets a drawn leaf overrule it.
@@ -360,45 +442,79 @@ export function doorSymbol({ centre, width, axes, operation }: DoorSymbolParams)
     x: axes.across.x * operation.openTowards,
     y: axes.across.y * operation.openTowards,
   };
-  const half = width / 2;
 
-  const at = (t: number): Point2D => ({ x: centre.x + along.x * t, y: centre.y + along.y * t });
-  const startJamb = at(-half);
-  const endJamb = at(half);
+  const at = (u: number, v = 0): Point2D => ({
+    x: centre.x + along.x * u + across.x * v,
+    y: centre.y + along.y * u + across.y * v,
+  });
 
-  if (operation.motion === 'none') return [];
+  // The frame: a rectangle at each jamb, from the wall face inward by the
+  // lining. This is what makes the doorway read as a door rather than as a
+  // gap, and it is where the clear passage visibly begins.
+  const halfRough = rough / 2;
+  const halfClear = clear / 2;
+  const halfDepth = Math.max(depth, 0.04) / 2;
+  const frame: SymbolLine[] = [];
+  for (const side of [-1, 1] as const) {
+    const outer = side * halfRough;
+    const inner = side * halfClear;
+    const corners = [
+      at(outer, -halfDepth), at(inner, -halfDepth),
+      at(inner, halfDepth), at(outer, halfDepth),
+    ];
+    for (let i = 0; i < corners.length; i++) {
+      frame.push({ start: corners[i], end: corners[(i + 1) % corners.length] });
+    }
+  }
+
+  // An opening whose operation the model never stated still gets its frame:
+  // that much is measured, and it is more than the bare gap the cut leaves.
+  if (operation.motion === 'none') return { frame, swing: [] };
+
+  const startJamb = at(-halfClear);
+  const endJamb = at(halfClear);
 
   if (operation.motion === 'sliding') {
     // A leaf parked beside its opening, offset just off the wall line so it
     // reads as a panel rather than as part of the wall.
-    const offset = Math.min(0.06, width / 8);
+    const offset = Math.min(0.06, clear / 8);
     const shift = (p: Point2D): Point2D => ({ x: p.x + across.x * offset, y: p.y + across.y * offset });
     const from = operation.hinge === 'start' ? startJamb : endJamb;
-    const to = operation.hinge === 'start' ? at(half * 0.9) : at(-half * 0.9);
-    return [{ start: shift(from), end: shift(to) }];
+    const to = operation.hinge === 'start' ? at(halfClear * 0.9) : at(-halfClear * 0.9);
+    return { frame, swing: [{ start: shift(from), end: shift(to) }] };
   }
 
   if (operation.motion === 'double-swing') {
-    // Each leaf is half the opening and hinged at its own jamb, so the two
-    // arcs meet in the middle.
-    const leafWidth = half;
-    const openDir = across;
-    return [
-      { start: startJamb, end: { x: startJamb.x + openDir.x * leafWidth, y: startJamb.y + openDir.y * leafWidth } },
-      ...swingArc(startJamb, openDir, along, leafWidth),
-      { start: endJamb, end: { x: endJamb.x + openDir.x * leafWidth, y: endJamb.y + openDir.y * leafWidth } },
-      ...swingArc(endJamb, openDir, { x: -along.x, y: -along.y }, leafWidth),
-    ];
+    // Each leaf is half the clear passage and hinged at its own jamb, so the
+    // two arcs meet in the middle.
+    const leaf = halfClear;
+    return {
+      frame,
+      swing: [
+        { start: startJamb, end: { x: startJamb.x + across.x * leaf, y: startJamb.y + across.y * leaf } },
+        ...swingArc(startJamb, across, along, leaf),
+        { start: endJamb, end: { x: endJamb.x + across.x * leaf, y: endJamb.y + across.y * leaf } },
+        ...swingArc(endJamb, across, { x: -along.x, y: -along.y }, leaf),
+      ],
+    };
   }
 
   // Single swing. The leaf stands on the hinge and points across the wall; the
-  // arc runs from its tip back to the jamb it closes against.
+  // arc runs from its tip back to the jamb it closes against. Both are the
+  // CLEAR width — a leaf is as long as the hole it fills, not as the hole plus
+  // its frame, and drawing it to the rough opening overhangs the doorway by
+  // one lining on each side. `lining` is otherwise unused here, and that is
+  // the point: it has already done its work by narrowing `clear`.
+  void lining;
   const hinge = operation.hinge === 'start' ? startJamb : endJamb;
   const closed = operation.hinge === 'start' ? along : { x: -along.x, y: -along.y };
-  return [
-    { start: hinge, end: { x: hinge.x + across.x * width, y: hinge.y + across.y * width } },
-    ...swingArc(hinge, across, closed, width),
-  ];
+  return {
+    frame,
+    swing: [
+      { start: hinge, end: { x: hinge.x + across.x * clear, y: hinge.y + across.y * clear } },
+      ...swingArc(hinge, across, closed, clear),
+    ],
+  };
 }
 
 export interface WindowSymbolParams {

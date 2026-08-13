@@ -31,7 +31,7 @@ import type { GeometryResult, MeshData } from '@ifc-lite/geometry';
 import { RelationshipType } from '@ifc-lite/data';
 import {
   doorOperationFromIfc, planAxes, openingWidth, doorSymbol, windowSymbol,
-  classifyOpeningParts, swingFromGeometry,
+  classifyOpeningParts, swingFromGeometry, doorWidths, doorSymbolLines,
   type SymbolLine, type LocalExtent, type PlanAxes, type LocalBox, type OpeningParts,
 } from '@/lib/plan/openingSymbols';
 import { doorReference, doorSize, doorLabelLines, formatDoorSize } from '@/lib/plan/doorLabels';
@@ -177,6 +177,55 @@ function attribute(store: IfcDataStore, expressId: number, name: string): string
   return value.length > 0 ? value : undefined;
 }
 
+/** What a door's frame measures, as far as the model states it. */
+interface LiningProperties {
+  /** Frame member width, per side, in metres. */
+  readonly thickness?: number;
+  /** How deep the frame sits through the wall, in metres. */
+  readonly depth?: number;
+}
+
+/**
+ * `IfcDoorLiningProperties` for a door, through its type.
+ *
+ * Reached the awkward way, because there is no other: the lining properties
+ * hang off `IfcTypeObject.HasPropertySets`, which is a LIST attribute, and the
+ * name-mapped attribute reader only returns scalars. So the raw attribute
+ * array is scanned for a list of ids and each is checked by class — order
+ * independent, which matters because IFC2X3 puts these on an `IfcDoorStyle`
+ * and IFC4 on an `IfcDoorType` and the two do not agree on much else.
+ *
+ * The lining entity's OWN values are then read BY NAME, which is the part that
+ * would otherwise be a real trap: `LiningDepth` and `LiningThickness` are
+ * adjacent, both are lengths, and swapping them produces a frame that looks
+ * plausible and is wrong in both directions at once.
+ */
+function liningFromType(store: IfcDataStore, typeId: number): LiningProperties | null {
+  const type = store.getEntity?.(typeId);
+  if (!type?.attributes) return null;
+
+  for (const attribute of type.attributes) {
+    if (!Array.isArray(attribute)) continue;
+    for (const candidate of attribute) {
+      if (typeof candidate !== 'number') continue;
+      // `entities.getTypeName` answers "Unknown" here: the columnar table
+      // carries products, and a property-set definition is not one. The
+      // buffer-backed reader is the one that knows these exist.
+      if (store.getEntity?.(candidate)?.type !== 'IFCDOORLININGPROPERTIES') continue;
+
+      const named = extractAllEntityAttributes(store, candidate);
+      const numeric = (name: string): number | undefined => {
+        const entry = named.find((a) => a.name === name);
+        if (!entry) return undefined;
+        const value = Number.parseFloat(String(entry.value));
+        return Number.isFinite(value) && value > 0 ? value : undefined;
+      };
+      return { thickness: numeric('LiningThickness'), depth: numeric('LiningDepth') };
+    }
+  }
+  return null;
+}
+
 /** A named property out of a named property set, or `undefined`. */
 function propertyValue(
   store: IfcDataStore, expressId: number, setName: string, propertyName: string,
@@ -203,9 +252,18 @@ export interface PlanOpenings {
    * are switched on independently in the view, which is where that belongs.
    */
   readonly doorLabels: PlanLabel[];
+  /**
+   * How many doors got the assumed frame width because the model states none.
+   *
+   * Surfaced so the toolbar can DECLARE it. On the models met so far this is
+   * the normal case, not the exception, and a plan that quietly invents a
+   * frame width is a plan whose door openings are wrong by a centimetre or
+   * two everywhere without saying so.
+   */
+  readonly assumedLinings: number;
 }
 
-const NO_OPENINGS: PlanOpenings = { symbols: [], doorLabels: [] };
+const NO_OPENINGS: PlanOpenings = { symbols: [], doorLabels: [], assumedLinings: 0 };
 
 /**
  * How far off the wall a door's label sits, in metres, measured from the face.
@@ -257,6 +315,8 @@ export function usePlanOpeningSymbols({
 
     const symbols: PlanOpeningSymbol[] = [];
     const doorLabels: PlanLabel[] = [];
+    /** How many doors had to be given a frame width rather than told one. */
+    let assumedLinings = 0;
     for (const [key, { expressId, kind, meshes }] of byOpening) {
       // The axes come first: the centre is measured along them.
       //
@@ -306,6 +366,26 @@ export function usePlanOpeningSymbols({
       // The model's own leaf outranks the enum. Where a leaf was drawn, the
       // symbol is made to agree with the 3D view by construction; only where
       // none was found does the attribute get a say.
+      // ── The frame ─────────────────────────────────────────────────────
+      // `IfcDoorLiningProperties` off the type where there is one, then a
+      // property set some exporters write under the same name instead, then
+      // the assumption — which the toolbar declares, because on the models met
+      // so far the assumption is the normal case rather than the exception.
+      const typeIds = dataStore.relationships?.getRelated(
+        expressId, RelationshipType.DefinesByType, 'inverse',
+      );
+      const typeId = typeIds?.[0];
+      let lining = typeId === undefined ? null : liningFromType(dataStore, typeId);
+      if (lining?.thickness === undefined) {
+        const stated = propertyValue(dataStore, expressId, 'Pset_DoorLiningProperties', 'LiningThickness');
+        const parsed = stated === undefined ? Number.NaN : Number.parseFloat(stated) * scale;
+        if (Number.isFinite(parsed) && parsed > 0) lining = { ...lining, thickness: parsed };
+      }
+
+      const widths = doorWidths(width, lining?.thickness);
+      if (!widths) continue;
+      if (widths.liningSource === 'assumed') assumedLinings += 1;
+
       const fromAttribute = doorOperationFromIfc(operationType);
       const drawn = geometry.parts?.leaf
         ? swingFromGeometry(geometry.parts.reveal, geometry.parts.leaf)
@@ -356,7 +436,12 @@ export function usePlanOpeningSymbols({
         });
       }
 
-      const lines = doorSymbol({ centre: geometry.centre, width, axes, operation });
+      const lines = doorSymbolLines(doorSymbol({
+        centre: geometry.centre, widths, axes, operation,
+        // The stated frame depth, else what the lining actually measures
+        // through the wall.
+        depth: lining?.depth ?? geometry.extent.depth,
+      }));
       if (lines.length === 0) continue;
 
       symbols.push({
@@ -367,7 +452,7 @@ export function usePlanOpeningSymbols({
       });
     }
 
-    return { symbols, doorLabels };
+    return { symbols, doorLabels, assumedLinings };
   }, [enabled, geometryResult, dataStore, storeyId]);
 }
 
