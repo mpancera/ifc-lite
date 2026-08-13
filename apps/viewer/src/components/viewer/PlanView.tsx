@@ -46,7 +46,7 @@ import type { GeometryResult } from '@ifc-lite/geometry';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import type { Point2D } from '@ifc-lite/drawing-2d';
 import { Drawing2DCanvas } from './Drawing2DCanvas';
-import { PlanRoomLabels } from './PlanRoomLabels';
+import { PlanLabels } from './PlanLabels';
 import { PlanOpeningSymbols } from './PlanOpeningSymbols';
 import { PlanToolbar } from './PlanToolbar';
 import { DrawingSettingsPanel } from './DrawingSettingsPanel';
@@ -61,6 +61,7 @@ import { useSymbolicAnnotationsForDrawing } from '@/hooks/useSymbolicAnnotations
 import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds } from '@/hooks/useDxfUnderlay';
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { usePlanRoomLabels } from '@/hooks/usePlanRoomLabels';
+import { roomPlanLabel } from '@/lib/plan/roomLabels';
 import { usePlanOpeningSymbols } from '@/hooks/usePlanOpeningSymbols';
 import { useLensColorKeys } from '@/hooks/useLensColorKeys';
 import { useModelOrigins } from '@/hooks/useModelOrigins';
@@ -298,12 +299,19 @@ export function PlanView({
   // representation of their own. Same reason as the room count above for
   // deriving them whenever the plan is open: the toolbar reports how many
   // openings could be given a symbol at all.
-  const openingSymbols = usePlanOpeningSymbols({
+  const { symbols: openingSymbols, doorLabels } = usePlanOpeningSymbols({
     enabled: active,
     geometryResult,
     dataStore: storeyDataStore,
     storeyId: storey?.expressId ?? null,
   });
+
+  // Room and door text are one layer: they are the same thing on a drawing,
+  // and one switch is what somebody reaching for "turn the writing off" means.
+  const planLabels = useMemo(
+    () => [...roomLabels.map(roomPlanLabel), ...doorLabels],
+    [roomLabels, doorLabels],
+  );
 
   // ── Solo ────────────────────────────────────────────────────────────────
   // "The storey is solo, as if isolated in 3D" (#50) — and it IS the 3D one,
@@ -609,7 +617,7 @@ export function PlanView({
     measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D,
     // Only what is on screen gets exported: switching the labels off is a
     // statement about the drawing, not about the viewport.
-    roomLabels: planShowRoomLabels ? roomLabels : undefined,
+    planLabels: planShowRoomLabels ? planLabels : undefined,
     openingSymbols: planShowOpeningSymbols ? openingSymbols : undefined,
     // A plan is not a sheet. Laying one out on paper is the 2D Section tool's
     // job and stays there, so the export writes the drawing itself.
@@ -949,7 +957,7 @@ export function PlanView({
       {/* Room names and areas. Above the drawing and below the tools, which is
           where a reader expects to find them: part of the plan, not part of
           the application. */}
-      {planShowRoomLabels && <PlanRoomLabels labels={roomLabels} transform={planTransform} />}
+      {planShowRoomLabels && <PlanLabels labels={planLabels} transform={planTransform} />}
 
       {/* Points already placed, and the rubber band to the cursor. Drawn over
           the canvas rather than into it: it changes on every mouse move, and
@@ -1097,7 +1105,7 @@ export function PlanView({
           onToggleConstructionProjection={() => updateDisplayOptions({ showConstructionProjection: !displayOptions.showConstructionProjection })}
           showRoomLabels={planShowRoomLabels}
           onToggleRoomLabels={() => setPlanShowRoomLabels(!planShowRoomLabels)}
-          roomCount={roomLabels.length}
+          roomCount={planLabels.length}
           showOpeningSymbols={planShowOpeningSymbols}
           onToggleOpeningSymbols={() => setPlanShowOpeningSymbols(!planShowOpeningSymbols)}
           openingCount={openingSymbols.length}

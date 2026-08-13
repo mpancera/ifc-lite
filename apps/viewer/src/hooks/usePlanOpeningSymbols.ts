@@ -34,6 +34,8 @@ import {
   classifyOpeningParts, swingFromGeometry,
   type SymbolLine, type LocalExtent, type PlanAxes, type LocalBox, type OpeningParts,
 } from '@/lib/plan/openingSymbols';
+import { doorReference, doorSize, doorLabelLines, formatDoorSize } from '@/lib/plan/doorLabels';
+import type { PlanLabel } from '@/lib/plan/roomLabels';
 
 export interface PlanOpeningSymbol {
   /**
@@ -175,13 +177,50 @@ function attribute(store: IfcDataStore, expressId: number, name: string): string
   return value.length > 0 ? value : undefined;
 }
 
+/** A named property out of a named property set, or `undefined`. */
+function propertyValue(
+  store: IfcDataStore, expressId: number, setName: string, propertyName: string,
+): string | undefined {
+  for (const set of store.getProperties?.(expressId) ?? []) {
+    if (set.name !== setName) continue;
+    for (const property of set.properties ?? []) {
+      if (property.name !== propertyName) continue;
+      const value = String(property.value ?? '').trim();
+      if (value.length > 0) return value;
+    }
+  }
+  return undefined;
+}
+
+export interface PlanOpenings {
+  readonly symbols: PlanOpeningSymbol[];
+  /**
+   * Door marks and sizes.
+   *
+   * Produced HERE rather than by a hook of their own: both outputs need the
+   * same placement, the same lining and the same one pass over the meshes, and
+   * doing that twice would be the expensive half of the work repeated. The two
+   * are switched on independently in the view, which is where that belongs.
+   */
+  readonly doorLabels: PlanLabel[];
+}
+
+const NO_OPENINGS: PlanOpenings = { symbols: [], doorLabels: [] };
+
+/**
+ * How far off the wall a door's label sits, in metres, measured from the face.
+ *
+ * On the side AWAY from the swing, because the swing side is where the arc is.
+ */
+const DOOR_LABEL_CLEARANCE = 0.35;
+
 export function usePlanOpeningSymbols({
   enabled, geometryResult, dataStore, storeyId,
-}: UsePlanOpeningSymbolsOptions): PlanOpeningSymbol[] {
-  return useMemo((): PlanOpeningSymbol[] => {
-    if (!enabled || !dataStore || storeyId === null) return [];
+}: UsePlanOpeningSymbolsOptions): PlanOpenings {
+  return useMemo((): PlanOpenings => {
+    if (!enabled || !dataStore || storeyId === null) return NO_OPENINGS;
     const elementToStorey = dataStore.spatialHierarchy?.elementToStorey;
-    if (!elementToStorey) return [];
+    if (!elementToStorey) return NO_OPENINGS;
 
     // Group this storey's doors and windows in ONE pass over the meshes. A
     // door arrives as up to thirty submeshes (frame, leaf, glazing, handle),
@@ -209,7 +248,7 @@ export function usePlanOpeningSymbols({
       if (entry) entry.meshes.push(mesh);
       else byOpening.set(key, { expressId: mesh.expressId, kind, meshes: [mesh] });
     }
-    if (byOpening.size === 0) return [];
+    if (byOpening.size === 0) return NO_OPENINGS;
 
     const scale = dataStore.lengthUnitScale ?? 1;
     // Doors of one type share an OperationType, and re-reading the type per
@@ -217,6 +256,7 @@ export function usePlanOpeningSymbols({
     const operationByType = new Map<number, string | undefined>();
 
     const symbols: PlanOpeningSymbol[] = [];
+    const doorLabels: PlanLabel[] = [];
     for (const [key, { expressId, kind, meshes }] of byOpening) {
       // The axes come first: the centre is measured along them.
       //
@@ -274,6 +314,48 @@ export function usePlanOpeningSymbols({
         ? { motion: 'swing' as const, hinge: drawn.hinge, openTowards: drawn.openTowards }
         : fromAttribute;
 
+      // ── The door's own label ──────────────────────────────────────────
+      // Number and size, read the same way a room's name and area are.
+      const reference = doorReference({
+        name: attribute(dataStore, expressId, 'Name'),
+        psetReference: propertyValue(dataStore, expressId, 'Pset_DoorCommon', 'Reference'),
+        tag: attribute(dataStore, expressId, 'Tag'),
+      });
+      const statedHeight = attribute(dataStore, expressId, 'OverallHeight');
+      const size = doorSize({
+        statedWidth: stated === undefined ? null : Number.parseFloat(stated) * scale,
+        statedHeight: statedHeight === undefined ? null : Number.parseFloat(statedHeight) * scale,
+        geometricWidth: width,
+        // The LEAF's height is the door's; the lining's includes the frame and
+        // is a number no schedule contains.
+        geometricHeight: geometry.parts?.leaf
+          ? geometry.parts.leaf.max[1] - geometry.parts.leaf.min[1]
+          : geometry.parts
+            ? geometry.parts.reveal.max[1] - geometry.parts.reveal.min[1]
+            : null,
+      });
+      const labelLines = doorLabelLines(reference, size);
+      if (labelLines.length > 0) {
+        // Clear of the wall and on the side AWAY from the swing, where the arc
+        // is not. `openTowards` already points at the swing side.
+        const off = -operation.openTowards * (geometry.extent.depth / 2 + DOOR_LABEL_CLEARANCE);
+        doorLabels.push({
+          key, expressId, kind: 'door',
+          anchor: {
+            x: geometry.centre.x + axes.across.x * off,
+            y: geometry.centre.y + axes.across.y * off,
+          },
+          lines: labelLines,
+          // A door label appears once the doorway itself is as wide on screen
+          // as the text — the same "does it fit" rule the rooms follow, against
+          // the only extent a door has.
+          width, height: width,
+          title: size
+            ? `Tür ${reference || `#${expressId}`} — ${formatDoorSize(size)} cm`
+            : undefined,
+        });
+      }
+
       const lines = doorSymbol({ centre: geometry.centre, width, axes, operation });
       if (lines.length === 0) continue;
 
@@ -285,7 +367,7 @@ export function usePlanOpeningSymbols({
       });
     }
 
-    return symbols;
+    return { symbols, doorLabels };
   }, [enabled, geometryResult, dataStore, storeyId]);
 }
 

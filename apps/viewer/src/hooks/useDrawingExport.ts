@@ -5,7 +5,7 @@
 import { useCallback } from 'react';
 import { posthog } from '@/lib/analytics';
 import { rotatedBounds } from '@/lib/plan/planRotation';
-import { roomLabelLines, labelFits, type RoomLabel } from '@/lib/plan/roomLabels';
+import { labelFits, type PlanLabel } from '@/lib/plan/roomLabels';
 import type { SymbolLine } from '@/lib/plan/openingSymbols';
 import { downloadFile, sanitizeFilename } from '@/lib/export/download';
 import {
@@ -32,7 +32,7 @@ import { buildDxfExportTransform, resolveDxfExportGeoreference } from '@/hooks/d
 import { DEFAULT_SCAN_SVG_CAP, type ScanBandPoint } from '@/hooks/scanSectionMath';
 
 /** Module-level so the default parameters keep a stable identity across renders. */
-const EMPTY_ROOM_LABELS: readonly RoomLabel[] = [];
+const EMPTY_PLAN_LABELS: readonly PlanLabel[] = [];
 const EMPTY_OPENING_SYMBOLS: readonly { readonly lines: readonly SymbolLine[] }[] = [];
 
 /** Map a DXF vertical justification onto an SVG dominant-baseline. */
@@ -168,7 +168,7 @@ interface UseDrawingExportParams {
    * them; the 2D Section panel passes none, because a section has no floor to
    * name rooms on.
    */
-  roomLabels?: readonly RoomLabel[];
+  planLabels?: readonly PlanLabel[];
   /**
    * Derived door swings and window sashes, already in drawing space (#50).
    * Plan mode only, for the same reason as the room labels: a swing arc is a
@@ -212,7 +212,7 @@ function useDrawingExport({
   polygonArea2DResults,
   textAnnotations2D,
   cloudAnnotations2D,
-  roomLabels = EMPTY_ROOM_LABELS,
+  planLabels = EMPTY_PLAN_LABELS,
   openingSymbols = EMPTY_OPENING_SYMBOLS,
   sheetEnabled,
   activeSheet,
@@ -522,13 +522,13 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     // scale the sheet is at. Both are what their medium wants. The same fit
     // test runs against the paper sizes, so a room too small to hold its label
     // at 1:200 is left blank instead of overprinted.
-    if (roomLabels.length > 0) {
+    if (planLabels.length > 0) {
       const nameSize = mmToModel(3);
       const detailSize = mmToModel(2.5);
       const lineHeight = mmToModel(3.6);
-      svg += '  <g id="room-labels">\n';
-      for (const label of roomLabels) {
-        const lines = roomLabelLines(label);
+      svg += '  <g id="plan-labels">\n';
+      for (const label of planLabels) {
+        const { lines } = label;
         if (!labelFits(lines, label, 1, nameSize, lineHeight)) continue;
 
         const px = flipX ? -label.anchor.x : label.anchor.x;
@@ -537,9 +537,8 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
 
         for (let i = 0; i < lines.length; i++) {
           const y = top + i * lineHeight;
-          const isName = i === 0 && label.name.length > 0;
-          const size = isName ? nameSize : detailSize;
-          svg += `    <text${uprightText(px, y)} x="${px.toFixed(4)}" y="${y.toFixed(4)}" font-family="Arial, sans-serif" font-size="${size.toFixed(4)}" fill="#000000" text-anchor="middle" dominant-baseline="middle"${isName ? ' font-weight="600"' : ''}>${escapeXml(lines[i])}</text>\n`;
+          const size = i === 0 ? nameSize : detailSize;
+          svg += `    <text${uprightText(px, y)} x="${px.toFixed(4)}" y="${y.toFixed(4)}" font-family="Arial, sans-serif" font-size="${size.toFixed(4)}" fill="#000000" text-anchor="middle" dominant-baseline="middle"${i === 0 ? ' font-weight="600"' : ''}>${escapeXml(lines[i])}</text>\n`;
         }
       }
       svg += '  </g>\n';
@@ -670,7 +669,7 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     if (rotDeg !== 0) svg += '  </g>\n';
     svg += '</svg>';
     return svg;
-  }, [drawing, displayOptions, activePresetId, entityColorMap, overridesEnabled, overrideEngine, measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D, roomLabels, openingSymbols, sectionPlane.axis, dxfUnderlays, scanSection, viewRotation]);
+  }, [drawing, displayOptions, activePresetId, entityColorMap, overridesEnabled, overrideEngine, measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D, planLabels, openingSymbols, sectionPlane.axis, dxfUnderlays, scanSection, viewRotation]);
 
   // Generate SVG with drawing sheet (frame, title block, scale bar)
   // This generates coordinates directly in paper mm space (like the canvas rendering)

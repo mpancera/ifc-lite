@@ -242,6 +242,34 @@ export function formatRoomArea(squareMetres: number): string {
   return `${squareMetres.toFixed(1)} m²`;
 }
 
+/**
+ * A block of text on the plan, whatever it describes.
+ *
+ * A room label and a door label are the same object on a drawing — text, at a
+ * point, that disappears when it stops fitting. Composing both into this
+ * before anything draws them means one renderer, one fit rule and one export
+ * block, rather than two of each drifting apart.
+ */
+export interface PlanLabel {
+  /** Identifies the OCCURRENCE this describes. */
+  readonly key: string;
+  /** The entity it describes, for selection and tooltips. */
+  readonly expressId: number;
+  readonly kind: 'room' | 'door';
+  /** Where the text goes, in drawing units. */
+  readonly anchor: Point2D;
+  /** Lines top to bottom. The first is the mark, and carries weight. */
+  readonly lines: readonly string[];
+  /**
+   * The box the text has to fit inside, in drawing units — the room's
+   * footprint, or the doorway's own width.
+   */
+  readonly width: number;
+  readonly height: number;
+  /** Native tooltip, where there is something worth being able to check. */
+  readonly title?: string;
+}
+
 export interface RoomLabel {
   /** Identifies this OCCURRENCE — instanced rooms share an express id. */
   readonly key: string;
@@ -277,6 +305,30 @@ export function roomLabelLines(label: RoomLabel): string[] {
   if (label.longName) lines.push(label.longName);
   if (label.area) lines.push(formatRoomArea(label.area.value));
   return lines;
+}
+
+/**
+ * A room, as a block of text on the plan.
+ *
+ * Where the area came from is carried in the tooltip rather than shown: a plan
+ * whose areas silently came from geometry reads exactly like one whose areas
+ * came from the model, and the difference is worth being able to check.
+ */
+export function roomPlanLabel(label: RoomLabel): PlanLabel {
+  return {
+    key: label.key,
+    expressId: label.expressId,
+    kind: 'room',
+    anchor: label.anchor,
+    lines: roomLabelLines(label),
+    width: label.width,
+    height: label.height,
+    title: label.area
+      ? label.area.source === 'quantity'
+        ? `${label.area.quantityName}: ${formatRoomArea(label.area.value)}`
+        : `Aus der Geometrie gerechnet: ${formatRoomArea(label.area.value)} (das Modell nennt keine Fläche)`
+      : undefined,
+  };
 }
 
 /**
