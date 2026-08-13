@@ -260,12 +260,25 @@ export interface PlanLabel {
   readonly anchor: Point2D;
   /** Lines top to bottom. The first is the mark, and carries weight. */
   readonly lines: readonly string[];
-  /**
-   * The box the text has to fit inside, in drawing units — the room's
-   * footprint, or the doorway's own width.
-   */
+  /** The element's extent in drawing units — a room's footprint, a door's width. */
   readonly width: number;
   readonly height: number;
+  /**
+   * When the label appears.
+   *
+   * `'inside'` — the text has to FIT the element, which is what a room name
+   * must do: written across the wall into the next room it is worse than
+   * absent.
+   *
+   * `'beside'` — the label sits outside the element and only needs the element
+   * itself to be worth stamping, so the test is a screen size and not a text
+   * measurement. A door stamp is this. Testing a door stamp against the
+   * doorway is the wrong constraint and it shows: a mark like
+   * "ITUER_Zarge_1fl" needs 99 px of text against 0.9 m of doorway, so the
+   * stamp only appeared past about 120 px per metre — a zoom nobody reads a
+   * plan at.
+   */
+  readonly fit: 'inside' | 'beside';
   /** Native tooltip, where there is something worth being able to check. */
   readonly title?: string;
 }
@@ -323,6 +336,9 @@ export function roomPlanLabel(label: RoomLabel): PlanLabel {
     lines: roomLabelLines(label),
     width: label.width,
     height: label.height,
+    // A room name written across the wall into the next room is worse than
+    // no room name.
+    fit: 'inside',
     title: label.area
       ? label.area.source === 'quantity'
         ? `${label.area.quantityName}: ${formatRoomArea(label.area.value)}`
@@ -348,6 +364,36 @@ export function roomPlanLabel(label: RoomLabel): PlanLabel {
  * being approximate is fine — the test decides whether text is legible, not
  * where it lands.
  */
+/**
+ * How big an element has to be on screen before it is worth stamping, in
+ * pixels. Below this the doorway is a few pixels of line and a mark beside it
+ * describes nothing the reader can see.
+ */
+export const BESIDE_LABEL_MIN_PX = 26;
+
+/**
+ * Whether to draw this label at all.
+ *
+ * Dispatches on the label's own rule rather than measuring everything the same
+ * way, because "does the text fit in the room" and "is the door big enough to
+ * be worth marking" are different questions and only one of them is about
+ * text.
+ */
+export function labelVisible(
+  label: Pick<PlanLabel, 'lines' | 'width' | 'height' | 'fit'>,
+  scale: number,
+  fontSizePx: number,
+  lineHeightPx: number,
+): boolean {
+  if (label.lines.length === 0) return false;
+  if (!(scale > 0)) return false;
+  if (label.fit === 'inside') {
+    return labelFits(label.lines, label, scale, fontSizePx, lineHeightPx);
+  }
+  // The label is outside the element, so the element's own size decides.
+  return Math.max(label.width, label.height) * scale >= BESIDE_LABEL_MIN_PX;
+}
+
 export function labelFits(
   lines: readonly string[],
   metrics: { readonly width: number; readonly height: number },

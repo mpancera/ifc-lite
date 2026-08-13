@@ -518,6 +518,9 @@ export function usePlanOpeningSymbols({
           // as the text — the same "does it fit" rule the rooms follow, against
           // the only extent a door has.
           width, height: width,
+          // The stamp sits BESIDE the door, so the doorway's own size decides
+          // whether it is worth drawing — not whether the mark fits in it.
+          fit: 'beside',
           title: size
             ? `Tür ${reference || `#${expressId}`} — ${formatDoorSize(size)} cm`
             : undefined,

@@ -23,7 +23,7 @@
  */
 
 import React from 'react';
-import { labelFits, type PlanLabel } from '@/lib/plan/roomLabels';
+import { labelVisible, type PlanLabel } from '@/lib/plan/roomLabels';
 
 export interface PlanLabelsProps {
   labels: readonly PlanLabel[];
@@ -45,7 +45,7 @@ export function PlanLabels({ labels, transform }: PlanLabelsProps): React.ReactE
 
   const drawn = labels.map((label) => {
     const { lines } = label;
-    if (!labelFits(lines, label, scale, NAME_SIZE, LINE_HEIGHT)) return null;
+    if (!labelVisible(label, scale, NAME_SIZE, LINE_HEIGHT)) return null;
 
     const sx = label.anchor.x * scale;
     const sy = label.anchor.y * scale;

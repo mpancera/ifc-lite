@@ -5,7 +5,7 @@
 import { useCallback } from 'react';
 import { posthog } from '@/lib/analytics';
 import { rotatedBounds } from '@/lib/plan/planRotation';
-import { labelFits, type PlanLabel } from '@/lib/plan/roomLabels';
+import { labelVisible, type PlanLabel } from '@/lib/plan/roomLabels';
 import type { SymbolLine } from '@/lib/plan/openingSymbols';
 import { downloadFile, sanitizeFilename } from '@/lib/export/download';
 import {
@@ -529,7 +529,7 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
       svg += '  <g id="plan-labels">\n';
       for (const label of planLabels) {
         const { lines } = label;
-        if (!labelFits(lines, label, 1, nameSize, lineHeight)) continue;
+        if (!labelVisible(label, 1, nameSize, lineHeight)) continue;
 
         const px = flipX ? -label.anchor.x : label.anchor.x;
         const py = flipY ? -label.anchor.y : label.anchor.y;

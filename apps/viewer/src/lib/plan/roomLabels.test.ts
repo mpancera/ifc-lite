@@ -5,7 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  roomFootprint, roomAreaFromQuantities, formatRoomArea, roomLabelLines, labelFits,
+  roomFootprint, roomAreaFromQuantities, formatRoomArea, roomLabelLines, labelFits, labelVisible,
   type RoomMesh, type RoomLabel,
 } from './roomLabels.js';
 
@@ -195,5 +195,44 @@ describe('labelFits', () => {
 
   it('has nothing to place when the model named nothing', () => {
     assert.equal(labelFits([], { width: 40, height: 50 }, 100, 11, 13), false);
+  });
+});
+
+describe('labelVisible', () => {
+  const doorStamp = {
+    // A mark like this is a type designation, not a number — 15 characters
+    // needing 99 px of text beside a doorway 0.9 m wide. Measuring it against
+    // the doorway hid every door stamp below about 120 px per metre.
+    lines: ['ITUER_Zarge_1fl', '90/210'],
+    width: 0.9, height: 0.9,
+    fit: 'beside' as const,
+  };
+  const room = {
+    lines: ['01', 'Büro', '19.4 m²'],
+    width: 4, height: 5,
+    fit: 'inside' as const,
+  };
+
+  it('shows a door stamp at a zoom a plan is actually read at', () => {
+    // 0.9 m at 40 px/m is 36 px of doorway — small, but there.
+    assert.equal(labelVisible(doorStamp, 40, 11, 12), true);
+  });
+
+  it('does not make a long mark a reason to hide the stamp', () => {
+    const short = { ...doorStamp, lines: ['12', '90/210'] };
+    assert.equal(labelVisible(doorStamp, 40, 11, 12), labelVisible(short, 40, 11, 12));
+  });
+
+  it('drops the stamp once the doorway is a few pixels of line', () => {
+    assert.equal(labelVisible(doorStamp, 10, 11, 12), false);
+  });
+
+  it('still makes a room name fit its room', () => {
+    assert.equal(labelVisible(room, 50, 11, 12), true);
+    assert.equal(labelVisible(room, 5, 11, 12), false);
+  });
+
+  it('has nothing to show without lines', () => {
+    assert.equal(labelVisible({ ...doorStamp, lines: [] }, 200, 11, 12), false);
   });
 });
