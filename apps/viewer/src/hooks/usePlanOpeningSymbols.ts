@@ -31,12 +31,13 @@ import type { GeometryResult, MeshData } from '@ifc-lite/geometry';
 import { RelationshipType } from '@ifc-lite/data';
 import {
   doorOperationFromIfc, planAxes, openingWidth, doorSymbol, windowSymbol,
-  classifyOpeningParts, swingFromGeometry, doorSymbolLines,
+  classifyOpeningParts, swingFromGeometry, doorSymbolLines, wallThicknessAtOpening,
   type SymbolLine, type LocalExtent, type PlanAxes, type LocalBox, type OpeningParts,
 } from '@/lib/plan/openingSymbols';
 import { doorReference, doorSize, doorLabelLines, formatDoorSize } from '@/lib/plan/doorLabels';
 import { doorQuantities } from '@/lib/plan/doorQuantities';
 import type { PlanLabel } from '@/lib/plan/roomLabels';
+import type { Drawing2D, Point2D } from '@ifc-lite/drawing-2d';
 
 export interface PlanOpeningSymbol {
   /**
@@ -89,12 +90,48 @@ export interface UsePlanOpeningSymbolsOptions {
   geometryResult: GeometryResult | null | undefined;
   dataStore: IfcDataStore | null | undefined;
   storeyId: number | null;
+  /**
+   * The generated plan, for the one number that has to come off the drawing:
+   * how thick the host wall is where the door goes through it. See
+   * `wallThicknessAtOpening` for why no other source survives contact with a
+   * real model.
+   */
+  drawing: Drawing2D | null;
+}
+
+/**
+ * The host wall of a door: through its opening, the way IFC records it.
+ *
+ * `IfcRelFillsElement` from the door to the `IfcOpeningElement` it fills, then
+ * `IfcRelVoidsElement` from that opening to the wall it voids. Both inverse,
+ * because both relationships point the other way.
+ */
+function hostWallOf(store: IfcDataStore, doorId: number): number | undefined {
+  const openings = store.relationships?.getRelated(doorId, RelationshipType.FillsElement, 'inverse');
+  const opening = openings?.[0];
+  if (opening === undefined) return undefined;
+  const walls = store.relationships?.getRelated(opening, RelationshipType.VoidsElement, 'inverse');
+  return walls?.[0];
+}
+
+/** Every cut ring the drawing holds for one entity. */
+function cutRingsFor(drawing: Drawing2D | null, entityId: number): Point2D[][] {
+  if (!drawing) return [];
+  const rings: Point2D[][] = [];
+  for (const polygon of drawing.cutPolygons) {
+    if (!polygon.isCut || polygon.entityId !== entityId) continue;
+    rings.push(polygon.polygon.outer);
+    for (const hole of polygon.polygon.holes) rings.push(hole);
+  }
+  return rings;
 }
 
 /** An element's meshes reduced to the three things a symbol needs. */
 interface OpeningGeometry {
   readonly centre: { x: number; y: number };
   readonly extent: LocalExtent;
+  /** The opening's extent along the wall, for measuring the wall right there. */
+  readonly alongSpan: readonly [number, number];
   /** The lining and, when the model drew one, the leaf. */
   readonly parts: OpeningParts | null;
 }
@@ -166,6 +203,7 @@ function openingGeometry(meshes: readonly MeshData[], axes: PlanAxes): OpeningGe
     // Measured in the drawing, off the lining: the same body the centre came
     // from, so the symbol cannot be the right size in the wrong place.
     extent: { width: maxA - minA, depth: maxB - minB },
+    alongSpan: [minA, maxA],
     parts,
   };
 }
@@ -333,7 +371,7 @@ const NO_OPENINGS: PlanOpenings = { symbols: [], doorLabels: [], assumedLinings:
 const DOOR_LABEL_CLEARANCE = 0.35;
 
 export function usePlanOpeningSymbols({
-  enabled, geometryResult, dataStore, storeyId,
+  enabled, geometryResult, dataStore, storeyId, drawing,
 }: UsePlanOpeningSymbolsOptions): PlanOpenings {
   return useMemo((): PlanOpenings => {
     if (!enabled || !dataStore || storeyId === null) return NO_OPENINGS;
@@ -445,6 +483,14 @@ export function usePlanOpeningSymbols({
         panelDepth: fromType.panelDepth ?? fromSets.panelDepth,
       };
 
+      // The wall as DRAWN, measured across the doorway. Falls back to the
+      // lining's own depth only when the wall is not in the drawing — a wall
+      // on another storey, or one the cut missed.
+      const wallId = hostWallOf(dataStore, expressId);
+      const wallThickness = wallId === undefined ? null : wallThicknessAtOpening(
+        cutRingsFor(drawing, wallId), axes, geometry.alongSpan,
+      );
+
       const statedHeightRaw = attribute(dataStore, expressId, 'OverallHeight');
       const quantities = doorQuantities({
         nominalWidth: stated === undefined ? null : Number.parseFloat(stated) * scale,
@@ -454,10 +500,10 @@ export function usePlanOpeningSymbols({
         ...details,
         leaves: doorOperationFromIfc(operationType).motion === 'double-swing' ? 2 : 1,
         measuredWidth: width,
-        // A plan wants the WALL, not the frame: `LiningDepth` often runs past
-        // the plaster, which in 3D is truthful and in plan draws frame outside
-        // the wall (Marc, 2026-08-13).
-        measuredDepth: geometry.extent.depth,
+        // The WALL as drawn, not the frame and not the mesh. `LiningDepth`
+        // runs past the plaster, and a wall mesh carries its returns; the cut
+        // polygon is the wall at the height being drawn (Marc, 2026-08-13).
+        measuredDepth: wallThickness,
       });
       if (!quantities) continue;
       if (quantities.liningSource === 'assumed') assumedLinings += 1;
@@ -544,7 +590,7 @@ export function usePlanOpeningSymbols({
     }
 
     return { symbols, doorLabels, assumedLinings };
-  }, [enabled, geometryResult, dataStore, storeyId]);
+  }, [enabled, geometryResult, dataStore, storeyId, drawing]);
 }
 
 export default usePlanOpeningSymbols;

@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   doorOperationFromIfc, planAxes, openingWidth, doorSymbol, windowSymbol,
-  classifyOpeningParts, swingFromGeometry,
+  classifyOpeningParts, swingFromGeometry, wallThicknessAtOpening,
   type PlanAxes, type SymbolLine, type LocalBox, type DoorWidths,
 } from './openingSymbols.js';
 
@@ -139,6 +139,54 @@ describe('classifyOpeningParts / swingFromGeometry', () => {
 
   it('has nothing to classify without geometry', () => {
     assert.equal(classifyOpeningParts([]), null);
+  });
+});
+
+describe('wallThicknessAtOpening', () => {
+  /**
+   * A 6 m wall 0.15 thick with a 1 m doorway from x 2 to x 3 — so the cut
+   * leaves two pieces, and the jamb corners at x 2 and x 3 are the only
+   * vertices that sit across the opening. That is what the measurement reads,
+   * and it is why a wall drawn WITHOUT its opening yields nothing: there is
+   * then no wall face at the doorway to measure between.
+   */
+  const wall = [
+    [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 2, y: -0.15 }, { x: 0, y: -0.15 }],
+    [{ x: 3, y: 0 }, { x: 6, y: 0 }, { x: 6, y: -0.15 }, { x: 3, y: -0.15 }],
+  ];
+  const doorway: [number, number] = [2, 3];
+
+  it('measures the wall across the doorway', () => {
+    assert.equal(round(wallThicknessAtOpening(wall, AXES, doorway)!), 0.15);
+  });
+
+  it('ignores what the wall does elsewhere along its length', () => {
+    // A return at the far end: 0.9 deep, and none of the doorway's business.
+    const withReturn = [...wall, [
+      { x: 5.5, y: 0 }, { x: 6, y: 0 }, { x: 6, y: -0.9 }, { x: 5.5, y: -0.9 },
+    ]];
+    assert.equal(round(wallThicknessAtOpening(withReturn, AXES, doorway)!), 0.15);
+  });
+
+  it('follows a wall that runs at an angle to the drawing', () => {
+    // The same wall turned a quarter turn: the axes carry it, the arithmetic
+    // does not change. A building at 45° to the coordinates is the normal case.
+    const turned: PlanAxes = { along: { x: 0, y: -1 }, across: { x: -1, y: 0 } };
+    const rotated = wall.map((ring) => ring.map((p) => ({ x: -p.y, y: -p.x })));
+    assert.equal(round(wallThicknessAtOpening(rotated, turned, doorway)!), 0.15);
+  });
+
+  it('has no answer when the wall is not in the drawing', () => {
+    assert.equal(wallThicknessAtOpening([], AXES, doorway), null);
+  });
+
+  it('has no answer when the wall carries no opening to measure across', () => {
+    // An unbroken wall has no vertex at the doorway. Nothing to measure, and
+    // the caller falls back rather than inventing a thickness.
+    const unbroken = [[
+      { x: 0, y: 0 }, { x: 6, y: 0 }, { x: 6, y: -0.15 }, { x: 0, y: -0.15 },
+    ]];
+    assert.equal(wallThicknessAtOpening(unbroken, AXES, doorway), null);
   });
 });
 

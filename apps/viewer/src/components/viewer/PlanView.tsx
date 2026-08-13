@@ -304,6 +304,9 @@ export function PlanView({
     geometryResult,
     dataStore: storeyDataStore,
     storeyId: storey?.expressId ?? null,
+    // The drawing carries the one measurement no model source gets right: how
+    // thick the host wall is where a door goes through it.
+    drawing,
   });
 
   // Room and door text are one layer: they are the same thing on a drawing,

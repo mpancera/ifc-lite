@@ -310,6 +310,60 @@ export function openingWidth(
   return null;
 }
 
+/**
+ * How thick the host wall is, measured off the wall AS DRAWN.
+ *
+ * The frame in a plan has to be as deep as the wall it sits in, and every
+ * other source for that lies in some model or other:
+ *
+ * - the LINING's own depth is the frame, which frequently runs past the
+ *   plaster — truthful in 3D, and in plan it draws frame outside the wall;
+ * - `Qto_WallBaseQuantities.Width` came out as 150000 on a model whose
+ *   `Length` and `Height` were honest millimetres, so it cannot be trusted
+ *   without a sanity check that would itself need a second source;
+ * - the wall mesh's own extent across the door measured 0.92 on two of three
+ *   walls, because a wall mesh carries its returns and corners.
+ *
+ * The wall's CUT POLYGON cannot be wrong in the same way: it is the wall at
+ * the height being drawn, in the frame being drawn, and if it disagreed with
+ * the plan the plan would be visibly wrong.
+ *
+ * Only the vertices ACROSS the doorway are measured. Elsewhere along its
+ * length a wall may thicken, turn a corner or meet another wall; at the
+ * opening it is just the wall, and its two faces are what the reveal corners
+ * sit on.
+ *
+ * `null` when the polygon has nothing in that span — a wall drawn without its
+ * opening, or the wrong polygon entirely.
+ */
+export function wallThicknessAtOpening(
+  rings: readonly (readonly Point2D[])[],
+  axes: PlanAxes,
+  /** The opening's extent along the wall, as `[min, max]` in the along axis. */
+  alongSpan: readonly [number, number],
+  /** How far past the jambs to still count as "at the opening", in metres. */
+  tolerance = 0.05,
+): number | null {
+  const { along, across } = axes;
+  const lo = alongSpan[0] - tolerance;
+  const hi = alongSpan[1] + tolerance;
+
+  let minB = Infinity;
+  let maxB = -Infinity;
+  for (const ring of rings) {
+    for (const p of ring) {
+      const a = p.x * along.x + p.y * along.y;
+      if (a < lo || a > hi) continue;
+      const b = p.x * across.x + p.y * across.y;
+      if (b < minB) minB = b;
+      if (b > maxB) maxB = b;
+    }
+  }
+
+  if (!Number.isFinite(minB) || !(maxB > minB)) return null;
+  return maxB - minB;
+}
+
 /** How finely an arc is broken into segments. Twelve over 90° is smooth at
  *  every zoom a plan is read at and stays cheap in an SVG export. */
 const ARC_SEGMENTS = 12;
