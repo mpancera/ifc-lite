@@ -1473,6 +1473,33 @@ export function Drawing2DCanvas({
     // ═══════════════════════════════════════════════════════════════════════
     // 4. RENDER MEASUREMENTS (in screen space)
     // ═══════════════════════════════════════════════════════════════════════
+    // ── Drawing space to screen, for everything painted OVER the drawing ──
+    // Measurements, the user's marks and the snap indicator are all stored in
+    // TRUE drawing coordinates: the screen-to-drawing mapping undoes the plan
+    // rotation when they are taken. Painting them back therefore has to
+    // re-apply it. Positions turn; glyphs do not, which is what keeps labels
+    // upright on a turned plan.
+    //
+    // One mapping for all of them. The measure overlay used to carry its own
+    // copy WITHOUT the rotation, so on a turned plan the line and the snap
+    // marker appeared somewhere the cursor had never been — which read as
+    // "measuring does not work here" rather than as a drawing bug.
+    const annotScaleX = sectionAxis === 'side' ? -transform.scale : transform.scale;
+    const annotScaleY = sectionAxis === 'down' ? transform.scale : -transform.scale;
+    const annotRot = sectionAxis === 'down' ? (transform.rotation ?? 0) : 0;
+    const annotCos = Math.cos(annotRot);
+    const annotSin = Math.sin(annotRot);
+    const overlayToScreen = (x: number, y: number) => {
+      const sx = x * annotScaleX;
+      const sy = y * annotScaleY;
+      return {
+        x: sx * annotCos - sy * annotSin + transform.x,
+        y: sx * annotSin + sy * annotCos + transform.y,
+      };
+    };
+    const drawingToScreenX = (x: number, y: number) => overlayToScreen(x, y).x;
+    const drawingToScreenY = (x: number, y: number) => overlayToScreen(x, y).y;
+
     const drawMeasureLine = (
       start: { x: number; y: number },
       end: { x: number; y: number },
@@ -1480,17 +1507,13 @@ export function Drawing2DCanvas({
       color: string = '#2196F3',
       isActive: boolean = false
     ) => {
-      // Convert drawing coords to screen coords with axis-specific transforms
-      const measureScaleX = sectionAxis === 'side' ? -transform.scale : transform.scale;
-      const measureScaleY = sectionAxis === 'down' ? transform.scale : -transform.scale;
-      const screenStart = {
-        x: start.x * measureScaleX + transform.x,
-        y: start.y * measureScaleY + transform.y,
-      };
-      const screenEnd = {
-        x: end.x * measureScaleX + transform.x,
-        y: end.y * measureScaleY + transform.y,
-      };
+      // Through the SAME mapping the drawing uses, rotation included. Measured
+      // points are stored in true drawing coordinates — the screen-to-drawing
+      // conversion undoes the plan rotation when they are taken — so painting
+      // them back without the rotation put the line somewhere the cursor had
+      // never been, and measuring on a turned plan looked broken.
+      const screenStart = overlayToScreen(start.x, start.y);
+      const screenEnd = overlayToScreen(end.x, end.y);
 
       // Draw line
       ctx.strokeStyle = color;
@@ -1622,13 +1645,10 @@ export function Drawing2DCanvas({
 
     // Draw snap indicator
     if (measureMode && measureSnapPoint) {
-      // Use axis-specific transforms (matching canvas rendering)
-      const snapScaleX = sectionAxis === 'side' ? -transform.scale : transform.scale;
-      const snapScaleY = sectionAxis === 'down' ? transform.scale : -transform.scale;
-      const screenSnap = {
-        x: measureSnapPoint.x * snapScaleX + transform.x,
-        y: measureSnapPoint.y * snapScaleY + transform.y,
-      };
+      // Same mapping as the measure line, rotation included: a snap marker
+      // that is not under the cursor is worse than none, because it says the
+      // tool caught something somewhere else.
+      const screenSnap = overlayToScreen(measureSnapPoint.x, measureSnapPoint.y);
 
       // Draw snap crosshair
       ctx.strokeStyle = '#4CAF50';
@@ -1654,26 +1674,6 @@ export function Drawing2DCanvas({
     // ═══════════════════════════════════════════════════════════════════════
     // 5. RENDER POLYGON AREA MEASUREMENTS (in screen space)
     // ═══════════════════════════════════════════════════════════════════════
-    const annotScaleX = sectionAxis === 'side' ? -transform.scale : transform.scale;
-    const annotScaleY = sectionAxis === 'down' ? transform.scale : -transform.scale;
-    // The user's own marks are stored in TRUE drawing coordinates — the plan's
-    // screen-to-drawing mapping undoes the rotation when they are made — so
-    // drawing them back has to re-apply it, or a measurement taken on a turned
-    // plan would sit somewhere other than where it was drawn. Positions turn;
-    // glyphs do not, which is what keeps labels upright on a turned plan.
-    const annotRot = sectionAxis === 'down' ? (transform.rotation ?? 0) : 0;
-    const annotCos = Math.cos(annotRot);
-    const annotSin = Math.sin(annotRot);
-    const drawingToScreenX = (x: number, y: number) => {
-      const sx = x * annotScaleX;
-      const sy = y * annotScaleY;
-      return sx * annotCos - sy * annotSin + transform.x;
-    };
-    const drawingToScreenY = (x: number, y: number) => {
-      const sx = x * annotScaleX;
-      const sy = y * annotScaleY;
-      return sx * annotSin + sy * annotCos + transform.y;
-    };
 
     // Draw completed polygon areas
     for (const result of polygonAreaResults) {

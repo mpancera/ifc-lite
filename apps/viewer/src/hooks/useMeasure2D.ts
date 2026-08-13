@@ -266,11 +266,11 @@ export function useMeasure2D({
   useEffect(() => {
     if (!measure2DMode) return;
 
-    const handleGlobalMouseUp = (e: MouseEvent) => {
-      // If mouse button is released and we're outside the panel with a measurement started, cancel it
-      if (!isMouseInsidePanel.current && measure2DStart && e.button === 0) {
-        cancelMeasure2D();
-      }
+    const handleGlobalMouseUp = () => {
+      // Only bookkeeping. Cancelling here would end a half-drawn measurement
+      // every time the button came up outside the plan — which with a
+      // click-to-click gesture is most of the time, since the first click is
+      // released before the cursor has gone anywhere.
       isMouseButtonDown.current = false;
     };
 
@@ -278,7 +278,7 @@ export function useMeasure2D({
     return () => {
       window.removeEventListener('mouseup', handleGlobalMouseUp);
     };
-  }, [measure2DMode, measure2DStart, cancelMeasure2D]);
+  }, [measure2DMode]);
 
   // ═══════════════════════════════════════════════════════════════════════
   // PAN / MEASURE HANDLERS
@@ -304,16 +304,38 @@ export function useMeasure2D({
     const screenY = e.clientY - rect.top;
 
     if (measure2DMode) {
-      // Measure mode: set start point
+      // Click, preview, click — not press-drag-release.
+      //
+      // The same rhythm the underlay alignment and the plan rotation already
+      // use, and for the same reason: you see the snapped point BEFORE
+      // committing it, so you know what you caught. Dragging hides that, and
+      // on a long wall the two ends are far enough apart that holding the
+      // button across them is a nuisance in its own right.
       const drawingCoord = screenToDrawing(screenX, screenY);
       const snapPoint = findSnapPoint(drawingCoord);
-      const startPoint = snapPoint || drawingCoord;
-      setMeasure2DStart(startPoint);
-      setMeasure2DCurrent(startPoint);
+      const clicked = snapPoint || drawingCoord;
+
+      if (!measure2DStart) {
+        setMeasure2DStart(clicked);
+        setMeasure2DCurrent(clicked);
+        return;
+      }
+
+      // Second click closes the measurement. The end point goes in first:
+      // `completeMeasure2D` reads it back out of the store, and the store
+      // sets synchronously, so this is the value it sees.
+      setMeasure2DCurrent(
+        measure2DShiftLocked && measure2DLockedAxis
+          ? applyOrthogonalConstraint(measure2DStart, clicked, measure2DLockedAxis)
+          : clicked,
+      );
+      completeMeasure2D();
     }
     // No left-button panning: it would fight every pick, and the right button
     // does the job without a mode.
-  }, [measure2DMode, screenToDrawing, findSnapPoint, setMeasure2DStart, setMeasure2DCurrent]);
+  }, [measure2DMode, measure2DStart, measure2DShiftLocked, measure2DLockedAxis,
+      screenToDrawing, findSnapPoint, setMeasure2DStart, setMeasure2DCurrent,
+      applyOrthogonalConstraint, completeMeasure2D]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     const rect = containerRef.current?.getBoundingClientRect();
@@ -353,14 +375,12 @@ export function useMeasure2D({
     }
   }, [measure2DMode, measure2DStart, measure2DShiftLocked, measure2DLockedAxis, screenToDrawing, findSnapPoint, setMeasure2DSnapPoint, setMeasure2DCurrent, applyOrthogonalConstraint]);
 
+  // Releasing the button ends nothing: the measurement is closed by the SECOND
+  // CLICK, so a release between the two is just the first click finishing.
   const handleMouseUp = useCallback(() => {
     isMouseButtonDown.current = false;
-    if (measure2DMode && measure2DStart && measure2DCurrent) {
-      // Complete the measurement
-      completeMeasure2D();
-    }
     isPanning.current = false;
-  }, [measure2DMode, measure2DStart, measure2DCurrent, completeMeasure2D]);
+  }, []);
 
   const handleMouseLeave = useCallback(() => {
     isMouseInsidePanel.current = false;
@@ -372,7 +392,7 @@ export function useMeasure2D({
   const handleMouseEnter = useCallback((e: React.MouseEvent) => {
     isMouseInsidePanel.current = true;
     // If re-entering with button down and measurement started, resume tracking
-    if (isMouseButtonDown.current && measure2DMode && measure2DStart) {
+    if (measure2DMode && measure2DStart) {
       const rect = containerRef.current?.getBoundingClientRect();
       if (rect) {
         const screenX = e.clientX - rect.left;
