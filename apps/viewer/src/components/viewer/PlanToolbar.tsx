@@ -36,6 +36,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { Annotation2DTool } from '@/store';
 import { ViewModeToggle } from './ViewportOverlays';
+import { ViewportToolStrip, ToolStripDivider } from './ViewportToolStrip';
 
 export interface PlanToolbarProps {
   displayOptions: {
@@ -93,9 +94,8 @@ export interface PlanToolbarProps {
   children?: React.ReactNode;
 }
 
-function Divider() {
-  return <div className="mx-0.5 h-4 w-px bg-border" />;
-}
+/** The strip's own hairline, shared with the 3D viewport's strip. */
+const Divider = ToolStripDivider;
 
 function ToolButton({
   active, onClick, title, children, disabled,
@@ -138,9 +138,10 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
   } = props;
 
   return (
-    <div className="pointer-events-auto flex flex-wrap items-center gap-0.5 rounded-md border bg-background/95 backdrop-blur-sm px-1.5 py-1 shadow-sm">
+    <ViewportToolStrip testId="plan">
       {/* The way out of the mode comes first — it is the one control whose
-          absence strands you. */}
+          absence strands you, and it sits at the same end of the building's
+          strip so switching does not move the switch. */}
       <ViewModeToggle />
       <Divider />
 
@@ -339,7 +340,7 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
       <ToolButton onClick={onRegenerate} disabled={busy} title="Neu berechnen">
         <RefreshCw className={`h-4 w-4 ${busy ? 'animate-spin' : ''}`} />
       </ToolButton>
-    </div>
+    </ViewportToolStrip>
   );
 }
 

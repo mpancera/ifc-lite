@@ -16,6 +16,7 @@ import { goHomeFromStore } from '@/store/homeView';
 import { useIfc } from '@/hooks/useIfc';
 import { emitCameraInteracted } from '@/lib/tours/events';
 import { tourAnchor, TOUR_ANCHORS } from '@/lib/tours/anchors';
+import { ViewportToolStrip } from './ViewportToolStrip';
 import { cn } from '@/lib/utils';
 import { ViewCube, type ViewCubeRef } from './ViewCube';
 import { AxisHelper, type AxisHelperRef } from './AxisHelper';
@@ -30,6 +31,11 @@ export function ViewportOverlays({ hideViewCube = false }: { hideViewCube?: bool
   const basketPresentationVisible = useViewerStore((s) => s.basketPresentationVisible);
   const cameraCallbacks = useViewerStore((s) => s.cameraCallbacks);
   const isMobile = useViewerStore((s) => s.isMobile);
+  // Plan mode covers this viewport with its own full-bleed surface, which
+  // carries its own strip in the same corner. Rendering both leaves two
+  // identical mode switches stacked on the same pixels, one of them
+  // unreachable — invisible today only because of a z-index.
+  const planActive = useViewerStore((s) => s.viewMode) === '2d';
   const setOnCameraRotationChange = useViewerStore((s) => s.setOnCameraRotationChange);
   const setOnScaleChange = useViewerStore((s) => s.setOnScaleChange);
   const { ifcDataStore, geometryResult } = useIfc();
@@ -216,6 +222,21 @@ export function ViewportOverlays({ hideViewCube = false }: { hideViewCube?: bool
         </div>
       )}
 
+      {/* The building's tool strip, along the top edge — the same strip the
+          plan has, in the same corner, so the control that switches between
+          them does not move when you use it.
+
+          Deliberately near-empty for now: it is the container the 3D tools are
+          to be gathered into, and putting it in place first means they can be
+          moved one at a time rather than in one blind rearrangement.
+
+          It stops short of the ViewCube, which keeps its own corner. */}
+      {!isMobile && !planActive && (
+        <ViewportToolStrip rightInset="right-24" testId="viewport">
+          <ViewModeToggle />
+        </ViewportToolStrip>
+      )}
+
       {/* Basepoint toggle + Axis Helper + Scale Bar — desktop only; mobile keeps the viewport unobstructed */}
       {!isMobile && (
         <div className="absolute bottom-4 left-4 flex flex-col-reverse items-start gap-3">
@@ -229,7 +250,6 @@ export function ViewportOverlays({ hideViewCube = false }: { hideViewCube?: bool
             rotationY={initialRotationY}
           />
           <BasepointToggleButton />
-          <ViewModeToggle />
         </div>
       )}
 

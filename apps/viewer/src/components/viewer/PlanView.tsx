@@ -1089,9 +1089,10 @@ export function PlanView({
         </svg>
       )}
 
-      {/* Tools along the top edge, where #50 asks for them. */}
-      <div className="absolute top-2 left-2 right-2 flex items-start gap-2 pointer-events-none">
-        <PlanToolbar
+      {/* Tools along the top edge, where #50 asks for them. The strip brings
+          its own positioning now, so that the building's strip can be given
+          the same one. */}
+      <PlanToolbar
           displayOptions={displayOptions}
           onToggleSymbolic={() => {
             // Clearing the drawing makes the switch visible immediately: the
@@ -1183,8 +1184,7 @@ export function PlanView({
             title="Schnitthöhe über Geschossboden, in Metern"
           />
           <span className="text-[10px] text-muted-foreground">m</span>
-        </PlanToolbar>
-      </div>
+      </PlanToolbar>
 
       {/* Both panels are `h-full` and bring no positioning of their own, so
           they need a sized, positioned host or they collapse to nothing. */}
