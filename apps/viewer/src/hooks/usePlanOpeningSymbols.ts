@@ -31,7 +31,8 @@ import type { GeometryResult, MeshData } from '@ifc-lite/geometry';
 import { RelationshipType } from '@ifc-lite/data';
 import {
   doorOperationFromIfc, planAxes, openingWidth, doorSymbol, windowSymbol,
-  type SymbolLine, type LocalExtent, type PlanAxes,
+  classifyOpeningParts, swingFromGeometry,
+  type SymbolLine, type LocalExtent, type PlanAxes, type LocalBox, type OpeningParts,
 } from '@/lib/plan/openingSymbols';
 
 export interface PlanOpeningSymbol {
@@ -49,6 +50,12 @@ export interface PlanOpeningSymbol {
   readonly lines: readonly SymbolLine[];
   /** What the model said, for the tooltip — `null` when it said nothing. */
   readonly operationType: string | null;
+  /**
+   * Where the swing came from. `'geometry'` means a drawn leaf decided it and
+   * the symbol therefore agrees with the 3D view; `'operation-type'` means the
+   * attribute did, which is the weaker source.
+   */
+  readonly swingSource: 'geometry' | 'operation-type';
   /**
    * Whether this occurrence's placement is MIRRORED in plan.
    *
@@ -85,6 +92,8 @@ export interface UsePlanOpeningSymbolsOptions {
 interface OpeningGeometry {
   readonly centre: { x: number; y: number };
   readonly extent: LocalExtent;
+  /** The lining and, when the model drew one, the leaf. */
+  readonly parts: OpeningParts | null;
 }
 
 /** The placement matrix an element's meshes agree on, or `undefined`. */
@@ -112,10 +121,20 @@ function placementOf(meshes: readonly MeshData[]): number[] | undefined {
  */
 function openingGeometry(meshes: readonly MeshData[], axes: PlanAxes): OpeningGeometry | null {
   const { along, across } = axes;
-  let minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity;
-  let lMinX = Infinity, lMaxX = -Infinity, lMinZ = Infinity, lMaxZ = -Infinity;
 
-  for (const mesh of meshes) {
+  // Measure ONLY the pieces that are in the wall. Everything else about an
+  // opening may be somewhere else entirely: a leaf drawn standing open reaches
+  // a full door-width out into the room, and averaging it in drags the symbol
+  // off its own doorway.
+  const boxed = meshes.filter((m): m is MeshData & { localBounds: LocalBox } => !!m.localBounds);
+  const parts = classifyOpeningParts(boxed.map((m) => m.localBounds));
+  const revealMeshes = parts
+    ? boxed.filter((m) => m.localBounds === parts.reveal)
+    : meshes;
+
+  let minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity;
+
+  for (const mesh of revealMeshes) {
     const ox = mesh.origin?.[0] ?? 0;
     const oz = mesh.origin?.[2] ?? 0;
     const p = mesh.positions;
@@ -126,13 +145,6 @@ function openingGeometry(meshes: readonly MeshData[], axes: PlanAxes): OpeningGe
       const b = x * across.x + y * across.y;
       if (a < minA) minA = a; if (a > maxA) maxA = a;
       if (b < minB) minB = b; if (b > maxB) maxB = b;
-    }
-    const lb = mesh.localBounds;
-    if (lb) {
-      if (lb.min[0] < lMinX) lMinX = lb.min[0];
-      if (lb.max[0] > lMaxX) lMaxX = lb.max[0];
-      if (lb.min[2] < lMinZ) lMinZ = lb.min[2];
-      if (lb.max[2] > lMaxZ) lMaxZ = lb.max[2];
     }
   }
 
@@ -148,10 +160,10 @@ function openingGeometry(meshes: readonly MeshData[], axes: PlanAxes): OpeningGe
       x: along.x * midA + across.x * midB,
       y: along.y * midA + across.y * midB,
     },
-    extent: {
-      width: Number.isFinite(lMinX) ? lMaxX - lMinX : 0,
-      depth: Number.isFinite(lMinZ) ? lMaxZ - lMinZ : 0,
-    },
+    // Measured in the drawing, off the lining: the same body the centre came
+    // from, so the symbol cannot be the right size in the wrong place.
+    extent: { width: maxA - minA, depth: maxB - minB },
+    parts,
   };
 }
 
@@ -229,14 +241,14 @@ export function usePlanOpeningSymbols({
           key, expressId, kind,
           lines: windowSymbol({ centre: geometry.centre, width, depth: geometry.extent.depth, axes }),
           operationType: null,
+          swingSource: 'geometry',
           mirrored: isMirrored(axes),
         });
         continue;
       }
 
-      // `OperationType` sits on the TYPE in every model met so far, but the
-      // occurrence may carry it in IFC4, and the occurrence is the more
-      // specific statement when it does.
+      // `OperationType` may sit on the occurrence (IFC4) or on the type; the
+      // occurrence is the more specific statement when it carries one.
       let operationType = attribute(dataStore, expressId, 'OperationType');
       if (operationType === undefined) {
         const typeIds = dataStore.relationships?.getRelated(
@@ -251,15 +263,24 @@ export function usePlanOpeningSymbols({
         }
       }
 
-      const lines = doorSymbol({
-        centre: geometry.centre, width, axes,
-        operation: doorOperationFromIfc(operationType),
-      });
+      // The model's own leaf outranks the enum. Where a leaf was drawn, the
+      // symbol is made to agree with the 3D view by construction; only where
+      // none was found does the attribute get a say.
+      const fromAttribute = doorOperationFromIfc(operationType);
+      const drawn = geometry.parts?.leaf
+        ? swingFromGeometry(geometry.parts.reveal, geometry.parts.leaf)
+        : null;
+      const operation = drawn
+        ? { motion: 'swing' as const, hinge: drawn.hinge, openTowards: drawn.openTowards }
+        : fromAttribute;
+
+      const lines = doorSymbol({ centre: geometry.centre, width, axes, operation });
       if (lines.length === 0) continue;
 
       symbols.push({
         key, expressId, kind, lines,
         operationType: operationType ?? null,
+        swingSource: drawn ? 'geometry' : 'operation-type',
         mirrored: isMirrored(axes),
       });
     }

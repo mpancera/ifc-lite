@@ -6,7 +6,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   doorOperationFromIfc, planAxes, openingWidth, doorSymbol, windowSymbol,
-  type PlanAxes, type SymbolLine,
+  classifyOpeningParts, swingFromGeometry,
+  type PlanAxes, type SymbolLine, type LocalBox,
 } from './openingSymbols.js';
 
 /** Identity rotation: local X along drawing +x, local +Y along drawing −y. */
@@ -42,11 +43,11 @@ describe('doorOperationFromIfc', () => {
   // DIN-R, so the names look swapped against a German door schedule — that is
   // the schema's naming, not a bug here.
   it('hangs SingleSwingLeft at the local X minimum', () => {
-    assert.deepEqual(doorOperationFromIfc('SINGLE_SWING_LEFT'), { motion: 'swing', hinge: 'start' });
+    assert.deepEqual(doorOperationFromIfc('SINGLE_SWING_LEFT'), { motion: 'swing', hinge: 'start', openTowards: 1 });
   });
 
   it('hangs SingleSwingRight at the local X maximum', () => {
-    assert.deepEqual(doorOperationFromIfc('SINGLE_SWING_RIGHT'), { motion: 'swing', hinge: 'end' });
+    assert.deepEqual(doorOperationFromIfc('SINGLE_SWING_RIGHT'), { motion: 'swing', hinge: 'end', openTowards: 1 });
   });
 
   it('reads the enum case-insensitively and ignores stray space', () => {
@@ -59,8 +60,8 @@ describe('doorOperationFromIfc', () => {
   });
 
   it('gives a sliding or folding leaf no arc to sweep', () => {
-    assert.deepEqual(doorOperationFromIfc('SLIDING_TO_LEFT'), { motion: 'sliding', hinge: 'start' });
-    assert.deepEqual(doorOperationFromIfc('FOLDING_TO_RIGHT'), { motion: 'sliding', hinge: 'end' });
+    assert.deepEqual(doorOperationFromIfc('SLIDING_TO_LEFT'), { motion: 'sliding', hinge: 'start', openTowards: 1 });
+    assert.deepEqual(doorOperationFromIfc('FOLDING_TO_RIGHT'), { motion: 'sliding', hinge: 'end', openTowards: 1 });
     assert.equal(doorOperationFromIfc('DOUBLE_DOOR_SLIDING').motion, 'sliding');
   });
 
@@ -68,6 +69,76 @@ describe('doorOperationFromIfc', () => {
     for (const value of ['NOTDEFINED', 'USERDEFINED', 'REVOLVING', 'ROLLINGUP', '', undefined, null]) {
       assert.equal(doorOperationFromIfc(value).motion, 'none', `for ${String(value)}`);
     }
+  });
+});
+
+describe('classifyOpeningParts / swingFromGeometry', () => {
+  /** `[minX, minY, minZ]` → `[maxX, maxY, maxZ]`, the shape localBounds has. */
+  const box = (
+    x0: number, x1: number, y0: number, y1: number, z0: number, z1: number,
+  ): LocalBox => ({ min: [x0, y0, z0], max: [x1, y1, z1] });
+
+  /**
+   * A real door out of a project model, its leaf STANDING OPEN: 0.92 wide,
+   * lining 19 cm deep sitting in the wall at z −0.96…−0.77, and a 4 cm leaf
+   * edge reaching from the wall out to z 0. Plus two handle parts, which are
+   * the only pieces much shorter than the door.
+   */
+  const openDoor = [
+    box(0, 0.92, 0, 2.16, -0.96, -0.77),   // lining
+    box(0.82, 0.86, 0, 2.10, -0.80, 0),    // leaf, open
+    box(0.86, 0.865, 0.85, 1.05, -0.07, -0.03), // handle
+    box(0.77, 0.815, 1.018, 1.043, -0.168, -0.038), // handle plate
+  ];
+
+  it('finds the lining as the piece that spans the opening', () => {
+    const parts = classifyOpeningParts(openDoor);
+    assert.ok(parts);
+    assert.deepEqual(parts.reveal.min, [0, 0, -0.96]);
+  });
+
+  it('finds the leaf, and does not mistake the handle for it', () => {
+    const parts = classifyOpeningParts(openDoor);
+    assert.ok(parts?.leaf);
+    assert.deepEqual(parts.leaf.min, [0.82, 0, -0.80]);
+  });
+
+  it('hangs the door where the leaf actually stands', () => {
+    const parts = classifyOpeningParts(openDoor)!;
+    // The leaf sits at x ≈ 0.84 in a 0…0.92 opening, so at the far end.
+    assert.equal(swingFromGeometry(parts.reveal, parts.leaf!).hinge, 'end');
+  });
+
+  it('swings the door the way the leaf actually reaches', () => {
+    const parts = classifyOpeningParts(openDoor)!;
+    // The leaf reaches past the lining towards +Z, which is −across.
+    assert.equal(swingFromGeometry(parts.reveal, parts.leaf!).openTowards, -1);
+  });
+
+  it('reads a leaf reaching the other way as the other way', () => {
+    // The same door mirrored through the wall: lining at z −0.19…0, leaf out
+    // to −0.96. This is the second commonest case in the model measured.
+    const mirrored = [
+      box(0, 0.92, 0, 2.16, -0.19, 0),
+      box(0.06, 0.10, 0, 2.10, -0.96, -0.16),
+    ];
+    const parts = classifyOpeningParts(mirrored)!;
+    const swing = swingFromGeometry(parts.reveal, parts.leaf!);
+    assert.equal(swing.hinge, 'start');
+    assert.equal(swing.openTowards, 1);
+  });
+
+  it('reports no leaf when the model drew the door shut', () => {
+    // Lining plus a leaf filling it: nothing sticks out of the wall.
+    const shut = [
+      box(0, 0.9, 0, 2.0, -0.1, 0.1),
+      box(0.05, 0.85, 0.05, 1.95, -0.02, 0.02),
+    ];
+    assert.equal(classifyOpeningParts(shut)?.leaf, null);
+  });
+
+  it('has nothing to classify without geometry', () => {
+    assert.equal(classifyOpeningParts([]), null);
   });
 });
 
@@ -135,7 +206,7 @@ describe('doorSymbol', () => {
 
   it('stands the leaf on the hinge and opens it towards local +Y', () => {
     const lines = doorSymbol({
-      centre, width, axes: AXES, operation: { motion: 'swing', hinge: 'start' },
+      centre, width, axes: AXES, operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
     });
     // Hinge at the local X minimum, i.e. x = −0.5.
     assert.deepEqual(pt(lines[0].start), [-0.5, 0]);
@@ -145,7 +216,7 @@ describe('doorSymbol', () => {
 
   it('hangs a right-hung door at the other jamb, opening the same way', () => {
     const lines = doorSymbol({
-      centre, width, axes: AXES, operation: { motion: 'swing', hinge: 'end' },
+      centre, width, axes: AXES, operation: { motion: 'swing', hinge: 'end', openTowards: 1 },
     });
     assert.deepEqual(pt(lines[0].start), [0.5, 0]);
     assert.deepEqual(pt(lines[0].end), [0.5, -1]);
@@ -153,7 +224,7 @@ describe('doorSymbol', () => {
 
   it('sweeps an arc of the leaf width, hinge to closed position', () => {
     const lines = doorSymbol({
-      centre, width, axes: AXES, operation: { motion: 'swing', hinge: 'start' },
+      centre, width, axes: AXES, operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
     });
     const hinge = { x: -0.5, y: 0 };
     // Every arc point is one leaf-width from the hinge.
@@ -167,7 +238,7 @@ describe('doorSymbol', () => {
 
   it('takes the short way round, never three quarters of a circle', () => {
     const lines = doorSymbol({
-      centre, width, axes: AXES, operation: { motion: 'swing', hinge: 'start' },
+      centre, width, axes: AXES, operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
     });
     const arc = lines.slice(1);
     // A quarter turn of radius 1 is π/2 long; the long way would be 3π/2.
@@ -177,7 +248,7 @@ describe('doorSymbol', () => {
 
   it('gives a two-leaf door one arc per jamb, each half the opening', () => {
     const lines = doorSymbol({
-      centre, width: 2, axes: AXES, operation: { motion: 'double-swing', hinge: 'start' },
+      centre, width: 2, axes: AXES, operation: { motion: 'double-swing', hinge: 'start', openTowards: 1 },
     });
     const leaves = lines.filter((l) => Math.abs(l.start.y) < 1e-9 && Math.abs(l.end.y + 1) < 1e-9);
     assert.equal(leaves.length, 2, 'one leaf line per jamb');
@@ -187,29 +258,38 @@ describe('doorSymbol', () => {
 
   it('draws a sliding leaf beside the opening, with no arc', () => {
     const lines = doorSymbol({
-      centre, width, axes: AXES, operation: { motion: 'sliding', hinge: 'start' },
+      centre, width, axes: AXES, operation: { motion: 'sliding', hinge: 'start', openTowards: 1 },
     });
     assert.equal(lines.length, 1, 'a sliding door sweeps nothing');
   });
 
   it('draws no leaf at all when the model never said how it opens', () => {
     assert.deepEqual(
-      doorSymbol({ centre, width, axes: AXES, operation: { motion: 'none', hinge: 'start' } }),
+      doorSymbol({ centre, width, axes: AXES, operation: { motion: 'none', hinge: 'start', openTowards: 1 } }),
       [],
     );
   });
 
   it('has nothing to draw for an opening of no width', () => {
     assert.deepEqual(
-      doorSymbol({ centre, width: 0, axes: AXES, operation: { motion: 'swing', hinge: 'start' } }),
+      doorSymbol({ centre, width: 0, axes: AXES, operation: { motion: 'swing', hinge: 'start', openTowards: 1 } }),
       [],
     );
+  });
+
+  it('swings the leaf to the other side when the geometry says so', () => {
+    const lines = doorSymbol({
+      centre, width, axes: AXES, operation: { motion: 'swing', hinge: 'start', openTowards: -1 },
+    });
+    assert.deepEqual(pt(lines[0].start), [-0.5, 0]);
+    // Mirrored through the wall: the leaf now reaches +y instead of −y.
+    assert.deepEqual(pt(lines[0].end), [-0.5, 1]);
   });
 
   it('turns the whole symbol with the placement', () => {
     const turned: PlanAxes = { along: { x: 0, y: -1 }, across: { x: -1, y: 0 } };
     const lines = doorSymbol({
-      centre, width, axes: turned, operation: { motion: 'swing', hinge: 'start' },
+      centre, width, axes: turned, operation: { motion: 'swing', hinge: 'start', openTowards: 1 },
     });
     assert.deepEqual(pt(lines[0].start), [0, 0.5]);
     assert.deepEqual(pt(lines[0].end), [-1, 0.5]);

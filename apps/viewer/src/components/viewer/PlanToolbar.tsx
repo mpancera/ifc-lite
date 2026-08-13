@@ -27,7 +27,6 @@ import {
   Box, Shapes, Tag, Layers, PenTool, FileText, ZoomIn, ZoomOut,
   Maximize2, Download, FileDown, Printer, RefreshCw, Ruler,
   Hexagon, Type, Cloud, Trash2, FilePlus2, RotateCw, DoorOpen,
-  BetweenHorizonalStart,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -189,7 +188,8 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
             : `Raumbeschriftung: Name und Fläche in ${roomCount} ${roomCount === 1 ? 'Raum' : 'Räumen'}`
         }
       >
-        <DoorOpen className="h-4 w-4" />
+        {/* A "T", because the button puts TEXT on the plan. */}
+        <Type className="h-4 w-4" />
       </ToolButton>
       <ToolButton
         active={showOpeningSymbols}
@@ -201,7 +201,8 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
             : `Tür-/Fenstersymbole für ${openingCount} Öffnung${openingCount === 1 ? '' : 'en'} — abgeleitet, nicht aus dem Modell gezeichnet`
         }
       >
-        <BetweenHorizonalStart className="h-4 w-4" />
+        {/* A door with its swing — the plan graphic this button draws. */}
+        <DoorOpen className="h-4 w-4" />
       </ToolButton>
 
       <Divider />

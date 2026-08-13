@@ -44,6 +44,115 @@ export interface DoorOperation {
   readonly motion: DoorMotion;
   /** Meaningless for `double-swing`, `sliding` and `none`. */
   readonly hinge: HingeEnd;
+  /**
+   * Which side of the wall the leaf swings to, as a multiple of `across`.
+   *
+   * `+1` is the door's local +Y, which is where the schema says a panel always
+   * opens. `-1` only ever comes from geometry that says otherwise, and
+   * geometry outranks the schema here for the reason below.
+   */
+  readonly openTowards: 1 | -1;
+}
+
+/** An element's object-space box, as `MeshData.localBounds` delivers it. */
+export interface LocalBox {
+  readonly min: readonly [number, number, number];
+  readonly max: readonly [number, number, number];
+}
+
+const boxWidth = (b: LocalBox) => b.max[0] - b.min[0];
+const boxHeight = (b: LocalBox) => b.max[1] - b.min[1];
+const boxDepth = (b: LocalBox) => b.max[2] - b.min[2];
+
+export interface OpeningParts {
+  /**
+   * The piece that spans the opening — the lining, which by definition sits IN
+   * the wall. Everything positional is measured off this and not off the
+   * element as a whole, because the whole is not necessarily in the wall.
+   */
+  readonly reveal: LocalBox;
+  /** The leaf, when the model draws one standing open. `null` otherwise. */
+  readonly leaf: LocalBox | null;
+}
+
+/**
+ * Split an opening's pieces into the part in the wall and the swinging leaf.
+ *
+ * # Why this exists at all
+ * A door is often modelled with its leaf STANDING OPEN — the 3D view of such a
+ * model shows a building full of open doors, and that is correct, it is what
+ * the file says. It also means the element's bounding box is as deep as the
+ * door is wide, and its middle is half a leaf-length out in the room. Taking
+ * the element's centre as the opening's centre therefore pushes every symbol
+ * off its own doorway, in the swing direction, by an amount that looks like a
+ * small bug and is actually a large misreading.
+ *
+ * The lining is found as the WIDEST piece across the opening. That works
+ * whichever way the leaf is drawn: swung open, the leaf is thin along the wall
+ * (four centimetres of panel edge); swung shut, it is inside the lining
+ * anyway. Handles and hinges are dropped first by height — they are the only
+ * parts substantially shorter than the door.
+ */
+export function classifyOpeningParts(boxes: readonly LocalBox[]): OpeningParts | null {
+  if (boxes.length === 0) return null;
+
+  const tallest = Math.max(...boxes.map(boxHeight));
+  // Half the door's height keeps frame, leaf and glazing and drops the
+  // ironmongery, which is an order of magnitude smaller.
+  const structural = boxes.filter((b) => boxHeight(b) >= tallest * 0.5);
+  if (structural.length === 0) return null;
+
+  let reveal = structural[0];
+  for (const b of structural) {
+    if (boxWidth(b) > boxWidth(reveal)) reveal = b;
+  }
+
+  const span = boxWidth(reveal);
+  if (!(span > 0)) return null;
+
+  // A leaf standing open: narrow across the opening, and reaching well out of
+  // the wall. Both conditions, because a glazing panel is narrow too and a
+  // sill is deep too, and neither is a leaf.
+  let leaf: LocalBox | null = null;
+  for (const b of structural) {
+    if (b === reveal) continue;
+    if (boxWidth(b) > span * 0.3) continue;
+    if (boxDepth(b) < span * 0.3) continue;
+    if (leaf === null || boxDepth(b) > boxDepth(leaf)) leaf = b;
+  }
+
+  return { reveal, leaf };
+}
+
+/**
+ * Hinge side and swing direction read off a leaf the model actually drew.
+ *
+ * This outranks `OperationType`, and not as a matter of taste. Measured over
+ * the 27 doors of one real project model, the attribute and the geometry agree
+ * no better than chance: of twenty doors marked `SINGLE_SWING_LEFT`, eleven
+ * are hung at one end and nine at the other. The exporter writes the enum
+ * without reference to the door it is describing — which is exactly the class
+ * of "informational only" attribute the schema warns about for OverallWidth,
+ * and the same answer applies. The drawn leaf cannot disagree with the 3D
+ * view, because it IS the 3D view.
+ *
+ * `openTowards` is a multiple of `across`, and `across` is the door's local +Y
+ * in the drawing, which is GL local −Z. So a leaf reaching past the lining
+ * towards +Z is swinging to −across.
+ */
+export function swingFromGeometry(
+  reveal: LocalBox, leaf: LocalBox,
+): { hinge: HingeEnd; openTowards: 1 | -1 } {
+  const leafCentre = (leaf.min[0] + leaf.max[0]) / 2;
+  const revealCentre = (reveal.min[0] + reveal.max[0]) / 2;
+
+  const beyondPlus = leaf.max[2] - reveal.max[2];
+  const beyondMinus = reveal.min[2] - leaf.min[2];
+
+  return {
+    hinge: leafCentre < revealCentre ? 'start' : 'end',
+    openTowards: beyondPlus > beyondMinus ? -1 : 1,
+  };
 }
 
 /**
@@ -90,12 +199,12 @@ export function doorOperationFromIfc(operationType: string | undefined | null): 
     case 'SINGLE_SWING_LEFT':
     case 'DOUBLE_DOOR_SINGLE_SWING_OPPOSITE_LEFT':
     case 'SWING_FIXED_LEFT':
-      return { motion: 'swing', hinge: 'start' };
+      return { motion: 'swing', hinge: 'start', openTowards: 1 };
 
     case 'SINGLE_SWING_RIGHT':
     case 'DOUBLE_DOOR_SINGLE_SWING_OPPOSITE_RIGHT':
     case 'SWING_FIXED_RIGHT':
-      return { motion: 'swing', hinge: 'end' };
+      return { motion: 'swing', hinge: 'end', openTowards: 1 };
 
     // Two leaves meeting in the middle, each hinged at its own jamb. Drawn as
     // two half-width swings rather than one wide one, which is what the
@@ -104,7 +213,7 @@ export function doorOperationFromIfc(operationType: string | undefined | null): 
     case 'DOUBLE_SWING_LEFT':
     case 'DOUBLE_SWING_RIGHT':
     case 'DOUBLE_DOOR_DOUBLE_SWING':
-      return { motion: 'double-swing', hinge: 'start' };
+      return { motion: 'double-swing', hinge: 'start', openTowards: 1 };
 
     // A sliding or folding leaf sweeps nothing, so it gets no arc. Folding is
     // lumped in with sliding on purpose: at plan scale both are "a leaf that
@@ -112,17 +221,17 @@ export function doorOperationFromIfc(operationType: string | undefined | null): 
     // model never stated.
     case 'SLIDING_TO_LEFT':
     case 'FOLDING_TO_LEFT':
-      return { motion: 'sliding', hinge: 'start' };
+      return { motion: 'sliding', hinge: 'start', openTowards: 1 };
     case 'SLIDING_TO_RIGHT':
     case 'FOLDING_TO_RIGHT':
-      return { motion: 'sliding', hinge: 'end' };
+      return { motion: 'sliding', hinge: 'end', openTowards: 1 };
     case 'DOUBLE_DOOR_SLIDING':
     case 'DOUBLE_DOOR_FOLDING':
-      return { motion: 'sliding', hinge: 'start' };
+      return { motion: 'sliding', hinge: 'start', openTowards: 1 };
 
     default:
       // REVOLVING, ROLLINGUP, USERDEFINED, NOTDEFINED, and anything absent.
-      return { motion: 'none', hinge: 'start' };
+      return { motion: 'none', hinge: 'start', openTowards: 1 };
   }
 }
 
@@ -244,7 +353,13 @@ export interface DoorSymbolParams {
  */
 export function doorSymbol({ centre, width, axes, operation }: DoorSymbolParams): SymbolLine[] {
   if (!(width > 0)) return [];
-  const { along, across } = axes;
+  const { along } = axes;
+  // The side the leaf actually goes to. `across` alone is the schema's answer;
+  // multiplying by `openTowards` lets a drawn leaf overrule it.
+  const across = {
+    x: axes.across.x * operation.openTowards,
+    y: axes.across.y * operation.openTowards,
+  };
   const half = width / 2;
 
   const at = (t: number): Point2D => ({ x: centre.x + along.x * t, y: centre.y + along.y * t });
