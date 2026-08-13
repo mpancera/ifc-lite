@@ -43,8 +43,10 @@ import { GraphicOverrideEngine, type Drawing2D } from '@ifc-lite/drawing-2d';
 import type { AnnotationGeometry } from '@ifc-lite/create';
 import { toast } from '@/components/ui/toast';
 import type { GeometryResult } from '@ifc-lite/geometry';
+import type { IfcDataStore } from '@ifc-lite/parser';
 import type { Point2D } from '@ifc-lite/drawing-2d';
 import { Drawing2DCanvas } from './Drawing2DCanvas';
+import { PlanRoomLabels } from './PlanRoomLabels';
 import { PlanToolbar } from './PlanToolbar';
 import { DrawingSettingsPanel } from './DrawingSettingsPanel';
 import { DxfUnderlayPanel } from './DxfUnderlayPanel';
@@ -57,6 +59,7 @@ import { useDrawingExport } from '@/hooks/useDrawingExport';
 import { useSymbolicAnnotationsForDrawing } from '@/hooks/useSymbolicAnnotations';
 import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds } from '@/hooks/useDxfUnderlay';
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
+import { usePlanRoomLabels } from '@/hooks/usePlanRoomLabels';
 import { useLensColorKeys } from '@/hooks/useLensColorKeys';
 import { useModelOrigins } from '@/hooks/useModelOrigins';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
@@ -123,6 +126,8 @@ export function PlanView({
   const setPlanRotation = useViewerStore((s) => s.setPlanRotation);
   const planRotationPicking = useViewerStore((s) => s.planRotationPicking);
   const setPlanRotationPicking = useViewerStore((s) => s.setPlanRotationPicking);
+  const planShowRoomLabels = useViewerStore((s) => s.planShowRoomLabels);
+  const setPlanShowRoomLabels = useViewerStore((s) => s.setPlanShowRoomLabels);
   const models = useViewerStore((s) => s.models);
   const activeTool = useViewerStore((s) => s.activeTool);
   const addElementPendingPoints = useViewerStore((s) => s.addElementPendingPoints);
@@ -227,20 +232,22 @@ export function PlanView({
   // Single-model only: `elementToStorey` keys are LOCAL express ids, so on a
   // federation they would collide with another model's mesh ids and derive
   // floors for the wrong building. Federated plan mode is its own problem.
-  const { storeys, storeyModelId } = useMemo((): {
+  const { storeys, storeyModelId, storeyDataStore } = useMemo((): {
     storeys: PlanStorey[];
     /** Which model the storeys belong to, for the isolation ref. */
     storeyModelId: string | null;
+    /** That model's store, for anything else that has to read the model. */
+    storeyDataStore: IfcDataStore | null;
   } => {
     const singleEntry = models.size === 1 ? [...models.entries()][0] : null;
     const modelId = singleEntry ? singleEntry[0] : models.size === 0 ? 'legacy' : null;
     const dataStore = (singleEntry?.[1]?.ifcDataStore ?? (models.size === 0 ? ifcDataStore : null)) as
-      | { spatialHierarchy?: { elementToStorey: Map<number, number>; storeyElevations: Map<number, number>; byStorey: Map<number, number[]> }; entities?: { getName(id: number): string | undefined } }
+      | IfcDataStore
       | null
       | undefined;
     const sh = dataStore?.spatialHierarchy;
     if (!sh || !geometryResult?.meshes || modelId === null) {
-      return { storeys: [], storeyModelId: null };
+      return { storeys: [], storeyModelId: null, storeyDataStore: null };
     }
 
     const names = new Map<number, string>();
@@ -255,6 +262,7 @@ export function PlanView({
         elementToStorey: sh.elementToStorey,
       }),
       storeyModelId: modelId,
+      storeyDataStore: dataStore ?? null,
     };
   }, [models, ifcDataStore, geometryResult]);
 
@@ -269,6 +277,18 @@ export function PlanView({
     }
     return defaultPlanStorey(storeys);
   }, [activeStorey, storeys]);
+
+  // ── The rooms on this floor ─────────────────────────────────────────────
+  // Derived whenever the plan is open, not only when the labels are switched
+  // on: the toolbar says how many rooms this storey has, and a count that
+  // appeared only once you had already asked to see them would be useless.
+  const roomLabels = usePlanRoomLabels({
+    enabled: active,
+    geometryResult,
+    dataStore: storeyDataStore,
+    modelId: storeyModelId,
+    storeyId: storey?.expressId ?? null,
+  });
 
   // ── Solo ────────────────────────────────────────────────────────────────
   // "The storey is solo, as if isolated in 3D" (#50) — and it IS the 3D one,
@@ -572,6 +592,9 @@ export function PlanView({
     drawing, displayOptions, sectionPlane, activePresetId,
     entityColorMap, overridesEnabled, overrideEngine,
     measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D,
+    // Only what is on screen gets exported: switching the labels off is a
+    // statement about the drawing, not about the viewport.
+    roomLabels: planShowRoomLabels ? roomLabels : undefined,
     // A plan is not a sheet. Laying one out on paper is the 2D Section tool's
     // job and stays there, so the export writes the drawing itself.
     sheetEnabled: false, activeSheet: null,
@@ -900,6 +923,11 @@ export function PlanView({
         />
       )}
 
+      {/* Room names and areas. Above the drawing and below the tools, which is
+          where a reader expects to find them: part of the plan, not part of
+          the application. */}
+      {planShowRoomLabels && <PlanRoomLabels labels={roomLabels} transform={planTransform} />}
+
       {/* Points already placed, and the rubber band to the cursor. Drawn over
           the canvas rather than into it: it changes on every mouse move, and
           the drawing underneath does not. */}
@@ -1044,6 +1072,9 @@ export function PlanView({
           }}
           onToggleIfcAnnotations={() => updateDisplayOptions({ showIfcAnnotations: !displayOptions.showIfcAnnotations })}
           onToggleConstructionProjection={() => updateDisplayOptions({ showConstructionProjection: !displayOptions.showConstructionProjection })}
+          showRoomLabels={planShowRoomLabels}
+          onToggleRoomLabels={() => setPlanShowRoomLabels(!planShowRoomLabels)}
+          roomCount={roomLabels.length}
           settingsOpen={settingsOpen}
           onToggleSettings={() => setSettingsOpen((v) => !v)}
           dxfOpen={dxfPanelOpen}

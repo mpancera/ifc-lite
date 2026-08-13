@@ -5,6 +5,7 @@
 import { useCallback } from 'react';
 import { posthog } from '@/lib/analytics';
 import { rotatedBounds } from '@/lib/plan/planRotation';
+import { roomLabelLines, labelFits, type RoomLabel } from '@/lib/plan/roomLabels';
 import { downloadFile, sanitizeFilename } from '@/lib/export/download';
 import {
   GraphicOverrideEngine,
@@ -28,6 +29,9 @@ import type { IfcDataStore } from '@ifc-lite/parser';
 import { useViewerStore } from '@/store';
 import { buildDxfExportTransform, resolveDxfExportGeoreference } from '@/hooks/dxfExportGeoref';
 import { DEFAULT_SCAN_SVG_CAP, type ScanBandPoint } from '@/hooks/scanSectionMath';
+
+/** Module-level so the default parameter keeps a stable identity across renders. */
+const EMPTY_ROOM_LABELS: readonly RoomLabel[] = [];
 
 /** Map a DXF vertical justification onto an SVG dominant-baseline. */
 function dxfValignToBaseline(valign: 'baseline' | 'bottom' | 'middle' | 'top'): string {
@@ -157,6 +161,12 @@ interface UseDrawingExportParams {
   polygonArea2DResults: PolygonArea2DResult[];
   textAnnotations2D: TextAnnotation2D[];
   cloudAnnotations2D: CloudAnnotation2D[];
+  /**
+   * Room names + areas, already in drawing space (#50). Plan mode supplies
+   * them; the 2D Section panel passes none, because a section has no floor to
+   * name rooms on.
+   */
+  roomLabels?: readonly RoomLabel[];
   sheetEnabled: boolean;
   activeSheet: DrawingSheet | null;
   /** DXF underlays pre-mapped to drawing space, rendered beneath the drawing (issue #1782) */
@@ -194,6 +204,7 @@ function useDrawingExport({
   polygonArea2DResults,
   textAnnotations2D,
   cloudAnnotations2D,
+  roomLabels = EMPTY_ROOM_LABELS,
   sheetEnabled,
   activeSheet,
   dxfUnderlays,
@@ -466,6 +477,41 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     }
     svg += '  </g>\n';
 
+    // 3b. ROOM NAMES AND AREAS (#50)
+    //
+    // Model content, so it goes UNDER the user's marks: a measurement drawn
+    // across a room should sit on top of that room's name, not disappear
+    // behind it.
+    //
+    // Sized in millimetres ON PAPER rather than in screen pixels, which is the
+    // one place this export differs from what the canvas draws: on screen a
+    // label stays the same size as you zoom, on paper it is 3 mm at whatever
+    // scale the sheet is at. Both are what their medium wants. The same fit
+    // test runs against the paper sizes, so a room too small to hold its label
+    // at 1:200 is left blank instead of overprinted.
+    if (roomLabels.length > 0) {
+      const nameSize = mmToModel(3);
+      const detailSize = mmToModel(2.5);
+      const lineHeight = mmToModel(3.6);
+      svg += '  <g id="room-labels">\n';
+      for (const label of roomLabels) {
+        const lines = roomLabelLines(label);
+        if (!labelFits(lines, label, 1, nameSize, lineHeight)) continue;
+
+        const px = flipX ? -label.anchor.x : label.anchor.x;
+        const py = flipY ? -label.anchor.y : label.anchor.y;
+        const top = py - ((lines.length - 1) * lineHeight) / 2;
+
+        for (let i = 0; i < lines.length; i++) {
+          const y = top + i * lineHeight;
+          const isName = i === 0 && label.name.length > 0;
+          const size = isName ? nameSize : detailSize;
+          svg += `    <text${uprightText(px, y)} x="${px.toFixed(4)}" y="${y.toFixed(4)}" font-family="Arial, sans-serif" font-size="${size.toFixed(4)}" fill="#000000" text-anchor="middle" dominant-baseline="middle"${isName ? ' font-weight="600"' : ''}>${escapeXml(lines[i])}</text>\n`;
+        }
+      }
+      svg += '  </g>\n';
+    }
+
     // 4. DRAW COMPLETED MEASUREMENTS
     if (measure2DResults.length > 0) {
       svg += '  <g id="measurements">\n';
@@ -591,7 +637,7 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     if (rotDeg !== 0) svg += '  </g>\n';
     svg += '</svg>';
     return svg;
-  }, [drawing, displayOptions, activePresetId, entityColorMap, overridesEnabled, overrideEngine, measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D, sectionPlane.axis, dxfUnderlays, scanSection, viewRotation]);
+  }, [drawing, displayOptions, activePresetId, entityColorMap, overridesEnabled, overrideEngine, measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D, roomLabels, sectionPlane.axis, dxfUnderlays, scanSection, viewRotation]);
 
   // Generate SVG with drawing sheet (frame, title block, scale bar)
   // This generates coordinates directly in paper mm space (like the canvas rendering)

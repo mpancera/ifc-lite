@@ -77,10 +77,24 @@ export interface ViewModeSlice {
    * step with one. `null` means nothing has been loaded yet.
    */
   planRotationProject: string | null;
+  /**
+   * Whether rooms are labelled with their name and area.
+   *
+   * On by default: it is most of what makes a drawing read as a plan, and a
+   * feature nobody finds is a feature nobody has. Switchable because a plan
+   * being used as a background for something else — a sensor layout, a
+   * coordination view — wants the floor bare.
+   *
+   * Its own flag rather than a drawing display option: the labels are an
+   * overlay derived from the model, not something the drawing generator
+   * produces, and 2D Section has no storey to label rooms on.
+   */
+  planShowRoomLabels: boolean;
 
   setViewMode: (mode: ViewMode) => void;
   toggleViewMode: () => void;
   setPlanCutHeight: (metres: number) => void;
+  setPlanShowRoomLabels: (show: boolean) => void;
   setPlanRotation: (radians: number) => void;
   setPlanRotationPicking: (picking: boolean) => void;
   /**
@@ -99,6 +113,7 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   planRotation: 0,
   planRotationPicking: false,
   planRotationProject: null,
+  planShowRoomLabels: true,
 
   setViewMode: (viewMode) => {
     if (get().viewMode === viewMode) return;
@@ -143,6 +158,8 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   },
 
   setPlanRotationPicking: (planRotationPicking) => set({ planRotationPicking }),
+
+  setPlanShowRoomLabels: (planShowRoomLabels) => set({ planShowRoomLabels }),
 
   restorePlanRotationForProject: () => {
     const project = get().currentProjectKey();

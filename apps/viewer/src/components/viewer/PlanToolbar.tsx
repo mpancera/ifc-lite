@@ -26,7 +26,7 @@ import React from 'react';
 import {
   Box, Shapes, Tag, Layers, PenTool, FileText, ZoomIn, ZoomOut,
   Maximize2, Download, FileDown, Printer, RefreshCw, Ruler,
-  Hexagon, Type, Cloud, Trash2, FilePlus2, RotateCw,
+  Hexagon, Type, Cloud, Trash2, FilePlus2, RotateCw, DoorOpen,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -46,6 +46,12 @@ export interface PlanToolbarProps {
   onToggleSymbolic: () => void;
   onToggleIfcAnnotations: () => void;
   onToggleConstructionProjection: () => void;
+
+  /** Room names + areas written into the rooms. */
+  showRoomLabels: boolean;
+  onToggleRoomLabels: () => void;
+  /** How many rooms this storey actually has, for the tooltip. */
+  roomCount: number;
 
   settingsOpen: boolean;
   onToggleSettings: () => void;
@@ -115,7 +121,8 @@ function ToolButton({
 export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
   const {
     displayOptions, onToggleSymbolic, onToggleIfcAnnotations,
-    onToggleConstructionProjection, settingsOpen, onToggleSettings, dxfOpen, onToggleDxf,
+    onToggleConstructionProjection, showRoomLabels, onToggleRoomLabels, roomCount,
+    settingsOpen, onToggleSettings, dxfOpen, onToggleDxf,
     activeTool, onSetTool, hasAnnotations, onClearAnnotations,
     canCommitAnnotation, onCommitAnnotation,
     rotationDeg, rotationPicking, onToggleRotationPick, onSetRotationDeg,
@@ -160,6 +167,21 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
         title="Projektion unter dem Schnitt — der Boden, auf dem der Grundriss steht"
       >
         <Layers className="h-4 w-4" />
+      </ToolButton>
+      {/* Disabled rather than hidden when the storey has no rooms: a control
+          that comes and goes reads as a bug, and "no rooms on this floor" is
+          itself the answer somebody is looking for. */}
+      <ToolButton
+        active={showRoomLabels}
+        onClick={onToggleRoomLabels}
+        disabled={roomCount === 0}
+        title={
+          roomCount === 0
+            ? 'Raumbeschriftung — auf diesem Geschoss liegen keine Räume (IfcSpace)'
+            : `Raumbeschriftung: Name und Fläche in ${roomCount} ${roomCount === 1 ? 'Raum' : 'Räumen'}`
+        }
+      >
+        <DoorOpen className="h-4 w-4" />
       </ToolButton>
 
       <Divider />
