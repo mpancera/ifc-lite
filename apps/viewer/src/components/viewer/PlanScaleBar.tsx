@@ -44,13 +44,10 @@ export function PlanScaleBar({ pixelsPerMetre }: PlanScaleBarProps): React.React
   return (
     <div className="absolute bottom-4 left-4 flex flex-col items-start gap-1 pointer-events-none"
          data-plan-scale-bar={bar.metres}>
-      <div className="flex items-end gap-0" style={{ width }}>
-        {/* End ticks and the run between them: the shape a scale bar has on
-            every drawing, so it is recognised before it is read. */}
-        <div className="h-2 w-px bg-foreground/80" />
-        <div className="h-px flex-1 bg-foreground/80" />
-        <div className="h-2 w-px bg-foreground/80" />
-      </div>
+      {/* The same weight as the building's reference-length bar (`h-1
+          rounded-full`), so the two corners look like one application rather
+          than two (Marc, 2026-08-13). */}
+      <div className="h-1 rounded-full bg-foreground/80" style={{ width }} />
       <span className="text-xs tabular-nums text-foreground/80">
         {formatScaleBarLength(bar.metres)}
       </span>

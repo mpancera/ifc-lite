@@ -4,7 +4,10 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { northBearingDeg, niceScaleBarLength, formatScaleBarLength } from './planChrome.js';
+import {
+  northBearingDeg, niceScaleBarLength, formatScaleBarLength,
+  scaleDenominator, pixelsPerMetreForScale, nearestStandardScale, formatScaleRatio,
+} from './planChrome.js';
 
 const DEG = Math.PI / 180;
 const round = (n: number) => Math.round(n * 1e6) / 1e6;
@@ -33,6 +36,66 @@ describe('northBearingDeg', () => {
 
   it('answers zero for an angle that is not a number', () => {
     assert.equal(northBearingDeg(Number.NaN), 0);
+  });
+});
+
+describe('scaleDenominator / pixelsPerMetreForScale', () => {
+  // A round 4 px per millimetre, so the arithmetic is checkable by eye.
+  const MM = 0.25;
+
+  it('reads a metre drawn 1000 px long as full size', () => {
+    assert.equal(round(scaleDenominator(4000, MM)!), 1);
+  });
+
+  it('reads a metre drawn 10 mm long as 1:100', () => {
+    // 10 mm of glass at 0.25 mm per pixel is 40 px.
+    assert.equal(round(scaleDenominator(40, MM)!), 100);
+  });
+
+  it('inverts itself', () => {
+    for (const d of [1, 20, 50, 100, 500, 5000]) {
+      const px = pixelsPerMetreForScale(d, MM)!;
+      assert.equal(round(scaleDenominator(px, MM)!), d);
+    }
+  });
+
+  it('uses the browser 96 dpi pixel when none is given', () => {
+    // 1:100 means a metre is 10 mm on the glass, which at 96 dpi is 37.795 px.
+    const px = pixelsPerMetreForScale(100)!;
+    assert.equal(Math.round(px * 1000) / 1000, 37.795);
+  });
+
+  it('has no scale for a zoom that is not a zoom', () => {
+    assert.equal(scaleDenominator(0), null);
+    assert.equal(scaleDenominator(-3), null);
+    assert.equal(scaleDenominator(Number.NaN), null);
+    assert.equal(pixelsPerMetreForScale(0), null);
+  });
+});
+
+describe('nearestStandardScale', () => {
+  it('lands on the issued scales, not on round numbers', () => {
+    assert.equal(nearestStandardScale(97), 100);
+    assert.equal(nearestStandardScale(23), 25);
+  });
+
+  it('compares on a log axis, the way scales are read', () => {
+    // 1:150 is the geometric middle of 100 and 200 — linearly it would look
+    // closer to 200, which is not how anybody reads a scale.
+    assert.equal(nearestStandardScale(140), 100);
+    assert.equal(nearestStandardScale(160), 200);
+  });
+
+  it('clamps to the ends of the series', () => {
+    assert.equal(nearestStandardScale(0.2), 1);
+    assert.equal(nearestStandardScale(99999), 5000);
+  });
+});
+
+describe('formatScaleRatio', () => {
+  it('writes a ratio, rounded', () => {
+    assert.equal(formatScaleRatio(100), '1:100');
+    assert.equal(formatScaleRatio(187.3), '1:187');
   });
 });
 

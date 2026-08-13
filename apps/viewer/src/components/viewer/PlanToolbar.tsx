@@ -38,6 +38,7 @@ import type { Annotation2DTool } from '@/store';
 import { ViewModeToggle } from './ViewportOverlays';
 import { ViewportToolStrip, ToolStripDivider } from './ViewportToolStrip';
 import { ASSUMED_LINING_THICKNESS } from '@/lib/plan/doorQuantities';
+import { scaleDenominator, formatScaleRatio, STANDARD_SCALES } from '@/lib/plan/planChrome';
 
 export interface PlanToolbarProps {
   displayOptions: {
@@ -76,7 +77,10 @@ export interface PlanToolbarProps {
   canCommitAnnotation: boolean;
   onCommitAnnotation: () => void;
 
-  zoomPercent: number;
+  /** Screen pixels per drawing metre, for the scale readout. */
+  pixelsPerMetre: number;
+  /** Put the plan AT a scale — the denominator of `1:n`. */
+  onSetScale: (denominator: number) => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
   onFitToView: () => void;
@@ -129,9 +133,11 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
     settingsOpen, onToggleSettings, dxfOpen, onToggleDxf,
     activeTool, onSetTool, hasAnnotations, onClearAnnotations,
     canCommitAnnotation, onCommitAnnotation,
-    zoomPercent, onZoomIn, onZoomOut, onFitToView,
+    pixelsPerMetre, onSetScale, onZoomIn, onZoomOut, onFitToView,
     onExportSVG, onExportDXF, onPrint, onRegenerate, busy, children,
   } = props;
+
+  const scaleDenom = scaleDenominator(pixelsPerMetre);
 
   return (
     <ViewportToolStrip testId="plan">
@@ -283,9 +289,33 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
 
       {/* Navigation */}
       <ToolButton onClick={onZoomOut} title="Verkleinern"><ZoomOut className="h-4 w-4" /></ToolButton>
-      <span className="min-w-[3rem] px-1 text-center text-[10px] tabular-nums text-muted-foreground">
-        {Math.round(zoomPercent)}%
-      </span>
+      {/* A SCALE, not a zoom percentage (#50). "142 %" describes the window;
+          1:100 describes the drawing, and it is what somebody reading a plan
+          asks for. Picking one sets the zoom to match. */}
+      <DropdownMenu>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="sm"
+                      className="h-6 min-w-[3.5rem] px-1 text-[10px] tabular-nums text-muted-foreground">
+                {scaleDenom === null ? '—' : formatScaleRatio(scaleDenom)}
+              </Button>
+            </DropdownMenuTrigger>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-xs text-xs">
+            Massstab der Darstellung. Auf dem Bildschirm nur so genau, wie der
+            Monitor den CSS-Pixel einhält — im PDF-Druck dagegen exakt.
+          </TooltipContent>
+        </Tooltip>
+        <DropdownMenuContent align="center" className="min-w-0">
+          {STANDARD_SCALES.map((d) => (
+            <DropdownMenuItem key={d} onClick={() => onSetScale(d)}
+                              className="text-xs tabular-nums justify-center">
+              {formatScaleRatio(d)}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
       <ToolButton onClick={onZoomIn} title="Vergrössern"><ZoomIn className="h-4 w-4" /></ToolButton>
       <ToolButton onClick={onFitToView} title="Einpassen"><Maximize2 className="h-4 w-4" /></ToolButton>
 

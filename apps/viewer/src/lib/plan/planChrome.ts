@@ -33,6 +33,92 @@ export function northBearingDeg(planRotationRad: number): number {
   return ((deg % 360) + 360) % 360;
 }
 
+/**
+ * Millimetres per CSS pixel, at the 96 dpi a browser nominally assumes.
+ *
+ * # The honesty this needs
+ * A CSS pixel is DEFINED as 1/96 inch, but a monitor is under no obligation to
+ * agree: the same page is physically larger on a 24" 1080p panel than on a
+ * 27" 1440p one, and the browser exposes no way to ask. So a scale shown on
+ * screen is nominal — right to within whatever the display's real pitch is.
+ *
+ * The PRINTED scale is not affected by any of this. The SVG and PDF exports
+ * lay the drawing out in paper millimetres from `displayOptions.scale`, so
+ * what comes out of the printer is exact. Screen and paper therefore agree on
+ * WHICH scale is set, and only the screen's rendering of it is approximate —
+ * which is the same deal every CAD application offers.
+ */
+export const MM_PER_CSS_PIXEL = 25.4 / 96;
+
+/**
+ * The scales a drawing is actually issued at.
+ *
+ * The architectural series, not every round number: 1:25 and 1:200 belong,
+ * 1:300 does not. Offering a scale nobody issues invites a drawing nobody can
+ * check against a ruler.
+ */
+export const STANDARD_SCALES = [
+  1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000, 2500, 5000,
+] as const;
+
+/**
+ * The scale the plan is currently at, as the denominator of `1:n`.
+ *
+ * A metre of building is `pixelsPerMetre` pixels, which is that many times
+ * {@link MM_PER_CSS_PIXEL} on the glass; the scale is the thousand millimetres
+ * of building divided by that.
+ *
+ * `null` for a zoom that is not a zoom, so callers show nothing rather than
+ * `1:Infinity`.
+ */
+export function scaleDenominator(
+  pixelsPerMetre: number,
+  mmPerPixel = MM_PER_CSS_PIXEL,
+): number | null {
+  if (!Number.isFinite(pixelsPerMetre) || pixelsPerMetre <= 0) return null;
+  if (!Number.isFinite(mmPerPixel) || mmPerPixel <= 0) return null;
+  return 1000 / (pixelsPerMetre * mmPerPixel);
+}
+
+/**
+ * The zoom that puts the plan AT a stated scale — the inverse of
+ * {@link scaleDenominator}, and the reason a scale can be chosen rather than
+ * only reported.
+ */
+export function pixelsPerMetreForScale(
+  denominator: number,
+  mmPerPixel = MM_PER_CSS_PIXEL,
+): number | null {
+  if (!Number.isFinite(denominator) || denominator <= 0) return null;
+  if (!Number.isFinite(mmPerPixel) || mmPerPixel <= 0) return null;
+  return 1000 / (denominator * mmPerPixel);
+}
+
+/**
+ * The issued scale nearest the current one.
+ *
+ * Compared on a LOG axis, because scales are read as ratios: 1:200 is as far
+ * from 1:100 as 1:50 is, and a linear comparison would call 1:150 closer to
+ * 1:200 than to 1:100, which is not how anybody reads them.
+ */
+export function nearestStandardScale(denominator: number): number {
+  let best: number = STANDARD_SCALES[0];
+  let bestDistance = Infinity;
+  for (const candidate of STANDARD_SCALES) {
+    const distance = Math.abs(Math.log(denominator / candidate));
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+/** `1:100`. Rounded, because a scale of 1:187.3 is a zoom wearing a costume. */
+export function formatScaleRatio(denominator: number): string {
+  return `1:${Math.round(denominator)}`;
+}
+
 /** The lengths a scale bar is allowed to be, per decade. */
 const NICE_STEPS = [1, 2, 5] as const;
 

@@ -64,6 +64,7 @@ import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds } fr
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { usePlanRoomLabels } from '@/hooks/usePlanRoomLabels';
 import { roomPlanLabel } from '@/lib/plan/roomLabels';
+import { pixelsPerMetreForScale } from '@/lib/plan/planChrome';
 import { usePlanOpeningSymbols } from '@/hooks/usePlanOpeningSymbols';
 import { useLensColorKeys } from '@/hooks/useLensColorKeys';
 import { useModelOrigins } from '@/hooks/useModelOrigins';
@@ -415,6 +416,37 @@ export function PlanView({
     cachedSheetTransformRef,
     rotation: planRotation,
   });
+
+  // ── Setting a scale ─────────────────────────────────────────────────────
+  // Zooms about the MIDDLE of the viewport, not about the origin: a scale
+  // change is a change of magnification, and whatever you were looking at
+  // should still be what you are looking at. Zooming about the origin would
+  // send the building off the edge at 1:20.
+  //
+  // The chosen scale is also written into the drawing display options, which
+  // is what the SVG and PDF exports lay out in paper millimetres — so what is
+  // set here is what comes out of the printer, and the screen's approximation
+  // of it is the only approximate part.
+  const setPlanScale = useCallback((denominator: number) => {
+    const target = pixelsPerMetreForScale(denominator);
+    const container = containerRef.current;
+    if (target === null || !container) return;
+
+    const rect = container.getBoundingClientRect();
+    const cx = rect.width / 2;
+    const cy = rect.height / 2;
+    setViewTransform((prev) => {
+      if (!(prev.scale > 0)) return { ...prev, scale: target };
+      const k = target / prev.scale;
+      return {
+        ...prev,
+        scale: target,
+        x: cx - (cx - prev.x) * k,
+        y: cy - (cy - prev.y) * k,
+      };
+    });
+    updateDisplayOptions({ scale: denominator });
+  }, [setViewTransform, updateDisplayOptions]);
 
   // The transform the canvas paints with, and the one every screen-to-drawing
   // conversion below inverts. Built once so the two can never disagree.
@@ -1150,7 +1182,8 @@ export function PlanView({
           canCommitAnnotation={selectedAnnotation2D !== null}
           onCommitAnnotation={commitSelectedAnnotation}
           onClearAnnotations={() => { clearAllAnnotations2D(); clearMeasure2DResults(); }}
-          zoomPercent={viewTransform.scale * 100}
+          pixelsPerMetre={viewTransform.scale}
+          onSetScale={setPlanScale}
           onZoomIn={zoomIn}
           onZoomOut={zoomOut}
           onFitToView={fitToView}
