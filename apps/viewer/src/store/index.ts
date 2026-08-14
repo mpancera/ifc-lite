@@ -31,6 +31,7 @@ import { createBcfSlice, type BCFSlice } from './slices/bcfSlice.js';
 import { createIdsSlice, type IDSSlice } from './slices/idsSlice.js';
 import { createExtensionsSlice, type ExtensionsSlice } from './slices/extensionsSlice.js';
 import { createListSlice, type ListSlice } from './slices/listSlice.js';
+import { createGraphSlice, type GraphSlice } from './slices/graphSlice.js';
 import { createPinboardSlice, type PinboardSlice } from './slices/pinboardSlice.js';
 import { createLensSlice, type LensSlice } from './slices/lensSlice.js';
 import { createClashSlice, type ClashSlice } from './slices/clashSlice.js';
@@ -100,6 +101,9 @@ export type { IDSSlice, IDSSliceState, IDSDisplayOptions, IDSFilterMode } from '
 // Re-export List types
 export type { ListSlice } from './slices/listSlice.js';
 
+// Re-export Graph types
+export type { GraphSlice, GraphHighlight } from './slices/graphSlice.js';
+
 // Re-export Pinboard types
 export type { PinboardSlice } from './slices/pinboardSlice.js';
 
@@ -152,6 +156,7 @@ export type ViewerState = LoadingSlice &
   BCFSlice &
   IDSSlice &
   ListSlice &
+  GraphSlice &
   PinboardSlice &
   LensSlice &
   ClashSlice &
@@ -244,6 +249,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
   ...createBcfSlice(...args),
   ...createIdsSlice(...args),
   ...createListSlice(...args),
+  ...createGraphSlice(...args),
   ...createPinboardSlice(...args),
   ...createLensSlice(...args),
   ...createClashSlice(...args),

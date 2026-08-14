@@ -24,6 +24,7 @@ import { ExtensionsPanel } from '@/components/extensions/ExtensionsPanel';
 import { ScriptPanel } from '@/components/viewer/ScriptPanel';
 import { GanttPanel } from '@/components/viewer/schedule/GanttPanel';
 import { ListPanel } from '@/components/viewer/lists/ListPanel';
+import { GraphPanel } from '@/components/viewer/graph/GraphPanel';
 import { RoomPanel } from '@/components/viewer/RoomPanel';
 import { ZonesPanel } from '@/components/viewer/ZonesPanel';
 import { HeightsPanel } from '@/components/viewer/HeightsPanel';
@@ -56,6 +57,7 @@ export function renderPanelBody(id: WorkspacePanelId, onClose: () => void): Reac
     case 'collab': return <RoomPanel onClose={onClose} />;
     case 'zones': return <ZonesPanel onClose={onClose} />;
     case 'heights': return <HeightsPanel onClose={onClose} />;
+    case 'graph': return <GraphPanel onClose={onClose} />;
     case 'layers': return (
       <Suspense fallback={null}>
         <LayersPanel onClose={onClose} />

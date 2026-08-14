@@ -10,6 +10,10 @@
  */
 
 import { Issue, List, Compare, Layer, Clash, Check, Script, Schedule, Coloring } from '@/icons';
+// No house icon for a schematic yet — the icon set is drawn for the panels that
+// predate it. Borrowed from lucide, as the panel registry does for the same
+// reason; worth a matching `@/icons` entry if the Graph earns a second home.
+import { Workflow } from 'lucide-react';
 import { useViewerStore } from '@/store';
 import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
 import {
@@ -99,6 +103,13 @@ export function AnalyzeTab() {
           tooltip="Schedule (Gantt)"
           active={activeWorkspacePanels.has('gantt')}
           onClick={() => handleToggleBottomPanel('gantt')}
+        />
+        <RibbonLargeButton
+          icon={Workflow}
+          label="Graph"
+          tooltip="Schema: Elemente nach ihrer Zugehörigkeit statt nach ihrer Lage — hebt im Modell hervor, was gezeichnet ist"
+          active={activeWorkspacePanels.has('graph')}
+          onClick={() => handleToggleBottomPanel('graph')}
         />
         <RibbonLargeButton
           icon={Script}

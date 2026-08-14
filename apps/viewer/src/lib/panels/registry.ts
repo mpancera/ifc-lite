@@ -33,6 +33,7 @@ import {
   Layers as LayersIcon,
   Box,
   Ruler,
+  Workflow,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -56,7 +57,8 @@ export type WorkspacePanelId =
   | 'collab'
   | 'layers'
   | 'zones'
-  | 'heights';
+  | 'heights'
+  | 'graph';
 
 /** Activity-bar clustering — a divider is drawn whenever the group changes. */
 export type PanelGroup = 'navigate' | 'inspect' | 'review' | 'author' | 'work';
@@ -122,14 +124,23 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   // consults occasionally, not a tool one works beside. Reached from File ▸
   // Settings rather than an authoring tab, for the same reason.
   { id: 'heights', title: 'Höhen & Lage', short: 'Heights', Icon: Ruler, group: 'review', region: 'bottom' },
+  // The schematic view: elements arranged by what they belong to rather than by
+  // where they are (PROJECT.md §V35). APPENDED so the frozen Alt+1..0 mapping
+  // stays intact (no Alt shortcut).
+  //
+  // Bottom strip, like Lists, and for the same reason — it is read ALONGSIDE
+  // the model, not instead of it. It was briefly a third view mode covering the
+  // viewport, which was wrong: the drawing and the building answer each other,
+  // and a schematic that hides the thing it describes cannot do that.
+  { id: 'graph', title: 'Graph', short: 'Graph', Icon: Workflow, group: 'review', region: 'bottom', prefersWide: true },
 ];
 
 /** The bottom-strip panel ids, mapped to their store visibility flag + setter
  *  names — these stay independent of the single-tenant right pane. */
-export type BottomPanelId = Extract<WorkspacePanelId, 'script' | 'gantt' | 'lists' | 'heights'>;
+export type BottomPanelId = Extract<WorkspacePanelId, 'script' | 'gantt' | 'lists' | 'heights' | 'graph'>;
 
 export function isBottomPanel(id: WorkspacePanelId): id is BottomPanelId {
-  return id === 'script' || id === 'gantt' || id === 'lists' || id === 'heights';
+  return id === 'script' || id === 'gantt' || id === 'lists' || id === 'heights' || id === 'graph';
 }
 
 /** The left-slot nav panel (Hierarchy, #1267): toggled via `leftPanelCollapsed`,

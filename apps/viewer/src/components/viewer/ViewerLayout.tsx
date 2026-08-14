@@ -38,6 +38,7 @@ import { ClashPanel } from './ClashPanel';
 import { ComparePanel } from './ComparePanel';
 import type { BottomPanelId } from '@/lib/panels/registry';
 import { ListPanel } from './lists/ListPanel';
+import { GraphPanel } from './graph/GraphPanel';
 import { HeightsPanel } from './HeightsPanel';
 import { ScriptPanel } from './ScriptPanel';
 import { GanttPanel } from './schedule/GanttPanel';
@@ -208,6 +209,8 @@ export function ViewerLayout() {
   const extensionsPanelVisible = useViewerStore((s) => s.extensionsPanelVisible);
   const setExtensionsPanelVisible = useViewerStore((s) => s.setExtensionsPanelVisible);
   const listPanelVisible = useViewerStore((s) => s.listPanelVisible);
+  const graphPanelVisible = useViewerStore((s) => s.graphPanelVisible);
+  const setGraphPanelVisible = useViewerStore((s) => s.setGraphPanelVisible);
   const heightsPanelVisible = useViewerStore((s) => s.heightsPanelVisible);
   const setHeightsPanelVisible = useViewerStore((s) => s.setHeightsPanelVisible);
   const setListPanelVisible = useViewerStore((s) => s.setListPanelVisible);
@@ -233,6 +236,7 @@ export function ViewerLayout() {
   const ganttDocked = ganttPanelVisible && !detachedIds.has('gantt');
   const scriptDocked = scriptPanelVisible && !detachedIds.has('script');
   const listDocked = listPanelVisible && !detachedIds.has('lists');
+  const graphDocked = graphPanelVisible && !detachedIds.has('graph');
   const heightsDocked = heightsPanelVisible && !detachedIds.has('heights');
   const analysisExtensionState = useSyncExternalStore(
     subscribeAnalysisExtensions,
@@ -435,7 +439,7 @@ export function ViewerLayout() {
             {/* Bottom Panel - Lists / Script / Gantt / analysis ext (custom resizable).
                 Launched from the sidebar rail but docked here (their home region).
                 A panel that's been dragged out to float / another screen is skipped. */}
-            {(listDocked || scriptDocked || ganttDocked || heightsDocked || !!activeBottomAnalysisExtension) && (
+            {(listDocked || scriptDocked || ganttDocked || heightsDocked || graphDocked || !!activeBottomAnalysisExtension) && (
               <div data-detach-root style={{ height: bottomHeight, flexShrink: 0 }} className="relative">
                 {/* Drag handle (resize height) */}
                 <div
@@ -446,7 +450,7 @@ export function ViewerLayout() {
                   {/* Detach grip — drag to float / pop the bottom panel onto another
                       screen (hidden for analysis extensions, which own their chrome). */}
                   {!activeBottomAnalysisExtension && (
-                    <BottomPanelGrip id={ganttDocked ? 'gantt' : scriptDocked ? 'script' : heightsDocked ? 'heights' : 'lists'} />
+                    <BottomPanelGrip id={ganttDocked ? 'gantt' : scriptDocked ? 'script' : heightsDocked ? 'heights' : graphDocked ? 'graph' : 'lists'} />
                   )}
                   <div className="flex-1 min-h-0 overflow-hidden">
                     {activeBottomAnalysisExtension ? (
@@ -457,6 +461,8 @@ export function ViewerLayout() {
                       <ScriptPanel onClose={() => setScriptPanelVisible(false)} />
                     ) : heightsDocked ? (
                       <HeightsPanel onClose={() => setHeightsPanelVisible(false)} />
+                    ) : graphDocked ? (
+                      <GraphPanel onClose={() => setGraphPanelVisible(false)} />
                     ) : (
                       <ListPanel onClose={() => setListPanelVisible(false)} />
                     )}

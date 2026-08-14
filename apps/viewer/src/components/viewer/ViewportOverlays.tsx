@@ -35,7 +35,7 @@ export function ViewportOverlays({ hideViewCube = false }: { hideViewCube?: bool
   // carries its own strip in the same corner. Rendering both leaves two
   // identical mode switches stacked on the same pixels, one of them
   // unreachable — invisible today only because of a z-index.
-  const planActive = useViewerStore((s) => s.viewMode) === '2d';
+  const viewportCovered = useViewerStore((s) => s.viewMode) === '2d';
   const setOnCameraRotationChange = useViewerStore((s) => s.setOnCameraRotationChange);
   const setOnScaleChange = useViewerStore((s) => s.setOnScaleChange);
   const { ifcDataStore, geometryResult } = useIfc();
@@ -205,7 +205,7 @@ export function ViewportOverlays({ hideViewCube = false }: { hideViewCube?: bool
           its corner. A cube turns in three axes; a plan has one angle, so the
           two are alternatives rather than neighbours, and stacking them would
           leave the cube unreachable under the plan's own surface. */}
-      {!hideViewCube && !planActive && (
+      {!hideViewCube && !viewportCovered && (
         <div className="absolute top-6 right-6" {...tourAnchor(TOUR_ANCHORS.viewcube)}>
           <ViewCube
             ref={viewCubeRef}
@@ -234,7 +234,7 @@ export function ViewportOverlays({ hideViewCube = false }: { hideViewCube?: bool
           moved one at a time rather than in one blind rearrangement.
 
           It stops short of the ViewCube, which keeps its own corner. */}
-      {!isMobile && !planActive && (
+      {!isMobile && !viewportCovered && (
         <ViewportToolStrip rightInset="right-24" testId="viewport">
           <ViewModeToggle />
         </ViewportToolStrip>

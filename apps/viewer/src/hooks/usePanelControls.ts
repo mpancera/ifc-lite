@@ -62,6 +62,7 @@ function setDockedVisible(id: AnalysisPanelId, visible: boolean): void {
     case 'layers': s.setLayersPanelVisible(visible); break;
     case 'zones': s.setZonesPanelVisible(visible); break;
     case 'heights': s.setHeightsPanelVisible(visible); break;
+    case 'graph': s.setGraphPanelVisible(visible); break;
   }
 }
 
@@ -73,6 +74,7 @@ export function usePanelControls(): PanelControls {
   const scriptVisible = useViewerStore((s) => s.scriptPanelVisible);
   const ganttVisible = useViewerStore((s) => s.ganttPanelVisible);
   const listVisible = useViewerStore((s) => s.listPanelVisible);
+  const graphVisible = useViewerStore((s) => s.graphPanelVisible);
   // The Hierarchy panel (left region, #1267) is "docked" while its slot is open.
   const leftPanelCollapsed = useViewerStore((s) => s.leftPanelCollapsed);
   // The lower half of a docked split (#1266), also docked/visible.
@@ -108,10 +110,11 @@ export function usePanelControls(): PanelControls {
       if (id === 'script') return scriptVisible;
       if (id === 'gantt') return ganttVisible;
       if (id === 'lists') return listVisible;
+      if (id === 'graph') return graphVisible;
       // A side panel is docked as the right-pane primary OR the split secondary.
       return id === sideDocked || id === secondaryDocked;
     },
-    [sideDocked, secondaryDocked, scriptVisible, ganttVisible, listVisible, leftPanelCollapsed],
+    [sideDocked, secondaryDocked, scriptVisible, ganttVisible, listVisible, graphVisible, leftPanelCollapsed],
   );
 
   const panelLocation = useCallback(

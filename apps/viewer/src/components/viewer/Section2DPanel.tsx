@@ -44,7 +44,7 @@ import { useMeasure2D } from '@/hooks/useMeasure2D';
 import { useAnnotation2D } from '@/hooks/useAnnotation2D';
 import { useViewControls } from '@/hooks/useViewControls';
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
-import { useLensColorKeys } from '@/hooks/useLensColorKeys';
+import { useDrawingColorKeys } from '@/hooks/useDrawingColorKeys';
 import { useDrawingExport } from '@/hooks/useDrawingExport';
 import { useSymbolicAnnotationsForDrawing } from '@/hooks/useSymbolicAnnotations';
 import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds } from '@/hooks/useDxfUnderlay';
@@ -240,7 +240,7 @@ export function Section2DPanel({
   // with plan mode so the two surfaces can't disagree about what is drawn.
   const { combinedHiddenIds, combinedIsolatedIds } = useCombinedVisibilityIds();
   // Same lens the 3D scene shows, so a section is coloured by it too.
-  const lensColorKeys = useLensColorKeys(modelIdToIndex);
+  const lensColorKeys = useDrawingColorKeys(modelIdToIndex);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // EXTRACTED HOOKS

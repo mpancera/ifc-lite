@@ -19,7 +19,7 @@ import {
 } from '@/services/analysis-extensions';
 import { closePanelWindow } from '@/services/panel-windows';
 
-export type BottomPanel = 'script' | 'list' | 'gantt' | 'heights';
+export type BottomPanel = 'script' | 'list' | 'gantt' | 'heights' | 'graph';
 export type RightPanel = 'bcf' | 'ids' | 'lens' | 'clash' | 'compare' | 'addElement' | 'zonePaint' | 'zones' | 'extensions';
 export type WorkspacePanel = BottomPanel | RightPanel | string;
 
@@ -66,6 +66,8 @@ export function useWorkspacePanelControls() {
   const setScriptPanelVisible = useViewerStore((state) => state.setScriptPanelVisible);
   const ganttPanelVisible = useViewerStore((state) => state.ganttPanelVisible);
   const setGanttPanelVisible = useViewerStore((state) => state.setGanttPanelVisible);
+  const graphPanelVisible = useViewerStore((state) => state.graphPanelVisible);
+  const setGraphPanelVisible = useViewerStore((state) => state.setGraphPanelVisible);
   const layersPanelVisible = useViewerStore((state) => state.layersPanelVisible);
   const collabPanelVisible = useViewerStore((state) => state.collabPanelVisible);
   const setRightPanelCollapsed = useViewerStore((state) => state.setRightPanelCollapsed);
@@ -96,13 +98,15 @@ export function useWorkspacePanelControls() {
     const nextListVisible = panel === 'list' ? !listPanelVisible : false;
     const nextGanttVisible = panel === 'gantt' ? !ganttPanelVisible : false;
     const nextHeightsVisible = panel === 'heights' ? !heightsPanelVisible : false;
+    const nextGraphVisible = panel === 'graph' ? !graphPanelVisible : false;
 
     setScriptPanelVisible(nextScriptVisible);
     setListPanelVisible(nextListVisible);
     setGanttPanelVisible(nextGanttVisible);
     setHeightsPanelVisible(nextHeightsVisible);
+    setGraphPanelVisible(nextGraphVisible);
 
-    if (nextScriptVisible || nextListVisible || nextGanttVisible || nextHeightsVisible) {
+    if (nextScriptVisible || nextListVisible || nextGanttVisible || nextHeightsVisible || nextGraphVisible) {
       setRightPanelCollapsed(false);
     }
   }, [
@@ -110,9 +114,11 @@ export function useWorkspacePanelControls() {
     setHeightsPanelVisible,
     activeAnalysisExtension?.placement,
     ganttPanelVisible,
+    graphPanelVisible,
     listPanelVisible,
     scriptPanelVisible,
     setGanttPanelVisible,
+    setGraphPanelVisible,
     setListPanelVisible,
     setRightPanelCollapsed,
     setScriptPanelVisible,
@@ -249,6 +255,7 @@ export function useWorkspacePanelControls() {
     if (extensionsPanelVisible) panels.add('extensions');
     if (zonesPanelVisible) panels.add('zones');
     if (heightsPanelVisible) panels.add('heights');
+    if (graphPanelVisible) panels.add('graph');
     if (isToolPanel(activeTool)) panels.add(activeTool);
     if (layersPanelVisible) panels.add('layers');
     if (collabPanelVisible) panels.add('collab');
@@ -266,6 +273,7 @@ export function useWorkspacePanelControls() {
     zonesPanelVisible,
     heightsPanelVisible,
     ganttPanelVisible,
+    graphPanelVisible,
     idsPanelVisible,
     lensPanelVisible,
     listPanelVisible,
