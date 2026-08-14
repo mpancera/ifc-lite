@@ -22,6 +22,7 @@ import {
   GitCompareArrows,
   MessageSquare,
   ClipboardCheck,
+  ClipboardList,
   Palette,
   Crosshair,
   Puzzle,
@@ -58,7 +59,8 @@ export type WorkspacePanelId =
   | 'layers'
   | 'zones'
   | 'heights'
-  | 'graph';
+  | 'graph'
+  | 'housekeeping';
 
 /** Activity-bar clustering — a divider is drawn whenever the group changes. */
 export type PanelGroup = 'navigate' | 'inspect' | 'review' | 'author' | 'work';
@@ -133,6 +135,14 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   // viewport, which was wrong: the drawing and the building answer each other,
   // and a schematic that hides the thing it describes cannot do that.
   { id: 'graph', title: 'Graph', short: 'Graph', Icon: Workflow, group: 'review', region: 'bottom', prefersWide: true },
+  // The model's Prüfplan: every housekeeping check as a row, worked through
+  // one at a time. APPENDED so the frozen Alt+1..0 mapping stays intact (no
+  // Alt shortcut).
+  //
+  // Side panel and not bottom: its rows select elements in the model, and a
+  // checklist you consult WHILE looking at what it points at has to stand
+  // beside the viewport rather than under it.
+  { id: 'housekeeping', title: 'Housekeeping', short: 'Prüfplan', Icon: ClipboardList, group: 'review', region: 'side' },
 ];
 
 /** The bottom-strip panel ids, mapped to their store visibility flag + setter

@@ -60,6 +60,7 @@ import { createLayerStackSlice, type LayerStackSlice } from './slices/layerStack
 import { createZonesSlice, type ZonesSlice } from './slices/zonesSlice.js';
 import { createIfcZonesSlice, type IfcZonesSlice } from './slices/ifcZonesSlice.js';
 import { createHeightsSlice, type HeightsSlice } from './slices/heightsSlice.js';
+import { createHousekeepingSlice, type HousekeepingSlice } from './slices/housekeepingSlice.js';
 import { createProjectSlice, type ProjectSlice } from './slices/projectSlice.js';
 import { createViewModeSlice, type ViewModeSlice } from './slices/viewModeSlice.js';
 import { invalidateVisibleBasketCache } from './basketVisibleSet.js';
@@ -184,6 +185,8 @@ export type ViewerState = LoadingSlice &
   ZonesSlice &
   IfcZonesSlice &
   HeightsSlice &
+  HousekeepingSlice &
+  HousekeepingSlice &
   ProjectSlice &
   ViewModeSlice &
   ExtensionsSlice & {
@@ -277,6 +280,8 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
   ...createZonesSlice(...args),
   ...createIfcZonesSlice(...args),
   ...createHeightsSlice(...args),
+  ...createHousekeepingSlice(...args),
+  ...createHousekeepingSlice(...args),
   ...createProjectSlice(...args),
   ...createViewModeSlice(...args),
   ...createExtensionsSlice(...args),
@@ -596,6 +601,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
       collabPanelVisible: panel === 'collab',
       layersPanelVisible: panel === 'layers',
       zonesPanelVisible: panel === 'zones',
+      housekeepingPanelVisible: panel === 'housekeeping',
       rightPanelCollapsed: false,
     });
     if (get().sidebarMode !== 'expanded') get().setSidebarMode('expanded');
@@ -633,6 +639,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
         collabPanelVisible: false,
         layersPanelVisible: false,
         zonesPanelVisible: false,
+        housekeepingPanelVisible: false,
         rightPanelCollapsed: false,
       });
       get().setSidebarActivePanel('properties');
@@ -725,6 +732,7 @@ export const SIDEBAR_PANEL_FLAGS: ReadonlyArray<readonly [keyof ViewerState, Wor
   ['collabPanelVisible', 'collab'],
   ['layersPanelVisible', 'layers'],
   ['zonesPanelVisible', 'zones'],
+  ['housekeepingPanelVisible', 'housekeeping'],
 ];
 
 /**
