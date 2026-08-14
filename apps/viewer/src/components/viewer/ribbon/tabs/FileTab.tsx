@@ -8,7 +8,7 @@
  */
 
 import React from 'react';
-import { FolderOpen, HardHat, Palette, Ruler, ShieldCheck, Spline } from 'lucide-react';
+import { BookMarked, FolderOpen, HardHat, Palette, Ruler, ShieldCheck, Spline } from 'lucide-react';
 import { AddFile, Loading, OpenFile, Refresh, Screenshot, FileCsv, FileIfc, FileGlb, FileKmz, FileJson, FileHbjson, Share, CollabsRoom } from '@/icons';
 import {
   DropdownMenu,
@@ -27,6 +27,7 @@ import { HbjsonExportDialog } from '../../HbjsonExportDialog';
 import { ColorPalettePanel } from '../../ColorPalettePanel';
 import { ProjectFolderPanel } from '../../ProjectFolderPanel';
 import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
+import { ClassCatalogPanel } from '@/components/viewer/ClassCatalogPanel';
 import { DataPrivacyPanel } from '../../DataPrivacyPanel';
 import { RelationKindsPanel } from '../../RelationKindsPanel';
 import { DisciplineRolePanel } from '../../DisciplineRolePanel';
@@ -238,6 +239,18 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
                 icon={ShieldCheck}
                 label="Data privacy"
                 tooltip="Control whether the app may contact third-party services"
+              />
+            }
+          />
+          {/* The list an element's Fachklasse is chosen FROM. Beside data
+              privacy on purpose: it is the other setting in this group that
+              reaches outside the app, and it goes through the same gate. */}
+          <ClassCatalogPanel
+            trigger={
+              <RibbonSmallButton
+                icon={BookMarked}
+                label="Objektkatalog"
+                tooltip="Die Liste der Fachklassen abgleichen, aus der ein Element seine Klasse bekommt"
               />
             }
           />
