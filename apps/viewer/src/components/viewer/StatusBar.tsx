@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { useMemo, useState, useEffect } from 'react';
-import { Boxes, Triangle, CheckCircle2, AlertCircle, Eye, Loader2, Lock } from 'lucide-react';
+import { Boxes, Triangle, CheckCircle2, AlertCircle, Eye, Loader2, Lock, ListChecks } from 'lucide-react';
 import { Separator } from '@/components/ui/separator';
 import { formatNumber, formatBytes } from '@/lib/utils';
 import { useViewerStore } from '@/store';
@@ -12,6 +12,7 @@ import { VIEWER_ROLE_ID, findDisciplineSystem } from '@/lib/roles/disciplineRole
 import { useWebGPU } from '@/hooks/useWebGPU';
 import { FlavorIndicator } from '@/components/extensions/FlavorIndicator';
 import { FlavorDialog } from '@/components/extensions/FlavorDialog';
+import { FeatureOverviewDialog } from './FeatureOverviewDialog';
 
 export function StatusBar() {
   const { loading, geometryResult, ifcDataStore } = useIfc();
@@ -27,6 +28,7 @@ export function StatusBar() {
   const [fps, setFps] = useState(60);
   const [memory, setMemory] = useState(0);
   const [flavorDialogOpen, setFlavorDialogOpen] = useState(false);
+  const [featuresOpen, setFeaturesOpen] = useState(false);
   /** Deep-link from Command Palette → "Manage flavors…". */
   const flavorDialogRequested = useViewerStore((s) => s.flavorDialogRequested);
   const setFlavorDialogRequested = useViewerStore((s) => s.setFlavorDialogRequested);
@@ -220,6 +222,23 @@ export function StatusBar() {
 
         <Separator orientation="vertical" className="h-3.5" />
 
+        {/* Neben der Version, weil beide dieselbe Frage beantworten: was für
+            ein Stand ist das hier. Der Fork heisst in der Statusleiste
+            weiterhin nicht anders als das Original — was dazugekommen ist,
+            steht im Dialog. */}
+        <button
+          type="button"
+          onClick={() => setFeaturesOpen(true)}
+          aria-label="Funktionsübersicht — was IFClite kann und was dieser Fork ergänzt"
+          title="Funktionsübersicht — was aus IFClite stammt und was dieser Fork ergänzt"
+          className="flex items-center gap-1 rounded-md px-1.5 py-0.5 transition-colors hover:bg-muted/60 hover:text-foreground"
+        >
+          <ListChecks className="h-3.5 w-3.5" />
+          <span className="text-[11px]">Funktionen</span>
+        </button>
+
+        <Separator orientation="vertical" className="h-3.5" />
+
         <span className="opacity-60">v{__APP_VERSION__}</span>
 
         <Separator orientation="vertical" className="h-3.5" />
@@ -236,6 +255,7 @@ export function StatusBar() {
       </div>
 
       <FlavorDialog open={flavorDialogOpen} onClose={() => setFlavorDialogOpen(false)} />
+      <FeatureOverviewDialog open={featuresOpen} onClose={() => setFeaturesOpen(false)} />
     </div>
   );
 }
