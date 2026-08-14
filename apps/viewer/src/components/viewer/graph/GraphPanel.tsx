@@ -54,9 +54,10 @@ import { getInheritanceChainForEntity } from '@ifc-lite/parser';
 import { useViewerStore } from '@/store';
 import { expressTypeCounts, graphSourceFor, systemsIn, type GraphStore } from '@/lib/graph/storeSource';
 import { layoutGraph, LayoutSuperseded, NODE_SIZE } from '@/lib/graph/layout';
-import { relationsNotDrawn, RELATION_STYLE } from '@/lib/graph/relationStyle';
+import { RELATION_STYLE } from '@/lib/graph/relationStyle';
 import { GRAPH_NODE_TYPES, type GraphNodeData } from './GraphNodes';
 import { useGraphOverlay } from '@/hooks/useGraphOverlay';
+import { toGlobalIdFromModels } from '@/store/globalId';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
@@ -179,7 +180,7 @@ export interface GraphPanelProps {
 export function GraphPanel({ onClose }: GraphPanelProps) {
   const models = useViewerStore((s) => s.models);
   const selectedModelId = useViewerStore((s) => s.selectedModelId);
-  const setSelectedEntity = useViewerStore((s) => s.setSelectedEntity);
+  const setSelectedEntityId = useViewerStore((s) => s.setSelectedEntityId);
   const setGraphHighlight = useViewerStore((s) => s.setGraphHighlight);
   const highlightInView = useViewerStore((s) => s.graphHighlightInView);
   const setHighlightInView = useViewerStore((s) => s.setGraphHighlightInView);
@@ -346,12 +347,22 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
     };
   }, [built, overBudget]);
 
+  /**
+   * Clicking a box selects that element everywhere.
+   *
+   * Through `setSelectedEntityId` with a GLOBAL id — the app's one selection
+   * channel. The multi-model `setSelectedEntity(ref)` looks like the more
+   * modern call and is the wrong one to make here: the Information panel, the
+   * hierarchy tree and the renderer's highlight all key off `selectedEntityId`,
+   * and `useModelSelection` derives the ref from it, not the other way round.
+   * Setting only the ref selects the element in a store nobody is reading.
+   */
   const onNodeClick = useCallback(
     (_: unknown, node: Node) => {
       if (!effectiveModelId) return;
-      setSelectedEntity({ modelId: effectiveModelId, expressId: Number(node.id) });
+      setSelectedEntityId(toGlobalIdFromModels(models, effectiveModelId, Number(node.id)));
     },
-    [effectiveModelId, setSelectedEntity],
+    [effectiveModelId, models, setSelectedEntityId],
   );
 
   const toggleType = useCallback((name: string) => {
@@ -401,7 +412,12 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
       </header>
 
       <div className="flex min-h-0 flex-1">
-      <aside className="flex w-64 shrink-0 flex-col gap-3 overflow-y-auto border-r border-zinc-200 p-3 text-xs dark:border-zinc-800">
+      {/* The sidebar scrolls only where it has to. The picker is long — 17
+          classes, 21 systems — and when the whole column scrolled, everything
+          below it (the count, the gaps, the legend) sat under the fold and was
+          simply never found. So the readout and the legend are pinned above,
+          and the list takes whatever height is left. */}
+      <aside className="flex w-64 shrink-0 flex-col gap-3 border-r border-zinc-200 p-3 text-xs dark:border-zinc-800">
         {models.size > 1 && (
           <label className="flex flex-col gap-1">
             <span className="font-medium text-zinc-500 dark:text-zinc-400">Modell</span>
@@ -434,14 +450,44 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
           </select>
         </label>
 
-        <div className="flex flex-col gap-1">
+        {graph && (
+          <div className="text-zinc-500 dark:text-zinc-400">
+            <p>
+              {graph.nodes.length} Knoten, {graph.edges.length} Kanten.
+            </p>
+            {/* Said out loud rather than left to be noticed: a drawing that
+                omits its gaps reads as if everything were placed. */}
+            {gaps.map((gap) => (
+              <p key={gap} className="text-amber-600 dark:text-amber-400">
+                {gap}
+              </p>
+            ))}
+          </div>
+        )}
+
+        {drawnRelations.length > 0 && (
+          <div className="flex flex-col gap-1 border-t border-zinc-200 pt-2 text-zinc-600 dark:border-zinc-800 dark:text-zinc-300">
+            <span className="font-medium text-zinc-500 dark:text-zinc-400">Beziehungsarten</span>
+            {drawnRelations.map((relation) => (
+              <RelationLegendRow
+                key={relation}
+                ifcEntity={relation}
+                label={RELATION_STYLE[relation].label}
+                dash={RELATION_STYLE[relation].dash}
+                width={RELATION_STYLE[relation].width}
+              />
+            ))}
+          </div>
+        )}
+
+        <div className="flex min-h-0 flex-1 flex-col gap-1 border-t border-zinc-200 pt-2 dark:border-zinc-800">
           <span className="font-medium text-zinc-500 dark:text-zinc-400">
             {chain.pick === 'types' ? 'IFC-Klassen' : 'Anlagen'}
             {chosenCount > 0 && ` (${chosenCount})`}
           </span>
 
           {chain.pick === 'types' ? (
-            <div className="flex flex-col">
+            <div className="flex flex-col overflow-y-auto">
               {offeredTypes.length === 0 && <span className="text-zinc-400">Kein Modell geladen.</span>}
               {offeredTypes.map(([name, count]) => (
                 <button
@@ -461,7 +507,7 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
               ))}
             </div>
           ) : (
-            <div className="flex flex-col">
+            <div className="flex flex-col overflow-y-auto">
               {offeredSystems.length === 0 && (
                 // Worth saying rather than showing an empty list: a model with
                 // no systems in it is a fact about the model, and an empty box
@@ -491,49 +537,6 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
           )}
         </div>
 
-        {drawnRelations.length > 0 && (
-          <div className="flex flex-col gap-1 border-t border-zinc-200 pt-2 text-zinc-600 dark:border-zinc-800 dark:text-zinc-300">
-            <span className="font-medium text-zinc-500 dark:text-zinc-400">Beziehungsarten</span>
-            {drawnRelations.map((relation) => (
-              <RelationLegendRow
-                key={relation}
-                ifcEntity={relation}
-                label={RELATION_STYLE[relation].label}
-                dash={RELATION_STYLE[relation].dash}
-                width={RELATION_STYLE[relation].width}
-              />
-            ))}
-            {/* The catalogue's remaining kinds, greyed: they exist in the
-                Objektkatalog and this drawing has none of them. Saying so beats
-                their silent absence — it is also the list of what could come
-                next. */}
-            {relationsNotDrawn(drawnRelations).map((s) => (
-              <RelationLegendRow
-                key={s.ifcEntity}
-                ifcEntity={s.ifcEntity}
-                label={s.label}
-                dash={s.dash}
-                width={s.width}
-                muted
-              />
-            ))}
-          </div>
-        )}
-
-        {graph && (
-          <div className="border-t border-zinc-200 pt-2 text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-            <p>
-              {graph.nodes.length} Knoten, {graph.edges.length} Kanten.
-            </p>
-            {/* Said out loud rather than left to be noticed: a drawing that
-                omits its gaps reads as if everything were placed. */}
-            {gaps.map((gap) => (
-              <p key={gap} className="text-amber-600 dark:text-amber-400">
-                {gap}
-              </p>
-            ))}
-          </div>
-        )}
       </aside>
 
       <div className="relative flex-1">

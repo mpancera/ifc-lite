@@ -8,7 +8,7 @@
  */
 
 import React from 'react';
-import { FolderOpen, HardHat, Palette, Ruler, ShieldCheck } from 'lucide-react';
+import { FolderOpen, HardHat, Palette, Ruler, ShieldCheck, Spline } from 'lucide-react';
 import { AddFile, Loading, OpenFile, Refresh, Screenshot, FileCsv, FileIfc, FileGlb, FileKmz, FileJson, FileHbjson, Share, CollabsRoom } from '@/icons';
 import {
   DropdownMenu,
@@ -28,6 +28,7 @@ import { ColorPalettePanel } from '../../ColorPalettePanel';
 import { ProjectFolderPanel } from '../../ProjectFolderPanel';
 import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
 import { DataPrivacyPanel } from '../../DataPrivacyPanel';
+import { RelationKindsPanel } from '../../RelationKindsPanel';
 import { DisciplineRolePanel } from '../../DisciplineRolePanel';
 import type { FileCommands } from '../../toolbar/useFileCommands';
 import { useExportCommands } from '../../toolbar/useExportCommands';
@@ -237,6 +238,20 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
                 icon={ShieldCheck}
                 label="Data privacy"
                 tooltip="Control whether the app may contact third-party services"
+              />
+            }
+          />
+        </RibbonSmallStack>
+        <RibbonSmallStack>
+          {/* A reference, not a setting — the line styles are read-only for
+              now. It sits here because it answers what the schematic's lines
+              mean, which is a question one has once, away from the drawing. */}
+          <RelationKindsPanel
+            trigger={
+              <RibbonSmallButton
+                icon={Spline}
+                label="Beziehungsarten"
+                tooltip="Welche Beziehungsarten der Graph kennt, und mit welcher Linienart jede gezeichnet wird"
               />
             }
           />

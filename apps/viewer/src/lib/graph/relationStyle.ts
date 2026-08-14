@@ -37,6 +37,14 @@ export interface RelationStyle {
   width: number;
 }
 
+export interface RelationCatalogueEntry extends RelationStyle {
+  ifcEntity: string;
+  /** The Objektkatalog's one-line explanation, verbatim where it has one. */
+  hinweis: string;
+  /** Whether a chain can produce this edge today. */
+  drawable: boolean;
+}
+
 /**
  * Every kind the catalogue knows, drawn or not — the ONE table.
  *
@@ -47,19 +55,65 @@ export interface RelationStyle {
  * `GraphRelation`, so it was not "planned", and no chain emits it, so it was
  * never drawn either — and it appeared nowhere at all.
  */
-export const RELATION_CATALOGUE: ReadonlyArray<RelationStyle & { ifcEntity: string }> = [
-  { ifcEntity: 'IfcRelContainedInSpatialStructure', label: 'Verortung', width: 2.2 },
-  { ifcEntity: 'IfcRelAssignsToGroup', label: 'Gruppenzugehörigkeit', dash: '6 4', width: 1.5 },
+export const RELATION_CATALOGUE: readonly RelationCatalogueEntry[] = [
+  {
+    ifcEntity: 'IfcRelContainedInSpatialStructure',
+    label: 'Verortung',
+    width: 2.2,
+    hinweis:
+      'Hierarchische Einordnung in die räumliche Struktur, genau eine je Objekt, z.B. Raum im Geschoss',
+    drawable: true,
+  },
+  {
+    ifcEntity: 'IfcRelAssignsToGroup',
+    label: 'Gruppenzugehörigkeit',
+    dash: '6 4',
+    width: 1.5,
+    hinweis:
+      'Mitgliedschaft in einer Gruppe ohne eigene Geometrie, z.B. Raum in einer Wohnung (IfcZone) oder Gerät in einer Anlage (IfcSystem)',
+    drawable: true,
+  },
   {
     ifcEntity: 'IfcRelReferencedInSpatialStructure',
     label: 'Abschnittszugehörigkeit',
     dash: '10 3 2 3',
     width: 1.5,
+    hinweis:
+      'Nicht-hierarchische Referenz in einen räumlichen Bereich mit eigener Geometrie, z.B. Raum in einer vermietbaren Fläche (IfcSpatialZone)',
+    drawable: true,
   },
-  { ifcEntity: 'IfcRelDefinesByType', label: 'Typzuweisung', dash: '2 3', width: 1.5 },
-  { ifcEntity: 'IfcRelAssociatesClassification', label: 'Klassifizierung', dash: '14 4', width: 1.5 },
-  { ifcEntity: 'IfcRelAssignsToActor', label: 'Akteurzuweisung', dash: '10 3 2 3 2 3', width: 1.5 },
-  { ifcEntity: 'IfcRelAggregates', label: 'Zerlegung', width: 1.1 },
+  {
+    ifcEntity: 'IfcRelDefinesByType',
+    label: 'Typzuweisung',
+    dash: '2 3',
+    width: 1.5,
+    hinweis: 'Zuweisung an ein Typobjekt, z.B. Raum an IfcSpaceType',
+    drawable: false,
+  },
+  {
+    ifcEntity: 'IfcRelAssociatesClassification',
+    label: 'Klassifizierung',
+    dash: '14 4',
+    width: 1.5,
+    hinweis: 'Zuordnung zu einem Klassifikationssystem, z.B. SIA 416:2003 Flächenart',
+    drawable: false,
+  },
+  {
+    ifcEntity: 'IfcRelAssignsToActor',
+    label: 'Akteurzuweisung',
+    dash: '10 3 2 3 2 3',
+    width: 1.5,
+    hinweis: 'Zuordnung zu einer Rolle oder Person, z.B. vermietbare Fläche an einen Nutzer (IfcOccupant)',
+    drawable: false,
+  },
+  {
+    ifcEntity: 'IfcRelAggregates',
+    label: 'Zerlegung',
+    width: 1.1,
+    hinweis:
+      'Zerlegung eines Ganzen in seine Teile, z.B. Raum aus dem Geschoss. Nicht im Objektkatalog: eine Zerlegung ist keine Informationsanforderung, eine Zeichnung braucht sie trotzdem.',
+    drawable: true,
+  },
 ];
 
 export const RELATION_STYLE: Record<GraphRelation, RelationStyle> = {
@@ -87,16 +141,3 @@ export const RELATION_STYLE: Record<GraphRelation, RelationStyle> = {
   IfcRelAggregates: { label: 'Zerlegung', width: 1.1 },
 };
 
-/**
- * The catalogue entries this drawing does NOT contain.
- *
- * Derived, never hand-listed. Saying "these exist in the catalogue and this
- * drawing has none of them" is worth more than their silent absence, and it is
- * also the list of what a next chain could add.
- */
-export function relationsNotDrawn(
-  drawn: readonly string[],
-): ReadonlyArray<RelationStyle & { ifcEntity: string }> {
-  const shown = new Set(drawn);
-  return RELATION_CATALOGUE.filter((r) => !shown.has(r.ifcEntity));
-}
