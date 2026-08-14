@@ -66,7 +66,11 @@ import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds } fr
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { usePlanRoomLabels } from '@/hooks/usePlanRoomLabels';
 import { roomPlanLabel } from '@/lib/plan/roomLabels';
-import { pixelsPerMetreForScale } from '@/lib/plan/planChrome';
+import {
+  planAnnotations, planAnnotationIdsToReplace, describeAnnotationSet,
+  type PlanAnnotationKind,
+} from '@/lib/plan/planAnnotations';
+import { pixelsPerMetreForScale, scaleDenominator } from '@/lib/plan/planChrome';
 import { usePlanOpeningSymbols } from '@/hooks/usePlanOpeningSymbols';
 import { usePlanDeviceMarks } from '@/hooks/usePlanDeviceMarks';
 import { useDrawingColorKeys } from '@/hooks/useDrawingColorKeys';
@@ -699,6 +703,69 @@ export function PlanView({
   }, [selectedAnnotation2D, storey, storeyModelId, measure2DResults, polygonArea2DResults,
       cloudAnnotations2D, textAnnotations2D, viewTransform.scale, addAnnotation]);
 
+  /**
+   * Write the plan's own writing and graphics into the model.
+   *
+   * Replaces rather than adds: a previous run's annotations are found by the
+   * `ObjectType` marker and removed first, so committing twice leaves one copy
+   * and not two. Only the kinds being committed are taken back — somebody's
+   * hand-drawn note is not ours to delete.
+   *
+   * The candidates are gathered from BOTH the file and the session's overlay,
+   * because a committed annotation lives in the overlay until it is exported
+   * and in the source afterwards; looking at only one of the two makes a plan
+   * re-committed across that boundary double.
+   */
+  const removeEntity = useViewerStore((s) => s.removeEntity);
+  const commitPlanAnnotations = useCallback((kinds: readonly PlanAnnotationKind[]) => {
+    if (!storey || !storeyModelId) return;
+    if (!ensureMutationView(storeyModelId)) return;
+
+    const set = planAnnotations({
+      roomLabels: kinds.includes('roomLabel') ? roomLabels.map(roomPlanLabel) : [],
+      doorLabels: kinds.includes('doorLabel') ? doorLabels : [],
+      symbols: kinds.includes('openingSymbol') ? openingSymbols : [],
+      scaleDenominator: scaleDenominator(viewTransform.scale),
+    });
+    const params = kinds.flatMap((kind) => set[kind]);
+    if (params.length === 0) {
+      toast.info('Nichts zu übernehmen — auf diesem Geschoss gibt es dazu nichts.');
+      return;
+    }
+
+    const store = storeyDataStore;
+    const overlay = useViewerStore.getState().mutationViews.get(storeyModelId);
+    const candidates: { expressId: number; attributes?: readonly unknown[] }[] = [];
+    for (const [type, ids] of store?.entityIndex?.byType ?? []) {
+      if (type.toUpperCase() !== 'IFCANNOTATION') continue;
+      for (const id of ids) {
+        candidates.push({ expressId: id, attributes: store?.getEntity?.(id)?.attributes });
+      }
+    }
+    for (const entity of overlay?.getNewEntities?.() ?? []) {
+      if (entity.type.toUpperCase() !== 'IFCANNOTATION') continue;
+      candidates.push({ expressId: entity.expressId, attributes: entity.attributes });
+    }
+
+    const stale = planAnnotationIdsToReplace(candidates, kinds);
+    let removed = 0;
+    for (const id of stale) if (removeEntity(storeyModelId, id)) removed += 1;
+
+    let written = 0;
+    for (const param of params) {
+      const result = addAnnotation(storeyModelId, storey.expressId, param);
+      if (!('error' in result)) written += 1;
+    }
+
+    if (written === 0) {
+      toast.error('Übernahme fehlgeschlagen — nichts geschrieben.');
+      return;
+    }
+    const replaced = removed > 0 ? ` (${removed} ersetzt)` : '';
+    toast.success(`${describeAnnotationSet(set)} übernommen${replaced}`);
+  }, [storey, storeyModelId, storeyDataStore, roomLabels, doorLabels, openingSymbols,
+      viewTransform.scale, ensureMutationView, addAnnotation, removeEntity]);
+
   const { handleExportSVG, handleExportDXF, handlePrint } = useDrawingExport({
     drawing, displayOptions, sectionPlane, activePresetId,
     entityColorMap, overridesEnabled, overrideEngine,
@@ -1242,6 +1309,8 @@ export function PlanView({
           hasAnnotations={hasAnnotations}
           canCommitAnnotation={selectedAnnotation2D !== null}
           onCommitAnnotation={commitSelectedAnnotation}
+          doorLabelCount={doorLabels.length}
+          onCommitPlanAnnotations={commitPlanAnnotations}
           onClearAnnotations={() => { clearAllAnnotations2D(); clearMeasure2DResults(); }}
           pixelsPerMetre={viewTransform.scale}
           onSetScale={setPlanScale}

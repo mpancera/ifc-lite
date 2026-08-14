@@ -26,7 +26,7 @@ import React from 'react';
 import {
   Box, Shapes, Tag, Layers, PenTool, FileText, ZoomIn, ZoomOut,
   Maximize2, Download, FileDown, Printer, RefreshCw, Ruler,
-  Hexagon, Type, Cloud, Trash2, FilePlus2, DoorOpen, Radio,
+  Hexagon, Type, Cloud, Trash2, FilePlus2, DoorOpen, Radio, Stamp,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -39,6 +39,7 @@ import { ViewModeToggle } from './ViewportOverlays';
 import { ViewportToolStrip, ToolStripDivider } from './ViewportToolStrip';
 import { ASSUMED_LINING_THICKNESS } from '@/lib/plan/doorQuantities';
 import { scaleDenominator, formatScaleRatio, STANDARD_SCALES } from '@/lib/plan/planChrome';
+import type { PlanAnnotationKind } from '@/lib/plan/planAnnotations';
 
 export interface PlanToolbarProps {
   displayOptions: {
@@ -82,6 +83,10 @@ export interface PlanToolbarProps {
   /** True when a mark is selected and can be written into the model. */
   canCommitAnnotation: boolean;
   onCommitAnnotation: () => void;
+  /** How many doors carry a mark — not every opening gets one. */
+  doorLabelCount: number;
+  /** Write the plan's own writing and graphics into the model. */
+  onCommitPlanAnnotations: (kinds: readonly PlanAnnotationKind[]) => void;
 
   /** Screen pixels per drawing metre, for the scale readout. */
   pixelsPerMetre: number;
@@ -139,7 +144,7 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
     showDeviceMarks, onToggleDeviceMarks, deviceCount,
     settingsOpen, onToggleSettings, dxfOpen, onToggleDxf,
     activeTool, onSetTool, hasAnnotations, onClearAnnotations,
-    canCommitAnnotation, onCommitAnnotation,
+    canCommitAnnotation, onCommitAnnotation, doorLabelCount, onCommitPlanAnnotations,
     pixelsPerMetre, onSetScale, onZoomIn, onZoomOut, onFitToView,
     onExportSVG, onExportDXF, onPrint, onRegenerate, busy, children,
   } = props;
@@ -304,6 +309,54 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
       )}
 
       <Divider />
+
+      {/* Committing the plan's OWN writing and graphics — a different act from
+          the button above, which commits one selected mark. A menu rather than
+          three buttons: it is one decision with three scopes, and none of them
+          is the everyday one. Replaces on a second run rather than doubling. */}
+      <DropdownMenu>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
+                <Stamp className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-xs text-xs">
+            Beschriftung und Plangrafik als IfcAnnotation ins Modell übernehmen.
+            Die Texthöhe richtet sich nach dem eingestellten Massstab; ein
+            zweiter Lauf ersetzt den ersten.
+          </TooltipContent>
+        </Tooltip>
+        <DropdownMenuContent align="center" className="text-xs">
+          <DropdownMenuItem
+            disabled={roomCount === 0}
+            onClick={() => onCommitPlanAnnotations(['roomLabel'])}
+          >
+            Raumbeschriftung übernehmen{roomCount > 0 ? ` (${roomCount})` : ''}
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            disabled={doorLabelCount === 0}
+            onClick={() => onCommitPlanAnnotations(['doorLabel'])}
+          >
+            Türbeschriftung übernehmen{doorLabelCount > 0 ? ` (${doorLabelCount})` : ''}
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            disabled={openingCount === 0}
+            onClick={() => onCommitPlanAnnotations(['openingSymbol'])}
+          >
+            Plangrafik übernehmen{openingCount > 0 ? ` (${openingCount})` : ''}
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            disabled={roomCount + doorLabelCount + openingCount === 0}
+            onClick={() => onCommitPlanAnnotations(['roomLabel', 'doorLabel', 'openingSymbol'])}
+          >
+            Alles übernehmen
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
 
       <Divider />
 
