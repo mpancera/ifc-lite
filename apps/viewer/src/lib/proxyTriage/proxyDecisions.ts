@@ -19,6 +19,14 @@
  * thing. That is a value in the file — it burdens no view and no panel, and
  * the next reader of the model sees a deliberate proxy rather than a lazy one.
  *
+ * `ObjectType` is the load-bearing half. IFC2X3 gives
+ * `IfcBuildingElementProxy` a `CompositionType` where IFC4 gives it a
+ * `PredefinedType`, so the enum has nowhere to go in an IFC2X3 file — the
+ * exporter maps attributes BY NAME against the target class's layout for the
+ * file's own schema, finds no `PredefinedType`, and writes none. Nothing lands
+ * in the wrong slot, and the declaration survives either way because
+ * `IfcObject.ObjectType` exists in both.
+ *
  * # Property sets are left alone
  * Retyping an element to `IfcLightFixture` does not give it the properties a
  * light fixture should have, and inventing them would be worse than not having
