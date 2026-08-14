@@ -9,7 +9,7 @@
  * toolbar (viewer/commenter roles cannot unlock authoring).
  */
 
-import { Box, Brush, FileDiff, Library, Wand2 } from 'lucide-react';
+import { Box, Boxes, Brush, FileDiff, Library, Wand2 } from 'lucide-react';
 import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, List, Select, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -17,6 +17,7 @@ import { tourAnchor, toolAnchor } from '@/lib/tours/anchors';
 import { BulkPropertyEditor } from '../../BulkPropertyEditor';
 import { DataConnector } from '../../DataConnector';
 import { ProductLibraryPanel } from '../../catalog/ProductLibraryPanel';
+import { ProxyTriagePanel } from '../../ProxyTriagePanel';
 import { ReferenceOverridesPanel } from '../../ReferenceOverridesPanel';
 import { SmartPropertyPanel } from '../../SmartPropertyPanel';
 import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
@@ -198,6 +199,19 @@ export function AuthorTab() {
           disabled={!ifcDataStore}
           active={activeWorkspacePanels.has('list')}
           onClick={() => handleToggleBottomPanel('list')}
+        />
+        {/* Assigning a class is authoring, not analysis — an element's
+            Fachklasse is a statement the author makes, so the tool that makes
+            it in bulk belongs beside the other bulk authoring tools. */}
+        <ProxyTriagePanel
+          trigger={
+            <RibbonLargeButton
+              icon={Boxes}
+              label="Proxy-Triage"
+              tooltip="Elemente ohne Fachklasse gruppenweise der richtigen Klasse zuweisen"
+              disabled={!ifcDataStore}
+            />
+          }
         />
         <RibbonSmallStack>
           <DataConnector

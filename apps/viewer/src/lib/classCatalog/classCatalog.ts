@@ -125,7 +125,17 @@ export function parseClassCatalog(
  * Ranked by where the match falls: a label that STARTS with the term beats one
  * that merely contains it, and both beat a synonym. Without that, typing "Tür"
  * buries `Tür` under `Türblatt`, `Türzarge` and everything else containing it.
+ *
+ * The last tier matches the other way round — a LABEL contained in the term.
+ * German builds its words by compounding, so a model that calls something a
+ * `Deckenleuchte` is looking for the catalogue's `Leuchte`, and a search that
+ * only ever asks whether the label contains the term finds nothing at all for
+ * every compound an author ever wrote. Short labels are held back from this,
+ * because a three-letter word appears inside half the language.
  */
+const MIN_COMPOUND_LABEL = 4;
+/** Rank of the compound tier, referenced by the tie-break below. */
+const COMPOUND_SCORE = 6;
 export function searchClassCatalog(
   catalog: ClassCatalog | null,
   query: string,
@@ -147,11 +157,18 @@ export function searchClassCatalog(
     else if (entity.includes(term)) score = 3;
     else if (entry.id.toLowerCase().includes(term)) score = 4;
     else if (entry.synonyms.some((s) => s.toLowerCase().includes(term))) score = 5;
+    else if (label.length >= MIN_COMPOUND_LABEL && term.includes(label)) score = COMPOUND_SCORE;
 
     if (score >= 0) scored.push({ entry, score });
   }
 
-  scored.sort((a, b) => a.score - b.score || a.entry.label.localeCompare(b.entry.label));
+  // Within the compound tier the longer label wins: `Deckenleuchte` contains
+  // both `Decke` and `Leuchte`, and the one that accounts for more of the word
+  // is the one that was meant. Everywhere else the tie is broken by name, so
+  // the order does not depend on how the catalogue happens to be stored.
+  scored.sort((a, b) => a.score - b.score
+    || (a.score === COMPOUND_SCORE ? b.entry.label.length - a.entry.label.length : 0)
+    || a.entry.label.localeCompare(b.entry.label));
   return scored.slice(0, limit).map((s) => s.entry);
 }
 

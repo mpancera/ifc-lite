@@ -120,6 +120,49 @@ describe('searchClassCatalog', () => {
     assert.equal(searchClassCatalog(mixed, 'Melder')[0].entity, 'IfcSensor');
   });
 
+  it('finds the head of a German compound', () => {
+    // A model calling something a Deckenleuchte wants the catalogue's
+    // Leuchte. Matching only "label contains term" finds nothing here, which
+    // is the normal case for every compound a German author writes.
+    const lamps = parseClassCatalog({
+      classes: [{ entity: 'IfcLightFixture', label: 'Leuchte' }],
+    })!;
+    assert.deepEqual(
+      searchClassCatalog(lamps, 'Deckenleuchte').map((e) => e.entity),
+      ['IfcLightFixture'],
+    );
+  });
+
+  it('ranks a compound match below a direct one', () => {
+    const lamps = parseClassCatalog({
+      classes: [
+        { entity: 'IfcLightFixture', label: 'Leuchte' },
+        { entity: 'IfcLamp', label: 'Deckenleuchte' },
+      ],
+    })!;
+    assert.equal(searchClassCatalog(lamps, 'Deckenleuchte')[0].entity, 'IfcLamp');
+  });
+
+  it('prefers the compound head that explains more of the word', () => {
+    // 'Deckenleuchte' contains both 'Decke' and 'Leuchte'. It is a lamp.
+    const both = parseClassCatalog({
+      classes: [
+        { entity: 'IfcSlab', label: 'Decke' },
+        { entity: 'IfcLightFixture', label: 'Leuchte' },
+      ],
+    })!;
+    assert.deepEqual(
+      searchClassCatalog(both, 'Deckenleuchte').map((e) => e.entity),
+      ['IfcLightFixture', 'IfcSlab'],
+    );
+  });
+
+  it('holds short labels back from matching inside a longer term', () => {
+    // 'Tor' would otherwise answer for 'Motorschalter', 'Sektor', 'Rotor'.
+    const gates = parseClassCatalog({ classes: [{ entity: 'IfcDoor', label: 'Tor' }] })!;
+    assert.deepEqual(searchClassCatalog(gates, 'Motorschalter'), []);
+  });
+
   it('ignores case and stray space', () => {
     assert.deepEqual(ids('  RAUCHMELDER '), ['IfcSensor.FIRESENSOR']);
   });
