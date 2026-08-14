@@ -235,6 +235,47 @@ export function doorOperationFromIfc(operationType: string | undefined | null): 
   }
 }
 
+/**
+ * The enum value that would describe a swing the geometry actually shows.
+ *
+ * The inverse of {@link doorOperationFromIfc}, and it exists so a wrong
+ * attribute can be CORRECTED rather than only reported. Where a model's
+ * `OperationType` disagrees with the leaf its own geometry draws, this is what
+ * the attribute should have said.
+ *
+ * Only the swinging cases can be written back. A sliding leaf's enum carries
+ * which way it slides, and that is not what `hinge` means for a sliding door
+ * here — inventing a value from it would replace one wrong statement with
+ * another. `null` says "the geometry does not determine this", which is the
+ * true answer.
+ */
+export function operationTypeForSwing(operation: DoorOperation): string | null {
+  switch (operation.motion) {
+    case 'swing':
+      return operation.hinge === 'start' ? 'SINGLE_SWING_LEFT' : 'SINGLE_SWING_RIGHT';
+    case 'double-swing':
+      return 'DOUBLE_DOOR_SINGLE_SWING';
+    default:
+      return null;
+  }
+}
+
+/**
+ * Whether the model's `OperationType` says the same thing the drawn leaf does.
+ *
+ * `null` when there is nothing to compare — no attribute, no leaf, or an
+ * attribute that states no swing at all. That is a third answer and not a
+ * quiet "yes": a door nobody described is not a door described correctly, and
+ * counting it as agreement would hide exactly the models this exists for.
+ */
+export function attributeAgreesWithGeometry(
+  stated: DoorOperation,
+  drawn: { hinge: HingeEnd },
+): boolean | null {
+  if (stated.motion !== 'swing') return null;
+  return stated.hinge === drawn.hinge;
+}
+
 export interface PlanAxes {
   /** Along the opening's width, unit length, in drawing space. */
   readonly along: Point2D;

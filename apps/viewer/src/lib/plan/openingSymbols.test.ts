@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import {
   doorOperationFromIfc, planAxes, openingWidth, doorSymbol, windowSymbol,
   classifyOpeningParts, swingFromGeometry, wallThicknessAtOpening,
+  operationTypeForSwing, attributeAgreesWithGeometry,
   type PlanAxes, type SymbolLine, type LocalBox, type DoorWidths,
 } from './openingSymbols.js';
 
@@ -139,6 +140,45 @@ describe('classifyOpeningParts / swingFromGeometry', () => {
 
   it('has nothing to classify without geometry', () => {
     assert.equal(classifyOpeningParts([]), null);
+  });
+});
+
+describe('operationTypeForSwing / attributeAgreesWithGeometry', () => {
+  const swing = (hinge: 'start' | 'end') =>
+    ({ motion: 'swing' as const, hinge, openTowards: 1 as const });
+
+  it('writes back the enum the drawn leaf deserves', () => {
+    assert.equal(operationTypeForSwing(swing('start')), 'SINGLE_SWING_LEFT');
+    assert.equal(operationTypeForSwing(swing('end')), 'SINGLE_SWING_RIGHT');
+  });
+
+  it('round-trips through the reader', () => {
+    // A correction that the reader would not read back the same way would be
+    // a second wrong statement.
+    for (const hinge of ['start', 'end'] as const) {
+      const written = operationTypeForSwing(swing(hinge))!;
+      assert.equal(doorOperationFromIfc(written).hinge, hinge);
+    }
+  });
+
+  it('declines to invent an enum for a motion the geometry does not settle', () => {
+    // A sliding door's enum says which way it slides, which is not what a
+    // hinge end means. Better no correction than a different wrong one.
+    assert.equal(operationTypeForSwing({ motion: 'sliding', hinge: 'start', openTowards: 1 }), null);
+    assert.equal(operationTypeForSwing({ motion: 'none', hinge: 'start', openTowards: 1 }), null);
+  });
+
+  it('agrees when the attribute and the leaf say the same end', () => {
+    assert.equal(attributeAgreesWithGeometry(swing('start'), { hinge: 'start' }), true);
+    assert.equal(attributeAgreesWithGeometry(swing('end'), { hinge: 'start' }), false);
+  });
+
+  it('has NO opinion where there is nothing to compare', () => {
+    // The important third answer: a door nobody described is not a door
+    // described correctly, and counting it as agreement would hide the models
+    // this exists for.
+    assert.equal(attributeAgreesWithGeometry(doorOperationFromIfc(null), { hinge: 'start' }), null);
+    assert.equal(attributeAgreesWithGeometry(doorOperationFromIfc('SLIDING_TO_LEFT'), { hinge: 'start' }), null);
   });
 });
 

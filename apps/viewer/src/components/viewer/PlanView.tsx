@@ -50,6 +50,7 @@ import { PlanLabels } from './PlanLabels';
 import { PlanOpeningSymbols } from './PlanOpeningSymbols';
 import { PlanNorthArrow } from './PlanNorthArrow';
 import { PlanDeviceMarks } from './PlanDeviceMarks';
+import { PlanOperationTypeReport } from './PlanOperationTypeReport';
 import { PlanScaleBar } from './PlanScaleBar';
 import { PlanToolbar } from './PlanToolbar';
 import { DrawingSettingsPanel } from './DrawingSettingsPanel';
@@ -311,6 +312,7 @@ export function PlanView({
     geometryResult,
     dataStore: storeyDataStore,
     storeyId: storey?.expressId ?? null,
+    modelId: storeyModelId,
     // The drawing carries the one measurement no model source gets right: how
     // thick the host wall is where a door goes through it.
     drawing,
@@ -592,6 +594,41 @@ export function PlanView({
     const underlayCy = (bounds.min.y + bounds.max.y) / 2;
     updateDxfUnderlayPlacement(id, { offsetX: modelCx - underlayCx, offsetY: modelCy - underlayCy });
   }, [dxfUnderlays, drawing, geometryResult, updateDxfUnderlayPlacement]);
+
+  // ── Correcting a door's OperationType ───────────────────────────────────
+  // The plan already follows the drawn leaf, so this changes nothing on
+  // screen. It changes the MODEL, which is the point: anything downstream that
+  // believes the attribute — a schedule, an escape-route check, another viewer
+  // — is wrong until this is written.
+  const setAttribute = useViewerStore((s) => s.setAttribute);
+  const ensureMutationView = useViewerStore((s) => s.ensureMutationView);
+  const correctOperationType = useCallback((expressId: number, operationType: string) => {
+    if (!storeyModelId) return;
+    // The overlay is created lazily by whichever surface writes first; without
+    // it `setAttribute` returns null and nothing happens, silently.
+    if (!ensureMutationView(storeyModelId)) {
+      toast.error('Dieses Modell lässt sich nicht bearbeiten.');
+      return;
+    }
+    const previous = openingSymbols.find((o) => o.expressId === expressId)?.operationType;
+    // The STEP enum form, which is what the exporter writes back out.
+    const result = setAttribute(
+      storeyModelId, expressId, 'OperationType', `.${operationType}.`,
+      previous ? `.${previous}.` : undefined,
+    );
+    if (result) {
+      toast.success(`OperationType auf ${operationType} gesetzt`);
+      return;
+    }
+    // A refusal here is almost always the authoring role: the app opens
+    // read-only, and correcting a reference model needs the Editor role. The
+    // permission check carries that sentence already — repeating it beats a
+    // generic failure, which leaves a button that looks broken.
+    const why = useViewerStore.getState().canAuthorOn(storeyModelId, expressId);
+    toast.error(why.allowed
+      ? 'OperationType liess sich nicht setzen.'
+      : why.reason ?? 'Dieses Modell ist schreibgeschützt.');
+  }, [storeyModelId, openingSymbols, setAttribute, ensureMutationView]);
 
   // ── Commit a mark to the model ──────────────────────────────────────────
   // The mark STAYS. Committing adds an IfcAnnotation carrying the same
@@ -1256,6 +1293,9 @@ export function PlanView({
             title="Schnitthöhe über Geschossboden, in Metern"
           />
           <span className="text-[10px] text-muted-foreground">m</span>
+          {/* A data-quality finding, shown where the plan's own controls are
+              and only when there IS one. */}
+          <PlanOperationTypeReport symbols={openingSymbols} onCorrect={correctOperationType} />
       </PlanToolbar>
 
       {/* Both panels are `h-full` and bring no positioning of their own, so

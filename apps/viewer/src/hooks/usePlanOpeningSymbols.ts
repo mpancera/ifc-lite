@@ -32,12 +32,14 @@ import { RelationshipType } from '@ifc-lite/data';
 import {
   doorOperationFromIfc, planAxes, openingWidth, doorSymbol, windowSymbol,
   classifyOpeningParts, swingFromGeometry, doorSymbolLines, wallThicknessAtOpening,
+  operationTypeForSwing, attributeAgreesWithGeometry,
   type SymbolLine, type LocalExtent, type PlanAxes, type LocalBox, type OpeningParts,
 } from '@/lib/plan/openingSymbols';
 import { doorReference, doorSize, doorLabelLines, formatDoorSize } from '@/lib/plan/doorLabels';
 import { doorQuantities } from '@/lib/plan/doorQuantities';
 import type { PlanLabel } from '@/lib/plan/roomLabels';
 import type { Drawing2D, Point2D } from '@ifc-lite/drawing-2d';
+import { useViewerStore } from '@/store';
 
 export interface PlanOpeningSymbol {
   /**
@@ -60,6 +62,21 @@ export interface PlanOpeningSymbol {
    * attribute did, which is the weaker source.
    */
   readonly swingSource: 'geometry' | 'operation-type';
+  /**
+   * Whether the model's `OperationType` says what its own drawn leaf says.
+   *
+   * `null` when there is nothing to compare — no leaf, or an attribute that
+   * states no swing. That is a third answer and not a quiet yes: a door nobody
+   * described is not a door described correctly.
+   */
+  readonly attributeAgrees: boolean | null;
+  /**
+   * The enum the attribute SHOULD carry, where the geometry settles it and the
+   * attribute disagrees. `null` when there is nothing to correct.
+   */
+  readonly correctedOperationType: string | null;
+  /** What the door is called, for a list somebody has to work through. */
+  readonly name: string;
   /**
    * Whether this occurrence's placement is MIRRORED in plan.
    *
@@ -90,6 +107,8 @@ export interface UsePlanOpeningSymbolsOptions {
   geometryResult: GeometryResult | null | undefined;
   dataStore: IfcDataStore | null | undefined;
   storeyId: number | null;
+  /** Which model it is, for reading corrections back out of its overlay. */
+  modelId: string | null;
   /**
    * The generated plan, for the one number that has to come off the drawing:
    * how thick the host wall is where the door goes through it. See
@@ -208,11 +227,28 @@ function openingGeometry(meshes: readonly MeshData[], axes: PlanAxes): OpeningGe
   };
 }
 
-/** A named attribute of an entity, as a string, or `undefined`. */
-function attribute(store: IfcDataStore, expressId: number, name: string): string | undefined {
-  const entry = extractAllEntityAttributes(store, expressId).find((a) => a.name === name);
-  if (!entry) return undefined;
-  const value = String(entry.value).trim();
+/**
+ * A named attribute of an entity, as a string, or `undefined`.
+ *
+ * The authoring overlay is asked FIRST. Without that, a correction made here
+ * would be written and then not read back: the door would stay on the list of
+ * disagreements it had just been taken off, which reads as the correction not
+ * having worked.
+ *
+ * The overlay stores enums in the STEP form (`.SINGLE_SWING_LEFT.`) because
+ * that is what the exporter writes; the source-buffer reader strips those
+ * markers. Stripping here too keeps one shape for callers.
+ */
+function attribute(
+  store: IfcDataStore, expressId: number, name: string,
+  overlay?: { getAttributeMutationsForEntity(id: number): Array<{ name: string; value: string }> },
+): string | undefined {
+  const mutated = overlay?.getAttributeMutationsForEntity(expressId)
+    ?.find((a) => a.name === name)?.value;
+  const raw = mutated ?? extractAllEntityAttributes(store, expressId)
+    .find((a) => a.name === name)?.value;
+  if (raw === undefined) return undefined;
+  const value = String(raw).trim().replace(/^\.|\.$/g, '');
   return value.length > 0 ? value : undefined;
 }
 
@@ -371,8 +407,14 @@ const NO_OPENINGS: PlanOpenings = { symbols: [], doorLabels: [], assumedLinings:
 const DOOR_LABEL_CLEARANCE = 0.35;
 
 export function usePlanOpeningSymbols({
-  enabled, geometryResult, dataStore, storeyId, drawing,
+  enabled, geometryResult, dataStore, storeyId, modelId, drawing,
 }: UsePlanOpeningSymbolsOptions): PlanOpenings {
+  // A correction written this session lives in the overlay, not in the parsed
+  // buffer; `mutationVersion` bumps on every edit and is what makes a corrected
+  // door leave the list of disagreements it was just taken off.
+  const mutationViews = useViewerStore((s) => s.mutationViews);
+  const mutationVersion = useViewerStore((s) => s.mutationVersion);
+
   return useMemo((): PlanOpenings => {
     if (!enabled || !dataStore || storeyId === null) return NO_OPENINGS;
     const elementToStorey = dataStore.spatialHierarchy?.elementToStorey;
@@ -407,6 +449,8 @@ export function usePlanOpeningSymbols({
     if (byOpening.size === 0) return NO_OPENINGS;
 
     const scale = dataStore.lengthUnitScale ?? 1;
+    // Corrections made in this session live here, not in the parsed buffer.
+    const overlay = mutationViews.get(modelId ?? '');
     // Doors of one type share an OperationType, and re-reading the type per
     // door would re-parse the same entity for every door in the building.
     const operationByType = new Map<number, string | undefined>();
@@ -440,6 +484,9 @@ export function usePlanOpeningSymbols({
           lines: windowSymbol({ centre: geometry.centre, width, depth: geometry.extent.depth, axes }),
           operationType: null,
           swingSource: 'geometry',
+          attributeAgrees: null,
+          correctedOperationType: null,
+          name: '',
           mirrored: isMirrored(axes),
         });
         continue;
@@ -447,7 +494,7 @@ export function usePlanOpeningSymbols({
 
       // `OperationType` may sit on the occurrence (IFC4) or on the type; the
       // occurrence is the more specific statement when it carries one.
-      let operationType = attribute(dataStore, expressId, 'OperationType');
+      let operationType = attribute(dataStore, expressId, 'OperationType', overlay);
       if (operationType === undefined) {
         const typeIds = dataStore.relationships?.getRelated(
           expressId, RelationshipType.DefinesByType, 'inverse',
@@ -455,7 +502,7 @@ export function usePlanOpeningSymbols({
         const typeId = typeIds?.[0];
         if (typeId !== undefined) {
           if (!operationByType.has(typeId)) {
-            operationByType.set(typeId, attribute(dataStore, typeId, 'OperationType'));
+            operationByType.set(typeId, attribute(dataStore, typeId, 'OperationType', overlay));
           }
           operationType = operationByType.get(typeId);
         }
@@ -581,16 +628,22 @@ export function usePlanOpeningSymbols({
       }));
       if (lines.length === 0) continue;
 
+      const agrees = drawn ? attributeAgreesWithGeometry(fromAttribute, drawn) : null;
+      const shouldSay = drawn ? operationTypeForSwing(operation) : null;
       symbols.push({
         key, expressId, kind, lines,
         operationType: operationType ?? null,
         swingSource: drawn ? 'geometry' : 'operation-type',
+        attributeAgrees: agrees,
+        correctedOperationType: agrees === false ? shouldSay : null,
+        name: reference,
         mirrored: isMirrored(axes),
       });
     }
 
     return { symbols, doorLabels, assumedLinings };
-  }, [enabled, geometryResult, dataStore, storeyId, drawing]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, geometryResult, dataStore, storeyId, modelId, drawing, mutationViews, mutationVersion]);
 }
 
 export default usePlanOpeningSymbols;

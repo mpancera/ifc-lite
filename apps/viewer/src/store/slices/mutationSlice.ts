@@ -8,7 +8,10 @@
 
 import { type StateCreator } from 'zustand';
 import type { ViewerState } from '../index.js';
-import type { MutablePropertyView, NewEntity, IfcAttributeValue } from '@ifc-lite/mutations';
+import { MutablePropertyView } from '@ifc-lite/mutations';
+import type { NewEntity, IfcAttributeValue } from '@ifc-lite/mutations';
+import { configureMutationView } from '@/utils/configureMutationView';
+import type { IfcDataStore } from '@ifc-lite/parser';
 import { StoreEditor } from '@ifc-lite/mutations';
 import type { Mutation, ChangeSet, PropertyValue } from '@ifc-lite/mutations';
 import { PropertyValueType, QuantityType } from '@ifc-lite/data';
@@ -296,6 +299,17 @@ export interface MutationSlice {
   getMutationView: (modelId: string) => MutablePropertyView | null;
   /** Register a mutation view for a model */
   registerMutationView: (modelId: string, view: MutablePropertyView) => void;
+  /**
+   * The model's mutation view, creating and registering one if it has none.
+   *
+   * Every authoring surface used to do this three-step dance itself — build a
+   * `MutablePropertyView`, configure its on-demand extractor, register it — and
+   * every surface that FORGOT it got a silent `null` out of `setAttribute` and
+   * no mutation. One home, so a new editing surface cannot forget.
+   *
+   * `null` only when the model has no data store to author against.
+   */
+  ensureMutationView: (modelId: string) => MutablePropertyView | null;
   /** Clear mutation view for a model */
   clearMutationView: (modelId: string) => void;
 
@@ -1315,6 +1329,20 @@ export const createMutationSlice: StateCreator<
   },
 
   // Mutation View Management
+  ensureMutationView: (modelId) => {
+    const existing = get().mutationViews.get(modelId);
+    if (existing) return existing;
+
+    const model = get().models.get(modelId);
+    const dataStore = (model?.ifcDataStore ?? null) as IfcDataStore | null;
+    if (!dataStore) return null;
+
+    const view = new MutablePropertyView(dataStore.properties || null, modelId);
+    configureMutationView(view, dataStore);
+    get().registerMutationView(modelId, view);
+    return view;
+  },
+
   getMutationView: (modelId) => {
     return get().mutationViews.get(modelId) || null;
   },
