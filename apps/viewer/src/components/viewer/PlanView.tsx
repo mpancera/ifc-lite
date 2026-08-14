@@ -225,7 +225,7 @@ export function PlanView({
   } | null>(null);
 
   const { combinedHiddenIds, combinedIsolatedIds } = useCombinedVisibilityIds();
-  const lensColorKeys = useDrawingColorKeys(modelIdToIndex);
+  const colorKeys = useDrawingColorKeys(modelIdToIndex);
 
   // Adopt this project's saved rotation when the plan opens. A working state,
   // not model content: nothing is written into the IFC.
@@ -977,7 +977,7 @@ export function PlanView({
           isPinned
           cachedSheetTransformRef={cachedSheetTransformRef}
           selectedEntityKeys={selectedEntityKeys}
-          lensColorKeys={lensColorKeys}
+          colorKeys={colorKeys}
           measureMode={annotation2DActiveTool === 'measure'}
           measureStart={measure2DStart}
           measureCurrent={measure2DCurrent}

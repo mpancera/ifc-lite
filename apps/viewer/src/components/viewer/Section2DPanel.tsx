@@ -240,7 +240,7 @@ export function Section2DPanel({
   // with plan mode so the two surfaces can't disagree about what is drawn.
   const { combinedHiddenIds, combinedIsolatedIds } = useCombinedVisibilityIds();
   // Same lens the 3D scene shows, so a section is coloured by it too.
-  const lensColorKeys = useDrawingColorKeys(modelIdToIndex);
+  const colorKeys = useDrawingColorKeys(modelIdToIndex);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // EXTRACTED HOOKS
@@ -1200,7 +1200,7 @@ export function Section2DPanel({
               dxfUnderlays={dxfUnderlayData}
               scanPoints={displayOptions.showScanSection ? scanSectionLayer.points : undefined}
               scanOpacity={displayOptions.scanSectionOpacity}
-              lensColorKeys={lensColorKeys}
+              colorKeys={colorKeys}
             />
             {/* Subtle updating indicator - shows while regenerating without hiding the drawing */}
             {isRegenerating && (

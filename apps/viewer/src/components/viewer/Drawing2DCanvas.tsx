@@ -423,17 +423,19 @@ interface Drawing2DCanvasProps {
    */
   selectedEntityKeys?: ReadonlySet<string>;
   /**
-   * Lens colours, as `"modelIndex:entityId"` → CSS colour.
+   * Per-entity colours, as `"modelIndex:entityId"` → CSS colour.
    *
-   * The lens colours the 3D scene through a channel this canvas never read, so
-   * a lens that made sense of a building in 3D had no effect on any drawing of
-   * it. Keyed like `selectedEntityKeys` and for the same reason.
+   * Whatever currently wants to tint the drawing, already translated: the
+   * active lens, and the graph panel's fade of everything its schematic does
+   * not contain. All of it arrives through `useDrawingColorKeys`, which is the
+   * one place that turns global ids into the local pair a drawing carries.
+   * Keyed like `selectedEntityKeys` and for the same reason.
    *
-   * Takes precedence over IFC material and override colours: the lens is an
+   * Takes precedence over IFC material and override colours: this is an
    * explicit "show me this by X" instruction, and a material colour underneath
    * it is exactly what the user asked to stop looking at.
    */
-  lensColorKeys?: ReadonlyMap<string, string>;
+  colorKeys?: ReadonlyMap<string, string>;
 }
 
 export function Drawing2DCanvas({
@@ -471,7 +473,7 @@ export function Drawing2DCanvas({
   scanPoints,
   scanOpacity = 1,
   selectedEntityKeys,
-  lensColorKeys,
+  colorKeys,
 }: Drawing2DCanvasProps): React.ReactElement {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
@@ -1217,11 +1219,11 @@ export function Drawing2DCanvas({
           opacity = result.style.opacity;
         }
 
-        // The lens is an explicit instruction to look at something else, so it
-        // overrides whatever colour the material or the override rules chose.
-        const lensFill = lensColorKeys?.get(`${polygon.modelIndex}:${polygon.entityId}`);
-        if (lensFill) {
-          fillColor = lensFill;
+        // An explicit instruction to look at something else, so it overrides
+        // whatever colour the material or the override rules chose.
+        const keyedFill = colorKeys?.get(`${polygon.modelIndex}:${polygon.entityId}`);
+        if (keyedFill) {
+          fillColor = keyedFill;
           opacity = 1;
         }
 
@@ -1359,13 +1361,13 @@ export function Drawing2DCanvas({
           lineWidth *= 0.7;
         }
 
-        // Lens colour also reaches lines, not just cut fills. On a plan the
-        // things a lens is usually asked about — devices, sensors, furniture —
-        // sit BELOW the cut and have no cut face at all, so colouring only the
+        // The colour also reaches lines, not just cut fills. On a plan the
+        // things one asks about this way — devices, sensors, furniture — sit
+        // BELOW the cut and have no cut face at all, so colouring only the
         // fills would leave exactly the elements of interest black.
-        const lensStroke = lensColorKeys?.get(`${line.modelIndex}:${line.entityId}`);
-        if (lensStroke) {
-          strokeColor = lensStroke;
+        const keyedStroke = colorKeys?.get(`${line.modelIndex}:${line.entityId}`);
+        if (keyedStroke) {
+          strokeColor = keyedStroke;
           lineWidth = Math.max(lineWidth, 0.35);
         }
 
@@ -2006,7 +2008,7 @@ export function Drawing2DCanvas({
         }
       }
     }
-  }, [drawing, transform, showHiddenLines, canvasSize, overrideEngine, overridesEnabled, entityColorMap, useIfcMaterials, measureMode, measureStart, measureCurrent, measureResults, measureSnapPoint, sheetEnabled, activeSheet, sectionAxis, isPinned, annotation2DActiveTool, annotation2DCursorPos, polygonAreaPoints, polygonAreaResults, textAnnotations, textAnnotationEditing, cloudAnnotationPoints, cloudAnnotations, selectedAnnotation, ifcAnnotationLines, ifcAnnotationTexts, ifcAnnotationFills, dxfUnderlays, scanPoints, scanOpacity, alignmentOverlay, selectedEntityKeys, lensColorKeys]);
+  }, [drawing, transform, showHiddenLines, canvasSize, overrideEngine, overridesEnabled, entityColorMap, useIfcMaterials, measureMode, measureStart, measureCurrent, measureResults, measureSnapPoint, sheetEnabled, activeSheet, sectionAxis, isPinned, annotation2DActiveTool, annotation2DCursorPos, polygonAreaPoints, polygonAreaResults, textAnnotations, textAnnotationEditing, cloudAnnotationPoints, cloudAnnotations, selectedAnnotation, ifcAnnotationLines, ifcAnnotationTexts, ifcAnnotationFills, dxfUnderlays, scanPoints, scanOpacity, alignmentOverlay, selectedEntityKeys, colorKeys]);
 
   return (
     <canvas
