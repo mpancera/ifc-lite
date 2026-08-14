@@ -25,6 +25,13 @@ import { type StateCreator } from 'zustand';
 import type { ViewerState } from '../index.js';
 import { loadPlanRotation, savePlanRotation } from '@/lib/plan/planRotationStore';
 
+/**
+ * Two modes, not three. The schematic view (PROJECT.md §V35) was briefly a
+ * third one here and is now a bottom-strip panel instead: it is read ALONGSIDE
+ * the building or the plan, highlighting in the model what the drawing
+ * contains, so making it a mode meant switching off the very thing it points
+ * at. See `components/viewer/graph/GraphPanel.tsx`.
+ */
 export type ViewMode = '3d' | '2d';
 
 /**
@@ -98,12 +105,22 @@ export interface ViewModeSlice {
    * the symbolic path, and both at once would double every arc.
    */
   planShowOpeningSymbols: boolean;
+  /**
+   * Whether small devices get a mark instead of their own (invisible) shape.
+   *
+   * On by default: a detector at its real 100 mm is a speck at 1:100 and gone
+   * at 1:200, so without this the plan simply does not show that the device is
+   * there. Switchable because a plan used as a background for something else
+   * wants the floor bare.
+   */
+  planShowDeviceMarks: boolean;
 
   setViewMode: (mode: ViewMode) => void;
   toggleViewMode: () => void;
   setPlanCutHeight: (metres: number) => void;
   setPlanShowRoomLabels: (show: boolean) => void;
   setPlanShowOpeningSymbols: (show: boolean) => void;
+  setPlanShowDeviceMarks: (show: boolean) => void;
   setPlanRotation: (radians: number) => void;
   setPlanRotationPicking: (picking: boolean) => void;
   /**
@@ -124,6 +141,7 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   planRotationProject: null,
   planShowRoomLabels: true,
   planShowOpeningSymbols: true,
+  planShowDeviceMarks: true,
 
   setViewMode: (viewMode) => {
     if (get().viewMode === viewMode) return;
@@ -172,6 +190,8 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   setPlanShowRoomLabels: (planShowRoomLabels) => set({ planShowRoomLabels }),
 
   setPlanShowOpeningSymbols: (planShowOpeningSymbols) => set({ planShowOpeningSymbols }),
+
+  setPlanShowDeviceMarks: (planShowDeviceMarks) => set({ planShowDeviceMarks }),
 
   restorePlanRotationForProject: () => {
     const project = get().currentProjectKey();

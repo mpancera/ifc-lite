@@ -26,7 +26,7 @@ import React from 'react';
 import {
   Box, Shapes, Tag, Layers, PenTool, FileText, ZoomIn, ZoomOut,
   Maximize2, Download, FileDown, Printer, RefreshCw, Ruler,
-  Hexagon, Type, Cloud, Trash2, FilePlus2, DoorOpen,
+  Hexagon, Type, Cloud, Trash2, FilePlus2, DoorOpen, Radio,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -63,6 +63,12 @@ export interface PlanToolbarProps {
   openingCount: number;
   /** How many doors got the assumed frame width because the model states none. */
   assumedLinings: number;
+
+  /** Small devices drawn as marks rather than at their own invisible size. */
+  showDeviceMarks: boolean;
+  onToggleDeviceMarks: () => void;
+  /** How many devices this storey has, for the tooltip. */
+  deviceCount: number;
 
   settingsOpen: boolean;
   onToggleSettings: () => void;
@@ -130,6 +136,7 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
     displayOptions, onToggleSymbolic, onToggleIfcAnnotations,
     onToggleConstructionProjection, showRoomLabels, onToggleRoomLabels, roomCount,
     showOpeningSymbols, onToggleOpeningSymbols, openingCount, assumedLinings,
+    showDeviceMarks, onToggleDeviceMarks, deviceCount,
     settingsOpen, onToggleSettings, dxfOpen, onToggleDxf,
     activeTool, onSetTool, hasAnnotations, onClearAnnotations,
     canCommitAnnotation, onCommitAnnotation,
@@ -226,6 +233,19 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
           </TooltipContent>
         </Tooltip>
       )}
+
+      <ToolButton
+        active={showDeviceMarks}
+        onClick={onToggleDeviceMarks}
+        disabled={deviceCount === 0}
+        title={
+          deviceCount === 0
+            ? 'Gerätesymbole — auf diesem Geschoss liegen keine Geräte'
+            : `Gerätesymbole: ${deviceCount} ${deviceCount === 1 ? 'Gerät' : 'Geräte'} als Zeichen statt in ihrer unlesbar kleinen wahren Grösse`
+        }
+      >
+        <Radio className="h-4 w-4" />
+      </ToolButton>
 
       <Divider />
 

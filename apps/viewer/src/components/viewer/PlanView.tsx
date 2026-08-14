@@ -49,6 +49,7 @@ import { Drawing2DCanvas } from './Drawing2DCanvas';
 import { PlanLabels } from './PlanLabels';
 import { PlanOpeningSymbols } from './PlanOpeningSymbols';
 import { PlanNorthArrow } from './PlanNorthArrow';
+import { PlanDeviceMarks } from './PlanDeviceMarks';
 import { PlanScaleBar } from './PlanScaleBar';
 import { PlanToolbar } from './PlanToolbar';
 import { DrawingSettingsPanel } from './DrawingSettingsPanel';
@@ -66,7 +67,8 @@ import { usePlanRoomLabels } from '@/hooks/usePlanRoomLabels';
 import { roomPlanLabel } from '@/lib/plan/roomLabels';
 import { pixelsPerMetreForScale } from '@/lib/plan/planChrome';
 import { usePlanOpeningSymbols } from '@/hooks/usePlanOpeningSymbols';
-import { useLensColorKeys } from '@/hooks/useLensColorKeys';
+import { usePlanDeviceMarks } from '@/hooks/usePlanDeviceMarks';
+import { useDrawingColorKeys } from '@/hooks/useDrawingColorKeys';
 import { useModelOrigins } from '@/hooks/useModelOrigins';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
 import {
@@ -135,6 +137,8 @@ export function PlanView({
   const planShowRoomLabels = useViewerStore((s) => s.planShowRoomLabels);
   const setPlanShowRoomLabels = useViewerStore((s) => s.setPlanShowRoomLabels);
   const planShowOpeningSymbols = useViewerStore((s) => s.planShowOpeningSymbols);
+  const planShowDeviceMarks = useViewerStore((s) => s.planShowDeviceMarks);
+  const setPlanShowDeviceMarks = useViewerStore((s) => s.setPlanShowDeviceMarks);
   const setPlanShowOpeningSymbols = useViewerStore((s) => s.setPlanShowOpeningSymbols);
   const models = useViewerStore((s) => s.models);
   const activeTool = useViewerStore((s) => s.activeTool);
@@ -221,7 +225,7 @@ export function PlanView({
   } | null>(null);
 
   const { combinedHiddenIds, combinedIsolatedIds } = useCombinedVisibilityIds();
-  const lensColorKeys = useLensColorKeys(modelIdToIndex);
+  const lensColorKeys = useDrawingColorKeys(modelIdToIndex);
 
   // Adopt this project's saved rotation when the plan opens. A working state,
   // not model content: nothing is written into the IFC.
@@ -310,6 +314,16 @@ export function PlanView({
     // The drawing carries the one measurement no model source gets right: how
     // thick the host wall is where a door goes through it.
     drawing,
+  });
+
+  // Devices, which the cut never shows: a ceiling detector is above it and a
+  // floor socket below what the projection reaches, so without this layer the
+  // plan simply does not say they are there.
+  const deviceMarks = usePlanDeviceMarks({
+    enabled: active,
+    geometryResult,
+    dataStore: storeyDataStore,
+    storeyId: storey?.expressId ?? null,
   });
 
   // Room and door text are one layer: they are the same thing on a drawing,
@@ -656,6 +670,7 @@ export function PlanView({
     // statement about the drawing, not about the viewport.
     planLabels: planShowRoomLabels ? planLabels : undefined,
     openingSymbols: planShowOpeningSymbols ? openingSymbols : undefined,
+    deviceMarks: planShowDeviceMarks ? deviceMarks : undefined,
     // A plan is not a sheet. Laying one out on paper is the 2D Section tool's
     // job and stays there, so the export writes the drawing itself.
     sheetEnabled: false, activeSheet: null,
@@ -984,6 +999,12 @@ export function PlanView({
         />
       )}
 
+      {/* Device marks sit under the text and over the swings: a mark is
+          looked at, a name is read, and where they collide the text wins. */}
+      {planShowDeviceMarks && (
+        <PlanDeviceMarks marks={deviceMarks} transform={planTransform} />
+      )}
+
       {/* Door swings and window sashes go UNDER the room labels: both belong
           to the drawing, but a name is read and an arc is looked at, so where
           they collide the text should win. */}
@@ -1172,6 +1193,9 @@ export function PlanView({
           onToggleOpeningSymbols={() => setPlanShowOpeningSymbols(!planShowOpeningSymbols)}
           openingCount={openingSymbols.length}
           assumedLinings={assumedLinings}
+          showDeviceMarks={planShowDeviceMarks}
+          onToggleDeviceMarks={() => setPlanShowDeviceMarks(!planShowDeviceMarks)}
+          deviceCount={deviceMarks.length}
           settingsOpen={settingsOpen}
           onToggleSettings={() => setSettingsOpen((v) => !v)}
           dxfOpen={dxfPanelOpen}

@@ -7,6 +7,7 @@ import { posthog } from '@/lib/analytics';
 import { rotatedBounds } from '@/lib/plan/planRotation';
 import { labelVisible, type PlanLabel } from '@/lib/plan/roomLabels';
 import type { SymbolLine } from '@/lib/plan/openingSymbols';
+import { deviceMarkPaths, DEVICE_MARK_PAPER_MM, type DeviceMark } from '@/lib/plan/deviceSymbols';
 import { downloadFile, sanitizeFilename } from '@/lib/export/download';
 import {
   GraphicOverrideEngine,
@@ -34,6 +35,7 @@ import { DEFAULT_SCAN_SVG_CAP, type ScanBandPoint } from '@/hooks/scanSectionMat
 /** Module-level so the default parameters keep a stable identity across renders. */
 const EMPTY_PLAN_LABELS: readonly PlanLabel[] = [];
 const EMPTY_OPENING_SYMBOLS: readonly { readonly lines: readonly SymbolLine[] }[] = [];
+const EMPTY_DEVICE_MARKS: readonly DeviceMark[] = [];
 
 /** Map a DXF vertical justification onto an SVG dominant-baseline. */
 function dxfValignToBaseline(valign: 'baseline' | 'bottom' | 'middle' | 'top'): string {
@@ -175,6 +177,11 @@ interface UseDrawingExportParams {
    * plan convention that means nothing on a vertical section.
    */
   openingSymbols?: readonly { readonly lines: readonly SymbolLine[] }[];
+  /**
+   * Small devices as marks (#50). Plan mode only — a section has no storey to
+   * take them from, and they are not in the cut to begin with.
+   */
+  deviceMarks?: readonly DeviceMark[];
   sheetEnabled: boolean;
   activeSheet: DrawingSheet | null;
   /** DXF underlays pre-mapped to drawing space, rendered beneath the drawing (issue #1782) */
@@ -214,6 +221,7 @@ function useDrawingExport({
   cloudAnnotations2D,
   planLabels = EMPTY_PLAN_LABELS,
   openingSymbols = EMPTY_OPENING_SYMBOLS,
+  deviceMarks = EMPTY_DEVICE_MARKS,
   sheetEnabled,
   activeSheet,
   dxfUnderlays,
@@ -510,6 +518,35 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
       svg += '  </g>\n';
     }
 
+    // 3a2. DEVICE MARKS (#50)
+    //
+    // Sized in millimetres ON PAPER, which is the whole point: a detector is
+    // 100 mm across, so at 1:100 its own outline is a millimetre and at 1:200
+    // it is nothing. The mark is 3 mm at every scale, because it exists to be
+    // seen rather than to be measured.
+    if (deviceMarks.length > 0) {
+      const half = mmToModel(DEVICE_MARK_PAPER_MM) / 2;
+      const weight = mmToModel(0.25);
+      svg += '  <g id="device-marks">\n';
+      for (const mark of deviceMarks) {
+        const cx = flipX ? -mark.position.x : mark.position.x;
+        const cy = flipY ? -mark.position.y : mark.position.y;
+        let d = '';
+        for (const path of deviceMarkPaths(mark.kind)) {
+          path.forEach((p, i) => {
+            // The unit shape's y grows downward like a screen's; on paper the
+            // plan axis does too ('down' takes no flip), so it carries over.
+            const px = cx + p.x * half * 2;
+            const py = cy + p.y * half * 2;
+            d += `${i === 0 ? 'M' : 'L'} ${px.toFixed(4)} ${py.toFixed(4)} `;
+          });
+        }
+        if (!d.trim()) continue;
+        svg += `    <path d="${d.trim()}" fill="#ffffff" stroke="#000000" stroke-width="${weight.toFixed(4)}"/>\n`;
+      }
+      svg += '  </g>\n';
+    }
+
     // 3b. ROOM NAMES AND AREAS (#50)
     //
     // Model content, so it goes UNDER the user's marks: a measurement drawn
@@ -669,7 +706,7 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     if (rotDeg !== 0) svg += '  </g>\n';
     svg += '</svg>';
     return svg;
-  }, [drawing, displayOptions, activePresetId, entityColorMap, overridesEnabled, overrideEngine, measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D, planLabels, openingSymbols, sectionPlane.axis, dxfUnderlays, scanSection, viewRotation]);
+  }, [drawing, displayOptions, activePresetId, entityColorMap, overridesEnabled, overrideEngine, measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D, planLabels, openingSymbols, deviceMarks, sectionPlane.axis, dxfUnderlays, scanSection, viewRotation]);
 
   // Generate SVG with drawing sheet (frame, title block, scale bar)
   // This generates coordinates directly in paper mm space (like the canvas rendering)
