@@ -47,6 +47,7 @@ import {
 } from '@/lib/classTriage/genericClasses';
 import { useClassCatalog } from '@/lib/classCatalog/useClassCatalog';
 import { describeClass, type ClassCatalogEntry } from '@/lib/classCatalog/classCatalog';
+import { TriageGroupLabel } from '@/components/viewer/TriageGroupLabel';
 import { useViewerStore } from '@/store';
 import { toast } from '@/components/ui/toast';
 
@@ -265,7 +266,7 @@ export function ClassTriagePanel({ onClose }: ClassTriagePanelProps): React.Reac
                       {isAbstract
                         ? <TriangleAlert className="h-3 w-3 shrink-0 text-red-600" />
                         : <Eye className="h-3 w-3 shrink-0 text-muted-foreground" />}
-                      <span className="truncate">{group.label}</span>
+                      <TriageGroupLabel group={group} axes={activeAxes} />
                       {kind && (
                         <span className="shrink-0 rounded-sm bg-muted px-1 text-[10px] text-muted-foreground">
                           {GENERIC_CLASS_LABELS[kind]}

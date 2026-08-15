@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   groupProxies, suggestAxes, collapseSerialNames, summariseGroups, groupSearchTerm,
-  MAX_GROUPS, type ProxyElement,
+  describeAxisSource, AXIS_ORDER, MAX_GROUPS, type ProxyElement,
 } from './proxyGroups.js';
 
 function proxy(expressId: number, over: Partial<ProxyElement> = {}): ProxyElement {
@@ -213,6 +213,26 @@ describe('groupSearchTerm', () => {
   it('offers nothing where the author said nothing', () => {
     const [nameless] = groupProxies([proxy(1)], ['description']);
     assert.equal(groupSearchTerm(nameless), '');
+  });
+});
+
+describe('describeAxisSource', () => {
+  it('names the relationship a value came through', () => {
+    // "Ich traue der Aussage 'Starkstrom' aber initial noch nicht" — so the
+    // label says where it came from, not just what it says.
+    assert.equal(describeAxisSource('system'), 'IfcRelAssignsToGroup → IfcSystem');
+    assert.equal(describeAxisSource('type'), 'IfcRelDefinesByType → IfcTypeObject');
+  });
+
+  it('names a plain attribute without inventing a relationship', () => {
+    assert.equal(describeAxisSource('description'), 'IfcRoot.Description');
+    assert.equal(describeAxisSource('class'), 'Entity');
+  });
+
+  it('has a source for every axis', () => {
+    for (const axis of AXIS_ORDER) {
+      assert.ok(describeAxisSource(axis).length > 0, axis);
+    }
   });
 });
 

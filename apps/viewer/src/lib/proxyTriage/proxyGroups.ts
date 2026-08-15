@@ -66,6 +66,40 @@ export const AXIS_LABELS: Readonly<Record<ProxyGroupAxis, string>> = {
   geometry: 'Geometrie',
 };
 
+/**
+ * Where an axis value comes from in the file.
+ *
+ * Shown as a hint on every part of a group label, because a label like
+ * `IfcDistributionElement · Starkstrom · Motor` gives three words and no way
+ * to weigh them. "Ich traue der Aussage 'Starkstrom' aber initial noch nicht"
+ * (Marc, 2026-08-15) — and the answer to that is not a better word, it is
+ * saying which relationship produced it. A value that came from an
+ * `IfcSystem` the author assigned deliberately is worth more than one scraped
+ * out of a description field, and the reader can only know that if told.
+ */
+export interface AxisSource {
+  /** The IFC relationship or attribute the value was read through. */
+  readonly via: string;
+  /** The class the value was read FROM, where the value lives on another entity. */
+  readonly target?: string;
+}
+
+export const AXIS_SOURCES: Readonly<Record<ProxyGroupAxis, AxisSource>> = {
+  class: { via: 'Entity' },
+  type: { via: 'IfcRelDefinesByType', target: 'IfcTypeObject' },
+  system: { via: 'IfcRelAssignsToGroup', target: 'IfcSystem' },
+  description: { via: 'IfcRoot.Description' },
+  name: { via: 'IfcRoot.Name' },
+  layer: { via: 'IfcPresentationLayerAssignment' },
+  geometry: { via: 'IfcMappedItem', target: 'IfcRepresentationMap' },
+};
+
+/** `IfcRelAssignsToGroup → IfcSystem` — one line for a hint. */
+export function describeAxisSource(axis: ProxyGroupAxis): string {
+  const source = AXIS_SOURCES[axis];
+  return source.target ? `${source.via} → ${source.target}` : source.via;
+}
+
 /** One proxy, reduced to the facts grouping can use. */
 export interface ProxyElement {
   readonly expressId: number;

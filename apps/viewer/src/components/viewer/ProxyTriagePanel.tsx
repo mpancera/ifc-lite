@@ -39,6 +39,7 @@ import {
 } from '@/lib/proxyTriage/proxyDecisions';
 import { useClassCatalog } from '@/lib/classCatalog/useClassCatalog';
 import { searchClassCatalog, describeClass } from '@/lib/classCatalog/classCatalog';
+import { TriageGroupLabel } from '@/components/viewer/TriageGroupLabel';
 import { useViewerStore } from '@/store';
 import { toast } from '@/components/ui/toast';
 
@@ -226,7 +227,7 @@ export function ProxyTriagePanel({ onClose }: ProxyTriagePanelProps): React.Reac
                         }`}
                       >
                         <Eye className="h-3 w-3 shrink-0 text-muted-foreground" />
-                        <span className="truncate">{group.label}</span>
+                        <TriageGroupLabel group={group} axes={activeAxes} />
                         <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">
                           {group.members.length}
                         </span>
