@@ -9,6 +9,7 @@ import {
   danglingNodes,
   elementInSpaceInStorey,
   elementInSpaceInZone,
+  plantTopology,
   systemMembers,
   systemMembersInSpace,
 } from './chain.js';
@@ -204,6 +205,112 @@ describe('buildRelationGraph', () => {
     expect(chainRanks(systemMembers([500]))).toEqual(['system', 'element']);
     expect(chainRanks(systemMembersInSpace([500]))).toEqual(['system', 'element', 'space']);
     expect(chainRanks(elementInSpaceInZone(['IfcSensor']))).toEqual(['element', 'space', 'zone']);
+    // Three ranks, and the last is `port` — NOT `element`. A fourth hop back
+    // to the elements would repeat the first rank and make "has no outgoing
+    // edge" mean two different things in one drawing.
+    expect(chainRanks(plantTopology(['IfcPump']))).toEqual(['element', 'port', 'port']);
+  });
+
+  it('walks a plant: element to its ports to the ports they are joined to', () => {
+    // Pump 300 --port 600-- connected to --port 601-- pipe 301.
+    const plant: GraphSource = {
+      idsOfType: (t) => (t === 'IfcPump' ? [700] : t === 'IfcFlowSegment' ? [701] : []),
+      typeOf: (id) =>
+        id === 700 ? 'IfcPump'
+          : id === 701 ? 'IfcFlowSegment'
+            : id === 600 || id === 601 ? 'IfcDistributionPort'
+              : null,
+      nameOf: (id) => `#${id}`,
+      related: (id, relation, direction) => {
+        if (relation === 'IfcRelConnectsPortToElement') {
+          const owns: ReadonlyArray<readonly [number, number]> = [[600, 700], [601, 701]];
+          return owns
+            .filter(([port, el]) => (direction === 'forward' ? port : el) === id)
+            .map(([port, el]) => (direction === 'forward' ? el : port));
+        }
+        if (relation === 'IfcRelConnectsPorts') {
+          // Recorded once, 600 → 601. The pipe's side must still find it.
+          if (direction === 'forward' && id === 600) return [601];
+          if (direction === 'inverse' && id === 601) return [600];
+        }
+        return [];
+      },
+    };
+
+    const graph = buildRelationGraph(plant, plantTopology(['IfcPump', 'IfcFlowSegment']));
+
+    expect(graph.nodes.filter((n) => n.kind === 'element').map((n) => n.ifcType).sort()).toEqual([
+      'IfcFlowSegment',
+      'IfcPump',
+    ]);
+    expect(graph.nodes.filter((n) => n.kind === 'port')).toHaveLength(2);
+
+    // Two element→port edges, and the connection ONCE despite being reachable
+    // from both ends — the whole point of the symmetric hop.
+    expect(graph.edges.filter((e) => e.relation === 'IfcRelConnectsPortToElement')).toHaveLength(2);
+    expect(graph.edges.filter((e) => e.relation === 'IfcRelConnectsPorts')).toHaveLength(1);
+  });
+
+  it('finds the connection from the end the file did NOT list first', () => {
+    // Only the pipe is selected. Its port is the RELATED end, so a
+    // forward-only hop would find nothing at all.
+    const plant: GraphSource = {
+      idsOfType: (t) => (t === 'IfcFlowSegment' ? [701] : []),
+      typeOf: (id) => (id === 701 ? 'IfcFlowSegment' : id === 600 || id === 601 ? 'IfcDistributionPort' : null),
+      nameOf: () => '',
+      related: (id, relation, direction) => {
+        if (relation === 'IfcRelConnectsPortToElement' && direction === 'inverse' && id === 701) return [601];
+        if (relation === 'IfcRelConnectsPorts' && direction === 'inverse' && id === 601) return [600];
+        return [];
+      },
+    };
+
+    const graph = buildRelationGraph(plant, plantTopology(['IfcFlowSegment']));
+    expect(graph.edges.filter((e) => e.relation === 'IfcRelConnectsPorts')).toHaveLength(1);
+    expect(graph.nodes.some((n) => n.expressId === 600)).toBe(true);
+  });
+
+  it('counts a symmetric edge as leading away from both ends', () => {
+    // 600 --connected-- 601, recorded once. Stored directionally because a
+    // renderer needs two ends, but NEITHER port is a dead end.
+    const plant: GraphSource = {
+      idsOfType: (t) => (t === 'IfcPump' ? [700, 701] : []),
+      typeOf: (id) =>
+        id === 700 || id === 701 ? 'IfcPump' : id === 600 || id === 601 ? 'IfcDistributionPort' : null,
+      nameOf: () => '',
+      related: (id, relation, direction) => {
+        if (relation === 'IfcRelConnectsPortToElement' && direction === 'inverse') {
+          if (id === 700) return [600];
+          if (id === 701) return [601];
+        }
+        if (relation === 'IfcRelConnectsPorts') {
+          if (direction === 'forward' && id === 600) return [601];
+          if (direction === 'inverse' && id === 601) return [600];
+        }
+        return [];
+      },
+    };
+
+    const graph = buildRelationGraph(plant, plantTopology(['IfcPump']));
+    expect(graph.edges.filter((e) => e.symmetric)).toHaveLength(1);
+    expect(danglingNodes(graph, 'port')).toEqual([]);
+  });
+
+  it('does not draw a port as connected to itself', () => {
+    const selfJoined: GraphSource = {
+      idsOfType: (t) => (t === 'IfcPump' ? [700] : []),
+      typeOf: (id) => (id === 700 ? 'IfcPump' : id === 600 ? 'IfcDistributionPort' : null),
+      nameOf: () => '',
+      related: (id, relation, direction) => {
+        if (relation === 'IfcRelConnectsPortToElement' && direction === 'inverse' && id === 700) return [600];
+        // A file that records a port joined to itself.
+        if (relation === 'IfcRelConnectsPorts' && id === 600) return [600];
+        return [];
+      },
+    };
+
+    const graph = buildRelationGraph(selfJoined, plantTopology(['IfcPump']));
+    expect(graph.edges.filter((e) => e.relation === 'IfcRelConnectsPorts')).toHaveLength(0);
   });
 
   it('skips an id the model cannot type, the shape a dangling reference takes', () => {

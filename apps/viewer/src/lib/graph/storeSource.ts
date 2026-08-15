@@ -39,6 +39,8 @@ const RELATION_TO_STORE: Record<GraphRelation, RelationshipType> = {
   IfcRelReferencedInSpatialStructure: RelationshipType.ReferencedInSpatialStructure,
   IfcRelAggregates: RelationshipType.Aggregates,
   IfcRelAssignsToGroup: RelationshipType.AssignsToGroup,
+  IfcRelConnectsPortToElement: RelationshipType.ConnectsPortToElement,
+  IfcRelConnectsPorts: RelationshipType.ConnectsPorts,
 };
 
 /**

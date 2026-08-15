@@ -114,6 +114,23 @@ export const RELATION_CATALOGUE: readonly RelationCatalogueEntry[] = [
       'Zerlegung eines Ganzen in seine Teile, z.B. Raum aus dem Geschoss. Nicht im Objektkatalog: eine Zerlegung ist keine Informationsanforderung, eine Zeichnung braucht sie trotzdem.',
     drawable: true,
   },
+  {
+    ifcEntity: 'IfcRelConnectsPortToElement',
+    label: 'Anschlusspunkt',
+    dash: '1 3',
+    width: 1.2,
+    hinweis:
+      'Ein Anschluss (IfcDistributionPort) sitzt auf einem Gerät. Der Stich vom Gerät zu seinem Port — nicht im Objektkatalog, weil Anlagentopologie keine Informationsanforderung ist.',
+    drawable: true,
+  },
+  {
+    ifcEntity: 'IfcRelConnectsPorts',
+    label: 'Verbindung',
+    width: 2.6,
+    hinweis:
+      'Zwei Anschlüsse sind miteinander verbunden — die eigentliche Linie eines Anlagenschemas. Richtungslos: welcher Port in der Datei zuerst steht, ist eine Eigenheit des Exports.',
+    drawable: true,
+  },
 ];
 
 export const RELATION_STYLE: Record<GraphRelation, RelationStyle> = {
@@ -139,5 +156,16 @@ export const RELATION_STYLE: Record<GraphRelation, RelationStyle> = {
   // like Verortung because it is structural too, but visibly lighter: the two
   // are near neighbours in meaning and must not be near neighbours on paper.
   IfcRelAggregates: { label: 'Zerlegung', width: 1.1 },
+
+  // Anschlusspunkt — the stub from a device to its own port. Finely dotted
+  // and thin: it is plumbing about the drawing rather than part of the run,
+  // and it should recede behind the connections.
+  IfcRelConnectsPortToElement: { label: 'Anschlusspunkt', dash: '1 3', width: 1.2 },
+
+  // Verbindung — the heaviest line in the set, because in a plant schematic
+  // this IS the drawing. Solid, like Verortung: the two never appear in one
+  // drawing (no chain produces both), and the weights differ. Worth revisiting
+  // when the styles are tuned together.
+  IfcRelConnectsPorts: { label: 'Verbindung', width: 2.6 },
 };
 

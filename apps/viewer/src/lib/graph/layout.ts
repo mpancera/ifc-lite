@@ -33,6 +33,10 @@ export const NODE_SIZE: Record<GraphNodeKind, { width: number; height: number }>
   storey: { width: 200, height: 48 },
   zone: { width: 210, height: 52 },
   system: { width: 210, height: 52 },
+  // Deliberately small. A port carries a two-character name ("CP1") and there
+  // are twice as many of them as there are devices; at device size they would
+  // dominate a plant drawing that is supposed to be about the devices.
+  port: { width: 96, height: 30 },
 };
 
 export interface LayoutPosition {

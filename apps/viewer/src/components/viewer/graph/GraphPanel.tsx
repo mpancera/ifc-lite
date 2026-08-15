@@ -44,6 +44,7 @@ import {
   danglingNodes,
   elementInSpaceInStorey,
   elementInSpaceInZone,
+  plantTopology,
   systemMembers,
   systemMembersInSpace,
   type Graph,
@@ -73,15 +74,37 @@ import { cn } from '@/lib/utils';
  * A closed list rather than a chain builder: an editor for arbitrary chains,
  * before anyone has drawn a real one, would be guessing at the controls.
  */
-type ChainDef =
-  | { id: string; label: string; pick: 'types'; build: (types: readonly string[]) => RelationChain }
-  | { id: string; label: string; pick: 'systems'; build: (ids: readonly number[]) => RelationChain };
+/**
+ * `isolatedStart` decides what a start node that reached nothing means.
+ *
+ * `'keep'` for the location chains: an element in no room is a MODELLING GAP
+ * about that element, and dropping it would make the drawing read as complete
+ * (PROJECT.md §V42.3).
+ *
+ * `'drop'` for plant topology: a device with no port is not part of the plant
+ * at all — that is most of a building, not a fault. Drawing 3,531 unconnected
+ * boxes around a 296-node schematic is noise, and it is what blows the node
+ * budget. The count stays in the readout either way; only the drawing changes.
+ */
+type IsolatedStart = 'keep' | 'drop';
+
+type ChainDef = { id: string; label: string; isolatedStart?: IsolatedStart } & (
+  | { pick: 'types'; build: (types: readonly string[]) => RelationChain }
+  | { pick: 'systems'; build: (ids: readonly number[]) => RelationChain }
+);
 
 const CHAINS: readonly ChainDef[] = [
   { id: 'zone', label: 'Element → Raum → Zone', pick: 'types', build: elementInSpaceInZone },
   { id: 'storey', label: 'Element → Raum → Geschoss', pick: 'types', build: elementInSpaceInStorey },
   { id: 'system', label: 'Anlage → Elemente', pick: 'systems', build: systemMembers },
   { id: 'systemSpace', label: 'Anlage → Elemente → Raum', pick: 'systems', build: systemMembersInSpace },
+  {
+    id: 'plant',
+    label: 'Anlagentopologie (Gerät → Anschluss → Anschluss)',
+    pick: 'types',
+    build: plantTopology,
+    isolatedStart: 'drop',
+  },
 ];
 
 /**
@@ -117,6 +140,18 @@ const KIND_LABEL: Record<GraphNodeKind, { one: string; many: string }> = {
   storey: { one: 'Geschoss', many: 'Geschosse' },
   zone: { one: 'Zone', many: 'Zonen' },
   system: { one: 'Anlage', many: 'Anlagen' },
+  port: { one: 'Anschluss', many: 'Anschlüsse' },
+};
+
+/**
+ * What is missing when a rank leads to another of the SAME kind.
+ *
+ * The plant chain goes port → port, and "N von M Anschlüssen ohne Anschluss"
+ * reads like a typo. Naming the relation instead says the true thing: the
+ * port is there, it just goes nowhere.
+ */
+const SELF_LABEL: Partial<Record<GraphNodeKind, string>> = {
+  port: 'Verbindung',
 };
 
 /**
@@ -168,7 +203,9 @@ function gapsFor(graph: Graph, chain: RelationChain): string[] {
     const missing = danglingNodes(graph, kind).length;
     if (missing === 0) continue;
     const total = graph.nodes.filter((n) => n.kind === kind).length;
-    gaps.push(`${missing} von ${total} ${KIND_LABEL[kind].many} ohne ${KIND_LABEL[ranks[i + 1]].one}.`);
+    const next = ranks[i + 1];
+    const missingLabel = next === kind ? (SELF_LABEL[kind] ?? KIND_LABEL[next].one) : KIND_LABEL[next].one;
+    gaps.push(`${missing} von ${total} ${KIND_LABEL[kind].many} ohne ${missingLabel}.`);
   }
   return gaps;
 }
@@ -235,7 +272,32 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
     return { graph: buildRelationGraph(graphSourceFor(store), spec), spec };
   }, [store, chain, chosenCount, startTypes, startSystems]);
 
-  const graph = built?.graph ?? null;
+  /**
+   * The drawing, which is not always the whole graph.
+   *
+   * `gapsFor` keeps reading the FULL graph below, so the readout still reports
+   * every device with no connection point — the finding survives even when the
+   * boxes do not.
+   */
+  const drawn: { graph: Graph; hiddenIsolated: number } | null = useMemo(() => {
+    if (!built) return null;
+    if (chain.isolatedStart !== 'drop') return { graph: built.graph, hiddenIsolated: 0 };
+    const startKind = chainRanks(built.spec)[0];
+    const isolated = new Set(danglingNodes(built.graph, startKind).map((n) => n.id));
+    // Only start-rank nodes that touch NOTHING. A node with an incoming edge
+    // is part of the picture even if nothing leaves it.
+    for (const e of built.graph.edges) isolated.delete(e.target);
+    if (isolated.size === 0) return { graph: built.graph, hiddenIsolated: 0 };
+    return {
+      graph: {
+        nodes: built.graph.nodes.filter((n) => !isolated.has(n.id)),
+        edges: built.graph.edges,
+      },
+      hiddenIsolated: isolated.size,
+    };
+  }, [built, chain]);
+
+  const graph = drawn?.graph ?? null;
 
   const overBudget = (graph?.nodes.length ?? 0) > NODE_BUDGET;
 
@@ -260,11 +322,15 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
   }, [graph, effectiveModelId, setGraphHighlight]);
 
   useEffect(() => {
-    if (!built || overBudget) {
+    if (!built || !drawn || overBudget) {
       setPositioned(null);
       return;
     }
-    const { graph, spec } = built;
+    // The DRAWN graph, not the full one — `drawn` is what the node budget was
+    // measured against and what the reader is meant to see. The chain spec
+    // still comes from `built`, since the ranks are a property of the chain.
+    const graph = drawn.graph;
+    const spec = built.spec;
     let cancelled = false;
     setLaying(true);
     layoutGraph(graph)
@@ -345,7 +411,7 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [built, overBudget]);
+  }, [built, drawn, overBudget]);
 
   /**
    * Clicking a box selects that element everywhere.
@@ -375,6 +441,8 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
     );
   }, []);
 
+  // Deliberately the FULL graph, not the drawn one: a device dropped from the
+  // picture is still a device with no connection point.
   const gaps = built ? gapsFor(built.graph, built.spec) : [];
 
   // Only the relations this drawing actually contains. A legend listing six
@@ -462,6 +530,14 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
                 {gap}
               </p>
             ))}
+            {/* Said rather than done silently: the reader has to know the
+                drawing is not everything that was asked for. */}
+            {(drawn?.hiddenIsolated ?? 0) > 0 && (
+              <p>
+                {drawn?.hiddenIsolated} ohne Anschluss nicht gezeichnet — sie gehören zu keiner
+                Anlage.
+              </p>
+            )}
           </div>
         )}
 

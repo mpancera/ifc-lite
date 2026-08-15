@@ -47,6 +47,8 @@ const KIND_STYLE: Record<GraphNodeKind, string> = {
     'border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/50 text-amber-900 dark:text-amber-100',
   system:
     'border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-900 dark:text-emerald-100',
+  port:
+    'border-rose-300 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/50 text-rose-900 dark:text-rose-100',
 };
 
 export function GraphBoxNode({ data, selected }: NodeProps) {
@@ -69,7 +71,10 @@ export function GraphBoxNode({ data, selected }: NodeProps) {
     >
       <Handle type="target" position={Position.Left} className="!h-1.5 !w-1.5 !border-0 !bg-zinc-400" />
       <span className="truncate font-medium">{name || '(ohne Name)'}</span>
-      <span className="truncate text-[10px] opacity-60">{ifcType}</span>
+      {/* A port box is a third the width and carries a two-character name;
+          `IfcDistributionPort` under it would be an ellipsis. The class is in
+          the tooltip, where it is one hover away rather than never. */}
+      {kind !== 'port' && <span className="truncate text-[10px] opacity-60">{ifcType}</span>}
       <Handle type="source" position={Position.Right} className="!h-1.5 !w-1.5 !border-0 !bg-zinc-400" />
     </div>
   );

@@ -30,7 +30,16 @@ export type GraphNodeKind =
   /** `IfcZone` — a non-geometric grouping of spaces. */
   | 'zone'
   /** `IfcSystem` and its subtypes — the trade system an element belongs to. */
-  | 'system';
+  | 'system'
+  /**
+   * `IfcDistributionPort` and its kin — the connection point on an element.
+   *
+   * Its own rank rather than folded into `element`, because a schematic reads
+   * as element–port–port–element: the ports are what the connection is
+   * actually between, and hiding them would leave an edge whose ends the
+   * model does not agree with.
+   */
+  | 'port';
 
 /**
  * The IFC relationship an edge stands for, by its exact EXPRESS name.
@@ -45,7 +54,9 @@ export type GraphRelation =
   | 'IfcRelContainedInSpatialStructure'
   | 'IfcRelReferencedInSpatialStructure'
   | 'IfcRelAggregates'
-  | 'IfcRelAssignsToGroup';
+  | 'IfcRelAssignsToGroup'
+  | 'IfcRelConnectsPortToElement'
+  | 'IfcRelConnectsPorts';
 
 /**
  * Which way an edge is followed.
@@ -75,6 +86,16 @@ export interface GraphEdge {
   source: string;
   target: string;
   relation: GraphRelation;
+  /**
+   * True when the relation has no direction — two joined ports, say.
+   *
+   * `source` and `target` still hold whichever way the walk happened to
+   * arrive, because a renderer needs two ends. This flag says not to read
+   * meaning into which is which: without it, "has no outgoing edge" counts
+   * every target end of a symmetric edge as a dead end, and a plant where
+   * every port is connected reports half of them as loose.
+   */
+  symmetric?: boolean;
 }
 
 export interface Graph {
@@ -85,4 +106,17 @@ export interface Graph {
 /** The edge id for a given triple. One relation between two nodes, once. */
 export function edgeId(source: string, target: string, relation: GraphRelation): string {
   return `${source}-${relation}-${target}`;
+}
+
+/**
+ * The edge id for a relation with no inherent direction.
+ *
+ * Two ports joined by `IfcRelConnectsPorts` are joined, full stop — which of
+ * them the file happens to list as `RelatingPort` is an authoring artifact,
+ * not a fact about the plant. Walked from both ends, the same connection
+ * would otherwise arrive twice under two ids and be drawn as two lines
+ * between the same pair.
+ */
+export function symmetricEdgeId(a: string, b: string, relation: GraphRelation): string {
+  return a <= b ? `${a}-${relation}-${b}` : `${b}-${relation}-${a}`;
 }

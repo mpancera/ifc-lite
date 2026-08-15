@@ -19,6 +19,7 @@
 import type { GraphSource } from './source.js';
 import {
   edgeId,
+  symmetricEdgeId,
   type Graph,
   type GraphEdge,
   type GraphNode,
@@ -27,9 +28,20 @@ import {
   type RelationDirection,
 } from './types.js';
 
+/**
+ * Which way a hop follows its relationship.
+ *
+ * `both` is for relationships that have no inherent direction —
+ * `IfcRelConnectsPorts` above all. A port can be listed as either end of a
+ * connection depending on which one the authoring tool wrote first, so a hop
+ * that only went one way would find half the plant. Edges from a `both` hop
+ * are de-duplicated symmetrically (see `symmetricEdgeId`).
+ */
+export type HopDirection = RelationDirection | 'both';
+
 export interface RelationHop {
   relation: GraphRelation;
-  direction: RelationDirection;
+  direction: HopDirection;
   /**
    * Keep only targets of these exact EXPRESS types. Empty keeps every target.
    *
@@ -111,16 +123,36 @@ export function buildRelationGraph(source: GraphSource, chain: RelationChain): G
   for (const hop of chain.hops) {
     const next: GraphNode[] = [];
     const keep = new Set(hop.keepTypes);
+    const symmetric = hop.direction === 'both';
     for (const from of frontier) {
-      for (const targetId of source.related(from.expressId, hop.relation, hop.direction)) {
+      const targets =
+        hop.direction === 'both'
+          ? [
+              ...source.related(from.expressId, hop.relation, 'forward'),
+              ...source.related(from.expressId, hop.relation, 'inverse'),
+            ]
+          : source.related(from.expressId, hop.relation, hop.direction);
+      for (const targetId of targets) {
+        // A symmetric hop can reach the node it started from when a file
+        // records something as connected to itself. Drawing that as an edge
+        // from a box to the same box says nothing.
+        if (symmetric && targetId === from.expressId) continue;
         const targetType = source.typeOf(targetId);
         if (!targetType) continue;
         if (keep.size > 0 && !keep.has(targetType)) continue;
         const to = addNode(targetId, hop.kind);
         if (!to) continue;
-        const id = edgeId(from.id, to.id, hop.relation);
+        const id = symmetric
+          ? symmetricEdgeId(from.id, to.id, hop.relation)
+          : edgeId(from.id, to.id, hop.relation);
         if (!edges.has(id)) {
-          edges.set(id, { id, source: from.id, target: to.id, relation: hop.relation });
+          edges.set(id, {
+            id,
+            source: from.id,
+            target: to.id,
+            relation: hop.relation,
+            ...(symmetric ? { symmetric: true } : {}),
+          });
         }
         next.push(to);
       }
@@ -257,6 +289,52 @@ export function systemMembersInSpace(systemIds: readonly number[]): RelationChai
 }
 
 /**
+ * Plant topology: element → its ports → the ports those are joined to.
+ *
+ * The first chain that draws a real plant rather than a location tree. It
+ * reads element–port–port–element, which is what a schematic IS: the ports are
+ * what the connection is between, and the elements hang off them.
+ *
+ * # Why there is no fourth hop back to the elements
+ * There does not need to be. Every element of the chosen types is already a
+ * node at the start, and emits its own element→port edge — so the far side of
+ * a connection is drawn by that element's own first hop, not by walking back.
+ * A fourth hop would add nothing and would make the terminal rank ambiguous
+ * with the first (both `element`), which is exactly what makes a dead-end
+ * count meaningless.
+ *
+ * The consequence is worth knowing: a port whose element is NOT among the
+ * chosen types hangs there connected to nothing visible. That is honest —
+ * widening the type selection brings it in — and it is why the picker shows
+ * every class the model holds with its count.
+ *
+ * # Both directions, on purpose
+ * `IfcRelConnectsPorts` has no inherent direction; which port a file lists
+ * first is an authoring artifact. Walking one way would find half the plant.
+ */
+export function plantTopology(elementTypes: readonly string[]): RelationChain {
+  return {
+    start: { kind: 'element', types: elementTypes },
+    hops: [
+      {
+        // Inverse: from the element to the ports that sit on it. Forward runs
+        // port → element, the way the EXPRESS attributes are ordered.
+        relation: 'IfcRelConnectsPortToElement',
+        direction: 'inverse',
+        keepTypes: [],
+        kind: 'port',
+      },
+      {
+        relation: 'IfcRelConnectsPorts',
+        direction: 'both',
+        keepTypes: [],
+        kind: 'port',
+      },
+    ],
+  };
+}
+
+/**
  * The ranks a chain produces, in order: the start kind, then one per hop.
  *
  * The last one is TERMINAL — nothing is supposed to leave it. Callers that
@@ -280,6 +358,13 @@ export function chainRanks(chain: RelationChain): GraphNodeKind[] {
  * that shows it without saying it will be read as complete.
  */
 export function danglingNodes(graph: Graph, kind: GraphNodeKind): GraphNode[] {
-  const hasOutgoing = new Set(graph.edges.map((e) => e.source));
-  return graph.nodes.filter((n) => n.kind === kind && !hasOutgoing.has(n.id));
+  const reached = new Set<string>();
+  for (const e of graph.edges) {
+    reached.add(e.source);
+    // A symmetric edge leads away from BOTH of its ends — which one is stored
+    // as the target is an accident of the walk. Counting only sources reported
+    // half of a fully-connected plant's ports as loose.
+    if (e.symmetric) reached.add(e.target);
+  }
+  return graph.nodes.filter((n) => n.kind === kind && !reached.has(n.id));
 }
