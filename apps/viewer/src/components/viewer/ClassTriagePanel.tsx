@@ -28,13 +28,11 @@
  * so instead of presenting a button that would write an invalid file.
  */
 
-import React, { useMemo, useState } from 'react';
-import { Blocks, Check, Search, Eye, Ban, TriangleAlert } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Blocks, Check, Search, Eye, Ban, TriangleAlert, X, Undo2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import {
-  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger,
-} from '@/components/ui/dialog';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { useClassTriage } from '@/hooks/useClassTriage';
 import {
   groupProxies, suggestAxes, summariseGroups, AXIS_ORDER, AXIS_LABELS,
@@ -56,12 +54,12 @@ import { toast } from '@/components/ui/toast';
 const REQUIRED_AXES: readonly ProxyGroupAxis[] = ['class'];
 
 export interface ClassTriagePanelProps {
-  trigger: React.ReactNode;
+  onClose: () => void;
 }
 
-export function ClassTriagePanel({ trigger }: ClassTriagePanelProps): React.ReactElement {
-  const [open, setOpen] = useState(false);
-  const { elements, hasModel, alreadyStated } = useClassTriage(open);
+export function ClassTriagePanel({ onClose }: ClassTriagePanelProps): React.ReactElement {
+  const [includeStated, setIncludeStated] = useState(false);
+  const { elements, hasModel, alreadyStated } = useClassTriage(true, includeStated);
   const catalog = useClassCatalog();
 
   const [axes, setAxes] = useState<ProxyGroupAxis[] | null>(null);
@@ -76,6 +74,12 @@ export function ClassTriagePanel({ trigger }: ClassTriagePanelProps): React.Reac
   const setAttribute = useViewerStore((state) => state.setAttribute);
   const canAuthorOn = useViewerStore((state) => state.canAuthorOn);
   const setSelectedEntities = useViewerStore((state) => state.setSelectedEntities);
+  const setIsolatedEntities = useViewerStore((state) => state.setIsolatedEntities);
+
+  // Isolation belongs to this panel while it is open; closing gives the model
+  // back whole, because an isolated model with no panel explaining why reads
+  // as a broken viewer.
+  useEffect(() => () => { useViewerStore.getState().setIsolatedEntities(null); }, []);
 
   const suggested = useMemo(() => suggestAxes(elements, REQUIRED_AXES), [elements]);
   const activeAxes = axes ?? suggested;
@@ -118,7 +122,8 @@ export function ClassTriagePanel({ trigger }: ClassTriagePanelProps): React.Reac
   };
 
   const showGroup = (group: ProxyGroup) => {
-    setActiveKey(group.key === activeKey ? null : group.key);
+    const opening = group.key !== activeKey;
+    setActiveKey(opening ? group.key : null);
     // No prefill, unlike the proxy triage. There the catalogue is 1330 entries
     // and a search term is the only way in; here the candidates are the class's
     // own subtypes — four of them under IfcFlowSegment — so the whole list fits
@@ -127,7 +132,12 @@ export function ClassTriagePanel({ trigger }: ClassTriagePanelProps): React.Reac
     setQuery('');
     setKeepWord('');
     if (!activeModelId) return;
-    setSelectedEntities(group.members.map((expressId) => ({ modelId: activeModelId, expressId })));
+    // Selected AND isolated: selection drives the inspector, isolation is what
+    // lets somebody actually SEE the group they are about to decide.
+    setSelectedEntities(opening
+      ? group.members.map((expressId) => ({ modelId: activeModelId, expressId }))
+      : []);
+    setIsolatedEntities(opening ? new Set(group.members) : null);
   };
 
   const decide = (group: ProxyGroup, decision: ProxyDecision) => {
@@ -168,34 +178,36 @@ export function ClassTriagePanel({ trigger }: ClassTriagePanelProps): React.Reac
   };
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>{trigger}</DialogTrigger>
-      <DialogContent className="max-w-3xl text-xs">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 text-sm">
-            <Blocks className="h-4 w-4 text-muted-foreground" />
-            Zwischenklassen und abstrakte Klassen
-          </DialogTitle>
-          <DialogDescription className="text-xs leading-tight">
+    <div className="flex h-full flex-col text-xs">
+      <div className="flex items-center gap-2 border-b px-2 py-1.5">
+        <Blocks className="h-4 w-4 text-muted-foreground" />
+        <span className="text-sm font-medium">Clean Classes</span>
+        <Button size="sm" variant="ghost" className="ml-auto h-6 w-6 p-0" onClick={onClose}>
+          <X className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+
+      {!hasModel && <p className="p-4 text-center text-muted-foreground">Kein Modell geladen.</p>}
+
+      {hasModel && (
+        <ScrollArea className="flex-1">
+          <p className="px-2 py-1.5 leading-tight text-muted-foreground">
             Elemente auf einer Klasse, die noch keine Fachklasse ist — etwa
             IfcFlowSegment statt IfcPipeSegment. Eine Gruppe wird einmal
             entschieden und gilt für alle ihre Mitglieder.
-          </DialogDescription>
-        </DialogHeader>
-
-        {!hasModel && <p className="py-6 text-center text-muted-foreground">Kein Modell geladen.</p>}
-
-        {hasModel && elements.length === 0 && (
-          <p className="py-6 text-center text-muted-foreground">
-            {alreadyStated > 0
-              ? `Nichts offen — alle ${alreadyStated} Elemente auf einer Zwischenklasse sind erklärt.`
-              : 'Nichts zu tun — jedes Element sitzt auf einer echten Fachklasse.'}
           </p>
-        )}
 
-        {elements.length > 0 && (
+          {elements.length === 0 && (
+            <p className="p-4 text-center text-muted-foreground">
+              {alreadyStated > 0
+                ? `Nichts offen — alle ${alreadyStated} Elemente auf einer Zwischenklasse sind erklärt.`
+                : 'Nichts zu tun — jedes Element sitzt auf einer echten Fachklasse.'}
+            </p>
+          )}
+
+          {(elements.length > 0 || alreadyStated > 0) && (
           <>
-            <div className="flex flex-wrap items-center gap-1.5 border-b pb-2">
+            <div className="flex flex-wrap items-center gap-1.5 border-b px-2 pb-2">
               <span className="text-muted-foreground">Gruppieren nach</span>
               {AXIS_ORDER.map((axis) => (
                 <Button
@@ -212,13 +224,29 @@ export function ClassTriagePanel({ trigger }: ClassTriagePanelProps): React.Reac
                   {AXIS_LABELS[axis]}
                 </Button>
               ))}
-              <span className="ml-auto tabular-nums text-muted-foreground">
-                {summariseGroups(groups)} · {stillOpen} offen
-                {alreadyStated > 0 && ` · ${alreadyStated} bereits erklärt`}
-              </span>
             </div>
 
-            <div className="max-h-[22rem] overflow-y-auto">
+            <div className="flex flex-wrap items-center gap-2 border-b px-2 py-1 tabular-nums text-muted-foreground">
+              <span>{summariseGroups(groups)} · {stillOpen} offen</span>
+              {alreadyStated > 0 && (
+                // Clickable: an explanation somebody wants back was otherwise
+                // a dead end — the count said the elements exist and gave no
+                // way to reach them.
+                <Button
+                  size="sm"
+                  variant={includeStated ? 'default' : 'ghost'}
+                  className="ml-auto h-5 px-1.5 text-[11px]"
+                  onClick={() => { setIncludeStated(!includeStated); setActiveKey(null); }}
+                >
+                  <Undo2 className="mr-1 h-3 w-3" />
+                  {includeStated
+                    ? `${alreadyStated} erklärte wieder ausblenden`
+                    : `${alreadyStated} bereits erklärt — zurückholen`}
+                </Button>
+              )}
+            </div>
+
+            <div>
               {groups.map((group) => {
                 const decision = decisions.get(group.key) ?? { kind: 'undecided' as const };
                 const isActive = group.key === activeKey;
@@ -260,7 +288,7 @@ export function ClassTriagePanel({ trigger }: ClassTriagePanelProps): React.Reac
                           <Input
                             value={query}
                             onChange={(event) => setQuery(event.target.value)}
-                            placeholder={`Fachklasse unter ${entity} suchen`}
+                            placeholder={`nach IFC-Entität oder Fachklasse unter ${entity} suchen…`}
                             className="h-6 pl-6 text-xs"
                           />
                         </div>
@@ -350,9 +378,10 @@ export function ClassTriagePanel({ trigger }: ClassTriagePanelProps): React.Reac
               })}
             </div>
           </>
-        )}
-      </DialogContent>
-    </Dialog>
+          )}
+        </ScrollArea>
+      )}
+    </div>
   );
 }
 

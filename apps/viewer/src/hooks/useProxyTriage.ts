@@ -159,7 +159,17 @@ export interface ProxyTriageSource {
   readonly alreadyStated: number;
 }
 
-export function useProxyTriage(enabled: boolean): ProxyTriageSource {
+/**
+ * @param includeStated Bring back the proxies whose author already explained
+ *   them. A view change only — nothing is un-said in the model until a new
+ *   decision is applied over it, so switching this off restores the list
+ *   exactly. `alreadyStated` keeps counting them either way, so the button
+ *   offering them back does not vanish the moment it is used.
+ */
+export function useProxyTriage(
+  enabled: boolean,
+  includeStated = false,
+): ProxyTriageSource {
   const models = useViewerStore((state) => state.models);
   const activeModelId = useViewerStore((state) => state.activeModelId);
   const mutationViews = useViewerStore((state) => state.mutationViews);
@@ -193,7 +203,10 @@ export function useProxyTriage(enabled: boolean): ProxyTriageSource {
         const stated = overlay?.getAttributeMutationsForEntity(expressId)
           ?.find((a) => a.name === 'ObjectType')?.value
           ?? positional(store, expressId, OBJECT_TYPE_INDEX);
-        if (text(stated)) { alreadyStated += 1; continue; }
+        if (text(stated)) {
+          alreadyStated += 1;
+          if (!includeStated) continue;
+        }
 
         const shape = positional(store, expressId, REPRESENTATION_INDEX);
         const shapeId = typeof shape === 'number' ? shape : null;
@@ -211,7 +224,7 @@ export function useProxyTriage(enabled: boolean): ProxyTriageSource {
     }
 
     return { elements, hasModel: true, alreadyStated };
-  }, [enabled, models, activeModelId, mutationViews, mutationVersion]);
+  }, [enabled, includeStated, models, activeModelId, mutationViews, mutationVersion]);
 }
 
 /** A shape's layer, via any of the representations the shape holds. */

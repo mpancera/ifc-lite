@@ -61,6 +61,7 @@ import { createZonesSlice, type ZonesSlice } from './slices/zonesSlice.js';
 import { createIfcZonesSlice, type IfcZonesSlice } from './slices/ifcZonesSlice.js';
 import { createHeightsSlice, type HeightsSlice } from './slices/heightsSlice.js';
 import { createHousekeepingSlice, type HousekeepingSlice } from './slices/housekeepingSlice.js';
+import { createTriageSlice, type TriageSlice } from './slices/triageSlice.js';
 import { createProjectSlice, type ProjectSlice } from './slices/projectSlice.js';
 import { createViewModeSlice, type ViewModeSlice } from './slices/viewModeSlice.js';
 import { invalidateVisibleBasketCache } from './basketVisibleSet.js';
@@ -186,6 +187,7 @@ export type ViewerState = LoadingSlice &
   IfcZonesSlice &
   HeightsSlice &
   HousekeepingSlice &
+  TriageSlice &
   HousekeepingSlice &
   ProjectSlice &
   ViewModeSlice &
@@ -281,6 +283,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
   ...createIfcZonesSlice(...args),
   ...createHeightsSlice(...args),
   ...createHousekeepingSlice(...args),
+  ...createTriageSlice(...args),
   ...createHousekeepingSlice(...args),
   ...createProjectSlice(...args),
   ...createViewModeSlice(...args),
@@ -602,6 +605,8 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
       layersPanelVisible: panel === 'layers',
       zonesPanelVisible: panel === 'zones',
       housekeepingPanelVisible: panel === 'housekeeping',
+      proxyTriagePanelVisible: panel === 'proxyTriage',
+      classTriagePanelVisible: panel === 'classTriage',
       rightPanelCollapsed: false,
     });
     if (get().sidebarMode !== 'expanded') get().setSidebarMode('expanded');
@@ -640,6 +645,8 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
         layersPanelVisible: false,
         zonesPanelVisible: false,
         housekeepingPanelVisible: false,
+        proxyTriagePanelVisible: false,
+        classTriagePanelVisible: false,
         rightPanelCollapsed: false,
       });
       get().setSidebarActivePanel('properties');
@@ -733,6 +740,8 @@ export const SIDEBAR_PANEL_FLAGS: ReadonlyArray<readonly [keyof ViewerState, Wor
   ['layersPanelVisible', 'layers'],
   ['zonesPanelVisible', 'zones'],
   ['housekeepingPanelVisible', 'housekeeping'],
+  ['proxyTriagePanelVisible', 'proxyTriage'],
+  ['classTriagePanelVisible', 'classTriage'],
 ];
 
 /**

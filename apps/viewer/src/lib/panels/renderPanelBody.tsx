@@ -29,6 +29,8 @@ import { RoomPanel } from '@/components/viewer/RoomPanel';
 import { ZonesPanel } from '@/components/viewer/ZonesPanel';
 import { HeightsPanel } from '@/components/viewer/HeightsPanel';
 import { HousekeepingPanel } from '@/components/viewer/HousekeepingPanel';
+import { ProxyTriagePanel } from '@/components/viewer/ProxyTriagePanel';
+import { ClassTriagePanel } from '@/components/viewer/ClassTriagePanel';
 // Lazy: the Layers panel pulls in @ifc-lite/merge (engine + blake3); a
 // dynamic chunk keeps it out of the initial bundle until first opened.
 const LayersPanel = lazy(() =>
@@ -60,6 +62,8 @@ export function renderPanelBody(id: WorkspacePanelId, onClose: () => void): Reac
     case 'heights': return <HeightsPanel onClose={onClose} />;
     case 'graph': return <GraphPanel onClose={onClose} />;
     case 'housekeeping': return <HousekeepingPanel onClose={onClose} />;
+    case 'proxyTriage': return <ProxyTriagePanel onClose={onClose} />;
+    case 'classTriage': return <ClassTriagePanel onClose={onClose} />;
     case 'layers': return (
       <Suspense fallback={null}>
         <LayersPanel onClose={onClose} />

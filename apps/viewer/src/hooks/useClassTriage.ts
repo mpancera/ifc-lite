@@ -62,7 +62,11 @@ export interface ClassTriageSource {
   readonly kindByClass: ReadonlyMap<string, GenericClassKind>;
 }
 
-export function useClassTriage(enabled: boolean): ClassTriageSource {
+export function useClassTriage(
+  enabled: boolean,
+  /** See {@link useProxyTriage} — a view change, not a write. */
+  includeStated = false,
+): ClassTriageSource {
   const models = useViewerStore((state) => state.models);
   const activeModelId = useViewerStore((state) => state.activeModelId);
   const mutationViews = useViewerStore((state) => state.mutationViews);
@@ -101,7 +105,10 @@ export function useClassTriage(enabled: boolean): ClassTriageSource {
         const stated = overlay?.getAttributeMutationsForEntity(expressId)
           ?.find((a) => a.name === 'ObjectType')?.value
           ?? store.getEntity?.(expressId)?.attributes?.[OBJECT_TYPE_INDEX];
-        if (text(stated)) { alreadyStated += 1; continue; }
+        if (text(stated)) {
+          alreadyStated += 1;
+          if (!includeStated) continue;
+        }
 
         elements.push({
           expressId,
@@ -121,5 +128,5 @@ export function useClassTriage(enabled: boolean): ClassTriageSource {
     }
 
     return { elements, hasModel: true, alreadyStated, kindByClass };
-  }, [enabled, models, activeModelId, mutationViews, mutationVersion]);
+  }, [enabled, includeStated, models, activeModelId, mutationViews, mutationVersion]);
 }

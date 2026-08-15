@@ -3,9 +3,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * Run against the real schema registry, not a stand-in: the whole question is
- * what IFC actually says about these classes, and a fixture would only record
- * what I believed it said.
+ * Checked against the real IFC-4.3 table, and against the classification
+ * Marc's Data Dictionary shows for the same classes — the whole point is to
+ * agree with that, so a fixture would only record what I believed it said.
  */
 
 import { describe, it } from 'node:test';
@@ -15,38 +15,51 @@ import {
 } from './genericClasses.js';
 
 describe('genericClassKind — Zwischenklassen', () => {
-  it('recognises the ones Marc named', () => {
-    // "Zwischen klassen wäre z.B. IfcFlowSegment, IfcFlowController,
-    // IfcDistributionFlowElement, ..." (Marc, 2026-08-15).
-    assert.equal(genericClassKind('IfcFlowSegment'), 'intermediate');
-    assert.equal(genericClassKind('IfcFlowController'), 'intermediate');
-    assert.equal(genericClassKind('IfcDistributionFlowElement'), 'intermediate');
-  });
-
-  it('covers the rest of the distribution junctions', () => {
+  it('matches the Data Dictionary\'s own list', () => {
+    // Read off the dictionary's tree view (Marc's screenshots, 2026-08-15).
     for (const entity of [
-      'IfcFlowTerminal', 'IfcFlowFitting', 'IfcFlowMovingDevice',
-      'IfcFlowStorageDevice', 'IfcFlowTreatmentDevice', 'IfcEnergyConversionDevice',
-      'IfcDistributionElement', 'IfcDistributionControlElement', 'IfcFurnishingElement',
+      'IfcBuiltElement', 'IfcDistributionElement', 'IfcDistributionFlowElement',
+      'IfcDistributionControlElement', 'IfcEnergyConversionDevice', 'IfcFlowController',
+      'IfcFlowFitting', 'IfcFlowMovingDevice', 'IfcFlowSegment', 'IfcFlowStorageDevice',
+      'IfcFlowTerminal', 'IfcFlowTreatmentDevice', 'IfcFurnishingElement',
     ]) {
       assert.equal(genericClassKind(entity), 'intermediate', entity);
     }
   });
 
-  it('leaves a class that IS a Fachklasse alone', () => {
-    // The trap: IFC4 gave these `…StandardCase` subtypes, so a rule of "has
-    // subtypes" flags all of them. On one real model that was 97 walls and 33
-    // doors. A wall carries a PredefinedType, so a wall is already specific.
-    for (const entity of ['IfcWall', 'IfcDoor', 'IfcSlab', 'IfcColumn', 'IfcMember',
-      'IfcPlate', 'IfcBeam', 'IfcWindow']) {
+  it('is "one step up from a real class" and nothing subtler', () => {
+    // "Einfach gesagt von einer Klasse (z.B. IfcWall, IfcSensor, IfcDamper) in
+    // der IFC-Schema-Hierarchie nach oben" (Marc, 2026-08-15).
+    assert.equal(genericClassKind('IfcSensor'), null);
+    assert.equal(genericClassKind('IfcBuiltElement'), 'intermediate');
+  });
+});
+
+describe('genericClassKind — Klassen, which are fine', () => {
+  it('leaves the classes Marc named alone', () => {
+    for (const entity of ['IfcWall', 'IfcSensor', 'IfcDamper']) {
       assert.equal(genericClassKind(entity), null, entity);
     }
   });
 
-  it('leaves a leaf class alone', () => {
-    assert.equal(genericClassKind('IfcSanitaryTerminal'), null);
-    assert.equal(genericClassKind('IfcPipeSegment'), null);
-    assert.equal(genericClassKind('IfcFurniture'), null);
+  it('does not trip over the deprecated StandardCase subtypes', () => {
+    // IFC4 gave IfcWall a `…StandardCase` child describing how the geometry
+    // was modelled, not what the thing is. Counting it made every wall a
+    // Zwischenklasse — 97 of them on one real model.
+    assert.equal(genericClassKind('IfcWall'), null);
+    assert.equal(genericClassKind('IfcDoor'), null);
+    assert.equal(genericClassKind('IfcSlab'), null);
+    assert.equal(genericClassKind('IfcColumn'), null);
+    assert.equal(genericClassKind('IfcBeam'), null);
+  });
+
+  it('agrees with the dictionary on the leaves it labels "Klasse"', () => {
+    for (const entity of [
+      'IfcAnnotation', 'IfcCivilElement', 'IfcDistributionChamberElement',
+      'IfcElementAssembly', 'IfcGeographicElement',
+    ]) {
+      assert.equal(genericClassKind(entity), null, entity);
+    }
   });
 
   it('does not call a proxy generic — that is the other triage\'s job', () => {
@@ -55,32 +68,34 @@ describe('genericClassKind — Zwischenklassen', () => {
 });
 
 describe('genericClassKind — abstrakte Klassen', () => {
-  it('recognises a class no file may instantiate', () => {
-    assert.equal(genericClassKind('IfcElement'), 'abstract');
-    assert.equal(genericClassKind('IfcBuildingElement'), 'abstract');
-    assert.equal(genericClassKind('IfcProduct'), 'abstract');
+  it('agrees with the dictionary', () => {
+    for (const entity of [
+      'IfcElement', 'IfcProduct', 'IfcElementComponent', 'IfcFeatureElement',
+      'IfcGeotechnicalElement',
+    ]) {
+      assert.equal(genericClassKind(entity), 'abstract', entity);
+    }
   });
 
   it('reports abstract before intermediate where a class is both', () => {
-    // IfcElement is abstract AND has subtypes AND has no PredefinedType. The
-    // stronger statement wins: it cannot be instantiated at all.
+    // IfcElement is abstract AND has subtypes. The stronger statement wins:
+    // it cannot be instantiated at all.
     assert.equal(genericClassKind('IfcElement'), 'abstract');
   });
 });
 
 describe('genericClassKind — what it refuses to judge', () => {
-  it('says nothing about things nobody classifies', () => {
+  it('says nothing about things nobody classifies on an element', () => {
     assert.equal(genericClassKind('IfcRelAggregates'), null);
     assert.equal(genericClassKind('IfcPropertySet'), null);
-    assert.equal(genericClassKind('IfcCartesianPoint'), null);
+    assert.equal(genericClassKind('IfcActor'), null);
+    assert.equal(genericClassKind('IfcGroup'), null);
   });
 
-  it('shrugs at a class the registry does not know', () => {
+  it('shrugs at a class the schema does not know', () => {
     assert.equal(genericClassKind('IfcNotAThing'), null);
-  });
-
-  it('does not judge a type object', () => {
-    assert.equal(genericClassKind('IfcFlowSegmentType'), null);
+    // IFC4's name for what 4.3 calls IfcBuiltElement — gone from the 4.3 table.
+    assert.equal(genericClassKind('IfcBuildingElement'), null);
   });
 });
 
@@ -93,8 +108,6 @@ describe('candidateSubclasses', () => {
   });
 
   it('never offers another junction as the answer', () => {
-    // Answering IfcDistributionElement with IfcFlowController would move the
-    // question rather than settle it.
     const under = candidateSubclasses('IfcDistributionElement');
     assert.ok(!under.includes('IfcFlowController'));
     assert.ok(!under.includes('IfcFlowTerminal'));
@@ -107,12 +120,15 @@ describe('candidateSubclasses', () => {
     assert.ok(under.includes('IfcDoor'));
   });
 
+  it('does not offer a deprecated StandardCase variant', () => {
+    assert.ok(!candidateSubclasses('IfcBuiltElement').includes('IfcWallStandardCase'));
+  });
+
   it('has nothing to offer under a leaf', () => {
     assert.deepEqual(candidateSubclasses('IfcSanitaryTerminal'), []);
   });
 
   it('comes back in a stable order', () => {
-    assert.deepEqual(candidateSubclasses('IfcFlowSegment'), candidateSubclasses('IfcFlowSegment'));
     const under = candidateSubclasses('IfcFlowSegment');
     assert.deepEqual([...under].sort(), under);
   });

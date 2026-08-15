@@ -17,8 +17,8 @@ import { tourAnchor, toolAnchor } from '@/lib/tours/anchors';
 import { BulkPropertyEditor } from '../../BulkPropertyEditor';
 import { DataConnector } from '../../DataConnector';
 import { ProductLibraryPanel } from '../../catalog/ProductLibraryPanel';
-import { ProxyTriagePanel } from '../../ProxyTriagePanel';
-import { ClassTriagePanel } from '../../ClassTriagePanel';
+
+
 import { ReferenceOverridesPanel } from '../../ReferenceOverridesPanel';
 import { SmartPropertyPanel } from '../../SmartPropertyPanel';
 import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
@@ -58,6 +58,9 @@ export function AuthorTab() {
   const canRedo = canEditInSession && activeModelId !== null && (redoStacks.get(activeModelId)?.length ?? 0) > 0;
 
   const { activeWorkspacePanels, handleToggleRightPanel, handleToggleBottomPanel } = useWorkspacePanelControls();
+  // The two Clean panels are registry panels, so they toggle by id rather than
+  // through the older RightPanel union.
+  const toggleWorkspacePanel = useViewerStore((s) => s.toggleWorkspacePanel);
 
   return (
     <>
@@ -232,25 +235,21 @@ export function AuthorTab() {
           way — find the elements whose class says too little, group them by
           what the author already told us, and decide a group at a time. */}
       <RibbonGroup label="Clean">
-        <ProxyTriagePanel
-          trigger={
-            <RibbonLargeButton
-              icon={Boxes}
-              label="Proxy-Triage"
-              tooltip="Elemente ohne Fachklasse (IfcBuildingElementProxy) gruppenweise der richtigen Klasse zuweisen"
-              disabled={!ifcDataStore}
-            />
-          }
+        <RibbonLargeButton
+          icon={Boxes}
+          label="Clean Proxy"
+          tooltip="Elemente ohne Fachklasse (IfcBuildingElementProxy) gruppenweise der richtigen Klasse zuweisen"
+          disabled={!ifcDataStore}
+          active={activeWorkspacePanels.has('proxyTriage')}
+          onClick={() => toggleWorkspacePanel('proxyTriage')}
         />
-        <ClassTriagePanel
-          trigger={
-            <RibbonLargeButton
-              icon={Blocks}
-              label="Zwischenklassen"
-              tooltip="Elemente auf einer Zwischen- oder abstrakten Klasse gruppenweise der richtigen Fachklasse zuweisen"
-              disabled={!ifcDataStore}
-            />
-          }
+        <RibbonLargeButton
+          icon={Blocks}
+          label="Clean Classes"
+          tooltip="Elemente auf einer Zwischen- oder abstrakten Klasse gruppenweise der richtigen Fachklasse zuweisen"
+          disabled={!ifcDataStore}
+          active={activeWorkspacePanels.has('classTriage')}
+          onClick={() => toggleWorkspacePanel('classTriage')}
         />
       </RibbonGroup>
 

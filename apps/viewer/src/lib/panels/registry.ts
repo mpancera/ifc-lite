@@ -23,6 +23,8 @@ import {
   MessageSquare,
   ClipboardCheck,
   ClipboardList,
+  Boxes,
+  Blocks,
   Palette,
   Crosshair,
   Puzzle,
@@ -60,7 +62,9 @@ export type WorkspacePanelId =
   | 'zones'
   | 'heights'
   | 'graph'
-  | 'housekeeping';
+  | 'housekeeping'
+  | 'proxyTriage'
+  | 'classTriage';
 
 /** Activity-bar clustering — a divider is drawn whenever the group changes. */
 export type PanelGroup = 'navigate' | 'inspect' | 'review' | 'author' | 'work';
@@ -143,6 +147,15 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   // checklist you consult WHILE looking at what it points at has to stand
   // beside the viewport rather than under it.
   { id: 'housekeeping', title: 'Housekeeping', short: 'Prüfplan', Icon: ClipboardList, group: 'review', region: 'side' },
+  // The two class-cleaning tools. APPENDED so the frozen Alt+1..0 mapping
+  // stays intact (no Alt shortcut).
+  //
+  // Side panels and not dialogs, which is what they were first: deciding what
+  // a group of elements IS means looking at them, and a dialog covers the one
+  // thing that would settle the question (Marc, 2026-08-15). As panels they
+  // isolate their selection in the viewport and stand beside it.
+  { id: 'proxyTriage', title: 'Clean Proxy', short: 'Proxy', Icon: Boxes, group: 'author', region: 'side' },
+  { id: 'classTriage', title: 'Clean Classes', short: 'Klassen', Icon: Blocks, group: 'author', region: 'side' },
 ];
 
 /** The bottom-strip panel ids, mapped to their store visibility flag + setter

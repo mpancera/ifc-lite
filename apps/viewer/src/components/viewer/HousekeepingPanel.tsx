@@ -35,7 +35,6 @@ import {
   summariseChecks, formatProgress,
   type CheckState, type FindingSeverity, type HousekeepingFinding, type RemedyTarget,
 } from '@/lib/housekeeping/findings';
-import { ProxyTriagePanel } from '@/components/viewer/ProxyTriagePanel';
 import { useViewerStore } from '@/store';
 
 const STATE_ICON: Record<CheckState, React.ComponentType<{ className?: string }>> = {
@@ -97,6 +96,7 @@ export function HousekeepingPanel({ onClose }: { onClose: () => void }): React.R
     // own — so both land in the same place, for now.
     if (target === 'georeference' || target === 'properties') openPanel('properties');
     else if (target === 'ids') openPanel('ids');
+    else if (target === 'proxy-triage') openPanel('proxyTriage');
   };
 
   const renderFinding = (finding: HousekeepingFinding, isAccepted: boolean) => {
@@ -124,15 +124,7 @@ export function HousekeepingPanel({ onClose }: { onClose: () => void }): React.R
                 </Button>
               )}
 
-              {finding.remedy?.target === 'proxy-triage' ? (
-                <ProxyTriagePanel
-                  trigger={(
-                    <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]">
-                      {finding.remedy.label}
-                    </Button>
-                  )}
-                />
-              ) : finding.remedy && (
+              {finding.remedy && (
                 <Button
                   size="sm" variant="outline" className="h-6 px-2 text-[11px]"
                   onClick={() => goTo(finding.remedy!.target)}
