@@ -65,6 +65,7 @@ import { getEntityBounds, getEntityCenter } from '@/utils/viewportUtils';
 import type { CatalogEntry } from '@/lib/catalog';
 import { disciplineSystemName, findDisciplineSystem, normalizeRoleId } from '@/lib/roles/disciplineRoles';
 import { mayCreateEntities, mayEditEntity, type EditPermission } from '@/lib/roles/roleGuard';
+import { typeClassFor } from '@/lib/classTriage/groupAssignment';
 import { preserveZoneColour } from '@/lib/ifcZones/zoneDisplay';
 import { resolveSpaceForPlacement } from '@/lib/relationships/spaceLookup';
 import { overlayContainerOf } from '@/lib/persistence/storeAdapter';
@@ -385,6 +386,32 @@ export interface MutationSlice {
     newType: string,
     predefinedType?: string | null
   ) => Mutation | null;
+
+  /**
+   * Put existing elements into an `IfcSystem`, creating it if asked.
+   *
+   * For the class triage: a group that grouped well on its other attributes
+   * and simply has no system can be given one, once, for every member
+   * (Marc, 2026-08-15). Emits one `IfcRelAssignsToGroup` for the whole set
+   * rather than one per element — that is what the relationship is for.
+   */
+  assignElementsToSystem: (
+    modelId: string,
+    expressIds: readonly number[],
+    target: { existingId: number } | { name: string },
+  ) => { systemId: number } | { error: string };
+
+  /**
+   * Define existing elements by an `IfcXxxType`, creating it if asked.
+   *
+   * The type class is derived from the elements' CURRENT class, so this must
+   * run after any retype — see `lib/classTriage/groupAssignment`.
+   */
+  defineElementsByType: (
+    modelId: string,
+    expressIds: readonly number[],
+    target: { existingId: number } | { name: string },
+  ) => { typeId: number } | { error: string };
 
   // Actions - Store-Level Mutations (raw STEP entity edits)
   /**
@@ -1082,6 +1109,53 @@ function applySmartProperties(
     });
   } catch (err) {
     console.warn('[smartProperties] rule evaluation failed:', err);
+  }
+}
+
+/**
+ * Run a builder that relates EXISTING elements to a group or a type.
+ *
+ * Lighter than {@link runInStoreElementBuilder}, which is shaped for creating
+ * one element: there is no mesh, no spatial registration and no single new
+ * express id to report — the product here is a relationship over a set.
+ *
+ * The anchor still comes from a storey, because `addLibraryTypeToStore` needs
+ * the file's schema and owner history from one. Any storey will do; a type and
+ * a system are not placed, so nothing about the choice reaches the output.
+ */
+function runGroupRelation<T>(
+  get: () => ViewerState,
+  set: (partial: Partial<ViewerState> | ((s: ViewerState) => Partial<ViewerState>)) => void,
+  modelId: string,
+  expressIds: readonly number[],
+  errorContext: string,
+  build: (editor: StoreEditor, anchor: ReturnType<typeof resolveSpatialAnchor>) => T,
+): T | { error: string } {
+  if (expressIds.length === 0) return { error: 'Keine Elemente ausgewählt' };
+  const mayCreate = mayCreateEntities(normalizeRoleId(get().activeDisciplineSystemId));
+  if (!mayCreate.allowed) return { error: mayCreate.reason };
+  if (!get().canCollabEdit()) return { error: 'Editing is disabled for your role in this shared session' };
+
+  const dataStore = get().models.get(modelId)?.ifcDataStore;
+  if (!dataStore) return { error: `No model loaded for id "${modelId}"` };
+  if (!get().mutationViews.get(modelId)) return { error: 'Model has no editable mutation view yet' };
+
+  const editor = getOrCreateStoreEditor(get, set, modelId);
+  if (!editor) return { error: 'Failed to create store editor' };
+
+  const storeyId = dataStore.entityIndex?.byType?.get('IFCBUILDINGSTOREY')?.[0];
+  if (storeyId === undefined) return { error: 'Das Modell hat kein Geschoss, an dem sich verankern lässt' };
+
+  try {
+    ensureStoreyPlacement(dataStore, editor, storeyId);
+    const result = build(editor, resolveSpatialAnchor(dataStore, storeyId));
+    set((state) => ({
+      dirtyModels: new Set(state.dirtyModels).add(modelId),
+      mutationVersion: state.mutationVersion + 1,
+    }));
+    return result;
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : `Failed to ${errorContext}` };
   }
 }
 
@@ -2478,6 +2552,48 @@ export const createMutationSlice: StateCreator<
       roleLabel: disciplineSystemName(system),
     });
   },
+
+  assignElementsToSystem: (modelId, expressIds, target) => runGroupRelation(
+    get, set, modelId, expressIds, 'System zuweisen',
+    (editor, anchor) => {
+      const systemId = 'existingId' in target
+        ? target.existingId
+        // IfcDistributionSystem and not a bare IfcSystem: it is the class the
+        // rest of this app already creates and finds, so a system made here is
+        // the same kind of thing as one made by placing a library element.
+        : addDistributionSystemToStore(editor, anchor.ownerHistoryId, {
+          PredefinedType: 'NOTDEFINED', Name: target.name.trim(),
+        }, anchor.guidRandom).systemId;
+      emitRelAssignsToGroup(
+        editor, anchor.ownerHistoryId, expressIds, systemId, anchor.guidRandom,
+      );
+      return { systemId };
+    },
+  ),
+
+  defineElementsByType: (modelId, expressIds, target) => runGroupRelation(
+    get, set, modelId, expressIds, 'Typ zuweisen',
+    (editor, anchor) => {
+      let typeId: number;
+      if ('existingId' in target) {
+        typeId = target.existingId;
+      } else {
+        // Derived from what the elements ARE right now, which is why the
+        // caller has to have written any retype first.
+        const store = get().models.get(modelId)?.ifcDataStore;
+        const current = store?.entities?.getTypeName(expressIds[0]);
+        const typeClass = current ? typeClassFor(current) : null;
+        if (!typeClass) throw new Error(`${current ?? 'Diese Klasse'} hat keine Typ-Klasse im Schema`);
+        typeId = addLibraryTypeToStore(editor, anchor, {
+          IfcEntity: typeClass, Name: target.name.trim(),
+        }).typeId;
+      }
+      emitRelDefinesByType(
+        editor, anchor.ownerHistoryId, expressIds, typeId, anchor.guidRandom,
+      );
+      return { typeId };
+    },
+  ),
 
   removeEntity: (modelId, expressId, opts) => {
     if (!get().canAuthorOn(modelId, expressId).allowed) return false;

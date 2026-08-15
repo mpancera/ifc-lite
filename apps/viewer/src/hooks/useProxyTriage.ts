@@ -27,6 +27,7 @@ import type { IfcDataStore } from '@ifc-lite/parser';
 import { extractAllEntityAttributes } from '@ifc-lite/parser';
 import { RelationshipType } from '@ifc-lite/data';
 import type { ProxyElement } from '@/lib/proxyTriage/proxyGroups';
+import { readOverlayRelations } from '@/lib/classTriage/overlayRelations';
 import { useViewerStore } from '@/store';
 
 /** The class this whole feature is about. */
@@ -186,6 +187,13 @@ export function useProxyTriage(
     if (!enabled || !store || !model) return { elements: [], hasModel: !!store, alreadyStated: 0 };
 
     const overlay = mutationViews.get(model.id);
+    // What THIS session assigned wins over the parsed index, which never sees
+    // overlay-authored relationships.
+    const fresh = readOverlayRelations(
+      overlay?.getNewEntities?.() ?? [],
+      (id) => text(overlay?.getNewEntity?.(id)?.attributes?.[2])
+        || text(store.entities?.getName(id)),
+    );
     const layers = layerNames(store);
 
     const elements: ProxyElement[] = [];
@@ -215,8 +223,10 @@ export function useProxyTriage(
           ifcClass: PROXY_TYPE,
           name: attribute(store, expressId, 'Name', overlay),
           description: attribute(store, expressId, 'Description', overlay),
-          typeName: relatedName(store, expressId, RelationshipType.DefinesByType),
-          system: relatedName(store, expressId, RelationshipType.AssignsToGroup),
+          typeName: fresh.typeOf.get(expressId)
+            ?? relatedName(store, expressId, RelationshipType.DefinesByType),
+          system: fresh.systemOf.get(expressId)
+            ?? relatedName(store, expressId, RelationshipType.AssignsToGroup),
           layer: shapeId === null ? null : layerOf(store, shapeId, layers),
           geometryKey: shapeId === null ? null : blockOf(store, shapeId),
         });

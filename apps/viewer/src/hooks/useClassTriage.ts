@@ -28,6 +28,7 @@ import { extractAllEntityAttributes } from '@ifc-lite/parser';
 import { RelationshipType } from '@ifc-lite/data';
 import type { ProxyElement } from '@/lib/proxyTriage/proxyGroups';
 import { genericClassKind, type GenericClassKind } from '@/lib/classTriage/genericClasses';
+import { readOverlayRelations } from '@/lib/classTriage/overlayRelations';
 import { useViewerStore } from '@/store';
 
 /** `IfcObject.ObjectType` — index 4 for every product. See `useProxyTriage`. */
@@ -82,6 +83,13 @@ export function useClassTriage(
     if (!enabled || !store || !model) return empty;
 
     const overlay = mutationViews.get(model.id);
+    // What THIS session assigned wins over the parsed index, which never sees
+    // overlay-authored relationships.
+    const fresh = readOverlayRelations(
+      overlay?.getNewEntities?.() ?? [],
+      (id) => text(overlay?.getNewEntity?.(id)?.attributes?.[2])
+        || text(store.entities?.getName(id)),
+    );
     const elements: ProxyElement[] = [];
     const kindByClass = new Map<string, GenericClassKind>();
     let alreadyStated = 0;
@@ -115,8 +123,10 @@ export function useClassTriage(
           ifcClass: current && current !== 'Unknown' ? current : canonical,
           name: attribute(store, expressId, 'Name'),
           description: attribute(store, expressId, 'Description'),
-          typeName: relatedName(store, expressId, RelationshipType.DefinesByType),
-          system: relatedName(store, expressId, RelationshipType.AssignsToGroup),
+          typeName: fresh.typeOf.get(expressId)
+            ?? relatedName(store, expressId, RelationshipType.DefinesByType),
+          system: fresh.systemOf.get(expressId)
+            ?? relatedName(store, expressId, RelationshipType.AssignsToGroup),
           // Layer and shared geometry are deliberately not read here. They cost
           // a full walk of the raw entities, and on the models this targets the
           // class itself plus the type or system already cuts the pile — the

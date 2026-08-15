@@ -40,6 +40,10 @@ import {
 import { useClassCatalog } from '@/lib/classCatalog/useClassCatalog';
 import { searchClassCatalog, describeClass } from '@/lib/classCatalog/classCatalog';
 import { TriageGroupLabel } from '@/components/viewer/TriageGroupLabel';
+import { TriageAssignmentFields } from '@/components/viewer/TriageAssignmentFields';
+import {
+  assignmentOrder, assignmentBlocker, NO_ASSIGNMENT, type GroupAssignment,
+} from '@/lib/classTriage/groupAssignment';
 import { useViewerStore } from '@/store';
 import { toast } from '@/components/ui/toast';
 
@@ -57,6 +61,7 @@ export function ProxyTriagePanel({ onClose }: ProxyTriagePanelProps): React.Reac
 
   const [axes, setAxes] = useState<ProxyGroupAxis[] | null>(null);
   const [decisions, setDecisions] = useState<Map<string, ProxyDecision>>(new Map());
+  const [assignments, setAssignments] = useState<Map<string, GroupAssignment>>(new Map());
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [keepWord, setKeepWord] = useState('');
@@ -68,6 +73,8 @@ export function ProxyTriagePanel({ onClose }: ProxyTriagePanelProps): React.Reac
   const canAuthorOn = useViewerStore((state) => state.canAuthorOn);
   const setSelectedEntities = useViewerStore((state) => state.setSelectedEntities);
   const setIsolatedEntities = useViewerStore((state) => state.setIsolatedEntities);
+  const assignElementsToSystem = useViewerStore((state) => state.assignElementsToSystem);
+  const defineElementsByType = useViewerStore((state) => state.defineElementsByType);
 
   // Isolation belongs to this panel while it is open. Closing it must give the
   // model back whole — an isolated model with no panel explaining why reads as
@@ -117,18 +124,26 @@ export function ProxyTriagePanel({ onClose }: ProxyTriagePanelProps): React.Reac
   /** Write one group's decision into the model. */
   const apply = (group: ProxyGroup) => {
     const decision = decisions.get(group.key) ?? { kind: 'undecided' as const };
+    const assignment = assignments.get(group.key) ?? NO_ASSIGNMENT;
     const writes = proxyWrites(group, decision);
-    if (writes.length === 0 || !activeModelId) return;
+    const hasAssignment = assignment.system !== null || assignment.type !== null;
+    if ((writes.length === 0 && !hasAssignment) || !activeModelId) return;
 
     // The overlay has to exist before anything can be written to it, and the
     // role has to permit writing at all — a silent `null` from `setEntityType`
     // is otherwise indistinguishable from success.
     ensureMutationView(activeModelId);
-    const permission = canAuthorOn(activeModelId, writes[0].expressId);
+    const permission = canAuthorOn(activeModelId, group.members[0]);
     if (!permission.allowed) {
       toast.error(permission.reason ?? 'Das Modell ist schreibgeschützt.');
       return;
     }
+
+    // A type must match the class the members will HAVE, not the proxy class
+    // they are leaving behind.
+    const resulting = decision.kind === 'reclassify' ? decision.entity : PROXY_ENTITY;
+    const blocker = assignmentBlocker(resulting, assignment);
+    if (blocker) { toast.error(blocker); return; }
 
     let written = 0;
     for (const write of writes) {
@@ -143,9 +158,30 @@ export function ProxyTriagePanel({ onClose }: ProxyTriagePanelProps): React.Reac
       written += 1;
     }
 
+    // System and type AFTER any retype, so the type class is derived from what
+    // the members are by then — see `lib/classTriage/groupAssignment`.
+    const done: string[] = [];
+    const members = [...group.members];
+    for (const step of assignmentOrder(writes.length > 0, assignment)) {
+      if (step === 'retype') continue;
+      const choice = step === 'system' ? assignment.system : assignment.type;
+      if (!choice) continue;
+      const target = choice.kind === 'existing'
+        ? { existingId: choice.expressId }
+        : { name: choice.name };
+      const result = step === 'system'
+        ? assignElementsToSystem(activeModelId, members, target)
+        : defineElementsByType(activeModelId, members, target);
+      if ('error' in result) { toast.error(result.error); return; }
+      done.push(step === 'system' ? `System „${choice.name}"` : `Typ „${choice.name}"`);
+    }
+
     const notice = psetNotice(decision);
-    const headline = `${written} von ${writes.length} übernommen`;
-    if (written === 0) toast.error(headline);
+    const parts: string[] = [];
+    if (writes.length > 0) parts.push(`${written} von ${writes.length} übernommen`);
+    if (done.length > 0) parts.push(`${done.join(' und ')} für ${members.length} Elemente`);
+    const headline = parts.join(', ');
+    if (writes.length > 0 && written === 0) toast.error(headline);
     else toast.success(notice ? `${headline}. ${notice}` : headline);
   };
 
@@ -311,10 +347,19 @@ export function ProxyTriagePanel({ onClose }: ProxyTriagePanelProps): React.Reac
                             </div>
                           </div>
 
+                          <TriageAssignmentFields
+                            entity={decision.kind === 'reclassify' ? decision.entity : PROXY_ENTITY}
+                            assignment={assignments.get(group.key) ?? NO_ASSIGNMENT}
+                            onChange={(next) => setAssignments(
+                              (prev) => new Map(prev).set(group.key, next),
+                            )}
+                          />
+
                           <Button
                             size="sm"
                             className="h-6 w-full text-[11px]"
-                            disabled={decision.kind === 'undecided'}
+                            disabled={decision.kind === 'undecided'
+                              && !(assignments.get(group.key)?.system || assignments.get(group.key)?.type)}
                             onClick={() => apply(group)}
                           >
                             Auf {group.members.length} Elemente anwenden
