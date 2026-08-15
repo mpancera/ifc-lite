@@ -389,10 +389,16 @@ export function ViewerLayout() {
         {/* Main Content Area - Desktop Layout */}
         {!isMobile && (
           <div ref={containerRef} className="flex-1 min-h-0 flex flex-col relative">
-            {/* Top: hierarchy | viewport split, with the unified sidebar (#1208)
-                pinned to the right edge (its own activity bar + docked pane). */}
+            {/* hierarchy | viewport split, with the unified sidebar (#1208)
+                pinned to the right edge (its own activity bar + docked pane).
+                The sidebar runs the FULL height of this row — the bottom strip
+                is nested in the left column below, not spread across the whole
+                window. A side panel is a long list of properties and wants
+                every pixel of height it can get, while the bottom panels have
+                nothing to say about the region under the sidebar. */}
             <div className="flex-1 min-h-0 flex">
-              <div className="flex-1 min-w-0">
+              <div className="flex-1 min-w-0 flex flex-col">
+                <div className="flex-1 min-h-0">
                 <PanelGroup orientation="horizontal" className="h-full">
                   {/* Left Panel - Hierarchy */}
                   <Panel
@@ -430,15 +436,13 @@ export function ViewerLayout() {
                     </div>
                   </Panel>
                 </PanelGroup>
-              </div>
+                </div>
 
-              {/* Unified workspace sidebar: activity bar + docked panel host. */}
-              <SidebarDock />
-            </div>
-
-            {/* Bottom Panel - Lists / Script / Gantt / analysis ext (custom resizable).
-                Launched from the sidebar rail but docked here (their home region).
-                A panel that's been dragged out to float / another screen is skipped. */}
+            {/* Bottom Panel - Lists / Script / Gantt / Graph / analysis ext
+                (custom resizable). Launched from the sidebar rail but docked
+                here (their home region). A panel that's been dragged out to
+                float / another screen is skipped.
+                Inside the left column, so it stops at the sidebar's edge. */}
             {(listDocked || scriptDocked || ganttDocked || heightsDocked || graphDocked || !!activeBottomAnalysisExtension) && (
               <div data-detach-root style={{ height: bottomHeight, flexShrink: 0 }} className="relative">
                 {/* Drag handle (resize height) */}
@@ -470,6 +474,12 @@ export function ViewerLayout() {
                 </div>
               </div>
             )}
+              </div>
+
+              {/* Unified workspace sidebar: activity bar + docked panel host.
+                  Full height of the row, top to bottom. */}
+              <SidebarDock />
+            </div>
 
             {/* Floating / docked workspace-panel windows (#1201) */}
             <FloatingPanelHost />
