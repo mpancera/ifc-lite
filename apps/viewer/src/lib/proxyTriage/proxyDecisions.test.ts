@@ -34,7 +34,7 @@ describe('proxyWrites', () => {
   });
 
   it('records a deliberate proxy as USERDEFINED with the author\'s own word', () => {
-    const writes = proxyWrites(group, { kind: 'keep', objectType: 'Kabelkanal' });
+    const writes = proxyWrites(group, { kind: 'keep', entity: PROXY_ENTITY, predefinedType: 'USERDEFINED', objectType: 'Kabelkanal' });
     assert.equal(writes.length, 3);
     assert.equal(writes[0].entity, PROXY_ENTITY);
     assert.equal(writes[0].predefinedType, 'USERDEFINED');
@@ -44,7 +44,25 @@ describe('proxyWrites', () => {
   it('will not record a deliberate proxy without saying what it is', () => {
     // 'Deliberately a proxy' with no word for the thing is the same silence
     // the triage exists to remove.
-    assert.deepEqual(proxyWrites(group, { kind: 'keep', objectType: '   ' }), []);
+    assert.deepEqual(proxyWrites(group, { kind: 'keep', entity: PROXY_ENTITY, predefinedType: 'USERDEFINED', objectType: '   ' }), []);
+  });
+
+  it('keeps whatever class the group is already on', () => {
+    // The class triage keeps a Zwischenklasse, not a proxy — and that class
+    // has no PredefinedType at all, so claiming USERDEFINED would be a
+    // statement about an attribute the class does not have.
+    const writes = proxyWrites(group, {
+      kind: 'keep', entity: 'IfcFlowTerminal', predefinedType: null, objectType: 'Bodendose',
+    });
+    assert.equal(writes[0].entity, 'IfcFlowTerminal');
+    assert.equal(writes[0].predefinedType, null);
+    assert.equal(writes[0].objectType, 'Bodendose');
+  });
+
+  it('will not keep a class that cannot be an occurrence', () => {
+    assert.deepEqual(proxyWrites(group, {
+      kind: 'keep', entity: 'IfcFlowTerminalType', predefinedType: null, objectType: 'x',
+    }), []);
   });
 
   it('carries ObjectType only where PredefinedType asks for it', () => {
@@ -96,8 +114,17 @@ describe('describeDecision', () => {
 
   it('says a kept proxy is a decision, not a gap', () => {
     assert.equal(
-      describeDecision(group, { kind: 'keep', objectType: 'Kabelkanal' }),
+      describeDecision(group, { kind: 'keep', entity: PROXY_ENTITY, predefinedType: 'USERDEFINED', objectType: 'Kabelkanal' }),
       '3 Elemente bleiben bewusst Proxy: Kabelkanal',
+    );
+  });
+
+  it('names the class it keeps when that class is not the proxy', () => {
+    assert.equal(
+      describeDecision(group, {
+        kind: 'keep', entity: 'IfcFlowTerminal', predefinedType: null, objectType: 'Bodendose',
+      }),
+      '3 Elemente bleiben bewusst IfcFlowTerminal: Bodendose',
     );
   });
 
@@ -117,7 +144,7 @@ describe('psetNotice', () => {
   });
 
   it('has nothing to say about a proxy that stays one', () => {
-    assert.equal(psetNotice({ kind: 'keep', objectType: 'Kabelkanal' }), null);
+    assert.equal(psetNotice({ kind: 'keep', entity: PROXY_ENTITY, predefinedType: 'USERDEFINED', objectType: 'Kabelkanal' }), null);
     assert.equal(psetNotice({ kind: 'undecided' }), null);
   });
 });
@@ -131,7 +158,7 @@ describe('countUndecided', () => {
 
   it('counts a kept proxy as decided', () => {
     const decisions = new Map<string, ProxyDecision>([
-      [group.key, { kind: 'keep', objectType: 'Kabelkanal' }],
+      [group.key, { kind: 'keep', entity: PROXY_ENTITY, predefinedType: 'USERDEFINED', objectType: 'Kabelkanal' }],
     ]);
     assert.equal(countUndecided([group, other], decisions), 1);
   });

@@ -35,7 +35,7 @@ import {
   type ProxyGroup, type ProxyGroupAxis,
 } from '@/lib/proxyTriage/proxyGroups';
 import {
-  proxyWrites, describeDecision, psetNotice, countUndecided,
+  proxyWrites, describeDecision, psetNotice, countUndecided, PROXY_ENTITY,
   type ProxyDecision,
 } from '@/lib/proxyTriage/proxyDecisions';
 import { useClassCatalog } from '@/lib/classCatalog/useClassCatalog';
@@ -258,7 +258,7 @@ export function ProxyTriagePanel({ trigger }: ProxyTriagePanelProps): React.Reac
                             variant="outline"
                             className="h-6 shrink-0 px-2 text-[11px]"
                             disabled={keepWord.trim().length === 0}
-                            onClick={() => decide(group, { kind: 'keep', objectType: keepWord })}
+                            onClick={() => decide(group, { kind: 'keep', entity: PROXY_ENTITY, predefinedType: 'USERDEFINED', objectType: keepWord })}
                           >
                             Merken
                           </Button>

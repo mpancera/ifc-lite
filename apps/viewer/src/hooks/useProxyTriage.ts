@@ -199,6 +199,7 @@ export function useProxyTriage(enabled: boolean): ProxyTriageSource {
         const shapeId = typeof shape === 'number' ? shape : null;
         elements.push({
           expressId,
+          ifcClass: PROXY_TYPE,
           name: attribute(store, expressId, 'Name', overlay),
           description: attribute(store, expressId, 'Description', overlay),
           typeName: relatedName(store, expressId, RelationshipType.DefinesByType),

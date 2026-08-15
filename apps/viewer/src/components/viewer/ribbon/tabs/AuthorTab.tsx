@@ -9,7 +9,7 @@
  * toolbar (viewer/commenter roles cannot unlock authoring).
  */
 
-import { Box, Boxes, Brush, FileDiff, Library, Wand2 } from 'lucide-react';
+import { Blocks, Box, Boxes, Brush, FileDiff, Library, Wand2 } from 'lucide-react';
 import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, List, Select, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -18,6 +18,7 @@ import { BulkPropertyEditor } from '../../BulkPropertyEditor';
 import { DataConnector } from '../../DataConnector';
 import { ProductLibraryPanel } from '../../catalog/ProductLibraryPanel';
 import { ProxyTriagePanel } from '../../ProxyTriagePanel';
+import { ClassTriagePanel } from '../../ClassTriagePanel';
 import { ReferenceOverridesPanel } from '../../ReferenceOverridesPanel';
 import { SmartPropertyPanel } from '../../SmartPropertyPanel';
 import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
@@ -200,19 +201,6 @@ export function AuthorTab() {
           active={activeWorkspacePanels.has('list')}
           onClick={() => handleToggleBottomPanel('list')}
         />
-        {/* Assigning a class is authoring, not analysis — an element's
-            Fachklasse is a statement the author makes, so the tool that makes
-            it in bulk belongs beside the other bulk authoring tools. */}
-        <ProxyTriagePanel
-          trigger={
-            <RibbonLargeButton
-              icon={Boxes}
-              label="Proxy-Triage"
-              tooltip="Elemente ohne Fachklasse gruppenweise der richtigen Klasse zuweisen"
-              disabled={!ifcDataStore}
-            />
-          }
-        />
         <RibbonSmallStack>
           <DataConnector
             trigger={
@@ -233,6 +221,37 @@ export function AuthorTab() {
             }
           />
         </RibbonSmallStack>
+      </RibbonGroup>
+
+      <RibbonGroupDivider />
+
+      {/* Putting the model's classes right, in bulk.
+          Its own group rather than a corner of Properties: these tools do not
+          set a value on an element, they decide WHAT an element is, and that
+          is a different job from editing its properties. Both work the same
+          way — find the elements whose class says too little, group them by
+          what the author already told us, and decide a group at a time. */}
+      <RibbonGroup label="Clean">
+        <ProxyTriagePanel
+          trigger={
+            <RibbonLargeButton
+              icon={Boxes}
+              label="Proxy-Triage"
+              tooltip="Elemente ohne Fachklasse (IfcBuildingElementProxy) gruppenweise der richtigen Klasse zuweisen"
+              disabled={!ifcDataStore}
+            />
+          }
+        />
+        <ClassTriagePanel
+          trigger={
+            <RibbonLargeButton
+              icon={Blocks}
+              label="Zwischenklassen"
+              tooltip="Elemente auf einer Zwischen- oder abstrakten Klasse gruppenweise der richtigen Fachklasse zuweisen"
+              disabled={!ifcDataStore}
+            />
+          }
+        />
       </RibbonGroup>
 
       <RibbonGroupDivider />

@@ -47,7 +47,25 @@ export type ProxyDecision =
     readonly objectType: string | null;
   }
   | {
+    /**
+     * The class stays as it is, deliberately, and `ObjectType` says what the
+     * thing actually is.
+     *
+     * Carries its own `entity` because both triages use it and they keep
+     * different things: the proxy triage keeps `IfcBuildingElementProxy`, the
+     * class triage keeps whatever junction the group is already on
+     * (`IfcFlowTerminal`, …). Carrying it also means the decision states the
+     * full outcome rather than leaving the reader to infer it.
+     */
     readonly kind: 'keep';
+    readonly entity: string;
+    /**
+     * `USERDEFINED` where the class HAS a `PredefinedType` — that is the
+     * IFC-sanctioned way to say "the author's own kind". `null` where the
+     * class has none at all, which is true of every Zwischenklasse: claiming
+     * an attribute the class does not have would be a statement about nothing.
+     */
+    readonly predefinedType: string | null;
     /** The author's own word for what this is, e.g. `Kabelkanal`. */
     readonly objectType: string;
   }
@@ -93,10 +111,11 @@ export function proxyWrites(
   if (decision.kind === 'keep') {
     const objectType = decision.objectType.trim();
     if (!objectType) return [];
+    if (!isOccurrenceClass(decision.entity)) return [];
     return group.members.map((expressId) => ({
       expressId,
-      entity: PROXY_ENTITY,
-      predefinedType: 'USERDEFINED',
+      entity: decision.entity,
+      predefinedType: decision.predefinedType,
       objectType,
     }));
   }
@@ -126,7 +145,9 @@ export function describeDecision(
     case 'undecided':
       return `${elements} — noch nicht entschieden`;
     case 'keep':
-      return `${elements} bleiben bewusst Proxy: ${decision.objectType.trim()}`;
+      return decision.entity === PROXY_ENTITY
+        ? `${elements} bleiben bewusst Proxy: ${decision.objectType.trim()}`
+        : `${elements} bleiben bewusst ${decision.entity}: ${decision.objectType.trim()}`;
     case 'reclassify': {
       const target = decision.predefinedType
         ? `${decision.entity}.${decision.predefinedType}`

@@ -3,7 +3,13 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * Sorting a model's `IfcBuildingElementProxy` elements into decidable groups.
+ * Sorting elements whose class says too little into decidable groups.
+ *
+ * Shared by both triages. The proxy triage feeds it elements with no class at
+ * all; the class triage feeds it elements sitting on a Zwischenklasse or an
+ * abstract class. The question — "what did the author already tell us that
+ * lets us cut this pile into decidable pieces" — is the same one, so the
+ * answer is one module rather than two that drift apart.
  *
  * # The problem
  * A proxy says "this is a thing, and I am not telling you what kind". Some
@@ -42,15 +48,16 @@
 
 /** What a group can be cut by. */
 export type ProxyGroupAxis =
-  | 'type' | 'system' | 'description' | 'name' | 'layer' | 'geometry';
+  | 'class' | 'type' | 'system' | 'description' | 'name' | 'layer' | 'geometry';
 
 /** Strongest first — the order `suggestAxes` walks. */
 export const AXIS_ORDER: readonly ProxyGroupAxis[] = [
-  'type', 'system', 'description', 'name', 'layer', 'geometry',
+  'class', 'type', 'system', 'description', 'name', 'layer', 'geometry',
 ];
 
 /** What to call an axis in the interface. */
 export const AXIS_LABELS: Readonly<Record<ProxyGroupAxis, string>> = {
+  class: 'Klasse',
   type: 'Typ',
   system: 'System',
   description: 'Beschreibung',
@@ -62,6 +69,9 @@ export const AXIS_LABELS: Readonly<Record<ProxyGroupAxis, string>> = {
 /** One proxy, reduced to the facts grouping can use. */
 export interface ProxyElement {
   readonly expressId: number;
+  /** The element's own IFC class. Constant for the proxy triage, the whole
+   *  question for the class triage. */
+  readonly ifcClass: string;
   readonly name: string;
   readonly description: string;
   /** Name of the `IfcTypeObject` this is defined by, where there is one. */
@@ -165,6 +175,7 @@ export function collapseSerialNames(
 
 function rawAxisValue(element: ProxyElement, axis: ProxyGroupAxis): string | null {
   switch (axis) {
+    case 'class': return informative(element.ifcClass);
     case 'type': return informative(element.typeName);
     case 'system': return informative(element.system);
     case 'description': return informative(element.description);
@@ -235,11 +246,21 @@ function groupCount(
  *
  * Returns an empty array when nothing distinguishes the elements — an honest
  * answer, and the caller can say so rather than showing a false structure.
+ *
+ * `required` axes are kept whatever they do to the group count. The class
+ * triage requires `class`: a group there is decided by writing ONE target
+ * class to every member, so a group that mixed `IfcFlowTerminal` with
+ * `IfcFlowSegment` would be undecidable by construction. (For the proxy triage
+ * the class is constant, so it earns nothing and is dropped on its own.)
  */
-export function suggestAxes(elements: readonly ProxyElement[]): ProxyGroupAxis[] {
-  const chosen: ProxyGroupAxis[] = [];
-  let count = 1;
+export function suggestAxes(
+  elements: readonly ProxyElement[],
+  required: readonly ProxyGroupAxis[] = [],
+): ProxyGroupAxis[] {
+  const chosen: ProxyGroupAxis[] = AXIS_ORDER.filter((a) => required.includes(a));
+  let count = chosen.length > 0 ? groupCount(elements, chosen) : 1;
   for (const axis of AXIS_ORDER) {
+    if (chosen.includes(axis)) continue;
     const next = [...chosen, axis];
     const nextCount = groupCount(elements, next);
     if (nextCount < count * MIN_SPLIT_GAIN) continue;  // adds a column, not information

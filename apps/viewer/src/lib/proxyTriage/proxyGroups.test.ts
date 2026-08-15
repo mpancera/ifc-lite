@@ -12,6 +12,7 @@ import {
 function proxy(expressId: number, over: Partial<ProxyElement> = {}): ProxyElement {
   return {
     expressId,
+    ifcClass: 'IfcBuildingElementProxy',
     name: `BuildingElementProxy ${expressId}`,
     description: 'IfcBuildingElementProxy',
     typeName: null,
@@ -174,6 +175,25 @@ describe('suggestAxes', () => {
   it('admits when nothing distinguishes them', () => {
     const identical = Array.from({ length: 5 }, (_, i) => proxy(i));
     assert.deepEqual(suggestAxes(identical), []);
+  });
+
+  it('never picks the class for proxies, because they are all one class', () => {
+    assert.ok(!suggestAxes(electrical).includes('class'));
+  });
+
+  it('keeps a required axis even where it earns nothing', () => {
+    // The class triage requires it: a group is decided by writing ONE class to
+    // every member, so a group mixing two classes would be undecidable.
+    assert.deepEqual(suggestAxes(electrical, ['class']), ['class', 'system', 'description']);
+  });
+
+  it('cuts by class when the elements differ in it', () => {
+    const mixed = [
+      proxy(1, { ifcClass: 'IfcFlowSegment' }), proxy(2, { ifcClass: 'IfcFlowSegment' }),
+      proxy(3, { ifcClass: 'IfcFlowTerminal' }),
+    ];
+    const groups = groupProxies(mixed, suggestAxes(mixed, ['class']));
+    assert.deepEqual(groups.map((g) => g.label), ['IfcFlowSegment', 'IfcFlowTerminal']);
   });
 });
 
