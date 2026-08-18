@@ -377,7 +377,9 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
           </TooltipTrigger>
           <TooltipContent side="bottom" className="max-w-xs text-xs">
             Massstab der Darstellung. Auf dem Bildschirm nur so genau, wie der
-            Monitor den CSS-Pixel einhält — im PDF-Druck dagegen exakt.
+            Monitor den CSS-Pixel einhält. SVG-Export und Druck bemassen das
+            Blatt in Millimetern — beim Drucken muss die Skalierung im
+            Druckdialog auf 100 % stehen, sonst passt der Browser ein.
           </TooltipContent>
         </Tooltip>
         <DropdownMenuContent align="center" className="min-w-0">

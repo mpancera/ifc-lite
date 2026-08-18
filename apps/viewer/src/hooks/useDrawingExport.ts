@@ -1037,6 +1037,25 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     const svg = (sheetEnabled && activeSheet) ? generateSheetSVG() : generateExportSVG();
     if (!svg) return;
 
+    // The paper size, read back off the SVG we just wrote.
+    //
+    // `generateExportSVG` sizes its root in MILLIMETRES from the plan scale —
+    // that is what makes 1:100 mean 1:100 on paper. Handing the print window a
+    // page of some other size makes the browser fit one to the other, and the
+    // scale is gone. So the page is told to be the drawing.
+    //
+    // Read out of the string rather than plumbed through: the generator returns
+    // an SVG, its root is written by us two hundred lines up, and a second
+    // return value would have to be threaded through the sheet path as well.
+    const mm = /width="([0-9.]+)mm"\s+height="([0-9.]+)mm"/.exec(svg);
+    const pageSize = mm ? `${mm[1]}mm ${mm[2]}mm` : 'auto';
+
+    // A correct page box still does not force the browser's own scale control,
+    // which defaults to fitting. Nothing in CSS can, so the window says so
+    // rather than quietly printing at 94%.
+    const scaleHint = mm
+      ? `<p class="scale-hint">Massstabsgetreu drucken: im Druckdialog <b>Skalierung 100%</b> (bzw. „Tatsächliche Grösse“) wählen und die Ränder auf <b>Keine</b> setzen. Blattgrösse ${mm[1]} × ${mm[2]} mm.</p>`
+      : '';
     // Create a new window for printing
     const printWindow = window.open('', '_blank', 'width=800,height=600');
     if (!printWindow) {
@@ -1065,27 +1084,35 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
           <title>${title}</title>
           <style>
             @media print {
-              @page { margin: ${(sheetEnabled && activeSheet) ? '0' : '1cm'}; }
-              body { margin: 0; }
+              /* The page follows the DRAWING, not the other way round. Fixed
+                 to a paper size, the browser fits the content to it — which is
+                 exactly what destroys the scale. */
+              @page { size: ${pageSize}; margin: 0; }
+              body { margin: 0; padding: 0; display: block; }
+              .scale-hint { display: none; }
             }
             body {
               display: flex;
-              justify-content: center;
+              flex-direction: column;
               align-items: center;
-              min-height: 100vh;
               margin: 0;
-              padding: ${(sheetEnabled && activeSheet) ? '0' : '20px'};
+              padding: ${(sheetEnabled && activeSheet) ? "0" : "20px"};
               box-sizing: border-box;
             }
-            svg {
-              max-width: 100%;
-              max-height: 100vh;
-              width: auto;
-              height: auto;
+            /* NOT max-width / height:auto. Those override the millimetres on
+               the <svg> root and shrink the drawing to the window, so it would
+               print at whatever scale happened to fit. */
+            svg { display: block; }
+            .scale-hint {
+              font: 13px system-ui, sans-serif;
+              margin-bottom: 12px; padding: 8px 12px;
+              border: 1px solid #d4a72c; background: #fdf6e3; color: #6b5200;
+              max-width: 40em;
             }
           </style>
         </head>
         <body>
+          ${scaleHint}
           ${svg}
           <script>
             window.onload = function() {
