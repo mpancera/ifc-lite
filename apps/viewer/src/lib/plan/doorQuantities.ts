@@ -101,6 +101,19 @@ export interface DoorQuantities {
   readonly leaves: 1 | 2;
   /** Whether {@link liningThickness} was read or assumed. */
   readonly liningSource: 'model' | 'assumed';
+  /**
+   * Where the frame DEPTH came from — the one number a plan reads as the wall.
+   *
+   * `'wall'` is the drawing measured across the doorway and the only source
+   * that is actually the wall. `'stated'` is the model's own `LiningDepth`,
+   * which routinely runs past the plaster. `null` means neither was
+   * available and the caller is left to fall back to the reveal body.
+   *
+   * Reported because it is invisible in the drawing: a frame drawn 20 cm deep
+   * looks equally plausible whether that is the wall or the door telling us
+   * about itself, and only one of those is right.
+   */
+  readonly depthSource: 'wall' | 'stated' | null;
 }
 
 const usable = (value: number | null | undefined): value is number =>
@@ -164,5 +177,8 @@ export function doorQuantities(sources: DoorQuantitySources): DoorQuantities | n
     passageHeight: clearHeight === null ? null : clearHeight - threshold,
     leaves,
     liningSource: stated ? 'model' : 'assumed',
+    depthSource: usable(sources.measuredDepth) ? 'wall'
+      : usable(sources.liningDepth) ? 'stated'
+        : null,
   };
 }

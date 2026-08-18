@@ -395,9 +395,23 @@ export interface PlanOpenings {
    * two everywhere without saying so.
    */
   readonly assumedLinings: number;
+  /**
+   * How many door frames took their depth from the WALL as drawn, out of
+   * {@link doorsWithSymbol}.
+   *
+   * The measurement is the only source that is really the wall, and whether
+   * it fired is invisible in the drawing — a frame looks equally plausible
+   * either way. Counted so the toolbar can say, on any model, whether the
+   * plan is showing the wall or the door talking about itself.
+   */
+  readonly wallMeasuredDepths: number;
+  readonly doorsWithSymbol: number;
 }
 
-const NO_OPENINGS: PlanOpenings = { symbols: [], doorLabels: [], assumedLinings: 0 };
+const NO_OPENINGS: PlanOpenings = {
+  symbols: [], doorLabels: [], assumedLinings: 0,
+  wallMeasuredDepths: 0, doorsWithSymbol: 0,
+};
 
 /**
  * How far off the wall a door's label sits, in metres, measured from the face.
@@ -459,6 +473,10 @@ export function usePlanOpeningSymbols({
     const doorLabels: PlanLabel[] = [];
     /** How many doors had to be given a frame width rather than told one. */
     let assumedLinings = 0;
+
+    let wallMeasuredDepths = 0;
+
+    let doorsWithSymbol = 0;
     for (const [key, { expressId, kind, meshes }] of byOpening) {
       // The axes come first: the centre is measured along them.
       //
@@ -554,6 +572,8 @@ export function usePlanOpeningSymbols({
       });
       if (!quantities) continue;
       if (quantities.liningSource === 'assumed') assumedLinings += 1;
+      if (quantities.depthSource === 'wall') wallMeasuredDepths += 1;
+      doorsWithSymbol += 1;
 
       const widths = {
         rough: quantities.nominalWidth,
@@ -641,7 +661,7 @@ export function usePlanOpeningSymbols({
       });
     }
 
-    return { symbols, doorLabels, assumedLinings };
+    return { symbols, doorLabels, assumedLinings, wallMeasuredDepths, doorsWithSymbol };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, geometryResult, dataStore, storeyId, modelId, drawing, mutationViews, mutationVersion]);
 }

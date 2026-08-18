@@ -64,6 +64,10 @@ export interface PlanToolbarProps {
   openingCount: number;
   /** How many doors got the assumed frame width because the model states none. */
   assumedLinings: number;
+  /** How many door frames took their depth from the wall as drawn. */
+  wallMeasuredDepths: number;
+  /** How many doors got a symbol at all, as the denominator for it. */
+  doorsWithSymbol: number;
 
   /** Small devices drawn as marks rather than at their own invisible size. */
   showDeviceMarks: boolean;
@@ -141,6 +145,7 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
     displayOptions, onToggleSymbolic, onToggleIfcAnnotations,
     onToggleConstructionProjection, showRoomLabels, onToggleRoomLabels, roomCount,
     showOpeningSymbols, onToggleOpeningSymbols, openingCount, assumedLinings,
+    wallMeasuredDepths, doorsWithSymbol,
     showDeviceMarks, onToggleDeviceMarks, deviceCount,
     settingsOpen, onToggleSettings, dxfOpen, onToggleDxf,
     activeTool, onSetTool, hasAnnotations, onClearAnnotations,
@@ -235,6 +240,27 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
             {assumedLinings === openingCount
               ? `Keine Tür auf diesem Geschoss nennt eine Rahmenbreite (IfcDoorLiningProperties). Für alle ${assumedLinings} ist ${Math.round(ASSUMED_LINING_THICKNESS * 100)} cm angenommen — Öffnungsbogen und Durchgangsbreite beruhen darauf.`
               : `${assumedLinings} von ${openingCount} Öffnungen nennen keine Rahmenbreite; für sie ist ${Math.round(ASSUMED_LINING_THICKNESS * 100)} cm angenommen.`}
+          </TooltipContent>
+        </Tooltip>
+      )}
+      {showOpeningSymbols && doorsWithSymbol > 0 && (
+        // Which source the frame DEPTH came from. Invisible in the drawing —
+        // a frame looks equally plausible whether it is the wall or the door
+        // reveal talking about itself — and only the wall is the wall.
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className={`ml-0.5 rounded-sm border px-1 text-[10px] leading-4 tabular-nums ${
+              wallMeasuredDepths === doorsWithSymbol
+                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                : 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+            }`}>
+              Wand {wallMeasuredDepths}/{doorsWithSymbol}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-xs text-xs">
+            {wallMeasuredDepths === doorsWithSymbol
+              ? `Die Rahmentiefe ist bei allen ${doorsWithSymbol} Türen aus der gezeichneten Wand gemessen — das ist die Wandstärke am Durchgang.`
+              : `Nur bei ${wallMeasuredDepths} von ${doorsWithSymbol} Türen ist die Rahmentiefe aus der gezeichneten Wand gemessen. Für die übrigen steht keine Wand im Schnitt zur Verfügung; dort zeigt der Rahmen die Tiefe der Zarge selbst (bzw. LiningDepth, falls das Modell sie nennt) — nicht die Wandstärke.`}
           </TooltipContent>
         </Tooltip>
       )}
