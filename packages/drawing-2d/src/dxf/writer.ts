@@ -136,6 +136,26 @@ function fmt(n: number): string {
   return n.toFixed(6);
 }
 
+/**
+ * Extended entity data — the DXF way to hang facts on a piece of geometry.
+ *
+ * A room polygon that is only a closed outline tells a reader where the room
+ * is and nothing about which room it is. XDATA is what every serious DXF
+ * reader (AutoCAD, BricsCAD, ODA) preserves and round-trips, so the room
+ * number and name survive being opened and saved again — unlike a layer name,
+ * which is the only other place people try to smuggle this and which collapses
+ * as soon as two rooms share a layer.
+ *
+ * Strings are written as group 1000 in the order given. DXF caps a 1000 at 255
+ * bytes; longer values are truncated rather than producing a file that some
+ * readers reject and others silently mangle.
+ */
+export interface DxfXdata {
+  /** Registered application name. Also declared in the APPID table. */
+  readonly appId: string;
+  readonly strings: readonly string[];
+}
+
 interface EntityWrite {
   (): string;
 }
@@ -164,6 +184,8 @@ export class DxfWriter {
   /** Raw (pre-sanitization) name → assigned safe name, for stable reuse + collision disambiguation. */
   private readonly layerNameBySource = new Map<string, string>();
   private readonly entities: EntityWrite[] = [];
+  /** APPIDs referenced by XDATA, declared in TABLES so strict readers accept it. */
+  private readonly appIds = new Set<string>();
   private readonly headerComment: string;
   private minX = Infinity;
   private minY = Infinity;
@@ -227,6 +249,31 @@ export class DxfWriter {
   }
 
   /**
+   * Register an application name for XDATA and return its sanitized form.
+   *
+   * R12 lets readers invent missing tables, but an APPID referenced by XDATA
+   * and absent from TABLES is the one case strict readers do reject — so it is
+   * declared rather than assumed.
+   */
+  appId(name: string): string {
+    const safe = sanitizeDxfLayerName(name);
+    this.appIds.add(safe);
+    return safe;
+  }
+
+  /** `1001`/`1000` groups for one entity, or `` when there is nothing to say. */
+  private xdataGroups(xdata?: DxfXdata): string {
+    if (!xdata) return '';
+    const safe = this.appId(xdata.appId);
+    let s = '1001\n' + safe + '\n';
+    for (const value of xdata.strings) {
+      const clean = sanitizeDxfText(value).slice(0, 255);
+      if (clean) s += '1000\n' + clean + '\n';
+    }
+    return s;
+  }
+
+  /**
    * Add a closed or open polyline (tessellated arcs/circles are pre-sampled
    * by the caller), written as classic `POLYLINE` + `VERTEX`* + `SEQEND` —
    * `LWPOLYLINE` does not exist before R14. `colorOverride` (CSS colour)
@@ -235,17 +282,26 @@ export class DxfWriter {
    * category layer but render with distinct colours in the source drawing
    * (matching the SVG exporter's per-entity fill/stroke).
    */
-  addPolyline(points: readonly Point2D[], layer: string, closed: boolean, colorOverride?: string): void {
+  addPolyline(
+    points: readonly Point2D[],
+    layer: string,
+    closed: boolean,
+    colorOverride?: string,
+    xdata?: DxfXdata,
+  ): void {
     if (points.length < 2) return;
     for (const p of points) this.extend(p);
     const pts = points.slice();
     const colorGroup = this.colorOverrideGroup(colorOverride);
+    // Resolved now rather than inside the closure: registering the APPID has
+    // to happen before TABLES is written, and the closures run after it.
+    const xdataGroups = this.xdataGroups(xdata);
     this.entities.push(() => {
       // The 10/20/30 "dummy point" (always 0) is part of the R12 POLYLINE
       // entity — the real coordinates live on the VERTEX chain.
       let s =
         '0\nPOLYLINE\n8\n' + layer + '\n' + colorGroup +
-        '66\n1\n10\n0.0\n20\n0.0\n30\n0.0\n70\n' + (closed ? 1 : 0) + '\n';
+        '66\n1\n10\n0.0\n20\n0.0\n30\n0.0\n70\n' + (closed ? 1 : 0) + '\n' + xdataGroups;
       for (const p of pts) {
         s += '0\nVERTEX\n8\n' + layer + '\n10\n' + fmt(p.x) + '\n20\n' + fmt(p.y) + '\n30\n0.0\n';
       }
@@ -363,6 +419,21 @@ export class DxfWriter {
     );
   }
 
+  /**
+   * APPID table — one entry per application name any XDATA references.
+   *
+   * Emitted only when there IS XDATA. R12 readers happily invent most missing
+   * tables, but an APPID that XDATA points at and TABLES does not declare is
+   * the case strict ones reject — so the file stays exactly as it was for
+   * every drawing that carries none.
+   */
+  private buildAppIdTable(): string {
+    if (this.appIds.size === 0) return '';
+    let s = '0\nTABLE\n2\nAPPID\n70\n' + this.appIds.size + '\n';
+    for (const name of this.appIds) s += '0\nAPPID\n2\n' + name + '\n70\n0\n';
+    return s + '0\nENDTAB\n';
+  }
+
   private buildLayerTable(): string {
     let s = '0\nTABLE\n2\nLAYER\n70\n' + this.layers.size + '\n';
     for (const l of this.layers.values()) {
@@ -381,6 +452,7 @@ export class DxfWriter {
       this.buildLtypeTable() +
       this.buildStyleTable() +
       this.buildLayerTable() +
+      this.buildAppIdTable() +
       '0\nENDSEC\n'
     );
   }

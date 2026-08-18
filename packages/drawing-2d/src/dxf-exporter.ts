@@ -54,6 +54,42 @@ export interface DXFExportOptions {
    * for a georeferenced export.
    */
   metadataComment?: string;
+  /**
+   * The plan overlays: room and door text, opening symbols, device marks,
+   * room outlines.
+   *
+   * The SVG export has carried these since #50; DXF did not, so a plan handed
+   * on as DXF arrived with walls and no writing on them. They are an option
+   * rather than read off the drawing because they are DERIVED — the viewer
+   * computes them per storey, and the drawing itself knows nothing about them.
+   */
+  plan?: DXFPlanOverlays;
+}
+
+/** A room outline, with the two facts a plan reader wants about it. */
+export interface DXFRoomPolygon {
+  readonly outline: readonly Point2D[];
+  /** Room number — `Name` on the IfcSpace. */
+  readonly number?: string;
+  /** Room designation — `LongName` on the IfcSpace. */
+  readonly name?: string;
+}
+
+/** One line of plan text, already positioned in drawing coordinates. */
+export interface DXFPlanText {
+  readonly position: Point2D;
+  readonly text: string;
+  /** Cap height in drawing units. */
+  readonly height: number;
+}
+
+export interface DXFPlanOverlays {
+  /** Room and door labels, one entry per LINE of text. */
+  readonly labels?: readonly DXFPlanText[];
+  /** Opening symbols and device marks, as loose segments. */
+  readonly symbolLines?: readonly { readonly start: Point2D; readonly end: Point2D }[];
+  /** Room outlines, carrying number and name as XDATA. */
+  readonly rooms?: readonly DXFRoomPolygon[];
 }
 
 /** One DXF reference underlay to embed (mirrors `SVGUnderlayOptions`). */
@@ -77,6 +113,22 @@ const CATEGORY_LAYER: Record<LineCategory, string> = {
 const FILL_LAYER = 'IFC-FILL';
 
 /** Builds a DXF document from a `Drawing2D`, mirroring `SVGExporter`. */
+/** Layer + APPID names for the plan overlays. */
+const ROOM_LAYER = 'IFCLITE-RAUM';
+const ROOM_COLOR = '#00A0A0';
+const SYMBOL_LAYER = 'IFCLITE-SYMBOL';
+const SYMBOL_COLOR = '#404040';
+const LABEL_LAYER = 'IFCLITE-TEXT';
+const LABEL_COLOR = '#000000';
+/**
+ * The application name the room XDATA hangs under.
+ *
+ * One name for the tool rather than one per field: a reader looking for
+ * "who wrote this" wants the producer, and the two strings are positional
+ * (number, then designation) under it.
+ */
+const ROOM_APPID = 'IFCLITE';
+
 export class DXFExporter {
   export(drawing: Drawing2D, options: DXFExportOptions = {}): string {
     const {
@@ -85,6 +137,7 @@ export class DXFExporter {
       underlays = [],
       coordinateTransform = (p: Point2D) => p,
       metadataComment,
+      plan,
     } = options;
 
     const writer = new DxfWriter({ headerComment: metadataComment });
@@ -118,7 +171,58 @@ export class DXFExporter {
       this.writeLine(writer, line, categoryLayers, map);
     }
 
+    if (plan) this.writePlanOverlays(writer, plan, map);
+
     return writer.toString();
+  }
+
+  /**
+   * The plan overlays, each on its own layer.
+   *
+   * Separate layers because that is the one thing every CAD user does with a
+   * received drawing: turn parts of it off. Room outlines, writing and
+   * symbols are three different decisions.
+   */
+  private writePlanOverlays(
+    writer: DxfWriter,
+    plan: DXFPlanOverlays,
+    map: (p: Point2D) => Point2D,
+  ): void {
+    const rooms = plan.rooms ?? [];
+    if (rooms.length > 0) {
+      const layer = writer.layer(ROOM_LAYER, ROOM_COLOR);
+      for (const room of rooms) {
+        if (room.outline.length < 3) continue;
+        const number = (room.number ?? '').trim();
+        const name = (room.name ?? '').trim();
+        // XDATA only where there is something to say. An APPID declared for
+        // a file whose rooms are all nameless would be a table entry that
+        // points at nothing.
+        const xdata = number || name
+          ? { appId: ROOM_APPID, strings: [number, name] }
+          : undefined;
+        writer.addPolyline(room.outline.map(map), layer, true, undefined, xdata);
+      }
+    }
+
+    const symbolLines = plan.symbolLines ?? [];
+    if (symbolLines.length > 0) {
+      const layer = writer.layer(SYMBOL_LAYER, SYMBOL_COLOR);
+      for (const line of symbolLines) {
+        writer.addLine(map(line.start), map(line.end), layer);
+      }
+    }
+
+    const labels = plan.labels ?? [];
+    if (labels.length > 0) {
+      const layer = writer.layer(LABEL_LAYER, LABEL_COLOR);
+      for (const label of labels) {
+        // Centred, matching where the viewer anchors a room stamp.
+        writer.addText(map(label.position), label.text, label.height, layer, {
+          hAlign: 'center', vAlign: 'middle',
+        });
+      }
+    }
   }
 
   private writeLine(

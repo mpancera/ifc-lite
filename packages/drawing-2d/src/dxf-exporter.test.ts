@@ -229,3 +229,75 @@ describe('DXFExporter', () => {
     expect(text.y).toBeCloseTo(5 - 500);
   });
 });
+
+describe('plan overlays (#50)', () => {
+  const room = {
+    outline: [
+      { x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 3 }, { x: 0, y: 3 },
+    ],
+    number: '1.04',
+    name: 'Sitzungszimmer',
+  };
+
+  it('writes room outlines, symbols and text on their own layers', () => {
+    const dxf = exportToDXF(emptyDrawing(), {
+      plan: {
+        rooms: [room],
+        symbolLines: [{ start: { x: 0, y: 0 }, end: { x: 1, y: 1 } }],
+        labels: [{ position: { x: 2, y: 1.5 }, text: '1.04', height: 0.25 }],
+      },
+    });
+    expect(dxf).toContain('IFCLITE-RAUM');
+    expect(dxf).toContain('IFCLITE-SYMBOL');
+    expect(dxf).toContain('IFCLITE-TEXT');
+  });
+
+  it('carries room number and designation as XDATA on the outline', () => {
+    // The point of the request: a closed outline says where the room is and
+    // nothing about which room it is.
+    const dxf = exportToDXF(emptyDrawing(), { plan: { rooms: [room] } });
+    expect(dxf).toContain('1001\nIFCLITE\n');
+    expect(dxf).toContain('1000\n1.04\n');
+    expect(dxf).toContain('1000\nSitzungszimmer\n');
+  });
+
+  it('declares the APPID it references, before using it', () => {
+    // XDATA pointing at an APPID that TABLES does not declare is the one case
+    // strict R12 readers reject.
+    const dxf = exportToDXF(emptyDrawing(), { plan: { rooms: [room] } });
+    const table = dxf.indexOf('TABLE\n2\nAPPID');
+    expect(table).toBeGreaterThan(-1);
+    expect(table).toBeLessThan(dxf.indexOf('1001\nIFCLITE'));
+  });
+
+  it('leaves a drawing without plan overlays byte-identical', () => {
+    const plain = exportToDXF(emptyDrawing());
+    expect(exportToDXF(emptyDrawing(), { plan: {} })).toBe(plain);
+    expect(plain).not.toContain('APPID');
+  });
+
+  it('writes no XDATA for a room with neither number nor name', () => {
+    const dxf = exportToDXF(emptyDrawing(), {
+      plan: { rooms: [{ outline: room.outline }] },
+    });
+    expect(dxf).toContain('IFCLITE-RAUM');
+    expect(dxf).not.toContain('1001');
+  });
+
+  it('stays parseable, with the outline closed', () => {
+    const dxf = exportToDXF(emptyDrawing(), { plan: { rooms: [room] } });
+    const polylines = parseDxf(dxf).entities.filter(
+      (e): e is DxfPolylineEntity => e.kind === 'polyline',
+    );
+    expect(polylines).toHaveLength(1);
+    expect(polylines[0].closed).toBe(true);
+    expect(polylines[0].vertices).toHaveLength(4);
+  });
+
+  it('skips a degenerate outline rather than writing a stray line', () => {
+    const dxf = exportToDXF(emptyDrawing(), {
+      plan: { rooms: [{ outline: [{ x: 0, y: 0 }, { x: 1, y: 0 }], number: 'X' }] },
+    });
+    expect(dxf).not.toContain('1000\nX\n');
+  });
+});

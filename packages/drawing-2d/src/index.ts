@@ -183,7 +183,10 @@ export type { SVGExportOptions } from './svg-exporter.js';
 // types) stay package-private: no external consumer exists, and an unused
 // public export is permanent semver liability (PR #1871 review).
 export { DXFExporter, exportToDXF } from './dxf-exporter.js';
-export type { DXFExportOptions, DXFUnderlayOptions } from './dxf-exporter.js';
+export type {
+  DXFExportOptions, DXFUnderlayOptions,
+  DXFPlanOverlays, DXFPlanText, DXFRoomPolygon,
+} from './dxf-exporter.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GPU ACCELERATION

@@ -15,6 +15,8 @@ import {
   renderTitleBlock,
   calculateDrawingTransform,
   exportToDXF,
+  type DXFPlanText,
+  type DXFRoomPolygon,
   type Drawing2D,
   type DrawingSheet,
   type ElementData,
@@ -1014,10 +1016,81 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     const metadataComment = isGeoreferenced
       ? `ifc-lite section export - units: metres, CRS: ${georeference!.projectedCRS.name || 'unknown'}`
       : undefined;
+    // The plan overlays, which DXF did not carry until now: a plan handed on
+    // as DXF arrived with walls and nothing written on them.
+    //
+    // Text is sized in PAPER millimetres like the SVG export, converted to
+    // model units through the plan scale — the same 3 mm / 2.5 mm the SVG
+    // uses, so the two exports of one drawing letter the same.
+    const dxfScale = displayOptions.scale || 100;
+    const paperToModel = (mm: number) => (mm * dxfScale) / 1000;
+    const nameSize = paperToModel(3);
+    const detailSize = paperToModel(2.5);
+    const lineStep = paperToModel(3.6);
+
+    const dxfLabels: DXFPlanText[] = [];
+    for (const label of planLabels) {
+      const lines = label.lines.filter((line) => line.trim().length > 0);
+      if (lines.length === 0) continue;
+      if (!labelVisible(label, 1, nameSize, lineStep)) continue;
+      // Stacked around the anchor, matching the overlay and the SVG.
+      const top = label.anchor.y - ((lines.length - 1) * lineStep) / 2;
+      lines.forEach((text, index) => {
+        dxfLabels.push({
+          position: { x: label.anchor.x, y: top + index * lineStep },
+          text,
+          height: index === 0 ? nameSize : detailSize,
+        });
+      });
+    }
+
+    // Opening symbols are already segments in drawing units. Device marks are
+    // NOT: a mark is a unit shape placed at a point and sized in paper
+    // millimetres, so it is expanded here exactly as the SVG export expands
+    // it — 3 mm at every scale, because it exists to be seen and not measured.
+    const dxfSymbolLines: { start: { x: number; y: number }; end: { x: number; y: number } }[] = [];
+    for (const symbol of openingSymbols) dxfSymbolLines.push(...symbol.lines);
+    const markHalf = paperToModel(DEVICE_MARK_PAPER_MM) / 2;
+    for (const mark of deviceMarks) {
+      for (const path of deviceMarkPaths(mark.kind)) {
+        for (let i = 1; i < path.length; i += 1) {
+          dxfSymbolLines.push({
+            start: {
+              x: mark.position.x + path[i - 1].x * markHalf * 2,
+              y: mark.position.y + path[i - 1].y * markHalf * 2,
+            },
+            end: {
+              x: mark.position.x + path[i].x * markHalf * 2,
+              y: mark.position.y + path[i].y * markHalf * 2,
+            },
+          });
+        }
+      }
+    }
+
+    // Room outlines come from the DRAWING, which is the only place a real
+    // footprint exists — `RoomLabel` carries an extent and an anchor, not an
+    // outline, and deriving one would mean the polygon union the label module
+    // deliberately avoids. Number and designation are joined on by express id.
+    const roomFacts = new Map(planLabels
+      .filter((label) => label.kind === 'room')
+      .map((label) => [label.expressId, label.lines]));
+    const dxfRooms: DXFRoomPolygon[] = [];
+    for (const polygon of drawing.cutPolygons) {
+      if (!polygon.isCut || polygon.ifcType !== 'IfcSpace') continue;
+      const facts = roomFacts.get(polygon.entityId);
+      dxfRooms.push({
+        outline: polygon.polygon.outer,
+        number: facts?.[0],
+        name: facts?.[1],
+      });
+    }
+
     const dxf = exportToDXF(drawing, {
       showHiddenLines: displayOptions.showHiddenLines,
       coordinateTransform,
       metadataComment,
+      plan: { labels: dxfLabels, symbolLines: dxfSymbolLines, rooms: dxfRooms },
     });
     const stem = `section-${sectionPlane.axis}-${sectionPlane.position}`;
     downloadFile(dxf, `${stem}.dxf`, 'application/dxf');
@@ -1027,7 +1100,8 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
       georeferenced: isGeoreferenced,
     });
   }, [
-    drawing, displayOptions.showHiddenLines, sectionPlane, ifcDataStore, coordinateInfo,
+    drawing, displayOptions.showHiddenLines, displayOptions.scale, sectionPlane,
+    ifcDataStore, coordinateInfo, planLabels, openingSymbols, deviceMarks,
     storeModels, anchorModelIdOverride, georefMutations, mutationVersion,
   ]);
 
