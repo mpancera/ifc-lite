@@ -118,6 +118,7 @@ export function ListPanel({ onClose }: ListPanelProps) {
   // model's provider just needs ITS OWN `toGlobalId` closure.
   const zoneSets = useViewerStore((s) => s.zoneSets);
   const zoneAssignments = useViewerStore((s) => s.zoneAssignments);
+  const zoneApportionment = useViewerStore((s) => s.zoneApportionment);
   const toGlobalId = useViewerStore((s) => s.toGlobalId);
 
   // Authoring done this session lives in the mutation overlay, not in the
@@ -130,6 +131,26 @@ export function ListPanel({ onClose }: ListPanelProps) {
   // Build the {modelId, provider} pairs in a single pass so the two
   // arrays can never drift out of alignment (skipping a model without
   // an ifcDataStore must not shift every later model's provider index).
+  // Declared VOLUMEUNIT scale per model, for the zone volume columns (#2508).
+  // Memoized on the MODELS alone: the zone context below is rebuilt whenever
+  // zones or assignments change, and re-extracting a model's unit assignment on
+  // every geometry tick would be real work for a value that cannot have moved.
+  const volumeScaleByModelId = useMemo(() => {
+    const map = new Map<string, number>();
+    const scaleOf = (store: IfcDataStore) => (store.source.length > 0
+      ? extractProjectUnits(store.source, store.entityIndex).resolvedForUnitType('VOLUMEUNIT')?.siScale ?? 1
+      : 1);
+    if (models.size > 0) {
+      for (const [modelId, model] of models) {
+        if (!model.ifcDataStore) continue;
+        map.set(modelId, scaleOf(model.ifcDataStore));
+      }
+    } else if (ifcDataStore) {
+      map.set('default', scaleOf(ifcDataStore));
+    }
+    return map;
+  }, [models, ifcDataStore]);
+
   const modelProviderPairs = useMemo(() => {
     const pairs: Array<{ modelId: string; provider: ListDataProvider; store: IfcDataStore }> = [];
     // Authoring an element also creates its placement/profile/solid/shape-rep
@@ -151,18 +172,28 @@ export function ListPanel({ onClose }: ListPanelProps) {
         // Skip native-metadata models — they don't have a parsed
         // IfcDataStore, so the list provider can't query them.
         if (!model.ifcDataStore) continue;
-        const zoneContext = { zoneSets, zoneAssignments, toGlobalId: (expressId: number) => toGlobalId(modelId, expressId) };
+        const zoneContext = {
+          zoneSets, zoneAssignments,
+          apportionment: zoneApportionment,
+          volumeSiScale: volumeScaleByModelId.get(modelId) ?? 1,
+          toGlobalId: (expressId: number) => toGlobalId(modelId, expressId),
+        };
         const provider = createListDataProvider(model.ifcDataStore, model.name, zoneContext);
         pairs.push({ modelId, provider: overlayFor(modelId, model.ifcDataStore, provider), store: model.ifcDataStore });
       }
     } else if (ifcDataStore) {
-      const zoneContext = { zoneSets, zoneAssignments, toGlobalId: (expressId: number) => toGlobalId('default', expressId) };
+      const zoneContext = {
+        zoneSets, zoneAssignments,
+        apportionment: zoneApportionment,
+        volumeSiScale: volumeScaleByModelId.get('default') ?? 1,
+        toGlobalId: (expressId: number) => toGlobalId('default', expressId),
+      };
       const provider = createListDataProvider(ifcDataStore, '', zoneContext);
       pairs.push({ modelId: 'default', provider: overlayFor('default', ifcDataStore, provider), store: ifcDataStore });
     }
     return pairs;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mutationVersion is the edit signal
-  }, [models, ifcDataStore, zoneSets, zoneAssignments, toGlobalId, mutationViews, mutationVersion]);
+  }, [models, ifcDataStore, zoneSets, zoneAssignments, zoneApportionment, volumeScaleByModelId, toGlobalId, mutationViews, mutationVersion]);
 
   const allProviders = useMemo(() => modelProviderPairs.map((p) => p.provider), [modelProviderPairs]);
   const allStores = useMemo(() => modelProviderPairs.map((p) => p.store), [modelProviderPairs]);

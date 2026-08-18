@@ -62,7 +62,7 @@ import { useMeasure2D } from '@/hooks/useMeasure2D';
 import { useAnnotation2D } from '@/hooks/useAnnotation2D';
 import { useDrawingExport } from '@/hooks/useDrawingExport';
 import { useSymbolicAnnotationsForDrawing } from '@/hooks/useSymbolicAnnotations';
-import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds } from '@/hooks/useDxfUnderlay';
+import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds, useDxfMapToWorldTransform } from '@/hooks/useDxfUnderlay';
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { usePlanRoomLabels } from '@/hooks/usePlanRoomLabels';
 import { roomPlanLabel } from '@/lib/plan/roomLabels';
@@ -161,7 +161,11 @@ export function PlanView({
   const overridesEnabled = useViewerStore((s) => s.overridesEnabled);
   const getActiveOverrideRules = useViewerStore((s) => s.getActiveOverrideRules);
   const customOverrideRules = useViewerStore((s) => s.customOverrideRules);
+  const typeVisibility = useViewerStore((s) => s.typeVisibility);
   const dxfUnderlays = useViewerStore((s) => s.dxfUnderlays);
+  // Ob eine Ankergeoreferenz vorliegt: dieselbe Quelle wie im
+  // Schnittpanel, damit beide Ansichten die Unterlagen gleich behandeln.
+  const { available: dxfGeoreferenceAvailable } = useDxfMapToWorldTransform();
 
   // Annotation + measure state, all of it already in the store and already
   // shaped for these hooks.
@@ -405,6 +409,7 @@ export function PlanView({
     ifcDataStore,
     sectionPlane,
     displayOptions,
+    typeVisibility,
     combinedHiddenIds,
     combinedIsolatedIds,
     computedIsolatedIds,
@@ -1386,6 +1391,7 @@ export function PlanView({
             onCenterOnModel={centerDxfUnderlay}
             // A plan IS the cardinal plan view the underlays are for, always.
             planViewActive
+            georeferenceAvailable={dxfGeoreferenceAvailable}
           />
         </div>
       )}

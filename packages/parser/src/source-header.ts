@@ -13,9 +13,10 @@
  * splitter that ignores quote state would mis-split.
  */
 
-import { safeUtf8Decode } from '@ifc-lite/data';
 import type { IfcSourceHeader } from '@ifc-lite/data';
 import { decodeStepStringLiteral } from '@ifc-lite/encoding';
+
+import { asSourceBytes, type IfcSourceBytes } from './source-bytes.js';
 
 /** Headers are tiny; cap the decode so a huge file's body is never scanned. */
 const MAX_HEADER_BYTES = 64 * 1024;
@@ -64,6 +65,32 @@ function splitTopLevel(inner: string): string[] {
     args.push(current.trim());
   }
   return args;
+}
+
+/**
+ * Decode a STEP header string argument's inner text (outer quotes already
+ * stripped) to its Unicode value.
+ *
+ * Both escape layers, in one scan, from the shared
+ * {@link decodeStepStringLiteral}: the `''` / `\\` doublings and the
+ * ISO-10303-21 backslash directives (`\X2\HHHH\X0\`, `\X\HH`, `\S\` and
+ * `\Px\`) the non-ASCII header fields (author, description, ...) arrive in.
+ *
+ * The regex this replaced in #2486 left those directives untouched on read
+ * while the writer's `\`->`\\` escaper doubled every backslash on write, so a
+ * round trip turned `Tr\X2\00FC\X0\mpler` into the literal
+ * `Tr\\X2\\00FC\\X0\\mpler`. Decoding to real Unicode here means the writer
+ * re-emits plain UTF-8 (no backslashes to double), so the value round-trips
+ * intact.
+ *
+ * The implementation moved into `@ifc-lite/encoding` for #2490, where
+ * `@ifc-lite/data`'s `parseStepValue` had grown the SAME directive-blind regex
+ * independently. Two copies of a decoder this subtle is how the second one got
+ * written; see that module for why the two layers cannot be resolved by two
+ * independent passes.
+ */
+function unescapeStepString(str: string): string {
+  return decodeStepStringLiteral(str);
 }
 
 /**
@@ -138,9 +165,12 @@ function extractRecordArgs(text: string, keyword: string, fromIndex = 0): string
  * non-STEP input). Cheap: only the first {@link MAX_HEADER_BYTES} are decoded,
  * truncated at the first `ENDSEC` so the DATA section is never scanned.
  */
-export function parseSourceHeader(buffer: Uint8Array): IfcSourceHeader | undefined {
-  const cap = Math.min(buffer.length, MAX_HEADER_BYTES);
-  let text = safeUtf8Decode(buffer, 0, cap);
+export function parseSourceHeader(
+  buffer: Uint8Array | IfcSourceBytes,
+): IfcSourceHeader | undefined {
+  const src = asSourceBytes(buffer);
+  const cap = Math.min(src.byteLength, MAX_HEADER_BYTES);
+  let text = src.decodeUtf8(0, cap);
   const endSec = text.toUpperCase().indexOf('ENDSEC');
   if (endSec >= 0) text = text.slice(0, endSec);
 

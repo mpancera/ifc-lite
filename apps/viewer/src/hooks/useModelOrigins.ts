@@ -64,7 +64,7 @@ export function useModelOrigins(enabled: boolean): ModelOrigin[] {
         mapConversion: selection.eff.mapConversion,
         projectedCRS: selection.eff.projectedCRS,
         lengthUnitScale: selection.eff.lengthUnitScale,
-        preAlignmentCoordinateInfo: model?.preAlignmentCoordinateInfo,
+        preAlignmentCoordinateInfo: model?.preAlignment?.coordinateInfo,
       },
     };
   }, [models, anchorModelIdOverride, georefMutations]);
@@ -93,7 +93,7 @@ export function useModelOrigins(enabled: boolean): ModelOrigin[] {
           mapConversion: eff?.mapConversion,
           projectedCRS: eff?.projectedCRS,
           lengthUnitScale: eff?.lengthUnitScale,
-          preAlignmentCoordinateInfo: model.preAlignmentCoordinateInfo,
+          preAlignmentCoordinateInfo: model.preAlignment?.coordinateInfo,
         };
         const anchorIsThis = anchorInput.id === modelId;
         const placement = await computeIfcOriginViewerPosition(

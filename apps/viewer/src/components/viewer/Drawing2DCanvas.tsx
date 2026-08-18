@@ -333,6 +333,7 @@ function drawScanSectionScreenSpace(
 // Static constants to avoid creating new objects/arrays on every render
 const CANVAS_STYLE = { imageRendering: 'crisp-edges' as const };
 const EMPTY_MEASURE_RESULTS: Measure2DResultData[] = [];
+const EMPTY_UNIT_DISPLAY_OVERRIDES: Record<string, string> = {};
 
 /** Selection halo. Matches the annotation-selection blue already used below. */
 const SELECTION_COLOR = '#1976D2';
@@ -436,6 +437,12 @@ interface Drawing2DCanvasProps {
    * it is exactly what the user asked to stop looking at.
    */
   colorKeys?: ReadonlyMap<string, string>;
+  // LENGTHUNIT display override for the on-canvas measure distance/perimeter
+  // labels (#2199 slice not covered by #2538, which wired every OTHER
+  // measure-tool readout — MeasurePanel.tsx, MeasurementVisuals.tsx — through
+  // `unitDisplayOverrides` but left this canvas's own `formatDistance()`
+  // calls on the pre-#2199 no-argument (always-metric) form).
+  unitDisplayOverrides?: Record<string, string>;
 }
 
 export function Drawing2DCanvas({
@@ -474,6 +481,7 @@ export function Drawing2DCanvas({
   scanOpacity = 1,
   selectedEntityKeys,
   colorKeys,
+  unitDisplayOverrides = EMPTY_UNIT_DISPLAY_OVERRIDES,
 }: Drawing2DCanvasProps): React.ReactElement {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
@@ -1542,7 +1550,7 @@ export function Drawing2DCanvas({
       const midY = (screenStart.y + screenEnd.y) / 2;
 
       // Format distance using shared utility
-      const labelText = formatDistance(distance);
+      const labelText = formatDistance(distance, unitDisplayOverrides);
 
       // Background for label
       ctx.font = '12px system-ui, sans-serif';
@@ -1720,7 +1728,7 @@ export function Drawing2DCanvas({
       const cx = drawingToScreenX(centroid.x, centroid.y);
       const cy = drawingToScreenY(centroid.x, centroid.y);
       const areaText = formatArea(result.area);
-      const perimText = `P: ${formatDistance(result.perimeter)}`;
+      const perimText = `P: ${formatDistance(result.perimeter, unitDisplayOverrides)}`;
 
       ctx.font = 'bold 12px system-ui, sans-serif';
       const areaMetrics = ctx.measureText(areaText);
@@ -2008,7 +2016,7 @@ export function Drawing2DCanvas({
         }
       }
     }
-  }, [drawing, transform, showHiddenLines, canvasSize, overrideEngine, overridesEnabled, entityColorMap, useIfcMaterials, measureMode, measureStart, measureCurrent, measureResults, measureSnapPoint, sheetEnabled, activeSheet, sectionAxis, isPinned, annotation2DActiveTool, annotation2DCursorPos, polygonAreaPoints, polygonAreaResults, textAnnotations, textAnnotationEditing, cloudAnnotationPoints, cloudAnnotations, selectedAnnotation, ifcAnnotationLines, ifcAnnotationTexts, ifcAnnotationFills, dxfUnderlays, scanPoints, scanOpacity, alignmentOverlay, selectedEntityKeys, colorKeys]);
+  }, [drawing, transform, showHiddenLines, canvasSize, overrideEngine, overridesEnabled, entityColorMap, useIfcMaterials, measureMode, measureStart, measureCurrent, measureResults, measureSnapPoint, sheetEnabled, activeSheet, sectionAxis, isPinned, annotation2DActiveTool, annotation2DCursorPos, polygonAreaPoints, polygonAreaResults, textAnnotations, textAnnotationEditing, cloudAnnotationPoints, cloudAnnotations, selectedAnnotation, ifcAnnotationLines, ifcAnnotationTexts, ifcAnnotationFills, dxfUnderlays, scanPoints, scanOpacity, alignmentOverlay, selectedEntityKeys, colorKeys, unitDisplayOverrides]);
 
   return (
     <canvas

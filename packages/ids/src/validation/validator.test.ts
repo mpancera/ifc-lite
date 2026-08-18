@@ -150,6 +150,36 @@ describe('validateIDS — optionality', () => {
     expect(reqResult.status).toBe('pass');
   });
 
+  it('optional requirement fails when facet is present but wrong (not merely absent)', async () => {
+    // `optional` pardons a wholly-absent facet, but must NOT pardon bad
+    // data: a present Description with the wrong value is an
+    // ATTRIBUTE_VALUE_MISMATCH, not an ATTRIBUTE_MISSING, so it must
+    // fail rather than be waved through by the missingFailures allowlist.
+    const accessor = createMockAccessor([
+      { expressId: 1, type: 'IfcWall', description: 'Wrong value' },
+    ]);
+
+    const spec = makeSpec({
+      requirements: [
+        {
+          id: 'req-0',
+          facet: {
+            type: 'attribute',
+            name: sv('Description'),
+            value: sv('Expected value'),
+          },
+          optionality: 'optional',
+        },
+      ],
+    });
+
+    const report = await validateIDS(makeDoc([spec]), accessor, modelInfo);
+    const reqResult = report.specificationResults[0].entityResults[0].requirementResults[0];
+    expect(reqResult.failure?.type).toBe('ATTRIBUTE_VALUE_MISMATCH');
+    expect(reqResult.status).toBe('fail');
+    expect(report.specificationResults[0].status).toBe('fail');
+  });
+
   it('prohibited requirements fail when facet passes', async () => {
     const accessor = createMockAccessor([
       { expressId: 1, type: 'IfcWall', description: 'Should not exist' },
@@ -191,6 +221,70 @@ describe('validateIDS — optionality', () => {
     expect(report.specificationResults[0].status).toBe('pass');
     const reqResult = report.specificationResults[0].entityResults[0].requirementResults[0];
     expect(reqResult.status).toBe('pass');
+  });
+
+  it('optional entity requirement passes when predefinedType is wholly absent', async () => {
+    // PREDEFINED_TYPE_MISSING means "this entity has no PredefinedType
+    // and no fallback ObjectType at all" — the same "wholly absent"
+    // shape as ATTRIBUTE_MISSING, so `optional` must give it a pass
+    // rather than treating it as bad data.
+    const accessor = createMockAccessor([
+      { expressId: 1, type: 'IfcWall' }, // no objectType, no predefinedType
+    ]);
+
+    const spec = makeSpec({
+      requirements: [
+        {
+          id: 'req-0',
+          facet: { type: 'entity', name: sv('IFCWALL'), predefinedType: sv('SOLIDWALL') },
+          optionality: 'optional',
+        },
+      ],
+    });
+
+    const report = await validateIDS(makeDoc([spec]), accessor, modelInfo);
+    const reqResult = report.specificationResults[0].entityResults[0].requirementResults[0];
+    expect(reqResult.failure?.type).toBe('PREDEFINED_TYPE_MISSING');
+    expect(reqResult.status).toBe('pass');
+    expect(report.specificationResults[0].status).toBe('pass');
+  });
+
+  it('optional partOf requirement passes when parent predefinedType is wholly absent', async () => {
+    // Same "wholly absent" shape as above, one level removed: the
+    // relation exists (a parent was found) but the parent's own
+    // PredefinedType attribute is unset.
+    const accessor = createMockAccessor([
+      {
+        expressId: 1,
+        type: 'IfcWall',
+        parent: {
+          expressId: 2,
+          type: 'IfcBuildingStorey',
+          relation: 'IfcRelContainedInSpatialStructure',
+          // predefinedType intentionally omitted
+        },
+      },
+    ]);
+
+    const spec = makeSpec({
+      requirements: [
+        {
+          id: 'req-0',
+          facet: {
+            type: 'partOf',
+            relation: 'IfcRelContainedInSpatialStructure',
+            entity: { type: 'entity', name: sv('IFCBUILDINGSTOREY'), predefinedType: sv('BASEMENT') },
+          },
+          optionality: 'optional',
+        },
+      ],
+    });
+
+    const report = await validateIDS(makeDoc([spec]), accessor, modelInfo);
+    const reqResult = report.specificationResults[0].entityResults[0].requirementResults[0];
+    expect(reqResult.failure?.type).toBe('PARTOF_PREDEFINED_TYPE_MISSING');
+    expect(reqResult.status).toBe('pass');
+    expect(report.specificationResults[0].status).toBe('pass');
   });
 });
 

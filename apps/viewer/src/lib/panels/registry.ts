@@ -33,6 +33,7 @@ import {
   Table2,
   ListTree,
   Users,
+  Cloud,
   Layers as LayersIcon,
   Box,
   Ruler,
@@ -54,6 +55,7 @@ export type WorkspacePanelId =
   | 'lens'
   | 'clash'
   | 'extensions'
+  | 'sources'
   | 'script'
   | 'gantt'
   | 'lists'
@@ -110,6 +112,9 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   // Alt+1..0 mapping stays intact (no Alt shortcut). The activity bar hides it
   // while the collab feature flag is off (see ActivityBar).
   { id: 'collab', title: 'Collaboration room', short: 'Room', Icon: Users, group: 'review', region: 'side' },
+  // Cloud sources (CDE integrations). APPENDED — no Alt shortcut. Always on
+  // the rail; providers that failed to register are reported inside the panel.
+  { id: 'sources', title: 'Cloud sources', short: 'Sources', Icon: Cloud, group: 'inspect', region: 'side' },
   // IFCX layer stack + per-layer diff (#1717). APPENDED so the frozen
   // Alt+1..0 mapping stays intact (no Alt shortcut). The activity bar only
   // surfaces it while a federated layer stack is loaded.

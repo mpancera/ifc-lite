@@ -136,7 +136,7 @@ describe('group condition', () => {
 
   it('filters rooms down to one zone', () => {
     const list = rooms(zoneColumn, [
-      { id: 'f', source: 'group', propertyName: 'Zone', operator: 'equals', value: 'AZ-A' },
+      { source: 'group', propertyName: 'Zone', operator: 'equals', value: 'AZ-A' },
     ]);
 
     expect(executeList(list, provider).rows.map((r) => r.entityId)).toEqual([1]);
@@ -146,7 +146,7 @@ describe('group condition', () => {
     // The everyday question after painting: what did I miss? `exists` alone
     // could not ask it — hence `notExists`.
     const list = rooms(zoneColumn, [
-      { id: 'f', source: 'group', propertyName: 'Zone', operator: 'notExists', value: '' },
+      { source: 'group', propertyName: 'Zone', operator: 'notExists', value: '' },
     ]);
 
     expect(executeList(list, provider).rows.map((r) => r.entityId)).toEqual([3]);
@@ -154,7 +154,7 @@ describe('group condition', () => {
 
   it('finds the rooms that are in some zone', () => {
     const list = rooms(zoneColumn, [
-      { id: 'f', source: 'group', propertyName: 'Zone', operator: 'exists', value: '' },
+      { source: 'group', propertyName: 'Zone', operator: 'exists', value: '' },
     ]);
 
     expect(executeList(list, provider).rows.map((r) => r.entityId)).toEqual([1, 2]);
@@ -162,7 +162,7 @@ describe('group condition', () => {
 
   it('matches part of a name', () => {
     const list = rooms(zoneColumn, [
-      { id: 'f', source: 'group', propertyName: 'Zone', operator: 'contains', value: 'AZ-' },
+      { source: 'group', propertyName: 'Zone', operator: 'contains', value: 'AZ-' },
     ]);
 
     expect(executeList(list, provider).rows.map((r) => r.entityId)).toEqual([1, 2]);

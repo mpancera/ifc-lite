@@ -14,6 +14,9 @@ import { useViewerStore } from '@/store';
 import { fromGlobalIdFromModels, toGlobalIdFromModels } from '@/store/globalId';
 import { pointInPolygon } from '@/lib/polygon-clip';
 import { toast } from '@/components/ui/toast';
+import { raycastForPolylinePoint, isNearPolylineStart,
+  isDuplicateClickPoint,
+} from './measureHandlers.js';
 
 /**
  * Handle click event for selection (single click and double click).
@@ -36,9 +39,19 @@ export async function handleSelectionClick(ctx: MouseHandlerContext, e: MouseEve
     return;
   }
 
-  // Measure tool now uses drag interaction (see mousedown/mousemove/mouseup)
+  // Measure tool: drag mode uses mousedown/mousemove/mouseup (see
+  // measureHandlers.ts) and never reaches here. Polyline mode (#2199) is the
+  // opposite — it does nothing on mousedown/drag, so a click is the ONLY
+  // gesture that adds a point, which is what makes the two modes unable to
+  // corrupt each other's state (see `setMeasureMode` in measurementSlice.ts).
   if (tool === 'measure') {
-    return; // Skip click handling for measure tool
+    const mode = useViewerStore.getState().measureMode;
+    if (mode === 'polyline') {
+      handlePolylineClick(ctx, x, y);
+    } else if (mode === 'angle') {
+      handleAngleClick(ctx, x, y);
+    }
+    return;
   }
 
   // Section-tool face-pick (issue #243): clicking any visible face places
@@ -594,6 +607,117 @@ export function handleSplitHover(ctx: MouseHandlerContext, x: number, y: number)
     });
   }
   return true;
+}
+
+/**
+ * Handle a click landing on the scene while the Measure tool's polyline mode
+ * is active (#2199). One click state machine, three outcomes:
+ *
+ *   - no sequence in progress → start one at the clicked point.
+ *   - sequence in progress, click lands near the FIRST point (screen space,
+ *     ≥3 points already placed) → close the loop, finishing as a perimeter.
+ *   - otherwise → append the clicked point.
+ *
+ * Finishing an OPEN polyline is a different gesture entirely (double-click
+ * or Enter — see `finishOpenPolyline`'s call sites in useMouseControls.ts /
+ * useKeyboardShortcuts.ts), so a click never finishes anything but a closed
+ * loop. A miss (no raycast hit) is a no-op — it neither starts nor extends
+ * a sequence, matching how a drag-mode click into empty space does nothing.
+ */
+export function handlePolylineClick(ctx: MouseHandlerContext, x: number, y: number): void {
+  const picked = raycastForPolylinePoint(ctx, x, y);
+  if (!picked) return;
+
+  const state = useViewerStore.getState();
+  ctx.setSnapTarget(picked.snapTarget);
+
+  const active = state.activePolyline;
+  if (!active) {
+    state.startPolyline(picked.point);
+    return;
+  }
+
+  const first = active.points[0];
+  if (active.points.length >= 3 && isNearPolylineStart(picked.point, first)) {
+    state.finishPolyline(true);
+    return;
+  }
+
+  state.addPolylinePoint(picked.point);
+}
+
+/**
+ * Click handler for angle mode (#2735).
+ *
+ * There is no finish gesture - every angle kind has a FIXED pick count and the
+ * store finishes the measurement itself on the last pick - so polyline's
+ * `fromDoubleClick` apparatus has no analogue here.
+ *
+ * But the duplicate-click DEFENCE still does, and an earlier version of this
+ * comment claimed otherwise on false grounds. It argued a stray second click
+ * "lands where the maths already classifies coincident picks as degenerate".
+ * Only APEX-coincidence is degenerate. Browsers fire `click, click, dblclick`,
+ * so a habitual double-click produces three distinct failures here:
+ *
+ *   1. double-clicking a DIRECTION point makes picks 2 and 3 coincide - a
+ *      recorded "0.0°", rendered as a real answer rather than an em dash;
+ *   2. double-clicking the THIRD pick finishes on the first click and the
+ *      second click starts a stray new sequence, so "1/3 picks · apex set"
+ *      appears unbidden;
+ *   3. double-clicking the APEX puts picks 1 and 2 a pixel or two apart - a
+ *      ray whose direction is cursor noise, and pick 3 then yields a
+ *      confident, wrong `angled` number.
+ *
+ * So the same `isDuplicateClickPoint` guard polyline uses applies: a click
+ * within {@link DUPLICATE_POINT_SCREEN_RADIUS_PX} of the previous pick is the
+ * second half of one physical double-click and is dropped. Dropping is safe
+ * because a genuinely intended pick that close is unmeasurable anyway.
+ *
+ * A miss is a no-op, matching polyline's contract.
+ *
+ * Only the `'points'` kind ships today; `'edges'` and `'faces'` are the later
+ * slices of #2735 and will need their own pick resolution (an edge run from
+ * `SnapTarget.metadata`, a camera-oriented face normal from the intersection),
+ * which is why the pick carries its `kind` rather than being a bare point.
+ */
+export function handleAngleClick(ctx: MouseHandlerContext, x: number, y: number): void {
+  const state = useViewerStore.getState();
+  if (state.angleKind !== 'points') return;
+
+  const picked = raycastForPolylinePoint(ctx, x, y);
+  if (!picked) return;
+
+  // Drop the second half of a physical double-click (see the note above).
+  const prior = state.activeAngle?.picks;
+  const last = prior && prior.length > 0 ? prior[prior.length - 1].point : null;
+  if (last && isDuplicateClickPoint(last, picked.point)) return;
+
+  ctx.setSnapTarget(picked.snapTarget);
+  state.addAnglePick({ kind: 'points', point: picked.point });
+}
+
+/**
+ * The store side of the Measure tool's double-click finish (#2199), kept
+ * beside {@link handlePolylineClick} because the two are one gesture family
+ * and this one reads the store directly the same way.
+ *
+ * This is the ONLY finish path that may drop a trailing near-duplicate point:
+ * a physical double-click dispatches `click, click, dblclick`, so
+ * `handlePolylineClick` has already appended the browser's second click by
+ * the time this runs. Enter (useKeyboardShortcuts.ts) and the close-loop
+ * click above append nothing extra, and the screen coordinates the duplicate
+ * check compares are reprojected on every camera move, so passing
+ * `fromDoubleClick` from anywhere else would delete real vertices after an
+ * orbit — see `finishPolyline` in measurementSlice.ts.
+ *
+ * Returns `null` when the gesture does not apply (not in polyline mode, or
+ * no sequence in progress) so the caller knows to leave the DOM event alone;
+ * otherwise whether a measurement was actually recorded.
+ */
+export function finishPolylineFromDoubleClick(): boolean | null {
+  const state = useViewerStore.getState();
+  if (state.measureMode !== 'polyline' || !state.activePolyline) return null;
+  return state.finishPolyline(false, { fromDoubleClick: true });
 }
 
 /**

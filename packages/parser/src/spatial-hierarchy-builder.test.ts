@@ -69,7 +69,7 @@ describe('space-contained elements', () => {
     // The storey assignment is a roll-up; the element's actual container is
     // still the room, and the two must not be conflated.
     const hierarchy = buildHierarchy();
-    expect(hierarchy?.elementToContainer.get(SENSOR)).toBe(SPACE);
+    expect(hierarchy?.elementToContainer?.get(SENSOR)).toBe(SPACE);
     expect(hierarchy?.bySpace.get(SPACE)).toContain(SENSOR);
   });
 });

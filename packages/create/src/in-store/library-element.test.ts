@@ -26,7 +26,7 @@ describe('addLibraryElementToStore', () => {
 
     const result = addLibraryElementToStore(
       editor,
-      { ownerHistoryId: 5, bodyContextId: 14, storeyId: 43, storeyPlacementId: 54 },
+      { ownerHistoryId: 5, bodyContextId: 14, axisContextId: 15, storeyId: 43, storeyPlacementId: 54 },
       { IfcEntity: 'IfcAlarm', Position: [1, 2, 0], PredefinedType: 'SIREN' },
     );
 
@@ -42,12 +42,12 @@ describe('addLibraryElementToStore', () => {
 
     const sensor = addLibraryElementToStore(
       editor,
-      { ownerHistoryId: 5, bodyContextId: 14, storeyId: 43, storeyPlacementId: 54 },
+      { ownerHistoryId: 5, bodyContextId: 14, axisContextId: 15, storeyId: 43, storeyPlacementId: 54 },
       { IfcEntity: 'IfcSensor', Position: [0, 0, 0], PredefinedType: 'FIRESENSOR' },
     );
     const camera = addLibraryElementToStore(
       editor,
-      { ownerHistoryId: 5, bodyContextId: 14, storeyId: 43, storeyPlacementId: 54 },
+      { ownerHistoryId: 5, bodyContextId: 14, axisContextId: 15, storeyId: 43, storeyPlacementId: 54 },
       { IfcEntity: 'IfcAudioVisualAppliance', Position: [3, 0, 0], PredefinedType: 'CAMERA' },
     );
 
@@ -62,7 +62,7 @@ describe('addLibraryElementToStore', () => {
 
     const result = addLibraryElementToStore(
       editor,
-      { ownerHistoryId: 5, bodyContextId: 14, storeyId: 43, storeyPlacementId: 54 },
+      { ownerHistoryId: 5, bodyContextId: 14, axisContextId: 15, storeyId: 43, storeyPlacementId: 54 },
       {
         IfcEntity: 'IfcSensor',
         Position: [0, 0, 0],
@@ -81,7 +81,7 @@ describe('addLibraryElementToStore', () => {
     const editor = new StoreEditor(makeStore(40), view);
     const result = addLibraryElementToStore(
       editor,
-      { ownerHistoryId: 5, bodyContextId: 14, storeyId: 43, storeyPlacementId: 54, schema: 'IFC2X3' },
+      { ownerHistoryId: 5, bodyContextId: 14, axisContextId: 15, storeyId: 43, storeyPlacementId: 54, schema: 'IFC2X3' },
       { IfcEntity: 'IfcSensor', Position: [0, 0, 0], PredefinedType: 'FIRESENSOR' },
     );
     const element = view.getNewEntities().find((e) => e.expressId === result.elementId);
@@ -93,7 +93,7 @@ describe('addLibraryElementToStore', () => {
     const editor = new StoreEditor(makeStore(10), view);
     expect(() => addLibraryElementToStore(
       editor,
-      { ownerHistoryId: 1, bodyContextId: 2, storeyId: 3, storeyPlacementId: 4 },
+      { ownerHistoryId: 1, bodyContextId: 2, axisContextId: 3, storeyId: 3, storeyPlacementId: 4 },
       { IfcEntity: '', Position: [0, 0, 0] },
     )).toThrow(/IfcEntity/);
   });
@@ -103,7 +103,7 @@ describe('addLibraryElementToStore', () => {
     const editor = new StoreEditor(makeStore(10), view);
     expect(() => addLibraryElementToStore(
       editor,
-      { ownerHistoryId: 1, bodyContextId: 2, storeyId: 3, storeyPlacementId: 4 },
+      { ownerHistoryId: 1, bodyContextId: 2, axisContextId: 3, storeyId: 3, storeyPlacementId: 4 },
       { IfcEntity: 'IfcSensor', Position: [0, 0, 0], Width: 0 },
     )).toThrow(/positive/);
   });

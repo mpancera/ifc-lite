@@ -1,6 +1,6 @@
 {
   "name": "@ifc-lite/ids",
-  "version": "1.15.34",
+  "version": "1.15.47",
   "description": "IDS (Information Delivery Specification) support for IFC-Lite",
   "type": "module",
   "main": "./dist/index.js",
@@ -18,16 +18,17 @@
   },
   "scripts": {
     "build": "pnpm exec tsc",
+    "typecheck": "node ../../scripts/typecheck-tests.mjs",
     "dev": "pnpm exec tsc --watch",
     "test": "vitest run"
   },
   "dependencies": {
     "@ifc-lite/data": "workspace:*",
     "@ifc-lite/parser": "workspace:*",
-    "@xmldom/xmldom": "^0.9.10"
+    "@xmldom/xmldom": "^0.9.11"
   },
   "devDependencies": {
-    "happy-dom": "^20.11.0",
+    "happy-dom": "^20.11.2",
     "typescript": "^6.0.3",
     "vitest": "^4.1.10"
   },

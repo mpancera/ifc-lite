@@ -30,6 +30,7 @@ import {
 } from '@ifc-lite/data';
 import type { EntityRef } from './types.js';
 import { EntityExtractor } from './entity-extractor.js';
+import type { IfcSourceBytes } from './source-bytes.js';
 import { getAttributeNamesAcrossSchemas } from './ifc-schema.js';
 
 const log = createLogger('SpatialHierarchy');
@@ -38,7 +39,7 @@ const log = createLogger('SpatialHierarchy');
  *  (storey elevation, LongName). Present on the fresh-parse / cache-with-source
  *  path, absent on the source-less `buildFromCache` fallback. */
 interface AttributeSource {
-  source: Uint8Array;
+  source: Uint8Array | IfcSourceBytes;
   entityIndex: { byId: { get(expressId: number): EntityRef | undefined } };
   lengthUnitScale: number;
 }
@@ -75,7 +76,7 @@ export class SpatialHierarchyBuilder {
     entities: EntityTable,
     relationships: RelationshipGraph,
     _strings: StringTable,
-    source: Uint8Array,
+    source: Uint8Array | IfcSourceBytes,
     entityIndex: { byId: { get(expressId: number): EntityRef | undefined } },
     lengthUnitScale: number = 1.0
   ): SpatialHierarchy {
@@ -404,7 +405,7 @@ export class SpatialHierarchyBuilder {
    */
   private extractElevation(
     expressId: number,
-    source: Uint8Array,
+    source: Uint8Array | IfcSourceBytes,
     entityIndex: { byId: { get(expressId: number): EntityRef | undefined } }
   ): number | undefined {
     const ref = entityIndex.byId.get(expressId);
@@ -458,7 +459,7 @@ export class SpatialHierarchyBuilder {
    */
   private extractPlacementElevation(
     expressId: number,
-    source: Uint8Array,
+    source: Uint8Array | IfcSourceBytes,
     entityIndex: { byId: { get(expressId: number): EntityRef | undefined } }
   ): number | undefined {
     try {

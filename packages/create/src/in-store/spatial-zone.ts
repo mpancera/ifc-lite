@@ -3,134 +3,306 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * Anchored builder for `IfcSpatialZone` — a spatial region WITH geometry.
+ * Anchored builder for `IfcSpatialZone` - the schema's own name for a region
+ * that is not bounded by physical elements (issue #2508 item 3).
  *
- * The counterpart to `IfcZone` (see `zone.ts`): where a zone is a bare
- * grouping of rooms, a spatial zone is a real spatial element with a placement
- * and a body. A fire compartment has an extent — you can ask for its area, cut
- * a section through it, colour it in 3D — and that is exactly what
- * `IfcSpatialZone` is for. Its `PredefinedType` domain says as much:
- * `FIRESAFETY`, `SECURITY`, `THERMAL`, `VENTILATION`, `OCCUPANCY`,
- * `TRANSPORT`, `LIGHTING`, `CONSTRUCTION`, `INTERFERENCE`, `RESERVATION`.
+ * A location zone is a construction section or takt area a user drew against
+ * the rendered scene. `docs/design/zone-emission.md` argues why it must NOT be
+ * emitted as an `IfcZone`: that type groups SPACES, its `IsGroupedBy` admits
+ * only `IfcSpace` / `IfcSpatialZone` / nested `IfcZone`, and this repo's own
+ * reader (`extractGroupMembersOnDemand`) describes an `IfcZone`'s members that
+ * way. Assigning walls to one produces a file we would mis-read ourselves.
  *
- * Geometry mirrors `addSpaceToStore`: a rectangle or an arbitrary footprint
- * polygon, extruded to a height, in the file's native length unit.
+ * `IfcSpatialZone` is the type that means this, and two of its properties are
+ * why it fits where `IfcZone` does not:
  *
- * Unlike a space, a spatial zone is NOT aggregated into the storey. IFC treats
- * it as a spatial element that may overlap the spatial hierarchy rather than
- * subdivide it — a fire compartment routinely spans several storeys, and
- * forcing it under one of them would state something false. It is placed
- * relative to the storey's placement so its coordinates stay comparable, and
- * left unaggregated.
+ * - Elements attach through **`IfcRelReferencedInSpatialStructure`**, which is
+ *   many-to-many and ADDITIVE. It leaves `IfcRelContainedInSpatialStructure` -
+ *   the exclusive relation that carries the building's real hierarchy -
+ *   untouched, so emitting zones never re-parents anything.
+ * - A straddling element can therefore be referenced in BOTH zones it crosses,
+ *   which is the truthful statement of the topology.
+ *
+ * What this cannot say is HOW MUCH of an element is in a zone. That is the
+ * quantity write-back's job (`IfcLite_ZoneVolumes`), and the two are
+ * complementary rather than alternatives: emit alongside the property sets,
+ * never instead of them.
+ *
+ * Pure: no I/O, no parser access - operates entirely through the editor, like
+ * every other builder here.
  */
 
 import { generateIfcGuid } from '@ifc-lite/encoding';
+import { IfcSpatialZoneTypeEnum } from '@ifc-lite/parser';
 import type { StoreEditor } from '@ifc-lite/mutations';
-import { toNativeLength, type SpatialAnchor } from './anchor.js';
-import {
-  emitBodyRepresentation,
-  emitExtrudedSolid,
-  emitLocalPlacement,
-  emitPolygonProfile,
-  emitRectangleProfile,
-  ownerHistoryRef,
-} from './_emit-helpers.js';
+import { toNativeLength, toNativePoint3, type SpatialAnchor } from './anchor.js';
+import { emitPolygonProfile, ownerHistoryRef } from './_emit-helpers.js';
 
-/** `IfcSpatialZoneTypeEnum`, as carried in the bundled IFC4.3 schema. */
-export type SpatialZonePredefinedType =
-  | 'CONSTRUCTION' | 'FIRESAFETY' | 'INTERFERENCE' | 'LIGHTING' | 'OCCUPANCY'
-  | 'RESERVATION' | 'SECURITY' | 'THERMAL' | 'TRANSPORT' | 'VENTILATION'
-  | 'USERDEFINED' | 'NOTDEFINED';
-
-interface SpatialZoneCommon {
+/**
+ * One zone to emit. Coordinates are IFC-AXES (Z-up) WORLD metres: the caller
+ * has already undone the render frame and swapped axes, because only the
+ * viewer knows what shifts its own pipeline applied. See
+ * `apps/viewer/src/lib/zones/emit-spatial-zones.ts`.
+ */
+export interface SpatialZoneInput {
+  /** `IfcRoot.Name` - the zone's own name, e.g. "Takt A". */
   Name: string;
-  Description?: string;
-  /** Refinement when `PredefinedType` is `USERDEFINED`. */
-  ObjectType?: string;
-  LongName?: string;
-  /** Defaults to `NOTDEFINED` — an honest "unclassified", not a guess. */
-  PredefinedType?: SpatialZonePredefinedType;
-  /** Extrusion height in metres. */
-  Height: number;
-}
-
-export interface SpatialZoneRectangleParams extends SpatialZoneCommon {
-  /** Placement origin in metres, relative to the storey. */
+  /** Base centre of the zone in IFC world metres (Z-up). */
   Position: [number, number, number];
+  /** Extent along world X, metres. Ignored when `Footprint` is given. */
   Width: number;
+  /** Extent along world Y, metres. Ignored when `Footprint` is given. */
   Depth: number;
-}
-
-export interface SpatialZonePolygonParams extends SpatialZoneCommon {
-  Position?: [number, number, number];
-  /** Footprint in metres, in the storey's XY plane. */
-  OuterCurve: Array<[number, number]>;
-}
-
-export type SpatialZoneInStoreParams =
-  | SpatialZoneRectangleParams
-  | SpatialZonePolygonParams;
-
-function isPolygonParams(
-  params: SpatialZoneInStoreParams,
-): params is SpatialZonePolygonParams {
-  return Array.isArray((params as SpatialZonePolygonParams).OuterCurve);
+  /** Extrusion height along +Z, metres. */
+  Height: number;
+  /** Rotation about the vertical axis, radians. Carried in the PLACEMENT
+   *  rather than baked into the profile, so the profile stays a plain
+   *  rectangle a receiving tool can read as one. Ignored with `Footprint`. */
+  RotationZ?: number;
+  /**
+   * Convex footprint in IFC world metres (X/Y pairs), for a prism zone. When
+   * present the zone is this polygon extruded by `Height`, and the profile is
+   * emitted RELATIVE to `Position` so the placement stays the one thing that
+   * positions the zone.
+   */
+  Footprint?: Array<[number, number]>;
 }
 
 /**
- * Create an `IfcSpatialZone`.
+ * A `PredefinedType` this builder accepts: the SCHEMA's own enum, or any of its
+ * values as a plain string.
  *
- * Attribute order: IfcRoot (GlobalId, OwnerHistory, Name, Description) +
- * IfcObject (ObjectType) + IfcProduct (ObjectPlacement, Representation) +
- * IfcSpatialElement (LongName) + IfcSpatialZone (PredefinedType).
+ * Typed rather than left as `string` because the value is written as a STEP
+ * ENUMERATION, so anything outside the set produces an `IfcSpatialZone` no
+ * reader can parse. Taken from the generated schema (`@ifc-lite/parser`) rather
+ * than re-listed here: a second copy of an enum is a second thing to keep in
+ * step with the schema.
  */
-export function addSpatialZoneToStore(
+export type SpatialZoneType = IfcSpatialZoneTypeEnum | `${IfcSpatialZoneTypeEnum}`;
+
+const SPATIAL_ZONE_TYPES: ReadonlySet<string> = new Set<string>(Object.values(IfcSpatialZoneTypeEnum));
+
+export interface SpatialZoneInStoreParams {
+  /** `IfcSpatialZone.LongName` - the zone SET's name, e.g. "Takt areas". */
+  LongName: string;
+  zones: SpatialZoneInput[];
+  /**
+   * `IfcRelReferencedInSpatialStructure.RelatedElements` per zone, by zone
+   * index: the expressIds each zone references. An element appears under every
+   * zone it touches, straddlers included.
+   */
+  RelatedElements: Array<number[]>;
+  /** `IfcSpatialZone.PredefinedType`. CONSTRUCTION is what a takt area is. */
+  PredefinedType?: SpatialZoneType;
+  /** `IfcSpatialZone.ObjectType`, which IFC4 REQUIRES when `PredefinedType` is
+   *  `USERDEFINED` (rule `CorrectPredefinedType`): the enum says "named
+   *  elsewhere", and `ObjectType` is where. */
+  ObjectType?: string;
+  /** `IfcRoot.Description`, written on every zone of the set. The caller's to
+   *  use: the viewer puts its zone set's stable id here so a later run can
+   *  find its own zones after the set has been RENAMED, which `LongName`
+   *  cannot survive. */
+  Description?: string;
+}
+
+export interface SpatialZoneBuildResult {
+  /** One `IfcSpatialZone` expressId per input zone, in input order. */
+  zoneIds: number[];
+  /** One `IfcRelReferencedInSpatialStructure` per zone that had elements. */
+  relReferencedIds: number[];
+}
+
+/**
+ * Check one zone, and report whether its shape is a polygon.
+ *
+ * ONE predicate decides the shape, so the rotation and the profile cannot
+ * disagree: keying the rotation off "has a Footprint" while the profile needs
+ * three points would silently emit a rectangle with the caller's rotation
+ * discarded. A Footprint too small to be a polygon is a caller error, not a
+ * reason to emit a different shape than was asked for.
+ */
+function validateZone(zone: SpatialZoneInput): boolean {
+  const usePolygon = zone.Footprint !== undefined;
+  if (usePolygon && zone.Footprint!.length < 3) {
+    throw new Error(`addSpatialZonesToStore: zone "${zone.Name}" has a Footprint of fewer than 3 points`);
+  }
+  for (const value of zone.Position) {
+    if (!Number.isFinite(value)) {
+      throw new Error(`addSpatialZonesToStore: zone "${zone.Name}" needs a finite Position`);
+    }
+  }
+  if (zone.RotationZ !== undefined && !Number.isFinite(zone.RotationZ)) {
+    throw new Error(`addSpatialZonesToStore: zone "${zone.Name}" needs a finite RotationZ`);
+  }
+  const extents: Array<readonly [string, number]> = usePolygon
+    // A polygon carries its own extents, so Width and Depth are not read.
+    ? [['Height', zone.Height]]
+    : [['Width', zone.Width], ['Depth', zone.Depth], ['Height', zone.Height]];
+  for (const [name, value] of extents) {
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new Error(`addSpatialZonesToStore: zone "${zone.Name}" needs a finite positive ${name}`);
+    }
+  }
+  if (usePolygon) {
+    for (const point of zone.Footprint!) {
+      if (!Number.isFinite(point[0]) || !Number.isFinite(point[1])) {
+        throw new Error(`addSpatialZonesToStore: zone "${zone.Name}" has a non-finite Footprint point`);
+      }
+    }
+  }
+  return usePolygon;
+}
+
+/**
+ * `IfcSpatialZone` does not exist before IFC4. Emitting one into an IFC2X3
+ * file would produce an entity no reader of that schema can resolve, so the
+ * caller is told rather than handed a file that fails on import.
+ */
+export function spatialZonesSupported(schema: SpatialAnchor['schema']): boolean {
+  return (schema ?? 'IFC4') !== 'IFC2X3';
+}
+
+/**
+ * Emit one `IfcSpatialZone` per zone, plus the reference relationships.
+ *
+ * Placement is ABSOLUTE (`PlacementRelTo = $`): the caller supplies world
+ * coordinates because that is what it has - the mesh pipeline already resolved
+ * every placement chain to world when it drew the zone against the model.
+ * Chaining to the site instead would mean inverting that chain to get back a
+ * local offset, which is arithmetic with nothing to gain: an absolute local
+ * placement is valid IFC and says exactly where the user put the box.
+ */
+export function addSpatialZonesToStore(
   editor: StoreEditor,
   anchor: SpatialAnchor,
   params: SpatialZoneInStoreParams,
-): { spatialZoneId: number } {
-  if (params.Height <= 0) {
-    throw new Error('addSpatialZoneToStore: Height must be positive');
+): SpatialZoneBuildResult {
+  if (!spatialZonesSupported(anchor.schema)) {
+    throw new Error('addSpatialZonesToStore: IfcSpatialZone requires IFC4 or later');
   }
 
-  const polygon = isPolygonParams(params);
-  if (polygon) {
-    if (params.OuterCurve.length < 3) {
-      throw new Error('addSpatialZoneToStore: OuterCurve needs at least three points');
+  const predefinedType = params.PredefinedType ?? 'CONSTRUCTION';
+  if (!SPATIAL_ZONE_TYPES.has(predefinedType)) {
+    throw new Error(`addSpatialZonesToStore: "${predefinedType}" is not an IfcSpatialZoneTypeEnum value`);
+  }
+  // IFC4's `CorrectPredefinedType` rule: USERDEFINED means "the type is named
+  // in ObjectType", so emitting it with ObjectType = $ is a file that fails
+  // that rule while looking fine.
+  if (predefinedType === 'USERDEFINED' && !params.ObjectType) {
+    throw new Error('addSpatialZonesToStore: PredefinedType USERDEFINED requires an ObjectType');
+  }
+
+  // EVERY zone is checked before the FIRST entity is added. Validating inside
+  // the emit loop would leave a caller who passed one bad zone with the good
+  // ones already written into the overlay and an exception saying the call
+  // failed - a half-applied build is worse than either outcome.
+  const shapes = params.zones.map((zone) => validateZone(zone));
+
+  const zoneIds: number[] = [];
+  const relReferencedIds: number[] = [];
+
+  params.zones.forEach((zone, index) => {
+    const usePolygon = shapes[index];
+
+    const position = toNativePoint3(anchor, zone.Position);
+    const height = toNativeLength(anchor, zone.Height);
+
+    // Placement: absolute, with the vertical rotation carried as the RefDirection
+    // rather than rotated into the profile.
+    const originPt = editor.addEntity('IfcCartesianPoint', [position]).expressId;
+    const rotation = usePolygon ? 0 : (zone.RotationZ ?? 0);
+    const refDirectionId = rotation === 0
+      ? null
+      : editor.addEntity('IfcDirection', [[Math.cos(rotation), Math.sin(rotation), 0]]).expressId;
+    const axisId = editor.addEntity('IfcAxis2Placement3D', [
+      `#${originPt}`,
+      null,
+      refDirectionId === null ? null : `#${refDirectionId}`,
+    ]).expressId;
+    const placementId = editor.addEntity('IfcLocalPlacement', [null, `#${axisId}`]).expressId;
+
+    // Profile: a rectangle for a box, the polygon for a prism. The prism's
+    // points are made RELATIVE to the placement origin so the two do not both
+    // carry the position (which would put the zone at twice its coordinates).
+    let profileId: number;
+    if (usePolygon && zone.Footprint) {
+      profileId = emitPolygonProfile(
+        editor,
+        zone.Footprint.map(([x, y]): [number, number] => [
+          toNativeLength(anchor, x - zone.Position[0]),
+          toNativeLength(anchor, y - zone.Position[1]),
+        ]),
+      );
+    } else {
+      const profileOriginPt = editor.addEntity('IfcCartesianPoint', [[0, 0]]).expressId;
+      const profilePos = editor.addEntity('IfcAxis2Placement2D', [`#${profileOriginPt}`, null]).expressId;
+      profileId = editor.addEntity('IfcRectangleProfileDef', [
+        '.AREA.',
+        null,
+        `#${profilePos}`,
+        toNativeLength(anchor, zone.Width),
+        toNativeLength(anchor, zone.Depth),
+      ]).expressId;
     }
-  } else if (params.Width <= 0 || params.Depth <= 0) {
-    throw new Error('addSpatialZoneToStore: Width and Depth must be positive');
-  }
 
-  // Params are metres; the file may be millimetres. Converting here is what
-  // keeps a compartment baked into a mm model from exporting 1000× too small.
-  const n = (metres: number) => toNativeLength(anchor, metres);
-  const origin: [number, number, number] = polygon
-    ? params.Position ?? [0, 0, 0]
-    : params.Position;
+    const solidOriginPt = editor.addEntity('IfcCartesianPoint', [[0, 0, 0]]).expressId;
+    const solidAxis = editor.addEntity('IfcAxis2Placement3D', [`#${solidOriginPt}`, null, null]).expressId;
+    const extrudeDirection = editor.addEntity('IfcDirection', [[0, 0, 1]]).expressId;
+    const solidId = editor.addEntity('IfcExtrudedAreaSolid', [
+      `#${profileId}`,
+      `#${solidAxis}`,
+      `#${extrudeDirection}`,
+      height,
+    ]).expressId;
 
-  const placementId = emitLocalPlacement(
-    editor,
-    anchor.storeyPlacementId,
-    [n(origin[0]), n(origin[1]), n(origin[2])],
-  );
-  const profileId = polygon
-    ? emitPolygonProfile(editor, params.OuterCurve.map(([x, y]): [number, number] => [n(x), n(y)]))
-    : emitRectangleProfile(editor, n(params.Width), n(params.Depth), n(params.Width / 2), n(params.Depth / 2));
-  const solidId = emitExtrudedSolid(editor, profileId, n(params.Height));
-  const { productShapeId } = emitBodyRepresentation(editor, anchor.bodyContextId, solidId);
+    const shapeRepId = editor.addEntity('IfcShapeRepresentation', [
+      `#${anchor.bodyContextId}`,
+      'Body',
+      'SweptSolid',
+      [`#${solidId}`],
+    ]).expressId;
+    const productShapeId = editor.addEntity('IfcProductDefinitionShape', [
+      null,
+      null,
+      [`#${shapeRepId}`],
+    ]).expressId;
 
-  const spatialZoneId = editor.addEntity('IfcSpatialZone', [
-    generateIfcGuid(anchor.guidRandom),
-    ownerHistoryRef(anchor.ownerHistoryId),
-    params.Name,
-    params.Description ?? null,
-    params.ObjectType ?? null,
-    `#${placementId}`,
-    `#${productShapeId}`,
-    params.LongName ?? null,
-    `.${params.PredefinedType ?? 'NOTDEFINED'}.`,
-  ]).expressId;
+    // IfcSpatialZone: GlobalId, OwnerHistory, Name, Description, ObjectType,
+    // ObjectPlacement, Representation, LongName, PredefinedType.
+    //
+    // NINE attributes, not ten: `IfcSpatialZone` derives from
+    // `IfcSpatialElement`, NOT from `IfcSpatialStructureElement`, so it has no
+    // `CompositionType`. That difference is the schema saying what this type is
+    // for - a zone is not part of the containment hierarchy.
+    const zoneId = editor.addEntity('IfcSpatialZone', [
+      generateIfcGuid(anchor.guidRandom),
+      ownerHistoryRef(anchor.ownerHistoryId),
+      zone.Name,
+      params.Description ?? null,
+      params.ObjectType ?? null,
+      `#${placementId}`,
+      `#${productShapeId}`,
+      params.LongName,
+      `.${predefinedType}.`,
+    ] as Parameters<StoreEditor['addEntity']>[1]).expressId;
+    zoneIds.push(zoneId);
 
-  return { spatialZoneId };
+    // REFERENCED, not CONTAINED. The containment relation is exclusive: an
+    // element has exactly one, and re-pointing it would move the element out of
+    // the storey that owns it. Referencing is additive and many-to-many, which
+    // is what lets a straddler belong to both zones it crosses.
+    const elements = params.RelatedElements[index] ?? [];
+    if (elements.length > 0) {
+      relReferencedIds.push(editor.addEntity('IfcRelReferencedInSpatialStructure', [
+        generateIfcGuid(anchor.guidRandom),
+        ownerHistoryRef(anchor.ownerHistoryId),
+        null,
+        null,
+        elements.map((id) => `#${id}`),
+        `#${zoneId}`,
+      ]).expressId);
+    }
+  });
+
+  return { zoneIds, relReferencedIds };
 }

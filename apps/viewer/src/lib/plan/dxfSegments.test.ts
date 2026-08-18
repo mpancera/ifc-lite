@@ -46,6 +46,7 @@ function state(
       warnings: [],
     },
     visible: true,
+    visible3D: true,
     opacity: 1,
     layerVisibility: {},
     placement,

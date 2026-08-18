@@ -2,7 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-export { decodeIfcString, decodeStepStringLiteral, encodeIfcString } from './ifc-string.js';
+export { decodeIfcString, encodeIfcString } from './ifc-string.js';
+export { decodeStepStringLiteral } from './step-string-literal.js';
 export {
   uuidToIfcGuid,
   ifcGuidToUuid,

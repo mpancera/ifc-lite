@@ -59,7 +59,7 @@ export function useOverlayAutosave() {
     if (cached) return cached;
     const store = useViewerStore.getState().models.get(modelId)?.ifcDataStore;
     if (!store?.source?.length) return null;
-    const hash = await computeFullSourceHash(store.source);
+    const hash = await computeFullSourceHash(store.source.materialize());
     if (hash) hashes.current.set(modelId, hash);
     return hash;
   }, []);

@@ -25,7 +25,7 @@
  * The two must never drift: one theme, one label, both landings derived here.
  */
 
-import type { SpatialZonePredefinedType } from '@ifc-lite/create';
+import type { AnchoredSpatialZonePredefinedType } from '@ifc-lite/create';
 
 /** The schema a `PredefinedType` value requires. */
 export type ThemeSchema = 'IFC4' | 'IFC4X3';
@@ -38,7 +38,7 @@ export interface ZoneTheme {
   /** `IfcZone.ObjectType`. */
   zoneObjectType: string;
   /** `IfcSpatialZone.PredefinedType`. */
-  spatialPredefinedType: SpatialZonePredefinedType;
+  spatialPredefinedType: AnchoredSpatialZonePredefinedType;
   /**
    * `IfcSpatialZone.ObjectType`, when the enum alone cannot tell two themes
    * apart — six of these map to FIRESAFETY, three to TRANSPORT.
@@ -244,7 +244,7 @@ export function themeOfZone(objectType: string | null | undefined): ZoneTheme | 
 }
 
 export interface SpatialTypeMapping {
-  predefinedType: SpatialZonePredefinedType;
+  predefinedType: AnchoredSpatialZonePredefinedType;
   objectType: string | null;
   /** True when the schema forced a fallback to `USERDEFINED`. */
   degraded: boolean;

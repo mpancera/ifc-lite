@@ -22,6 +22,7 @@ import {
   extractClassificationsOnDemand,
   extractMaterialsOnDemand,
   extractAllMaterialsOnDemand,
+  mergeInheritedPropertySets,
 } from '@ifc-lite/parser';
 import { resolveEntityPredefinedType } from '@/lib/entity-predefined-type';
 import { readZones } from '@/lib/ifcZones/membership';
@@ -299,20 +300,20 @@ export function createLensDataProvider(
       // which itself falls back to the eager table when no on-demand map exists.
       if (store.onDemandPropertyMap && store.source?.length > 0) {
         const instancePsets = instancePropertySets(resolved.entry, id);
-        // Merge type-inherited psets (Pset_*Common lives on the type entity
-        // for occurrences). Instance psets take precedence on name conflict.
+        // Merge type-inherited psets (Pset_*Common lives on the type entity for
+        // occurrences). Instance properties win per PROPERTY, not per set: both
+        // sides routinely carry a same-named set holding different properties,
+        // and replacing the whole set hid the type-only ones (#1913).
+        //
+        // Both sources stay overlay-aware: an edited value has to beat the
+        // parsed one, which is what instancePropertySets and
+        // overlayTypePropertySets are for. Only the merge rule comes from
+        // upstream.
         const typeProps = extractTypePropertiesOnDemand(store, id)?.properties ?? [];
         const inherited = typeProps.length > 0
           ? (typeProps as PropertySetInfo[])
           : overlayTypePropertySets(resolved.entry, id);
-        if (inherited.length === 0) return instancePsets;
-
-        const seen = new Set(instancePsets.map((p) => p.name));
-        const merged = instancePsets.slice();
-        for (const pset of inherited) {
-          if (!seen.has(pset.name)) merged.push(pset);
-        }
-        return merged;
+        return mergeInheritedPropertySets(instancePsets, inherited);
       }
 
       const psets = store.properties?.getForEntity?.(id);

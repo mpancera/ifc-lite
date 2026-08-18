@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { describe, expect, it } from 'vitest';
+import type { SpacePolygonParams } from './space.js';
 import type { StoreEditor } from '@ifc-lite/mutations';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import type { DetectedSpace, Segment } from './auto-space-detect.js';
@@ -217,7 +218,8 @@ describe('drawingSpaceParams', () => {
     // No inset. A plan draws both wall faces, so the region between them is
     // already the room; insetting would shrink it by a thickness nobody
     // measured.
-    expect(drawingSpaceParams(region, 0, 3, 'Room {n}').OuterCurve).toEqual(region.outline);
+    expect((drawingSpaceParams(region, 0, 3, 'Room {n}') as SpacePolygonParams).OuterCurve)
+      .toEqual(region.outline);
   });
 
   it('writes no GrossFloorArea', () => {

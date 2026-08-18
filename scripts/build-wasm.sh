@@ -14,6 +14,17 @@ fi
 
 echo "🦀 Building IFC-Lite WASM..."
 
+# The wasm build rebuilds `std` from source (needed for the panic_abort-only
+# single-thread bundle, and for the atomics-enabled threaded bundle below).
+# This used to live in `.cargo/config.toml`'s `[unstable] build-std`, but that
+# table applies to every `cargo` invocation in the workspace, not just wasm
+# ones — including plain host builds with no `--target` at all — and collided
+# with `[profile.release] panic = "abort"` there (duplicate `core` lang item).
+# Scope it to this script only via the env var equivalent of
+# `unstable.build-std`, so host builds (`cargo test --release`, etc.) never
+# see it.
+export CARGO_UNSTABLE_BUILD_STD="std,panic_abort"
+
 # Build with wasm-pack
 echo "📦 Running wasm-pack..."
 
@@ -132,8 +143,16 @@ if [ "${BUILD_THREADED:-}" = "1" ]; then
 
   # The exact flag set validated on spike/path-b-respike (8fcaff96). RUSTFLAGS
   # fully replaces .cargo/config.toml's target rustflags, so the base flags
-  # (max-memory, stack-size, simd128) are repeated here. build-std stays in
-  # .cargo/config.toml [unstable] and rebuilds std WITH atomics.
+  # (max-memory, stack-size, simd128) are repeated here. build-std is set via
+  # the `CARGO_UNSTABLE_BUILD_STD` env var above (NOT `.cargo/config.toml`'s
+  # `[unstable]` table — that was deliberately moved out of this file; see the
+  # comment near the top of this script and in `.cargo/config.toml`) and
+  # rebuilds std WITH atomics for this threaded build.
+  # NOTE for whoever bumps rust-toolchain.toml: since wasm-bindgen 0.2.122, threaded
+  # builds on nightlies dated 2026-05-06 or later ALSO need
+  # `-C link-arg=--export=__heap_base`. The pinned nightly-2025-11-15 predates that,
+  # so it is deliberately absent here; add it with the nightly bump or the threaded
+  # bundle breaks at link time.
   RUSTFLAGS="-C link-arg=--max-memory=4294967296 -C link-arg=-zstack-size=8388608 -C target-feature=+simd128,+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base" \
   rustup run nightly-2025-11-15 "$WASM_PACK" build rust/wasm-bindings \
     --target web \
@@ -182,7 +201,8 @@ fi
 # (+wide-arithmetic), which maps the exact-CSG kernel's bnum 64x64->128 limb
 # products to i64.mul_wide / i64.add128 instead of __multi3 libcalls. Measured
 # ~1.7x on a real void cut (docs/architecture/wasm-wide-arithmetic.md). Selected
-# at runtime via a WebAssembly.validate() probe (packages/geometry/src/wasm-features.ts);
+# at runtime via a WebAssembly.validate() probe (packages/geometry/src/wasm-features.ts,
+# NOT yet created — see docs/architecture/wasm-wide-arithmetic.md delivery plan);
 # engines without the proposal load the `pkg` bundle and are unaffected.
 if [ "${BUILD_WIDE:-}" = "1" ]; then
   WIDE_OUT="../../packages/wasm/pkg-wide"
