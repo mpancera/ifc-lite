@@ -15,7 +15,6 @@ import {
 import { ViewportOverlays } from './ViewportOverlays';
 import { MergeLayersBanner } from './MergeLayersBanner';
 import { GeometryModeBanner } from './GeometryModeBanner';
-import { LevelDisplayIndicator } from './LevelDisplayIndicator';
 import { ToolOverlays } from './ToolOverlays';
 import { ZoneOverlay, ZoneAssignmentSyncMount } from './tools/ZoneOverlay';
 import { OverlayAutosaveMount } from './OverlayAutosaveMount';
@@ -1552,7 +1551,6 @@ export function ViewportContainer() {
           model in place (full page reload would drop it — no boot auto-restore). */}
       <MergeLayersBanner onReload={handleMergeLayersReload} />
       <GeometryModeBanner onReload={handleGeometryModeReload} />
-      <LevelDisplayIndicator />
       <ToolOverlays />
       <ZoneOverlay />
       <ZoneAssignmentSyncMount />

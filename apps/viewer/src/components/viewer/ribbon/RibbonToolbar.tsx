@@ -28,6 +28,7 @@ import { cn } from '@/lib/utils';
 import { TOUR_ANCHORS, tourAnchor } from '@/lib/tours/anchors';
 import { ThemeSwitch } from '../ThemeSwitch';
 import { SearchInline } from '../SearchInline';
+import { LevelDisplayIndicator } from '../LevelDisplayIndicator';
 import { ExportChangesButton } from '../ExportChangesButton';
 import { ExtensionToolbarSlot } from '@/components/extensions/ExtensionToolbarSlot';
 import { useFileCommands } from '../toolbar/useFileCommands';
@@ -164,6 +165,12 @@ export function RibbonToolbar({ onShowShortcuts }: RibbonToolbarProps = {} as Ri
             reading position and slides sideways whenever the tab set
             changes. Docked to the right it lands where a search field is
             looked for, beside the rest of the always-on chrome. */}
+        {/* Level display readout — beside the other always-on chrome rather
+            than floating over the viewport, where it covered this very band.
+            Display only: Stacked / Solo / Exploded is switched in the
+            hierarchy, and a second control for one state drifts. */}
+        <LevelDisplayIndicator />
+
         <div className="mr-2">
           <SearchInline />
         </div>

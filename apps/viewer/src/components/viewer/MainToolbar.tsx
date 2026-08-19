@@ -72,6 +72,7 @@ import { FileSpreadsheet, FileJson, FileText, Filter, Upload, Pencil, DraftingCo
 import { BulkPropertyEditor } from './BulkPropertyEditor';
 import { DataConnector } from './DataConnector';
 import { ExportChangesButton } from './ExportChangesButton';
+import { LevelDisplayIndicator } from './LevelDisplayIndicator';
 import { isCollabEnabled } from '@/lib/collab/config';
 import { SearchInline } from './SearchInline';
 import { ThemeSwitch } from './ThemeSwitch';
@@ -484,6 +485,10 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
           />
         </DropdownMenuContent>
       </DropdownMenu>
+
+      {/* Level display readout — the same component the ribbon shows, so the
+          two strips cannot drift apart on what "Solo" looks like. */}
+      <LevelDisplayIndicator />
 
       {/* Export Changes Button - shows when there are pending mutations */}
       <ExportChangesButton />

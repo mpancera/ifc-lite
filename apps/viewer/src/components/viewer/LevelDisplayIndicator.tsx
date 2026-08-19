@@ -3,21 +3,26 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * Persistent in-viewport indicator for a non-default level display mode.
+ * Says that the model is NOT showing all storeys — and says only that.
  *
- * Replaces the 1.5px toolbar dot that used to be the only signal an
- * Exploded / Solo view was active — easy to miss, and the control itself
- * has now moved into the hierarchy. A small chip in the viewport tells the
- * user at a glance "you are isolated to storey X" / "levels are exploded",
- * with a one-click return to Stacked.
+ * # A readout, not a control
+ * This began as a chip floating in the viewport's top-left corner, with an X
+ * to return to Stacked. Two problems, and the second is the reason it moved:
+ * it covered the toolbar band underneath it, and it was a second place to
+ * switch the level display. The switch belongs to the hierarchy panel, which
+ * owns Stacked / Solo / Exploded and is where somebody looking for it goes.
+ * Two controls for one state drift; a readout beside the other always-on
+ * chrome cannot.
  *
- * Anchored top-left so it never covers the ViewCube (top-right) or the
- * Sun & Sky panel (top-32 right).
+ * # Silent in the normal case
+ * Stacked is what a model looks like unless somebody said otherwise, so the
+ * indicator renders nothing there. It appears exactly when the view is doing
+ * something the user could otherwise forget about — that is the whole job.
  */
 
-import { ChevronsUpDown, SquareStack, X } from 'lucide-react';
+import { ChevronsUpDown, SquareStack } from 'lucide-react';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useViewerStore } from '@/store';
-import { applyLevelDisplayMode } from '@/store/levelDisplay';
 import { useFloorplanView } from '@/hooks/useFloorplanView';
 
 export function LevelDisplayIndicator() {
@@ -30,26 +35,28 @@ export function LevelDisplayIndicator() {
 
   const Icon = mode === 'exploded' ? ChevronsUpDown : SquareStack;
   const soloName = activeStorey
-    ? availableStoreys.find((s) => s.modelId === activeStorey.modelId && s.expressId === activeStorey.expressId)?.name
+    ? availableStoreys.find(
+      (s) => s.modelId === activeStorey.modelId && s.expressId === activeStorey.expressId,
+    )?.name
     : undefined;
-  const label =
-    mode === 'exploded'
-      ? `Exploded · ${explodedGap} m gap`
-      : `Solo · ${soloName ?? 'storey'}`;
+  const label = mode === 'exploded'
+    ? `Exploded · ${explodedGap} m`
+    : `Solo · ${soloName ?? 'Geschoss'}`;
 
   return (
-    <div className="absolute top-4 left-4 z-10 flex items-center gap-1.5 rounded-md border border-purple-300/60 bg-background/90 px-2 py-1 text-xs font-medium text-foreground shadow-sm backdrop-blur dark:border-purple-500/40">
-      <Icon className="h-3.5 w-3.5 text-purple-500" />
-      <span className="tabular-nums">{label}</span>
-      <button
-        type="button"
-        onClick={() => applyLevelDisplayMode('stacked')}
-        title="Back to stacked"
-        aria-label="Back to stacked view"
-        className="ml-0.5 inline-flex h-4 w-4 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-      >
-        <X className="h-3 w-3" />
-      </button>
-    </div>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div
+          data-level-display-indicator
+          className="mr-2 flex items-center gap-1.5 rounded-md border border-purple-300/60 bg-purple-50/60 px-2 py-1 text-xs font-medium text-foreground dark:border-purple-500/40 dark:bg-purple-950/30"
+        >
+          <Icon className="h-3.5 w-3.5 text-purple-500" />
+          <span className="tabular-nums">{label}</span>
+        </div>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">
+        Die Darstellung wird links in der Hierarchie umgeschaltet (Stacked / Solo / Exploded).
+      </TooltipContent>
+    </Tooltip>
   );
 }
