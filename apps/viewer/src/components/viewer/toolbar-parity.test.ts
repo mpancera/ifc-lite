@@ -127,6 +127,26 @@ const ALLOWLIST: { surface: Surface; symbol: string; reason: string }[] = [
     symbol: 'setLeftPanelCollapsed',
     reason: 'Same: un-collapses the left panel so the hierarchy shortcut has somewhere to land.',
   },
+  {
+    surface: 'ribbon',
+    symbol: 'viewMode',
+    reason: 'Plan-or-building is viewport furniture, not toolbar geography: `ViewModeToggle` sits in ViewportOverlays under BOTH styles, and plan mode carries its own copy in PlanToolbar so the way out of a mode is inside the mode. The Mode group on the ribbon is a second door onto that switch, not the only one.',
+  },
+  {
+    surface: 'ribbon',
+    symbol: 'setViewMode',
+    reason: 'Same switch as viewMode.',
+  },
+  {
+    surface: 'ribbon',
+    symbol: 'showSpaceGraph',
+    reason: 'Reachable from the classic surface through the layer menu on the plan (the `spaceGraph` entry in PlanToolbar), which PlanView drives — but as a PROP (`onToggleSpaceGraph`), and this walk only sees store members read off `s` / `state` / `store`. A blind spot of the oracle, not a one-sided capability; see the "what it cannot catch" list at the top.',
+  },
+  {
+    surface: 'ribbon',
+    symbol: 'setShowSpaceGraph',
+    reason: 'Same overlay as showSpaceGraph, reached through the same prop.',
+  },
 ];
 
 function resolveImport(spec: string, fromFile: string): string | null {
