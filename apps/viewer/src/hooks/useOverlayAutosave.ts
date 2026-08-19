@@ -150,39 +150,48 @@ export function useOverlayAutosave() {
       // reconciliation against any file whatsoever and every unrelated model
       // would raise the prompt.
       const openProject = readProject(activeStore);
-      for (const candidate of await listSnapshots()) {
-        if (cancelled) return;
-        // Already known to be inside this exact file — recorded the last time
-        // it was opened, so the question does not come back on every load.
-        if (isMutedFor(candidate, hash)) continue;
-        if (!isSameProject(candidate.reference, openProject, (globalId) => (
-          target.expressIdOfGlobalId(globalId) >= 0
-        ))) continue;
+      // The NEWEST saved state of this project, and only that one.
+      //
+      // `listSnapshots` sorts newest first, and the loop used to fall through
+      // to older ones when the newest had nothing to say. That is how a state
+      // somebody had already worked past came back: rooms discarded in a later
+      // session still sit in an earlier snapshot, so the older state
+      // legitimately holds "work missing from this file" and offered to put the
+      // discarded rooms back. An older state of the same project is history,
+      // not a candidate — it is superseded by definition.
+      const candidate = (await listSnapshots()).find((snapshot) => isSameProject(
+        snapshot.reference, openProject, (globalId) => target.expressIdOfGlobalId(globalId) >= 0,
+      ));
+      if (cancelled || !candidate) return;
 
-        // The open file's name goes into every message: "das Geschoss gibt es
-        // nicht mehr" is only actionable once the reader knows in WHAT.
-        const currentModelName = useViewerStore.getState().models.get(activeModelId)?.name;
-        const report = reconcileSnapshot(candidate, hash, target, { currentModelName });
-        // This IS the file that state was exported to: every authored object
-        // is already in it, under the same GlobalIds. Re-applying would give
-        // each one a twin, and asking again on every open is the loop a user
-        // walks into by doing the obvious thing — exporting what they just
-        // restored. So the file is recorded on the state and the state stays:
-        // it is still the recovery copy for the file it was authored against,
-        // and for any other version it still has something to say.
-        if (report.materialised) {
-          void saveSnapshot(withMaterialisedIn(candidate, hash));
-          continue;
-        }
-        // A report with no rows has nothing to decide: whatever the snapshot
-        // held could not be re-identified in this file and would not be
-        // applied either way. Offering it would be an interruption, not a
-        // choice — keep looking for a candidate that does say something.
-        if (!hasDecisions(report)) continue;
-        setPendingRestore({ snapshot: candidate, report, modelId: activeModelId });
+      // Already known to be inside this exact file — recorded the last time it
+      // was opened, so the question does not come back on every load.
+      if (isMutedFor(candidate, hash)) { settled = true; return; }
+
+      // The open file's name goes into every message: "das Geschoss gibt es
+      // nicht mehr" is only actionable once the reader knows in WHAT.
+      const currentModelName = useViewerStore.getState().models.get(activeModelId)?.name;
+      const report = reconcileSnapshot(candidate, hash, target, { currentModelName });
+
+      // This IS the file that state was exported to: every authored object is
+      // already in it, under the same GlobalIds. Re-applying would give each
+      // one a twin, and asking again on every open is the loop a user walks
+      // into by doing the obvious thing — exporting what they just restored.
+      // So the file is recorded on the state and the state stays: it is still
+      // the recovery copy for the file it was authored against.
+      if (report.materialised) {
+        void saveSnapshot(withMaterialisedIn(candidate, hash));
         settled = true;
         return;
       }
+      // A report with no rows has nothing to decide: whatever the state held
+      // could not be re-identified in this file and would not be applied
+      // either way. Offering it would be an interruption, not a choice.
+      if (!hasDecisions(report)) { settled = true; return; }
+
+      setPendingRestore({ snapshot: candidate, report, modelId: activeModelId });
+      settled = true;
+      return;
       settled = true;
     })();
 
