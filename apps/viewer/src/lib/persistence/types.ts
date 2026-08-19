@@ -77,6 +77,18 @@ export interface OverlaySnapshot {
 
   placements: SnapshotPlacement[];
   /**
+   * Hashes of files that were found to already contain this state — the
+   * exports it has been written into.
+   *
+   * A small history rather than a delete: exporting a restored state produces
+   * a file that holds all of it, and offering the state back for that file
+   * would insert everything twice. Recording the file instead of dropping the
+   * state keeps the state available everywhere else — above all for the file
+   * it was authored against, where it is still the crash-recovery copy it was
+   * saved as.
+   */
+  materialisedIn?: string[];
+  /**
    * The reference model as it stood when this was saved. Existence alone
    * cannot tell "unchanged" from "re-planned" — an architect who reshapes a
    * room keeps its GlobalId — so the anchors carry fingerprints too.
@@ -116,11 +128,23 @@ export type ReconcileVerdict =
 
 export interface ReconcileItem {
   verdict: ReconcileVerdict;
-  /** What this covers, in the user's terms. */
+  /** What this covers, in the user's terms. Always states its own count. */
   label: string;
-  /** Why it got this verdict. */
+  /** Why it got this verdict, and what applying it would do. */
   detail: string;
-  /** Authored entities this item would restore. */
+  /**
+   * How many things this row covers — the number its label states.
+   *
+   * Not the same as `expressIds.length`: an edit or a deletion refers to a
+   * base entity by GlobalId and restores no authored object at all, so those
+   * rows carry a count and no ids. A button that added up ids alone told a
+   * reader it would apply "0" while it was about to replay their correction.
+   */
+  count: number;
+  /**
+   * Authored entities this item would restore. Empty for rows about edits and
+   * deletions — those ride along with `applyMutations`.
+   */
   expressIds: number[];
 }
 
@@ -130,4 +154,15 @@ export interface ReconcileReport {
   items: ReconcileItem[];
   /** Convenience counts for the dialog header. */
   counts: Record<ReconcileVerdict, number>;
+  /**
+   * Every authored object of this saved state is ALREADY in the open file,
+   * under the same GlobalIds — which is what a file exported out of that state
+   * looks like.
+   *
+   * Without this the app asked to restore work into the very file that work
+   * had just been written to: the export gets a new hash, no snapshot matches
+   * it exactly, and the same saved state comes back as a candidate on every
+   * open. Accepting it a second time would insert every object twice.
+   */
+  materialised: boolean;
 }

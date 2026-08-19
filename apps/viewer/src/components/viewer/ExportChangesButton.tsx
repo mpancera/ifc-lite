@@ -11,7 +11,7 @@
  * export).
  */
 
-import { useState, useCallback, useMemo, useLayoutEffect } from 'react';
+import { useState, useCallback, useMemo, useLayoutEffect, useEffect, useRef } from 'react';
 import { Download, Loader2, Check, AlertCircle } from 'lucide-react';
 import { zip, strToU8 } from 'fflate';
 import { Button } from '@/components/ui/button';
@@ -190,6 +190,19 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
 
   const totalCount = totalChangeCount(changed);
   const modelCount = changed.models.length;
+
+  // Somebody else asked to see the pending changes — the restore prompt does,
+  // right after it puts a saved state back, because "1255 Änderungen" in a
+  // badge is a number and this is the list behind it. Only ever opens when
+  // there is something to show: an empty review would answer the question
+  // "what did that do?" with a blank dialog.
+  const reviewRequests = useViewerStore((s) => s.changesReviewRequests);
+  const lastHandledRequest = useRef(reviewRequests);
+  useEffect(() => {
+    if (reviewRequests === lastHandledRequest.current) return;
+    lastHandledRequest.current = reviewRequests;
+    if (totalCount > 0) setReviewOpen(true);
+  }, [reviewRequests, totalCount]);
 
   // Built only while the dialog is open, from the live overlay — this is what
   // the user sees on screen. `handleConfirm` below re-derives this same shape

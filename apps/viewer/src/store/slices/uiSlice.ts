@@ -97,6 +97,17 @@ export interface UICrossSliceState {
 
 export interface UISlice extends GeometryLoadSettingsState, GeometryLoadSettingsActions {
   // State
+  /**
+   * Bumped whenever something asks for the pending-changes review to open.
+   *
+   * A counter rather than a boolean: the review owns its own open/closed state
+   * (it can be dismissed), and a flag would have to be reset by whoever raised
+   * it — two owners for one truth. Each increment is one request, and a
+   * request that arrives while the review is already open changes nothing.
+   */
+  changesReviewRequests: number;
+  /** Ask the pending-changes review to open — see `changesReviewRequests`. */
+  requestChangesReview: () => void;
   leftPanelCollapsed: boolean;
   rightPanelCollapsed: boolean;
   activeTool: string;
@@ -222,6 +233,10 @@ export const createUISlice: StateCreator<UISlice & UICrossSliceState, [], [], UI
   ...geometryLoadSettingsInitialState,
   ...createGeometryLoadSettings(set, get, () => hasLoadedModel(get())),
   // Initial state
+  changesReviewRequests: 0,
+  requestChangesReview: () => set((state) => ({
+    changesReviewRequests: state.changesReviewRequests + 1,
+  })),
   leftPanelCollapsed: false,
   rightPanelCollapsed: false,
   activeTool: UI_DEFAULTS.ACTIVE_TOOL,

@@ -13,7 +13,10 @@ import {
 } from '@ifc-lite/mutations';
 import { addLibraryElementToStore, addLibraryTypeToStore, emitRelDefinesByType } from '@ifc-lite/create';
 import { captureOverlaySnapshot, type SnapshotSource } from './captureSnapshot.js';
-import { reconcileSnapshot, undisputedExpressIds } from './reconcileSnapshot.js';
+import {
+  reconcileSnapshot, undisputedExpressIds, restoreCounts, hasDecisions, isMutedFor,
+  withMaterialisedIn,
+} from './reconcileSnapshot.js';
 import { restoreOverlaySnapshot } from './restoreSnapshot.js';
 
 const STOREY = 43;
@@ -379,4 +382,289 @@ test('restore: a room missing from this file falls back to the storey', () => {
 
   // Claiming a room that is no longer there would be worse than the storey.
   assert.equal(registered.find((r) => r.expressId === inRoom)?.containerExpressId, undefined);
+});
+
+// ── What the report SAYS ──────────────────────────────────────────────────
+// A verdict icon says that a decision exists; only the sentence says which way
+// to decide. These pin the three claims that were previously made up.
+
+/** The same snapshot with one placement's identifiers taken away. */
+function withPlacement(patch: { storeyGlobalId?: string | null; containerGlobalId?: string | null }) {
+  const { snapshot, inRoom } = capture();
+  return {
+    inRoom,
+    snapshot: {
+      ...snapshot,
+      placements: snapshot.placements.map((p) => (p.expressId === inRoom ? { ...p, ...patch } : p)),
+    },
+  };
+}
+
+test('reconcile: a placement saved without a storey is not reported as a deleted storey', () => {
+  // Two different findings that used to collapse into one message: nothing was
+  // written down, versus what was written down is gone. Reporting the second
+  // when the first is true accuses the architect of deleting a storey.
+  const { snapshot, inRoom } = withPlacement({ storeyGlobalId: null });
+  const report = reconcileSnapshot(snapshot, 'hash-v2', unchangedFile, { currentModelName: 'V2.ifc' });
+
+  const item = report.items.find((i) => i.expressIds.includes(inRoom))!;
+  assert.equal(item.verdict, 'orphaned');
+  assert.ok(item.label.includes('ohne festgehaltenes Geschoss'), item.label);
+  assert.ok(!item.detail.includes('nicht mehr'), 'must not claim the storey disappeared');
+  assert.ok(item.detail.includes('kein Geschoss mitgeschrieben'), item.detail);
+});
+
+test('reconcile: a deleted storey still says so, in as many words', () => {
+  const { snapshot } = capture();
+  const storeyRemoved = {
+    expressIdOfGlobalId: (gid: string) => (gid === GID.storey ? -1 : unchangedFile.expressIdOfGlobalId(gid)),
+  };
+  const report = reconcileSnapshot(snapshot, 'hash-v2', storeyRemoved, { currentModelName: 'V2.ifc' });
+  const item = report.items.find((i) => i.verdict === 'orphaned')!;
+  assert.ok(item.detail.includes('nicht mehr'), item.detail);
+});
+
+test('reconcile: an element that never sat in a room is not called "room unchanged"', () => {
+  // Claiming a room comparison that never ran is the mirror image of the
+  // storey bug: a null container used to pass silently as "unverändert".
+  const { snapshot, inRoom } = withPlacement({ containerGlobalId: null });
+  const report = reconcileSnapshot(snapshot, 'hash-v2', unchangedFile);
+
+  const item = report.items.find((i) => i.expressIds.includes(inRoom))!;
+  assert.equal(item.verdict, 'ok');
+  assert.ok(item.label.includes('direkt im Geschoss'), item.label);
+  // It may mention a room to explain that there was none; what it must not do
+  // is call one unchanged, which is a comparison that never happened.
+  assert.ok(item.detail.includes('keinen Raum'), item.detail);
+  assert.ok(!item.detail.includes('unverändert'), item.detail);
+});
+
+test('reconcile: without a saved fingerprint the room comparison is declared missing', () => {
+  const { snapshot, inRoom } = capture();
+  const legacy = { ...snapshot, reference: undefined };
+  const report = reconcileSnapshot(legacy, 'hash-v2', unchangedFile);
+
+  const item = report.items.find((i) => i.expressIds.includes(inRoom))!;
+  assert.equal(item.verdict, 'ok');
+  assert.ok(item.label.includes('ohne Raumvergleich'), item.label);
+});
+
+test('reconcile: every row says how much it covers', () => {
+  // The self-contained row was the one without a number, so its size was the
+  // one thing a reader could not judge.
+  const { snapshot } = capture();
+  const report = reconcileSnapshot(snapshot, 'hash-v2', unchangedFile);
+  for (const item of report.items) {
+    assert.ok(/\d/.test(item.label), `row without a count: ${item.label}`);
+  }
+});
+
+test('reconcile: the messages name the file that is open', () => {
+  const { snapshot } = capture();
+  const named = reconcileSnapshot(snapshot, 'hash-v2', unchangedFile, { currentModelName: 'Langmatt_ARC_demo.ifc' });
+  assert.ok(named.items.every((i) => i.detail.includes('Langmatt_ARC_demo.ifc')));
+
+  // Without a name the wording stays true rather than showing empty quotes.
+  const anonymous = reconcileSnapshot(snapshot, 'hash-v2', unchangedFile);
+  assert.ok(anonymous.items.every((i) => i.detail.includes('dieser Fassung')));
+});
+
+test('restoreCounts: says what would be applied and what stays behind', () => {
+  const { snapshot, inRoom } = capture();
+  const roomRemoved = {
+    expressIdOfGlobalId: (gid: string) => (gid === GID.room ? -1 : unchangedFile.expressIdOfGlobalId(gid)),
+  };
+  const report = reconcileSnapshot(snapshot, 'hash-v2', roomRemoved);
+  const counts = restoreCounts(report);
+
+  assert.equal(counts.held, 1, 'the detector in the removed room is held back');
+  // One more than the restorable ids, on purpose: the renamed wall is an edit,
+  // which replays as a mutation and brings no authored object with it.
+  assert.equal(counts.undisputed, undisputedExpressIds(report).size + 1);
+  assert.ok(!undisputedExpressIds(report).has(inRoom));
+});
+
+test('reconcile: a saved state with nothing re-identifiable raises no question', () => {
+  // Found live: an edit had landed on an entity with no GlobalId (an IfcSIUnit),
+  // so capture could not record a base reference for it. The report came back
+  // empty and the dialog still opened — asking about an empty list and offering
+  // "übernehmen (0)", which is an interruption rather than a decision.
+  const { snapshot } = capture();
+  const nothingIdentifiable = {
+    ...snapshot,
+    newEntities: [],
+    placements: [],
+    editedBaseEntities: [],
+    deleted: [],
+  };
+
+  const report = reconcileSnapshot(nothingIdentifiable, 'hash-v2', unchangedFile);
+  assert.equal(report.items.length, 0);
+  assert.equal(hasDecisions(report), false);
+
+  // The normal case still asks.
+  assert.equal(hasDecisions(reconcileSnapshot(snapshot, 'hash-v2', unchangedFile)), true);
+});
+
+test('restoreCounts: an edit counts even though it restores no object', () => {
+  // Live find: the button read "Übernehmen (0)" while it was about to replay
+  // a saved attribute correction. Edits carry no authored entity, so counting
+  // express ids alone made the primary action understate itself to zero.
+  const { snapshot } = capture();
+  const editOnly = { ...snapshot, newEntities: [], placements: [], deleted: [] };
+
+  const report = reconcileSnapshot(editOnly, 'hash-v2', unchangedFile);
+  assert.equal(report.items.length, 1);
+  assert.equal(report.items[0].count, 1);
+  assert.deepEqual(restoreCounts(report), { undisputed: 1, held: 0 });
+});
+
+test("reconcile: a row's count matches the number in its own label", () => {
+  const { snapshot } = capture();
+  const report = reconcileSnapshot(snapshot, 'hash-v2', unchangedFile);
+  for (const item of report.items) {
+    assert.ok(item.label.includes(String(item.count)), `${item.label} vs count ${item.count}`);
+  }
+});
+
+// ── Exportieren und wieder öffnen ─────────────────────────────────────────
+// The loop a user walks into by doing the obvious thing: restore, export the
+// result, open the export. The file then already holds every authored object,
+// under the same GlobalIds — and the app used to offer the same saved state
+// again, which would have inserted all of it a second time.
+
+/**
+ * GlobalIds of the authored objects the file can actually be asked about.
+ *
+ * Relationships are left out deliberately: they carry a GlobalId but the
+ * parser's index holds products, so a lookup answers -1 even when the file
+ * plainly contains them. Found live against a real export — 7 authored spaces
+ * resolved, their 7 `IfcRelAggregates` and 34 `IfcRelSpaceBoundary` did not.
+ */
+function authoredGuids(
+  snapshot: { newEntities: ReadonlyArray<{ type: string; attributes: readonly unknown[] }> },
+): string[] {
+  return snapshot.newEntities
+    .filter((e) => !e.type.toLowerCase().startsWith('ifcrel'))
+    .map((e) => e.attributes[0])
+    .filter((g): g is string => typeof g === 'string' && g.length === 22);
+}
+
+/** A file that contains the reference model AND everything that was authored. */
+function fileWithAuthoredWork(guids: readonly string[]) {
+  const set = new Set(guids);
+  return {
+    expressIdOfGlobalId: (gid: string) =>
+      (set.has(gid) ? 900000 : unchangedFile.expressIdOfGlobalId(gid)),
+    geometryHashOfGlobalId: unchangedFile.geometryHashOfGlobalId,
+  };
+}
+
+test('reconcile: the file a saved state was exported to is not offered back', () => {
+  const { snapshot } = capture();
+  const exported = fileWithAuthoredWork(authoredGuids(snapshot));
+
+  const report = reconcileSnapshot(snapshot, 'hash-exported', exported);
+
+  assert.equal(report.materialised, true);
+  assert.equal(report.items.length, 0, 'nothing to decide about work that is already there');
+  assert.equal(hasDecisions(report), false);
+});
+
+test('reconcile: objects already in the file are shown, not offered for insertion', () => {
+  // Half-way case: exported once, then authored more. The exported half must
+  // be visible (so the count adds up) but must not be restorable again.
+  const { snapshot } = capture();
+  const [firstGuid] = authoredGuids(snapshot);
+  const partly = fileWithAuthoredWork([firstGuid]);
+
+  const report = reconcileSnapshot(snapshot, 'hash-v2', partly, { currentModelName: 'V2.ifc' });
+
+  assert.equal(report.materialised, false);
+  const row = report.items.find((i) => i.label.includes('bereits in der Datei'))!;
+  assert.ok(row, 'expected a row for what the file already holds');
+  assert.equal(row.count, 1);
+  assert.deepEqual(row.expressIds, [], 'nothing to restore from that row');
+
+  const present = snapshot.newEntities.find((e) => e.attributes[0] === firstGuid)!;
+  assert.ok(!undisputedExpressIds(report).has(present.expressId), 'must not be re-inserted');
+});
+
+test('restore: an object the file already holds is not inserted twice', () => {
+  // The same guard on the writing side, because `acceptAll` bypasses the
+  // report entirely.
+  const { snapshot } = capture();
+  const guids = new Set(authoredGuids(snapshot));
+  const fresh = new MutablePropertyView(null, 'm1');
+
+  const result = restoreOverlaySnapshot(snapshot, fresh, {
+    registerElement: () => {},
+    expressIdOfGlobalId: (gid: string) => (guids.has(gid) ? 900000 : unchangedFile.expressIdOfGlobalId(gid)),
+    appendMeshes: () => {},
+  });
+
+  assert.equal(result.skippedAsPresent, guids.size);
+  assert.equal(result.entitiesRestored, snapshot.newEntities.length - guids.size);
+  for (const entity of fresh.getNewEntities()) {
+    const guid = entity.attributes[0];
+    assert.ok(typeof guid !== 'string' || !guids.has(guid), 'restored a duplicate');
+  }
+});
+
+test('reconcile: a relationship that cannot be looked up does not block the verdict', () => {
+  // The live failure this pins: every authored space was in the exported file
+  // and the state still came back as "half restored", because its
+  // IfcRelAggregates answered -1 from an index that only holds products.
+  const { snapshot } = capture();
+  const productGuids = new Set(authoredGuids(snapshot));
+  const relationshipsUnknown = {
+    expressIdOfGlobalId: (gid: string) =>
+      (productGuids.has(gid) ? 900000 : unchangedFile.expressIdOfGlobalId(gid)),
+    geometryHashOfGlobalId: unchangedFile.geometryHashOfGlobalId,
+  };
+  assert.ok(
+    snapshot.newEntities.some((e) => e.type.toLowerCase().startsWith('ifcrel')),
+    'fixture should contain at least one authored relationship',
+  );
+
+  const report = reconcileSnapshot(snapshot, 'hash-exported', relationshipsUnknown);
+  assert.equal(report.materialised, true);
+});
+
+test('mute: a state records the file it was found in instead of being dropped', () => {
+  // Deleting would end the loop too, but it would also throw away the recovery
+  // copy for the file the work was authored against. Recording the export is
+  // the smaller statement: "this one already has it", not "this never existed".
+  const { snapshot } = capture();
+  assert.equal(isMutedFor(snapshot, 'hash-exported'), false);
+
+  const muted = withMaterialisedIn(snapshot, 'hash-exported');
+  assert.equal(isMutedFor(muted, 'hash-exported'), true);
+  assert.equal(isMutedFor(muted, 'hash-somewhere-else'), false, 'only that one file');
+  // Still the same saved work — nothing was removed to achieve the mute.
+  assert.equal(muted.newEntities.length, snapshot.newEntities.length);
+  assert.equal(muted.sourceHash, snapshot.sourceHash);
+});
+
+test('mute: recording the same file twice does not grow the history', () => {
+  const { snapshot } = capture();
+  const once = withMaterialisedIn(snapshot, 'hash-exported');
+  const twice = withMaterialisedIn(once, 'hash-exported');
+  assert.equal(twice.materialisedIn?.length, 1);
+  assert.equal(twice, once, 'no pointless rewrite to storage');
+});
+
+test('mute: several exports of one state are all remembered', () => {
+  const { snapshot } = capture();
+  const history = withMaterialisedIn(withMaterialisedIn(snapshot, 'export-a'), 'export-b');
+  assert.deepEqual(history.materialisedIn, ['export-a', 'export-b']);
+  assert.ok(isMutedFor(history, 'export-a') && isMutedFor(history, 'export-b'));
+});
+
+test('mute: the original file still restores its own work', () => {
+  // The point of muting rather than deleting: the state was saved as a
+  // recovery copy for the file it was authored against, and it stays one.
+  const { snapshot } = capture();
+  const muted = withMaterialisedIn(snapshot, 'hash-exported');
+  assert.equal(isMutedFor(muted, muted.sourceHash), false);
 });

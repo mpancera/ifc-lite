@@ -319,4 +319,31 @@ describe('ExportChangesButton — review/export divergence (issue: detect-and-re
     }
   });
 
+  it('opens the review when another surface asks for it, and only with something to show', () => {
+    // The restore prompt hands over here: after putting a saved state back,
+    // "1255 Änderungen" is a number and this list is the answer behind it.
+    const view = makeView();
+    view.setProperty(7, 'Pset_Base', 'Status', 'Wiederhergestellt', PropertyValueType.Label);
+    useViewerStore.setState({
+      models: new Map([['model-1', makeModel()]]),
+      mutationViews: new Map([['model-1', view]]),
+    });
+    const container = renderButton();
+    assert.equal(dialogText().includes('Wiederhergestellt'), false, 'closed until asked');
+
+    act(() => { useViewerStore.getState().requestChangesReview(); });
+    assert.ok(dialogText().includes('Wiederhergestellt'), dialogText());
+    assert.ok(container);
+  });
+
+  it('stays shut when there is nothing to review', () => {
+    // An empty review answers "what did that do?" with a blank dialog.
+    useViewerStore.setState({
+      models: new Map([['model-1', makeModel()]]),
+      mutationViews: new Map(),
+    });
+    renderButton();
+    act(() => { useViewerStore.getState().requestChangesReview(); });
+    assert.equal(dialogText().includes('Export'), false, dialogText());
+  });
 });

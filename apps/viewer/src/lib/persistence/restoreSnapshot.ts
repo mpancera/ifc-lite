@@ -46,6 +46,12 @@ export interface RestoreHooks {
 
 export interface RestoreResult {
   entitiesRestored: number;
+  /**
+   * Objects skipped because the open file already holds their GlobalId — the
+   * export-and-reopen case. Counted rather than ignored: "0 restored" and "12
+   * were already there" describe very different situations.
+   */
+  skippedAsPresent: number;
   mutationsApplied: number;
   elementsRegistered: number;
   meshesRestored: number;
@@ -61,9 +67,25 @@ export function restoreOverlaySnapshot(
 ): RestoreResult {
   const wanted = (expressId: number) => keep === undefined || keep.has(expressId);
 
+  // An object whose GlobalId is already in the open file is already there —
+  // typically because this file was exported out of this very snapshot. Adding
+  // it again would give it a twin that no later reconciliation could tell
+  // apart, so the guard sits here as well as in the reconciliation: a caller
+  // that skips the report (`acceptAll`) must not be able to duplicate either.
+  const alreadyInFile = (entity: { attributes: readonly unknown[] }): boolean => {
+    const guid = entity.attributes[0];
+    if (typeof guid !== 'string' || guid.length !== 22) return false;
+    return hooks.expressIdOfGlobalId(guid) >= 0;
+  };
+
   const restoredEntities = new Set<number>();
+  let skippedAsPresent = 0;
   for (const entity of snapshot.newEntities) {
     if (!wanted(entity.expressId)) continue;
+    if (alreadyInFile(entity)) {
+      skippedAsPresent += 1;
+      continue;
+    }
     view.restoreNewEntity(entity as NewEntity);
     restoredEntities.add(entity.expressId);
   }
@@ -117,6 +139,7 @@ export function restoreOverlaySnapshot(
 
   return {
     entitiesRestored: restoredEntities.size,
+    skippedAsPresent,
     mutationsApplied: applicable.length,
     elementsRegistered,
     meshesRestored: meshes.length,

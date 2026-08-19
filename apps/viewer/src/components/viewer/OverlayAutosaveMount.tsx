@@ -15,6 +15,13 @@ import { RestoreSessionDialog } from './RestoreSessionDialog';
 
 export function OverlayAutosaveMount() {
   const { pendingRestore, acceptUndisputed, acceptAll, discard, dismiss } = useOverlayAutosave();
+  // Restoring is the one moment where "what just happened to my model?" is the
+  // next question, and the answer already exists: the pending-changes review
+  // lists every restored object with its previous and new value. So the accept
+  // actions hand straight over to it instead of leaving a badge count behind.
+  const requestChangesReview = useViewerStore((s) => s.requestChangesReview);
+  const acceptUndisputedAndReview = () => { acceptUndisputed(); requestChangesReview(); };
+  const acceptAllAndReview = () => { acceptAll(); requestChangesReview(); };
   // Rule-driven values keep up with the model here rather than in their own
   // mount: both react to the same authoring signal, and running them together
   // means a re-evaluation is captured by the very next autosave.
@@ -28,8 +35,8 @@ export function OverlayAutosaveMount() {
     <RestoreSessionDialog
       pending={pendingRestore}
       currentModelName={currentModelName}
-      onAcceptUndisputed={acceptUndisputed}
-      onAcceptAll={acceptAll}
+      onAcceptUndisputed={acceptUndisputedAndReview}
+      onAcceptAll={acceptAllAndReview}
       onDiscard={discard}
       onDismiss={dismiss}
     />

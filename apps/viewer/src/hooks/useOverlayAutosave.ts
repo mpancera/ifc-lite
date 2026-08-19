@@ -23,7 +23,9 @@ import { registerAuthoredElement } from '@/utils/spatialHierarchy';
 import { computeFullSourceHash } from '@/utils/sourceContentHash';
 import { captureOverlaySnapshot } from '@/lib/persistence/captureSnapshot';
 import { loadSnapshot, saveSnapshot, deleteSnapshot, listSnapshots } from '@/lib/persistence/idbOverlayStorage';
-import { reconcileSnapshot, undisputedExpressIds } from '@/lib/persistence/reconcileSnapshot';
+import {
+  reconcileSnapshot, undisputedExpressIds, hasDecisions, isMutedFor, withMaterialisedIn,
+} from '@/lib/persistence/reconcileSnapshot';
 import { restoreOverlaySnapshot } from '@/lib/persistence/restoreSnapshot';
 import { makeReconcileTarget, makeSnapshotSource } from '@/lib/persistence/storeAdapter';
 import { isSameProject, readProject } from '@/lib/persistence/referenceIndex';
@@ -150,11 +152,33 @@ export function useOverlayAutosave() {
       const openProject = readProject(activeStore);
       for (const candidate of await listSnapshots()) {
         if (cancelled) return;
+        // Already known to be inside this exact file — recorded the last time
+        // it was opened, so the question does not come back on every load.
+        if (isMutedFor(candidate, hash)) continue;
         if (!isSameProject(candidate.reference, openProject, (globalId) => (
           target.expressIdOfGlobalId(globalId) >= 0
         ))) continue;
 
-        const report = reconcileSnapshot(candidate, hash, target);
+        // The open file's name goes into every message: "das Geschoss gibt es
+        // nicht mehr" is only actionable once the reader knows in WHAT.
+        const currentModelName = useViewerStore.getState().models.get(activeModelId)?.name;
+        const report = reconcileSnapshot(candidate, hash, target, { currentModelName });
+        // This IS the file that state was exported to: every authored object
+        // is already in it, under the same GlobalIds. Re-applying would give
+        // each one a twin, and asking again on every open is the loop a user
+        // walks into by doing the obvious thing — exporting what they just
+        // restored. So the file is recorded on the state and the state stays:
+        // it is still the recovery copy for the file it was authored against,
+        // and for any other version it still has something to say.
+        if (report.materialised) {
+          void saveSnapshot(withMaterialisedIn(candidate, hash));
+          continue;
+        }
+        // A report with no rows has nothing to decide: whatever the snapshot
+        // held could not be re-identified in this file and would not be
+        // applied either way. Offering it would be an interruption, not a
+        // choice — keep looking for a candidate that does say something.
+        if (!hasDecisions(report)) continue;
         setPendingRestore({ snapshot: candidate, report, modelId: activeModelId });
         settled = true;
         return;
