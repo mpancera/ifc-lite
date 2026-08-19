@@ -34,6 +34,7 @@ import {
   roomFootprint, roomAreaFromQuantities, type RoomMesh, type QuantitySetLike,
 } from '@/lib/plan/roomLabels';
 import { areaUnitScaleFor } from '@/lib/units/measure-scales';
+import { overlayAttribute } from '@/lib/mutations/overlayAttribute';
 import type { RoomRecord } from '@/lib/roomTriage/roomChecks';
 
 /** `IfcObject.ObjectType` sits at index 4 for every descendant of IfcProduct. */
@@ -123,19 +124,13 @@ export function useRoomTriage(enabled: boolean): RoomTriageSource {
     );
     const areaUnitScale = areaUnitScaleFor(store);
 
-    const attribute = (expressId: number, name: string): string | null => {
-      const mutated = overlay?.getAttributeMutationsForEntity?.(expressId)
-        ?.find((a) => a.name === name)?.value;
-      return mutated === undefined ? null : text(mutated);
-    };
-
     const records: RoomRecord[] = [];
     for (const { storey, space } of pairs) {
       const expressId = space.expressId;
       if (overlay?.isDeleted?.(expressId)) continue;
 
       const parsedObjectType = text(store.getEntity?.(expressId)?.attributes?.[OBJECT_TYPE_INDEX]);
-      const objectType = attribute(expressId, 'ObjectType') ?? parsedObjectType;
+      const objectType = overlayAttribute(overlay, expressId, 'ObjectType') ?? parsedObjectType;
 
       // GEOMETRY FIRST, unlike the plan label — deliberately.
       //
@@ -156,8 +151,8 @@ export function useRoomTriage(enabled: boolean): RoomTriageSource {
         expressId,
         storeyId: storey.expressId,
         storeyName: text(storey.name) || `#${storey.expressId}`,
-        number: attribute(expressId, 'Name') ?? text(space.name),
-        description: attribute(expressId, 'LongName') ?? text(space.longName),
+        number: overlayAttribute(overlay, expressId, 'Name') ?? text(space.name),
+        description: overlayAttribute(overlay, expressId, 'LongName') ?? text(space.longName),
         area: footprint?.area ?? stated?.value ?? null,
         derived: objectType === GENERATED_SPACE_OBJECTTYPE,
       });

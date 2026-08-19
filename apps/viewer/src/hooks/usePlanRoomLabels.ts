@@ -32,6 +32,7 @@ import {
   roomFootprint, roomAreaFromQuantities, type RoomLabel, type RoomMesh, type QuantitySetLike,
 } from '@/lib/plan/roomLabels';
 import { areaUnitScaleFor } from '@/lib/units/measure-scales';
+import { overlayAttribute } from '@/lib/mutations/overlayAttribute';
 
 export interface UsePlanRoomLabelsOptions {
   /** Off entirely when the plan is closed or the labels are switched off. */
@@ -132,17 +133,22 @@ export function usePlanRoomLabels({
         roomAreaFromQuantities(quantitySets, areaUnitScale) ??
         { value: footprint.area, source: 'geometry' as const };
 
-      const name = node.name?.trim() ?? '';
-      const longName = node.longName?.trim() ?? '';
+      // The overlay first, or a room renamed a moment ago keeps printing its
+      // old label while the panel that renamed it shows the new one: nothing
+      // writes an attribute mutation back into the parsed hierarchy.
+      const name = overlayAttribute(overlay, expressId, 'Name') ?? (node.name?.trim() ?? '');
+      const authored = overlayAttribute(overlay, expressId, 'LongName');
+      const longName = authored ?? (node.longName?.trim() ?? '');
 
       labels.push({
         key,
         expressId,
         anchor: footprint.anchor,
         name,
-        // The hierarchy only carries LongName when it differs from Name, so
-        // this cannot produce the same word twice.
-        longName,
+        // The hierarchy only carries LongName when it differs from Name; an
+        // authored one carries whatever was typed, so the same guard is applied
+        // here rather than assumed.
+        longName: longName === name ? '' : longName,
         area,
         width: footprint.width,
         height: footprint.height,
