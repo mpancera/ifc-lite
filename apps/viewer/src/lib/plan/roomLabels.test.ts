@@ -121,11 +121,25 @@ describe('roomAreaFromQuantities', () => {
     assert.equal(area?.value, 26);
   });
 
-  it('scales an area by the SQUARE of the length unit', () => {
-    // A millimetre model states 24 500 000 mm² for 24.5 m².
-    const area = roomAreaFromQuantities([qto('NetFloorArea', 24_500_000)], 0.001);
-    assert.ok(area);
-    assert.equal(Math.round(area.value * 100) / 100, 24.5);
+  it('scales by the declared AREA unit, not by the length unit squared', () => {
+    // An imperial file states 263.8 ft² for 24.5 m² and declares SQUARE FOOT
+    // (0.09290304 m² per ft²) to say so.
+    const imperial = roomAreaFromQuantities([qto('NetFloorArea', 263.75)], 0.09290304);
+    assert.ok(imperial);
+    assert.equal(Math.round(imperial.value * 10) / 10, 24.5);
+
+    // A file whose areas really are in square millimetres declares 1e-6.
+    const mm = roomAreaFromQuantities([qto('NetFloorArea', 24_500_000)], 1e-6);
+    assert.ok(mm);
+    assert.equal(Math.round(mm.value * 100) / 100, 24.5);
+  });
+
+  it('leaves a metric area alone when the file declares square metres', () => {
+    // The regression this replaced: a millimetre model declaring SQUARE_METRE
+    // used to be divided by a million, because the reader squared the LENGTH
+    // scale instead of reading the area unit.
+    const area = roomAreaFromQuantities([qto('NetFloorArea', 24.5)], 1);
+    assert.equal(area?.value, 24.5);
   });
 
   it('declines an unfilled quantity rather than printing 0.0 m²', () => {
@@ -141,6 +155,8 @@ describe('roomAreaFromQuantities', () => {
 
   it('refuses a nonsense unit scale instead of returning zero areas', () => {
     assert.equal(roomAreaFromQuantities([qto('NetFloorArea', 24.5)], 0), null);
+    assert.equal(roomAreaFromQuantities([qto('NetFloorArea', 24.5)], Number.NaN), null);
+    assert.equal(roomAreaFromQuantities([qto('NetFloorArea', 24.5)], -1), null);
   });
 });
 

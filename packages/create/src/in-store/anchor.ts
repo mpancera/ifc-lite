@@ -47,6 +47,27 @@ export interface SpatialAnchor {
    */
   lengthUnitScale?: number;
   /**
+   * Model area-unit scale: square metres per native area unit.
+   *
+   * **Not the square of {@link lengthUnitScale}.** `IfcUnitAssignment`
+   * declares AREAUNIT separately from LENGTHUNIT, and real files disagree in
+   * both directions: a Revit imperial export states FOOT *and* SQUARE FOOT
+   * (0.092903), while a millimetre metric export routinely states MILLI.METRE
+   * lengths with plain SQUARE_METRE areas (1). Squaring the length scale gets
+   * the first case right by accident and the second wrong by a factor of a
+   * million, which is why this is its own number.
+   *
+   * Defaults to 1 — the SI square metre, which is what IFC means when a
+   * project declares no area unit.
+   */
+  areaUnitScale?: number;
+  /**
+   * Model volume-unit scale: cubic metres per native volume unit. Same
+   * argument as {@link areaUnitScale}; VOLUMEUNIT is declared on its own.
+   * Defaults to 1 (SI cubic metre).
+   */
+  volumeUnitScale?: number;
+  /**
    * Optional seeded randomness for the GlobalIds the builders emit
    * (`@ifc-lite/encoding`'s `RandomSource`: a `Math.random`-style
    * `() => number` in `[0, 1)`). Pass a seeded generator to make in-store
@@ -67,6 +88,34 @@ export function toNativeLength(anchor: SpatialAnchor, metres: number): number {
   const scale = anchor.lengthUnitScale;
   if (!scale || !Number.isFinite(scale) || scale <= 0 || scale === 1) return metres;
   return Math.round((metres / scale) * 1e9) / 1e9;
+}
+
+/** Shared guard: an unusable scale means "no conversion", never "multiply by 0". */
+function usableScale(scale: number | undefined): number | null {
+  if (!scale || !Number.isFinite(scale) || scale <= 0 || scale === 1) return null;
+  return scale;
+}
+
+/**
+ * Convert a square-metre value to the anchor's native AREA unit for STEP emit.
+ *
+ * A quantity is stated in the unit its project declares — `IfcQuantityArea`
+ * in AREAUNIT, not in "length unit squared" — so this reads
+ * {@link SpatialAnchor.areaUnitScale} and never squares the length scale.
+ * Writing m² into a file whose AREAUNIT is SQUARE FOOT is how a 24 m² room
+ * came back as 2.3 m² through a reader that did the declared conversion.
+ */
+export function toNativeArea(anchor: SpatialAnchor, squareMetres: number): number {
+  const scale = usableScale(anchor.areaUnitScale);
+  if (scale === null) return squareMetres;
+  return Math.round((squareMetres / scale) * 1e9) / 1e9;
+}
+
+/** Cubic-metre value to the anchor's native VOLUME unit. See {@link toNativeArea}. */
+export function toNativeVolume(anchor: SpatialAnchor, cubicMetres: number): number {
+  const scale = usableScale(anchor.volumeUnitScale);
+  if (scale === null) return cubicMetres;
+  return Math.round((cubicMetres / scale) * 1e9) / 1e9;
 }
 
 /** 2D point variant of {@link toNativeLength}. */

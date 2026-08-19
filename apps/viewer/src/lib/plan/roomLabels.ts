@@ -203,16 +203,22 @@ export interface QuantitySetLike {
  * finished surfaces, which is what the room outline on a plan encloses, so it
  * is the one that agrees with what the reader is looking at.
  *
- * `lengthUnitScale` is metres per file length unit (`IfcDataStore`). Areas
- * scale with its SQUARE — a millimetre model states 24 650 000, not 24.65, and
- * writing that on a plan is not a rounding error but a different building.
+ * `areaUnitScale` is square metres per file AREA unit — `IfcUnitAssignment`'s
+ * AREAUNIT, resolved by `lib/units/measure-scales`. It is deliberately NOT the
+ * square of the length scale, which is what this used to do: a project
+ * declares its area unit separately from its length unit, and both common
+ * exports disagree with the shortcut. An imperial Revit file states FOOT and
+ * SQUARE FOOT, where squaring is right only by coincidence; a metric
+ * millimetre file states MILLI.METRE and plain SQUARE_METRE, where squaring
+ * divides every room by a million. Printing that on a plan is not a rounding
+ * error but a different building.
  */
 export function roomAreaFromQuantities(
   sets: readonly QuantitySetLike[],
-  lengthUnitScale: number,
+  areaUnitScale: number,
 ): RoomArea | null {
-  const scale = lengthUnitScale * lengthUnitScale;
-  if (!(scale > 0)) return null;
+  const scale = areaUnitScale;
+  if (!(scale > 0) || !Number.isFinite(scale)) return null;
 
   for (const wanted of ['NetFloorArea', 'GrossFloorArea'] as const) {
     for (const set of sets) {

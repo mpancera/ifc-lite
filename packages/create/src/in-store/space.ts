@@ -18,7 +18,7 @@
 
 import { generateIfcGuid } from '@ifc-lite/encoding';
 import type { StoreEditor } from '@ifc-lite/mutations';
-import { toNativeLength, type SpatialAnchor } from './anchor.js';
+import { toNativeArea, toNativeLength, toNativeVolume, type SpatialAnchor } from './anchor.js';
 import {
   emitBodyRepresentation,
   emitExtrudedSolid,
@@ -200,14 +200,25 @@ export function addSpaceToStore(
     ? polygonPerimeter(params.OuterCurve)
     : 2 * (params.Width + params.Depth);
   const grossArea = params.grossFloorArea ?? area;
-  // LENGTH quantities follow the project length unit (mm in a mm file);
-  // AREA/VOLUME have their own units which are SI m²/m³ in practice.
+  const netArea = params.netFloorArea ?? area;
+  // Every quantity follows the unit its own measure type is declared in:
+  // LENGTH the project length unit, AREA the project AREAUNIT, VOLUME the
+  // VOLUMEUNIT. The three are independent in `IfcUnitAssignment` and real
+  // files use that freedom — an imperial Revit export states FOOT and SQUARE
+  // FOOT, a metric millimetre one states MILLI.METRE and SQUARE_METRE. Writing
+  // m² into the first put a 24 m² room in the file as 24 ft², which every
+  // reader that honours the declaration then showed as 2.3 m².
+  const a = (squareMetres: number) => toNativeArea(anchor, squareMetres);
   editor.addQuantitySet(spaceId, 'Qto_SpaceBaseQuantities', [
-    { name: 'GrossFloorArea', value: grossArea, quantityType: 'AREA' },
-    { name: 'NetFloorArea', value: params.netFloorArea ?? area, quantityType: 'AREA' },
+    { name: 'GrossFloorArea', value: a(grossArea), quantityType: 'AREA' },
+    { name: 'NetFloorArea', value: a(netArea), quantityType: 'AREA' },
     { name: 'GrossPerimeter', value: n(perimeter), quantityType: 'LENGTH' },
     { name: 'Height', value: n(params.Height), quantityType: 'LENGTH' },
-    { name: 'GrossVolume', value: grossArea * params.Height, quantityType: 'VOLUME' },
+    {
+      name: 'GrossVolume',
+      value: toNativeVolume(anchor, grossArea * params.Height),
+      quantityType: 'VOLUME',
+    },
   ]);
 
   // Pset_SpaceCommon — the standard IfcSpace pset, so the space carries real
@@ -216,8 +227,9 @@ export function addSpaceToStore(
   editor.addPropertySet(spaceId, 'Pset_SpaceCommon', [
     { name: 'Reference', value: params.Name ?? '', type: 'LABEL' },
     { name: 'IsExternal', value: false, type: 'BOOLEAN' },
-    { name: 'GrossPlannedArea', value: grossArea, type: 'REAL' },
-    { name: 'NetPlannedArea', value: params.netFloorArea ?? area, type: 'REAL' },
+    // IfcAreaMeasure, so the AREAUNIT rule above applies here too.
+    { name: 'GrossPlannedArea', value: a(grossArea), type: 'REAL' },
+    { name: 'NetPlannedArea', value: a(netArea), type: 'REAL' },
   ]);
 
   // Space boundaries — one IfcRelSpaceBoundary per bounding element. Attribute

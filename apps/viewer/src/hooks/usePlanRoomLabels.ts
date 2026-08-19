@@ -31,6 +31,7 @@ import { useViewerStore } from '@/store';
 import {
   roomFootprint, roomAreaFromQuantities, type RoomLabel, type RoomMesh, type QuantitySetLike,
 } from '@/lib/plan/roomLabels';
+import { areaUnitScaleFor } from '@/lib/units/measure-scales';
 
 export interface UsePlanRoomLabelsOptions {
   /** Off entirely when the plan is closed or the labels are switched off. */
@@ -112,7 +113,9 @@ export function usePlanRoomLabels({
     }
 
     const overlay = modelId ? mutationViews.get(modelId === 'legacy' ? '__legacy__' : modelId) : undefined;
-    const lengthUnitScale = dataStore.lengthUnitScale ?? 1;
+    // The AREA unit the file declares, not the length unit squared — see
+    // `lib/units/measure-scales`.
+    const areaUnitScale = areaUnitScaleFor(dataStore);
 
     const labels: RoomLabel[] = [];
     for (const [key, { expressId, meshes }] of meshesBySpace) {
@@ -126,7 +129,7 @@ export function usePlanRoomLabels({
         overlay?.getQuantitiesForEntity(expressId) ?? dataStore.getQuantities?.(expressId) ?? [];
 
       const area =
-        roomAreaFromQuantities(quantitySets, lengthUnitScale) ??
+        roomAreaFromQuantities(quantitySets, areaUnitScale) ??
         { value: footprint.area, source: 'geometry' as const };
 
       const name = node.name?.trim() ?? '';

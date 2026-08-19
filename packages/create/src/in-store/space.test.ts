@@ -158,11 +158,58 @@ describe('addSpaceToStore', () => {
     const corner = points.find((p) => Array.isArray(p.attributes[0])
       && (p.attributes[0] as number[])[0] === 4000 && (p.attributes[0] as number[])[1] === 3000);
     expect(corner, 'expected a (4000, 3000) mm corner point').toBeTruthy();
-    // Areas/volumes stay in m²/m³ (their own units); LENGTH quantities scale.
+    // This anchor declares no AREAUNIT/VOLUMEUNIT, which in IFC means the SI
+    // square/cubic metre — so those quantities stay metric while the LENGTH
+    // ones follow the millimetre length unit. The metric millimetre file is
+    // exactly the case that makes squaring the length scale wrong.
     const named = namedQ(view, result.spaceId);
     expect(named['GrossFloorArea']).toBeCloseTo(12, 6);
     expect(named['Height']).toBeCloseTo(3000, 6);
     expect(named['GrossVolume']).toBeCloseTo(36, 6);
+  });
+
+  it("writes quantities in the file's declared AREA/VOLUME units, not in m²", () => {
+    // The imperial Revit export that found this: FOOT lengths, SQUARE FOOT
+    // areas, CUBIC FOOT volumes, all three declared separately. Writing m²
+    // here made a 12 m² room read back as 1.1 m² downstream.
+    const view = new MutablePropertyView(null, 'm1');
+    const editor = new StoreEditor(makeStore(40), view);
+    const result = addSpaceToStore(
+      editor,
+      {
+        ownerHistoryId: 5, bodyContextId: 14, axisContextId: 15, storeyId: 43,
+        storeyPlacementId: 54,
+        lengthUnitScale: 0.3048,
+        areaUnitScale: 0.09290304,
+        volumeUnitScale: 0.028316846592,
+      },
+      { Position: [0, 0, 0], Width: 4, Depth: 3, Height: 3 },
+    );
+    const named = namedQ(view, result.spaceId);
+    expect(named['GrossFloorArea']).toBeCloseTo(12 / 0.09290304, 4);   // 129.17 ft²
+    expect(named['NetFloorArea']).toBeCloseTo(12 / 0.09290304, 4);
+    expect(named['GrossVolume']).toBeCloseTo(36 / 0.028316846592, 4);  // 1271.3 ft³
+    expect(named['Height']).toBeCloseTo(3 / 0.3048, 6);                // 9.84 ft
+    expect(named['GrossPerimeter']).toBeCloseTo(14 / 0.3048, 6);
+  });
+
+  it('keeps Pset_SpaceCommon planned areas in the same unit as the quantities', () => {
+    // GrossPlannedArea is an IfcAreaMeasure; a pset that disagreed with the
+    // Qto beside it would be the same bug wearing a different hat.
+    const view = new MutablePropertyView(null, 'm1');
+    const editor = new StoreEditor(makeStore(40), view);
+    const result = addSpaceToStore(
+      editor,
+      {
+        ownerHistoryId: 5, bodyContextId: 14, axisContextId: 15, storeyId: 43,
+        storeyPlacementId: 54, lengthUnitScale: 0.3048, areaUnitScale: 0.09290304,
+      },
+      { Position: [0, 0, 0], Width: 4, Depth: 3, Height: 3 },
+    );
+    const pset = view.getForEntity(result.spaceId).find((p) => p.name === 'Pset_SpaceCommon');
+    const props = Object.fromEntries((pset?.properties ?? []).map((p) => [p.name, p.value]));
+    expect(props['GrossPlannedArea']).toBeCloseTo(12 / 0.09290304, 4);
+    expect(props['NetPlannedArea']).toBeCloseTo(12 / 0.09290304, 4);
   });
 
   it('rejects non-positive Height', () => {

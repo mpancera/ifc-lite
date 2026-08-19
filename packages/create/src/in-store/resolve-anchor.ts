@@ -11,7 +11,10 @@
  * IfcLocalPlacement.
  */
 
-import { EntityExtractor, extractLengthUnitScale, getAttributeNames, type IfcDataStore } from '@ifc-lite/parser';
+import {
+  EntityExtractor, extractLengthUnitScale, extractProjectUnits, getAttributeNames,
+  type IfcDataStore,
+} from '@ifc-lite/parser';
 import type { SpatialAnchor, SpatialAnchorSchema } from './anchor.js';
 
 export function resolveSpatialAnchor(store: IfcDataStore, storeyExpressId: number): SpatialAnchor {
@@ -66,7 +69,44 @@ export function resolveSpatialAnchor(store: IfcDataStore, storeyExpressId: numbe
     console.warn('resolveSpatialAnchor: failed to extract length unit scale; defaulting to metres', error);
   }
 
-  return { ownerHistoryId, bodyContextId, axisContextId, storeyId: storeyExpressId, storeyPlacementId, schema, lengthUnitScale };
+  // AREA and VOLUME are declared separately from LENGTH, so they are resolved
+  // separately — see `SpatialAnchor.areaUnitScale` for why squaring the length
+  // scale is wrong rather than merely redundant. One extraction covers both.
+  const { areaUnitScale, volumeUnitScale } = resolveMeasureScales(store);
+
+  return {
+    ownerHistoryId, bodyContextId, axisContextId, storeyId: storeyExpressId,
+    storeyPlacementId, schema, lengthUnitScale, areaUnitScale, volumeUnitScale,
+  };
+}
+
+/**
+ * The file's declared AREAUNIT / VOLUMEUNIT as SI-per-native scales.
+ *
+ * Both default to 1: a project that declares no area unit means the SI square
+ * metre, and inventing a scale from the length unit instead would mis-size
+ * every quantity in the metric millimetre files that are the common case.
+ */
+function resolveMeasureScales(store: IfcDataStore): {
+  areaUnitScale: number;
+  volumeUnitScale: number;
+} {
+  let areaUnitScale = 1.0;
+  let volumeUnitScale = 1.0;
+  try {
+    if (store.source.byteLength > 0) {
+      const units = extractProjectUnits(store.source, store.entityIndex);
+      const area = units.resolvedForUnitType('AREAUNIT')?.siScale;
+      const volume = units.resolvedForUnitType('VOLUMEUNIT')?.siScale;
+      if (Number.isFinite(area) && (area as number) > 0) areaUnitScale = area as number;
+      if (Number.isFinite(volume) && (volume as number) > 0) volumeUnitScale = volume as number;
+    }
+  } catch (error) {
+    // Same reasoning as the length scale: keep the SI fallback, but say so —
+    // a wrong scale writes a quantity that is silently off by a factor.
+    console.warn('resolveSpatialAnchor: failed to extract area/volume units; defaulting to SI', error);
+  }
+  return { areaUnitScale, volumeUnitScale };
 }
 
 /**
