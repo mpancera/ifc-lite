@@ -103,11 +103,35 @@ after(() => cleanup());
 describe('RoomTriagePanel', () => {
   it('lists the rooms and says what is missing', () => {
     const container = render(<RoomTriagePanel onClose={() => {}} />);
-    // "Nur offene" is on by default, so the finished room is out of the way
+    // The queue opens on the open ones, so the finished room is out of the way
     // and the one that needs an answer is the one on screen.
     assert.ok(container.textContent?.includes('0.02'));
     assert.equal(container.textContent?.includes('Vorhalle'), false);
     assert.ok(container.textContent?.includes('1 von 2 offen'));
+  });
+
+  it('shows the finished rooms on request, for the ones next door', () => {
+    // Deciding a room means looking at its neighbours, and those are usually
+    // the finished ones — a queue that only shows its own open items hides the
+    // context the decision needs.
+    const container = render(<RoomTriagePanel onClose={() => {}} />);
+    assert.equal(container.textContent?.includes('Vorhalle'), false, 'hidden while "Offen"');
+
+    click(button(container, 'Erledigt'));
+    assert.ok(container.textContent?.includes('Vorhalle'), container.textContent ?? '');
+    assert.equal(container.textContent?.includes('0.02'), false, 'the open one steps aside');
+
+    click(button(container, 'Alle'));
+    assert.ok(container.textContent?.includes('Vorhalle'));
+    assert.ok(container.textContent?.includes('0.02'));
+  });
+
+  it('lets a finished room be opened like any other', () => {
+    // The point of showing them: clicking one selects it in the model.
+    const container = render(<RoomTriagePanel onClose={() => {}} />);
+    click(button(container, 'Alle'));
+    click(row(container, '0.01'));
+    assert.equal(useViewerStore.getState().selectedEntityId, 30);
   });
 
   it('names the specific gap once the room is opened', () => {

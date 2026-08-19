@@ -32,7 +32,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { useRoomTriage } from '@/hooks/useRoomTriage';
 import {
   checkRooms, sortFindings, summariseRooms, nextOpen, isSettled, ISSUE_LABELS,
-  type RoomFinding,
+  type RoomFinding, type RoomSummary,
 } from '@/lib/roomTriage/roomChecks';
 import { formatRoomArea } from '@/lib/plan/roomLabels';
 import { toGlobalIdFromModels } from '@/store/globalId';
@@ -45,8 +45,26 @@ export interface RoomTriagePanelProps {
 
 const ALL_STOREYS = '__all__';
 
+/**
+ * What the list shows. "Erledigt" is not decoration: deciding a room means
+ * looking at the ones around it, and those are usually the finished ones — a
+ * queue that can only show its own open items hides exactly the context the
+ * decision needs.
+ */
+type StatusFilter = 'open' | 'settled' | 'all';
+
+const STATUS_FILTERS: ReadonlyArray<{
+  id: StatusFilter;
+  label: string;
+  count: (summary: RoomSummary) => number;
+}> = [
+  { id: 'open', label: 'Offen', count: (s) => s.open },
+  { id: 'settled', label: 'Erledigt', count: (s) => s.settled },
+  { id: 'all', label: 'Alle', count: (s) => s.total },
+];
+
 export function RoomTriagePanel({ onClose }: RoomTriagePanelProps): React.ReactElement {
-  const [openOnly, setOpenOnly] = useState(true);
+  const [status, setStatus] = useState<StatusFilter>('open');
   const [storeyFilter, setStoreyFilter] = useState<string>(ALL_STOREYS);
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [number, setNumber] = useState('');
@@ -77,12 +95,18 @@ export function RoomTriagePanel({ onClose }: RoomTriagePanelProps): React.ReactE
   }, [findings]);
 
   const shown = useMemo(() => findings.filter((finding) => {
-    if (openOnly && isSettled(finding) && finding.record.key !== activeKey) return false;
+    // The room being worked on stays visible whatever the filter says —
+    // answering it must not make it vanish mid-edit.
+    const settled = isSettled(finding);
+    const kept = finding.record.key === activeKey
+      || status === 'all'
+      || (status === 'open' ? !settled : settled);
+    if (!kept) return false;
     if (storeyFilter !== ALL_STOREYS && String(finding.record.storeyId) !== storeyFilter) {
       return false;
     }
     return true;
-  }), [findings, openOnly, storeyFilter, activeKey]);
+  }), [findings, status, storeyFilter, activeKey]);
 
   /** Show one room in the model and load its values into the fields. */
   const open = (finding: RoomFinding | null) => {
@@ -164,14 +188,17 @@ export function RoomTriagePanel({ onClose }: RoomTriagePanelProps): React.ReactE
       {hasModel && findings.length > 0 && (
         <>
           <div className="flex flex-wrap items-center gap-1.5 border-b px-2 py-1.5">
-            <Button
-              size="sm"
-              variant={openOnly ? 'default' : 'outline'}
-              className="h-6 px-2 text-[11px]"
-              onClick={() => setOpenOnly((value) => !value)}
-            >
-              Nur offene
-            </Button>
+            {STATUS_FILTERS.map((option) => (
+              <Button
+                key={option.id}
+                size="sm"
+                variant={status === option.id ? 'default' : 'outline'}
+                className="h-6 px-2 text-[11px]"
+                onClick={() => setStatus(option.id)}
+              >
+                {option.label} {option.count(summary)}
+              </Button>
+            ))}
             {storeys.length > 1 && (
               <>
                 <Button
@@ -229,9 +256,9 @@ export function RoomTriagePanel({ onClose }: RoomTriagePanelProps): React.ReactE
                     <span className="shrink-0 tabular-nums text-muted-foreground">
                       {record.area === null ? '' : formatRoomArea(record.area)}
                     </span>
-                    {!isSettled(finding) && (
-                      <CircleAlert className="h-3.5 w-3.5 shrink-0 text-amber-500" />
-                    )}
+                    {isSettled(finding)
+                      ? <Check className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                      : <CircleAlert className="h-3.5 w-3.5 shrink-0 text-amber-500" />}
                   </button>
 
                   {active && (
