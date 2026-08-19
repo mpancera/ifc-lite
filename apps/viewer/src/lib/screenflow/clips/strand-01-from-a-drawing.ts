@@ -42,6 +42,7 @@ import { EVENT_LOAD_FILE } from '@/lib/tours/events';
 import { getViewerStoreApi } from '@/store';
 import { underlayDemoFile } from '../dataset';
 import { propertyRowAnchor } from '@/lib/tours/anchors';
+import { LocalSeedCatalogProvider, type CatalogEntry } from '@/lib/catalog';
 import { midpoint } from '../worldPointer';
 import { modelsSettled } from '../model-lookup';
 import type { ScreenflowBeat, ScreenflowClip, ScreenflowStoreApi } from '../types';
@@ -67,25 +68,33 @@ const DOORS: ReadonlyArray<{ at: IfcStoreyLocalPoint; name: string }> = [
 ];
 
 /**
- * Five devices across the three rooms.
+ * Five placements across the three rooms, named by CATALOGUE ENTRY.
  *
- * Five and not two, and of four different kinds: the list and the lens are
- * only worth showing when there is something to tell apart. Two detectors of
- * one type make a list that proves nothing.
+ * Only the id and the position live here. What the element is — its IFC class,
+ * its predefined type, its size, its technical data — comes from the catalogue
+ * at placement time, because that is the argument this beat makes: these are
+ * products off a maintained range, not shapes the demo invented. A clip that
+ * restated the geometry would be a second, drifting copy of the range.
+ *
+ * Four kinds in five placements, with two of one kind in one room: the counter
+ * in the identifier rule is scoped per room and type, so that pair is what
+ * shows 001 and 002 later.
  */
-const DEVICES: ReadonlyArray<{
-  at: IfcStoreyLocalPoint;
-  entity: string;
-  predefinedType: string;
-  name: string;
-  catalogId: string;
-}> = [
-  { at: [2.2, 5.4, 2.7], entity: 'IfcSensor', predefinedType: 'SMOKESENSOR', name: 'Rauchmelder', catalogId: 'demo.smoke-detector' },
-  { at: [2.2, 2.2, 2.7], entity: 'IfcSensor', predefinedType: 'SMOKESENSOR', name: 'Rauchmelder', catalogId: 'demo.smoke-detector' },
-  { at: [6.5, 4.0, 2.7], entity: 'IfcSensor', predefinedType: 'SMOKESENSOR', name: 'Rauchmelder', catalogId: 'demo.smoke-detector' },
-  { at: [6.5, 6.8, 2.4], entity: 'IfcAlarm', predefinedType: 'SIREN', name: 'Sirene', catalogId: 'demo.siren' },
-  { at: [10.2, 4.0, 2.7], entity: 'IfcSensor', predefinedType: 'HEATSENSOR', name: 'Thermomelder', catalogId: 'demo.heat-detector' },
+const PLACEMENTS: ReadonlyArray<{ catalogId: string; at: IfcStoreyLocalPoint }> = [
+  { catalogId: 'fire.smoke-detector', at: [2.2, 5.4, 2.7] },
+  { catalogId: 'fire.smoke-detector', at: [2.2, 2.2, 2.7] },
+  { catalogId: 'fire.manual-call-point', at: [4.9, 3.4, 1.4] },
+  { catalogId: 'fire.siren', at: [6.5, 7.7, 2.3] },
+  { catalogId: 'fire.heat-detector', at: [10.2, 4.0, 2.7] },
 ];
+
+/** The catalogue the demo places from, read without a React hook. */
+const catalogue = new LocalSeedCatalogProvider();
+
+function catalogEntry(catalogId: string): CatalogEntry | null {
+  const entries = catalogue.listEntries();
+  return Array.isArray(entries) ? entries.find((e) => e.id === catalogId) ?? null : null;
+}
 
 /**
  * Where the numbering rule writes: the standard occurrence pset. The clip
@@ -223,39 +232,61 @@ function traceWallBeats(): ScreenflowBeat[] {
 }
 
 /** One beat per device, so the placing reads as placing. */
+/**
+ * One beat per placement, each one selecting its product first.
+ *
+ * `setAddElementLibrarySelection` puts the entry into the store, so the panel
+ * highlights the product the beat is about to place. Without it the library is
+ * on screen but nothing says which line of it is being used, and the beat
+ * reads as "a device appeared" rather than "this product was chosen".
+ *
+ * Every parameter comes off the entry. The clip knows a position and an id;
+ * the range knows what the thing is.
+ */
 function placeDeviceBeats(): ScreenflowBeat[] {
-  return DEVICES.map((device, i) => ({
-    id: `device-${i + 1}`,
-    captionDe: i === 0
-      ? 'Und jetzt die Installation – aus der Bibliothek, in den Raum gesetzt.'
-      : i === 3
-        ? 'Nicht nur Melder: auch eine Sirene gehört in den Plan.'
-        : 'Weiter, Raum für Raum.',
-    captionEn: i === 0
-      ? 'And now the installation - from the library, into the room.'
-      : i === 3
-        ? 'Not only detectors: a sounder belongs in the plan too.'
-        : 'On through the rooms.',
-    holdMs: i === 0 || i === 3 ? 3400 : 1200,
-    worldPoint: device.at,
-    perform: (store) => {
-      const at = target(store);
-      if (!at) return;
-      store.getState().addLibraryElement(at.modelId, at.storeyId, {
-        IfcEntity: device.entity,
-        Position: [...device.at] as [number, number, number],
-        PredefinedType: device.predefinedType,
-        Name: device.name,
-        Discipline: 'fire',
-        CatalogEntryId: device.catalogId,
-      });
-    },
-    settled: () => {
-      const store = getViewerStoreApi();
-      return authoredCount(store, 'IfcSensor') + authoredCount(store, 'IfcAlarm') > i;
-    },
-    settleTimeoutMs: 6000,
-  }));
+  return PLACEMENTS.map((placement, i) => {
+    const entry = catalogEntry(placement.catalogId);
+    return {
+      id: `device-${i + 1}`,
+      captionDe: i === 0
+        ? 'Die Geräte kommen aus der Bibliothek – eine gepflegte Produktpalette.'
+        : i === 2
+          ? 'Nicht nur Melder: Handfeuermelder und Signalgeber stehen daneben.'
+          : 'Weiter, Raum für Raum – jedes Mal ein Produkt aus derselben Liste.',
+      captionEn: i === 0
+        ? 'The devices come from the library - a maintained product range.'
+        : i === 2
+          ? 'Not only detectors: call points and sounders sit beside them.'
+          : 'On through the rooms - each one a product from the same list.',
+      holdMs: i === 0 || i === 2 ? 3600 : 1300,
+      worldPoint: placement.at,
+      prepare: (store) => {
+        // Show which product is being used, in the panel, while it is used.
+        if (entry) store.getState().setAddElementLibrarySelection(entry);
+      },
+      perform: (store) => {
+        const at = target(store);
+        if (!at || !entry) return;
+        store.getState().addLibraryElement(at.modelId, at.storeyId, {
+          IfcEntity: entry.ifc.entity,
+          Position: [...placement.at] as [number, number, number],
+          PredefinedType: entry.ifc.predefinedType,
+          Name: entry.label,
+          Width: entry.geometry?.width,
+          Depth: entry.geometry?.depth,
+          Height: entry.geometry?.height,
+          Discipline: entry.discipline,
+          CatalogEntryId: entry.id,
+          TechnicalData: entry.technicalData,
+        });
+      },
+      settled: () => {
+        const store = getViewerStoreApi();
+        return authoredCount(store, 'IfcSensor') + authoredCount(store, 'IfcAlarm') > i;
+      },
+      settleTimeoutMs: 6000,
+    };
+  });
 }
 
 export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
@@ -406,6 +437,23 @@ export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
       // the traced walls did not close, which is worth failing the take over.
       settled: () => authoredCount(getViewerStoreApi(), 'IfcSpace') >= 3,
       settleTimeoutMs: 30_000,
+    },
+    {
+      id: 'open-library',
+      anchor: 'add-element-panel',
+      captionDe: 'Installationselemente kommen nicht von Hand – sondern aus der Bibliothek.',
+      captionEn: 'Installation elements are not drawn by hand - they come from the library.',
+      prepare: (store) => {
+        // The room tool left the panel on 'space'; switching it to the library
+        // is what puts the product range on screen, and the range on screen is
+        // the whole point of this beat.
+        const state = store.getState();
+        state.setActiveTool('addElement');
+        state.setAddElementType('library');
+      },
+      settled: (s) => s.addElementType === 'library',
+      settleTimeoutMs: 6000,
+      holdMs: 4200,
     },
     ...placeDeviceBeats(),
     {
