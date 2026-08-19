@@ -25,6 +25,7 @@ import {
   ClipboardList,
   Boxes,
   Blocks,
+  DoorOpen,
   Palette,
   Crosshair,
   Puzzle,
@@ -68,7 +69,8 @@ export type WorkspacePanelId =
   | 'graph'
   | 'housekeeping'
   | 'proxyTriage'
-  | 'classTriage';
+  | 'classTriage'
+  | 'roomTriage';
 
 /** Activity-bar clustering — a divider is drawn whenever the group changes. */
 export type PanelGroup = 'navigate' | 'inspect' | 'review' | 'author' | 'work';
@@ -167,6 +169,9 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   // isolate their selection in the viewport and stand beside it.
   { id: 'proxyTriage', title: 'Clean Proxy', short: 'Proxy', Icon: Boxes, group: 'author', region: 'side' },
   { id: 'classTriage', title: 'Clean Classes', short: 'Klassen', Icon: Blocks, group: 'author', region: 'side' },
+  // Rooms are the exception to the grouping the two above are built on: a
+  // number belongs to ONE room, so this one is a queue rather than a grouping.
+  { id: 'roomTriage', title: 'Clean Rooms', short: 'Räume', Icon: DoorOpen, group: 'author', region: 'side' },
 ];
 
 /** The bottom-strip panel ids, mapped to their store visibility flag + setter

@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * Which of the two class-cleaning panels owns the docked sidebar slot.
+ * Which of the three cleaning panels owns the docked sidebar slot.
  *
  * Both were dialogs first, and both had to stop being dialogs for the same
  * reason: deciding what a group of elements IS means looking at them. A dialog
@@ -23,13 +23,17 @@ import type { ViewerState } from '../index.js';
 export interface TriageSlice {
   proxyTriagePanelVisible: boolean;
   classTriagePanelVisible: boolean;
+  roomTriagePanelVisible: boolean;
   setProxyTriagePanelVisible: (visible: boolean) => void;
   setClassTriagePanelVisible: (visible: boolean) => void;
+  setRoomTriagePanelVisible: (visible: boolean) => void;
 }
 
 export const createTriageSlice: StateCreator<ViewerState, [], [], TriageSlice> = (set) => ({
   proxyTriagePanelVisible: false,
   classTriagePanelVisible: false,
+  roomTriagePanelVisible: false,
   setProxyTriagePanelVisible: (proxyTriagePanelVisible) => set({ proxyTriagePanelVisible }),
   setClassTriagePanelVisible: (classTriagePanelVisible) => set({ classTriagePanelVisible }),
+  setRoomTriagePanelVisible: (roomTriagePanelVisible) => set({ roomTriagePanelVisible }),
 });

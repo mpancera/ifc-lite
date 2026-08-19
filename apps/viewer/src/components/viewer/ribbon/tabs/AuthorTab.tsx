@@ -9,7 +9,7 @@
  * toolbar (viewer/commenter roles cannot unlock authoring).
  */
 
-import { Blocks, Box, Boxes, Brush, FileDiff, Library, Wand2 } from 'lucide-react';
+import { Blocks, Box, Boxes, Brush, DoorOpen, FileDiff, Library, Wand2 } from 'lucide-react';
 import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, List, Select, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -250,6 +250,14 @@ export function AuthorTab() {
           disabled={!ifcDataStore}
           active={activeWorkspacePanels.has('classTriage')}
           onClick={() => toggleWorkspacePanel('classTriage')}
+        />
+        <RibbonLargeButton
+          icon={DoorOpen}
+          label="Clean Rooms"
+          tooltip="Räume ohne Nummer, ohne Bezeichnung oder doppelt vergeben einzeln nachtragen — oder als Splitter der Wanderkennung verwerfen"
+          disabled={!ifcDataStore}
+          active={activeWorkspacePanels.has('roomTriage')}
+          onClick={() => toggleWorkspacePanel('roomTriage')}
         />
       </RibbonGroup>
 
