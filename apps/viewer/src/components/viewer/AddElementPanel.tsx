@@ -29,6 +29,8 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import type { AddElementSpaceSource, AddElementAutoSpaceParams } from '@/store/slices/addElementSlice';
+import type { BoundaryMode } from '@ifc-lite/create';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
 import { EntityNode } from '@ifc-lite/query';
@@ -44,6 +46,24 @@ interface ElementOption {
   /** Short description shown below the type chips. */
   hint: string;
 }
+
+/** The three ways to make a room, and what each one needs to work. */
+const SPACE_SOURCES: ReadonlyArray<{
+  id: AddElementSpaceSource; label: string; hint: string;
+}> = [
+  {
+    id: 'draw', label: 'Draw',
+    hint: 'You place the corners. Nothing is assumed about the model — the way to add the room the detectors cannot find.',
+  },
+  {
+    id: 'walls', label: 'From walls',
+    hint: "Reads the model's wall axes and finds every enclosed region on the storey. Wants walls that actually meet; the weld tolerance forgives the rest.",
+  },
+  {
+    id: 'plan', label: 'From a plan',
+    hint: 'Traces the rooms off an imported DXF. For a model whose walls are missing or unusable, but whose plan is good.',
+  },
+];
 
 const ELEMENT_OPTIONS: ElementOption[] = [
   { type: 'wall', label: 'Wall', Icon: Minus, hint: 'Click Start, then End. Cross-section = Thickness × Height, profile spans the click-to-click axis.' },
@@ -122,6 +142,8 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
 
   const slabMode = useViewerStore((s) => s.addElementSlabMode);
   const setSlabMode = useViewerStore((s) => s.setAddElementSlabMode);
+  const spaceSource = useViewerStore((s) => s.addElementSpaceSource);
+  const setSpaceSource = useViewerStore((s) => s.setAddElementSpaceSource);
   const pendingPoints = useViewerStore((s) => s.addElementPendingPoints);
   const hoverPoint = useViewerStore((s) => s.addElementHoverPoint);
   const clearPending = useViewerStore((s) => s.clearAddElementPending);
@@ -241,7 +263,11 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
             </SelectContent>
           </Select>
           <p className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400 leading-snug pt-1">
-            {activeOption.hint}
+            {/* The type hint describes the click flow, which is only one of the
+                three ways to make a room — the source below says the rest. */}
+            {addElementType === 'space' && spaceSource !== 'draw'
+              ? SPACE_SOURCES.find((o) => o.id === spaceSource)?.hint
+              : activeOption.hint}
           </p>
         </section>
 
@@ -298,9 +324,34 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
           )}
         </section>
 
+        {/* A room can be made three ways, and they are three tools: drawn by
+            hand, found between the model's walls, traced off an imported plan.
+            Stacked as three sections they read as one tool with a lot of
+            settings — and the two detectors fail differently, so somebody
+            whose walls are dirty needs to know which one they are looking at. */}
+        {addElementType === 'space' && (
+          <section className="space-y-1.5">
+            <Label className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+              Where the room comes from
+            </Label>
+            <div className="grid grid-cols-3 gap-1">
+              {SPACE_SOURCES.map((source) => (
+                <ModeChip
+                  key={source.id}
+                  selected={spaceSource === source.id}
+                  onClick={() => setSpaceSource(source.id)}
+                >
+                  {source.label}
+                </ModeChip>
+              ))}
+            </div>
+          </section>
+        )}
+
         {/* Slab mode toggle — rectangle (2 clicks) vs polygon (N clicks + Enter) */}
         {/* Profile mode toggle — applies to slab, roof, plate, space (anything that supports both rect + polygon) */}
-        {(addElementType === 'slab' || addElementType === 'roof' || addElementType === 'plate' || addElementType === 'space') && (
+        {(addElementType === 'slab' || addElementType === 'roof' || addElementType === 'plate'
+          || (addElementType === 'space' && spaceSource === 'draw')) && (
           <section className="space-y-1.5">
             <Label className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
               {activeOption.label} profile
@@ -375,7 +426,7 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
             </div>
           )}
 
-          {addElementType === 'space' && (
+          {addElementType === 'space' && spaceSource === 'draw' && (
             <NumberField label="Height" suffix="m" value={spaceParams.Height} min={0.01} onChange={(v) => setSpaceParams({ Height: v })} />
           )}
 
@@ -431,7 +482,7 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
 
         {/* Auto Spaces — wall-graph face finder, runs only when the
             current type is 'space' so the panel stays focused. */}
-        {addElementType === 'space' && (
+        {addElementType === 'space' && spaceSource === 'walls' && (
           <AutoSpacesSection
             modelId={effectiveModelId}
             storeyId={addElementStoreyId ?? storeyOptions[0]?.expressId ?? null}
@@ -441,14 +492,17 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
         {/* The same rooms from an imported plan. A sibling rather than a mode
             of the section above: the outlines mean different things (drawn wall
             faces, not wall centrelines) and the two fail in different ways. */}
-        {addElementType === 'space' && (
+        {addElementType === 'space' && spaceSource === 'plan' && (
           <RoomsFromDrawingSection
             modelId={effectiveModelId}
             storeyId={addElementStoreyId ?? storeyOptions[0]?.expressId ?? null}
           />
         )}
 
-        {/* Click-state guidance — drives the user through the multi-click flow */}
+        {/* Click-state guidance — drives the user through the multi-click flow.
+            Silent for the two detectors: "click the first corner" is an
+            instruction for a tool the user is not holding. */}
+        {!(addElementType === 'space' && spaceSource !== 'draw') && (
         <DropGuidance
           ready={ready}
           type={addElementType}
@@ -460,11 +514,14 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
           onClearPending={clearPending}
           libraryLabel={librarySelection?.label ?? null}
         />
+        )}
 
+        {!(addElementType === 'space' && spaceSource !== 'draw') && (
         <p className="text-[10px] font-mono text-zinc-400 dark:text-zinc-600 leading-snug">
           Snap to vertices, edges, and faces is on by default — toggle with <span className="font-semibold">S</span>.
           Z is fixed to the storey floor; refine via the Raw STEP tab after dropping.
         </p>
+        )}
       </div>
     </div>
   );
@@ -624,6 +681,7 @@ interface RoomsFromDrawingSectionProps {
  */
 function RoomsFromDrawingSection({ modelId, storeyId }: RoomsFromDrawingSectionProps) {
   const params = useViewerStore((s) => s.addElementAutoSpaceParams);
+  const setParams = useViewerStore((s) => s.setAddElementAutoSpaceParams);
   const setPreview = useViewerStore((s) => s.setAddElementAutoSpacePreview);
   const generate = useViewerStore((s) => s.generateSpacesFromDrawing);
   const underlays = useViewerStore((s) => s.dxfUnderlays);
@@ -778,6 +836,8 @@ function RoomsFromDrawingSection({ modelId, storeyId }: RoomsFromDrawingSectionP
         </div>
       </div>
 
+      <DetectionSettings params={params} setParams={setParams} showBoundary={false} />
+
       <NumberField
         label="Min width" suffix="m"
         value={minWidth} min={0}
@@ -820,6 +880,99 @@ interface AutoSpacesSectionProps {
  * finder to the viewer slice. Preview button runs detection without
  * emitting; Generate commits each candidate as an IfcSpace.
  */
+/**
+ * The settings both detectors share, in one place.
+ *
+ * They ARE one set of settings — the same store fields drive the wall detector
+ * and the plan tracer — so rendering them in one of the two sections and not
+ * the other left the plan path running on numbers it never showed. `Boundary`
+ * is the exception: a plan already draws the room face, so there is nothing to
+ * offset and the generator has no such option.
+ */
+function DetectionSettings({ params, setParams, showBoundary }: {
+  params: AddElementAutoSpaceParams;
+  setParams: (p: Partial<AddElementAutoSpaceParams>) => void;
+  showBoundary: boolean;
+}) {
+  return (
+    <>
+      <div className="grid grid-cols-2 gap-2">
+        <NumberField
+          label="Weld" suffix="m"
+          value={params.SnapTolerance} min={0.001}
+          onChange={(v) => setParams({ SnapTolerance: v })}
+        />
+        <NumberField
+          label="Min area" suffix="m²"
+          value={params.MinArea} min={0}
+          onChange={(v) => setParams({ MinArea: v })}
+        />
+        <NumberField
+          label="Height" suffix="m"
+          value={params.Height} min={0.01}
+          onChange={(v) => setParams({ Height: v })}
+        />
+        {showBoundary && (
+        <div className="space-y-1">
+          <Label className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400" htmlFor="auto-space-boundary">
+            Boundary
+          </Label>
+          <Select
+            value={params.BoundaryMode}
+            onValueChange={(v) => setParams({ BoundaryMode: v as BoundaryMode })}
+          >
+            <SelectTrigger id="auto-space-boundary" className="h-8 font-mono text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="inner" className="font-mono text-xs">INNER (room face)</SelectItem>
+              <SelectItem value="center" className="font-mono text-xs">CENTER (wall axis)</SelectItem>
+              <SelectItem value="outer" className="font-mono text-xs">OUTER (far face)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        )}
+        <div className="space-y-1">
+          <Label className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400" htmlFor="auto-space-type">
+            Type
+          </Label>
+          <Select
+            value={params.PredefinedType}
+            onValueChange={(v) => setParams({ PredefinedType: v })}
+          >
+            <SelectTrigger id="auto-space-type" className="h-8 font-mono text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="INTERNAL" className="font-mono text-xs">INTERNAL</SelectItem>
+              <SelectItem value="EXTERNAL" className="font-mono text-xs">EXTERNAL</SelectItem>
+              <SelectItem value="SPACE" className="font-mono text-xs">SPACE</SelectItem>
+              <SelectItem value="PARKING" className="font-mono text-xs">PARKING</SelectItem>
+              <SelectItem value="GFA" className="font-mono text-xs">GFA</SelectItem>
+              <SelectItem value="USERDEFINED" className="font-mono text-xs">USERDEFINED</SelectItem>
+              <SelectItem value="NOTDEFINED" className="font-mono text-xs">NOTDEFINED</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      <div className="space-y-1">
+        <Label htmlFor="auto-space-name" className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400">
+          Name pattern <span className="text-zinc-400 dark:text-zinc-600 ml-1">({'{n}'} = index)</span>
+        </Label>
+        <Input
+          id="auto-space-name"
+          type="text"
+          value={params.NamePattern}
+          onChange={(e) => setParams({ NamePattern: e.target.value })}
+          className="h-8 font-mono text-xs"
+        />
+      </div>
+
+    </>
+  );
+}
+
 function AutoSpacesSection({ modelId, storeyId }: AutoSpacesSectionProps) {
   const params = useViewerStore((s) => s.addElementAutoSpaceParams);
   const setParams = useViewerStore((s) => s.setAddElementAutoSpaceParams);
@@ -842,6 +995,7 @@ function AutoSpacesSection({ modelId, storeyId }: AutoSpacesSectionProps) {
         height: params.Height,
         namePattern: params.NamePattern,
         predefinedType: params.PredefinedType,
+        boundaryMode: params.BoundaryMode,
         dryRun: true,
         debug: debugLogging,
       });
@@ -889,6 +1043,7 @@ function AutoSpacesSection({ modelId, storeyId }: AutoSpacesSectionProps) {
         height: params.Height,
         namePattern: params.NamePattern,
         predefinedType: params.PredefinedType,
+        boundaryMode: params.BoundaryMode,
         debug: debugLogging,
       });
       if ('error' in result) {
@@ -916,58 +1071,7 @@ function AutoSpacesSection({ modelId, storeyId }: AutoSpacesSectionProps) {
         </Label>
       </div>
 
-      <div className="grid grid-cols-2 gap-2">
-        <NumberField
-          label="Snap" suffix="m"
-          value={params.SnapTolerance} min={0.001}
-          onChange={(v) => setParams({ SnapTolerance: v })}
-        />
-        <NumberField
-          label="Min area" suffix="m²"
-          value={params.MinArea} min={0}
-          onChange={(v) => setParams({ MinArea: v })}
-        />
-        <NumberField
-          label="Height" suffix="m"
-          value={params.Height} min={0.01}
-          onChange={(v) => setParams({ Height: v })}
-        />
-        <div className="space-y-1">
-          <Label className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400" htmlFor="auto-space-type">
-            Type
-          </Label>
-          <Select
-            value={params.PredefinedType}
-            onValueChange={(v) => setParams({ PredefinedType: v })}
-          >
-            <SelectTrigger id="auto-space-type" className="h-8 font-mono text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="INTERNAL" className="font-mono text-xs">INTERNAL</SelectItem>
-              <SelectItem value="EXTERNAL" className="font-mono text-xs">EXTERNAL</SelectItem>
-              <SelectItem value="SPACE" className="font-mono text-xs">SPACE</SelectItem>
-              <SelectItem value="PARKING" className="font-mono text-xs">PARKING</SelectItem>
-              <SelectItem value="GFA" className="font-mono text-xs">GFA</SelectItem>
-              <SelectItem value="USERDEFINED" className="font-mono text-xs">USERDEFINED</SelectItem>
-              <SelectItem value="NOTDEFINED" className="font-mono text-xs">NOTDEFINED</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-
-      <div className="space-y-1">
-        <Label htmlFor="auto-space-name" className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400">
-          Name pattern <span className="text-zinc-400 dark:text-zinc-600 ml-1">({'{n}'} = index)</span>
-        </Label>
-        <Input
-          id="auto-space-name"
-          type="text"
-          value={params.NamePattern}
-          onChange={(e) => setParams({ NamePattern: e.target.value })}
-          className="h-8 font-mono text-xs"
-        />
-      </div>
+      <DetectionSettings params={params} setParams={setParams} showBoundary />
 
       <div className="grid grid-cols-2 gap-2 pt-1">
         <Button

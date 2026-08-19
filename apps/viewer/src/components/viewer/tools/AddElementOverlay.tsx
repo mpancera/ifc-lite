@@ -33,6 +33,18 @@ const PRIMARY = '#10b981'; // emerald-500
 const PRIMARY_LIGHT = 'rgba(16, 185, 129, 0.18)';
 const GHOST = 'rgba(16, 185, 129, 0.45)';
 
+/**
+ * The types placed with more than one click.
+ *
+ * They had no cursor marker at all: the first circle appeared only once the
+ * point was already set, so the one moment you need to see where the corner
+ * would land — before committing to it — was the one moment nothing was drawn.
+ * The single-click types have carried a full ghost all along.
+ */
+const MULTI_CLICK_TYPES: ReadonlySet<string> = new Set([
+  'wall', 'beam', 'member', 'slab', 'roof', 'plate', 'space',
+]);
+
 export function AddElementOverlay() {
   const activeTool = useViewerStore((s) => s.activeTool);
   const type = useViewerStore((s) => s.addElementType);
@@ -206,6 +218,16 @@ export function AddElementOverlay() {
       {(type === 'slab' || type === 'roof' || type === 'plate' || type === 'space') && slabMode === 'polygon' ? (
         <SlabPolygonPreview pending={screenPending} hover={hover} />
       ) : null}
+
+      {/* Where the next click would land. Hollow and dashed, so it reads as
+          "not placed yet" beside the solid markers of the points that are. */}
+      {hover && MULTI_CLICK_TYPES.has(type) && (
+        <circle
+          cx={hover.x} cy={hover.y} r={4}
+          fill="none" stroke={PRIMARY} strokeWidth={1.5} strokeDasharray="2 2"
+          data-add-element-cursor
+        />
+      )}
 
       {/* Pending point markers — drawn on top so they're always visible. */}
       {screenPending.map((p, i) => (

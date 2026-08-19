@@ -21,6 +21,7 @@
 import { type StateCreator } from 'zustand';
 import type { CatalogEntry } from '@/lib/catalog';
 import { VIEWER_ROLE_ID, normalizeRoleId } from '@/lib/roles/disciplineRoles';
+import type { BoundaryMode } from '@ifc-lite/create';
 
 const ROLE_STORAGE_KEY = 'ifclite.authoring.discipline-role';
 
@@ -141,7 +142,15 @@ export interface AddElementLibraryParams {
  * Lives here so the panel form survives type-switches.
  */
 export interface AddElementAutoSpaceParams {
-  /** Wall-end snap tolerance in metres (collapses tiny gaps). */
+  /**
+   * How far apart two wall ends may be and still be welded into one node,
+   * in metres.
+   *
+   * Called WELD rather than snap because this panel already has a snap: the
+   * cursor magnet on vertices and edges (S). One is about where you click,
+   * the other about how the wall graph is stitched, and naming both "snap"
+   * made the drawing settings read as one control with two boxes.
+   */
   SnapTolerance: number;
   /** Drop detected regions below this area (m²). */
   MinArea: number;
@@ -151,7 +160,25 @@ export interface AddElementAutoSpaceParams {
   NamePattern: string;
   /** IfcSpaceTypeEnum value (without dots). */
   PredefinedType: string;
+  /**
+   * Where the room's boundary sits relative to the walls it was found
+   * between: `inner` = the room face (net area), `center` = the wall
+   * centrelines (axis area), `outer` = the far face.
+   *
+   * It decides what every area in the room schedule MEANS, which is why it
+   * belongs in the panel rather than in the generator's default.
+   */
+  BoundaryMode: BoundaryMode;
 }
+
+/**
+ * Which of the three ways to make a room the panel is showing.
+ *
+ * They are three different tools that fail in three different ways — drawn by
+ * hand, found between the model's walls, traced off an imported plan — and
+ * stacking them under one heading read as one tool with a lot of settings.
+ */
+export type AddElementSpaceSource = 'draw' | 'walls' | 'plan';
 
 /** Live preview from the most recent dry-run detection (cleared on commit). */
 export interface AddElementAutoSpacePreview {
@@ -212,6 +239,7 @@ export interface AddElementSlice {
   /** Currently selected catalog entry for the `'library'` type; `null` until the user picks one. */
   addElementLibrarySelection: CatalogEntry | null;
   addElementAutoSpaceParams: AddElementAutoSpaceParams;
+  addElementSpaceSource: AddElementSpaceSource;
   addElementAutoSpacePreview: AddElementAutoSpacePreview | null;
 
   /**
@@ -249,6 +277,7 @@ export interface AddElementSlice {
   /** Selecting an entry reseeds the dimension params from its geometry hint. */
   setAddElementLibrarySelection: (entry: CatalogEntry | null) => void;
   setAddElementAutoSpaceParams: (p: Partial<AddElementAutoSpaceParams>) => void;
+  setAddElementSpaceSource: (source: AddElementSpaceSource) => void;
   setAddElementAutoSpacePreview: (preview: AddElementAutoSpacePreview | null) => void;
   setAddElementSlabMode: (m: AddElementSlabMode) => void;
   appendAddElementPendingPoint: (p: AddElementVec3) => void;
@@ -277,6 +306,8 @@ const ADD_ELEMENT_DEFAULTS = {
     Height: 3,
     NamePattern: 'Space {n}',
     PredefinedType: 'INTERNAL',
+    // The room face, which is what a room schedule means by "area".
+    BoundaryMode: 'inner',
   } as AddElementAutoSpaceParams,
 };
 
@@ -298,6 +329,7 @@ export const createAddElementSlice: StateCreator<AddElementSlice, [], [], AddEle
   addElementLibraryParams: { ...ADD_ELEMENT_DEFAULTS.library },
   addElementLibrarySelection: null,
   addElementAutoSpaceParams: { ...ADD_ELEMENT_DEFAULTS.autoSpace },
+  addElementSpaceSource: 'draw',
   addElementAutoSpacePreview: null,
   addElementSlabMode: 'rectangle',
   addElementPendingPoints: [],
@@ -355,6 +387,7 @@ export const createAddElementSlice: StateCreator<AddElementSlice, [], [], AddEle
     }),
   setAddElementAutoSpaceParams: (p) =>
     set((s) => ({ addElementAutoSpaceParams: { ...s.addElementAutoSpaceParams, ...p } })),
+  setAddElementSpaceSource: (addElementSpaceSource) => set({ addElementSpaceSource }),
   setAddElementAutoSpacePreview: (preview) =>
     set({ addElementAutoSpacePreview: preview }),
   setAddElementSlabMode: (addElementSlabMode) =>
