@@ -41,6 +41,17 @@ const IDLE: ExportRunState = {
 };
 
 export interface ExportProductsSlice {
+  /**
+   * Whether the panel owns the docked side slot.
+   *
+   * Every docked side panel needs a flag of its own: `openWorkspacePanel`
+   * sets them BY NAME, so a panel without one cannot be opened from any
+   * entry point — not the rail, not the palette — and reads as a dead
+   * feature with no error anywhere.
+   */
+  exportsPanelVisible: boolean;
+  setExportsPanelVisible: (visible: boolean) => void;
+
   exportProducts: readonly ExportProduct[];
   /** Which project the list was loaded for. */
   exportProductsProject: string | null;
@@ -78,6 +89,9 @@ export const createExportProductsSlice: StateCreator<
   };
 
   return {
+    exportsPanelVisible: false,
+    setExportsPanelVisible: (exportsPanelVisible) => set({ exportsPanelVisible }),
+
     exportProducts: [],
     exportProductsProject: null,
     exportRun: IDLE,

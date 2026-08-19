@@ -105,6 +105,12 @@ export function buildHiddenIfcTypes(
   for (const [ifcType, key] of Object.entries(IFC_TYPE_TO_VISIBILITY_KEY)) {
     if (!typeVisibility[key]) out.add(ifcType);
   }
+  // Rooms, storey areas and parking are all `IfcSpace`, so switching ONE of
+  // them off cannot be said at class level — dropping the class would take
+  // the other two with it. Once no kind is wanted at all, it can: the class
+  // and the kinds then agree, and the export matches the viewport instead of
+  // shipping spaces nobody can see on screen.
+  if (allSpaceKindsHidden(typeVisibility)) out.add('IfcSpace');
   return out;
 }
 

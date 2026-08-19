@@ -111,9 +111,9 @@ describe('buildHiddenIfcTypes', () => {
   it('drops exactly the classes owned by each toggle, one toggle at a time', () => {
     // Mirrors the per-pair check above for the GLB-export gate, so the two
     // consumers can never disagree about which class a toggle owns.
-    const expected: Record<keyof typeof ALL_ON, string[]> = {
+    // The kinds of space are deliberately absent here — see the test below.
+    const expected: Partial<Record<keyof typeof ALL_ON, string[]>> = {
       spaces: ['IfcSpace'],
-      rooms: ['IfcSpace'], storeySpaces: ['IfcSpace'], parking: ['IfcSpace'],
       spatialZones: ['IfcSpatialZone'],
       openings: ['IfcOpeningElement'],
       virtualElements: ['IfcVirtualElement'],
@@ -125,6 +125,23 @@ describe('buildHiddenIfcTypes', () => {
       const hidden = buildHiddenIfcTypes({ ...ALL_ON, [key]: false });
       assert.deepEqual([...hidden].sort(), [...classes].sort(), `toggle ${key}`);
     }
+  });
+
+  it('cannot drop a class for one kind of space, and drops it once no kind is left', () => {
+    // Rooms, storey areas and parking are all IfcSpace. Excluding the class
+    // because rooms are hidden would take the parking spaces with it, so one
+    // kind off is a per-entity decision (`isTypeVisible` with the kind) that
+    // a class-level exclusion cannot express — the export keeps the class.
+    for (const kind of ['rooms', 'storeySpaces', 'parking'] as const) {
+      assert.deepEqual([...buildHiddenIfcTypes({ ...ALL_ON, [kind]: false })], [], `kind ${kind}`);
+    }
+
+    // With no kind of space wanted, the two agree again and the class goes —
+    // otherwise a "visible only" export ships spaces the viewport does not
+    // show.
+    const noKinds = { ...ALL_ON, rooms: false, storeySpaces: false, parking: false };
+    assert.equal(allSpaceKindsHidden(noKinds), true);
+    assert.deepEqual([...buildHiddenIfcTypes(noKinds)], ['IfcSpace']);
   });
 
   it('hides every mapped class when all toggles are off', () => {
