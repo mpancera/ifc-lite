@@ -61,10 +61,24 @@ if ! command -v wasm-pack &> /dev/null; then
       echo "    https://rustwasm.github.io/wasm-pack/installer/)"
       exit 0
     fi
+    # No runtime on disk. Fetch the published one rather than succeeding
+    # without it.
+    #
+    # Exiting 0 here used to leave `pkg/` holding types and no runtime — and
+    # turbo caches `pkg/**` as this task's output. That half-empty directory
+    # became a cache entry, and every later cache HIT restored it over a
+    # runtime somebody had fetched by hand, which is how a working viewer
+    # stopped booting after an unrelated `pnpm typecheck`. A build task that
+    # reports success has to leave its output behind.
+    echo "⚠️  wasm-pack not found — fetching the published runtime instead."
+    if node "$(dirname "$0")/fetch-prebuilt-wasm.mjs"; then
+      exit 0
+    fi
     if [ -f "$EXPECTED_DTS" ]; then
-      echo "⚠️  wasm-pack not found — committed types at $EXPECTED_DTS are present,"
-      echo "   so type-checking works, but the wasm runtime is NOT built. The app"
-      echo "   won't run or bundle until you install Rust + wasm-pack and rebuild:"
+      echo "⚠️  Could not fetch the prebuilt runtime (offline?). The committed types"
+      echo "   at $EXPECTED_DTS are present, so type-checking works, but the app"
+      echo "   won't run or bundle until the runtime is there. Install Rust +"
+      echo "   wasm-pack and rebuild, or re-run with a network connection:"
       echo "     https://rustwasm.github.io/wasm-pack/installer/"
       exit 0
     fi

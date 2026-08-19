@@ -9,7 +9,7 @@
 
 import { execSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -22,6 +22,9 @@ const version = wasmPkgJson.version;
 const tarball = `@ifc-lite/wasm@${version}`;
 
 const wasmOut = join(rootDir, 'packages/wasm/pkg');
+
+/** What the prebuilt package actually contributes: the runtime, nothing else. */
+const RUNTIME_FILES = ['ifc-lite.js', 'ifc-lite_bg.wasm'];
 const wasmFile = join(wasmOut, 'ifc-lite_bg.wasm');
 
 if (existsSync(wasmFile)) {
@@ -39,15 +42,26 @@ const extractDir = join(rootDir, '.wasm-fetch-tmp');
 rmSync(extractDir, { recursive: true, force: true });
 mkdirSync(extractDir, { recursive: true });
 
-execSync(`tar -xzf ${JSON.stringify(join(rootDir, tgzName))} -C ${JSON.stringify(extractDir)}`, {
+// Paths stay RELATIVE to the cwd set below. GNU tar -- which is what Git Bash
+// and MSYS put on PATH -- reads an archive name containing a colon as
+// `host:path` and tries to fetch it over the network, so an absolute Windows
+// path fails with a bare status 2 and no useful message.
+execSync(`tar -xzf ${JSON.stringify(tgzName)} -C ${JSON.stringify(relative(rootDir, extractDir))}`, {
   cwd: rootDir,
   stdio: 'inherit',
 });
 
 mkdirSync(wasmOut, { recursive: true });
 
+// The RUNTIME only. `pkg/ifc-lite.d.ts` is committed (force-added past the
+// wasm-pack `pkg/.gitignore`) and CI diffs it exactly; the npm tarball carries
+// an unstripped copy, so copying the whole directory dirties a tracked file on
+// every fetch -- and whoever commits next has changed the published type
+// surface without touching a Rust source.
 const pkgDir = join(extractDir, 'package/pkg');
-cpSync(pkgDir, wasmOut, { recursive: true, force: true });
+for (const file of RUNTIME_FILES) {
+  cpSync(join(pkgDir, file), join(wasmOut, file), { force: true });
+}
 
 rmSync(extractDir, { recursive: true, force: true });
 rmSync(join(rootDir, tgzName), { force: true });
