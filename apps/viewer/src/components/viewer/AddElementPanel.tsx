@@ -36,6 +36,7 @@ import { useIfc } from '@/hooks/useIfc';
 import { EntityNode } from '@ifc-lite/query';
 import type { AddElementType } from '@/store/slices/addElementSlice';
 import { useCatalogEntries, type CatalogEntry } from '@/lib/catalog';
+import { TOUR_ANCHORS, tourAnchor } from '@/lib/tours/anchors';
 import { CatalogImportControls } from './catalog/CatalogImportControls';
 import { dxfSegments, summariseLayers, suggestWallLayers } from '@/lib/plan/dxfSegments';
 
@@ -215,7 +216,7 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
   const activeOption = ELEMENT_OPTIONS.find((o) => o.type === addElementType) ?? ELEMENT_OPTIONS[0];
 
   return (
-    <div className="h-full flex flex-col bg-white dark:bg-black">
+    <div className="h-full flex flex-col bg-white dark:bg-black" {...tourAnchor(TOUR_ANCHORS.addElementPanel)}>
       {/* Header */}
       <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950">
         <div className="flex items-center gap-2">

@@ -20,6 +20,27 @@ function makeStore(maxId: number): MutationStoreShape {
 }
 
 describe('addLibraryElementToStore', () => {
+  it('contains the element in the room when one was resolved, else in the storey', () => {
+    // The contract the block schema depends on: a device states the room it
+    // sits in, so element-room-storey is a chain and not three islands.
+    // Asserted here as well as on the sensor builder, because a catalog
+    // element and a plain sensor must not disagree about their container.
+    const view = new MutablePropertyView(null, 'm1');
+    const editor = new StoreEditor(makeStore(80), view);
+    const anchor = { ownerHistoryId: 5, bodyContextId: 14, axisContextId: 15, storeyId: 43, storeyPlacementId: 54 };
+
+    const roomed = addLibraryElementToStore(editor, anchor, {
+      IfcEntity: 'IfcSensor', Position: [1, 1, 0], ContainerId: 61,
+    });
+    const loose = addLibraryElementToStore(editor, anchor, {
+      IfcEntity: 'IfcSensor', Position: [9, 9, 0],
+    });
+
+    const byId = new Map(view.getNewEntities().map((e) => [e.expressId, e]));
+    expect(byId.get(roomed.relContainedId)?.attributes[5]).toBe('#61');
+    expect(byId.get(loose.relContainedId)?.attributes[5]).toBe('#43');
+  });
+
   it('emits the requested IFC entity with header + PredefinedType', () => {
     const view = new MutablePropertyView(null, 'm1');
     const editor = new StoreEditor(makeStore(40), view);

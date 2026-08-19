@@ -9,6 +9,7 @@
 import { useState, useEffect } from 'react';
 import { Sparkles, PenLine, Building2 } from 'lucide-react';
 import { PropertyEditor, type PropertyEditScope } from '../PropertyEditor';
+import { propertyRowAnchor, tourAnchor } from '@/lib/tours/anchors';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Badge } from '@/components/ui/badge';
@@ -121,6 +122,7 @@ export function PropertySetCard({ pset, modelId, entityId, enableEditing, isType
               <div
                 key={prop.name}
                 data-prop-key={propKey}
+                {...tourAnchor(propertyRowAnchor(pset.name, prop.name))}
                 className={`flex items-start justify-between gap-2 px-3 py-2 text-xs group/prop transition-colors ${
                   isFocused
                     ? 'bg-amber-100/70 dark:bg-amber-900/40 ring-2 ring-inset ring-amber-400 dark:ring-amber-500 motion-safe:animate-pulse-subtle'

@@ -3,17 +3,29 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * Anchor resolution for tour steps.
+ * Anchor resolution for tour steps and screenflow beats.
  *
  * The sidebar is single-tenant, so an anchor inside an inactive panel does
  * not exist in the DOM yet - the retry loop is what distinguishes "panel is
  * still mounting after prepare()" from real rot. Panels living in another OS
  * window (pop-out) are re-docked first: a main-document overlay cannot
  * spotlight another window.
+ *
+ * The parameter is the anchor/panel PAIR rather than a whole step, because a
+ * screenflow beat needs exactly the same resolution and is not a tour step.
+ * Nothing here ever read anything else off the step.
  */
 
+import type { WorkspacePanelId } from '@/lib/panels/registry';
 import { anchorSelector } from './anchors';
-import type { TourBrokenReason, TourStep, ViewerStoreApi } from './types';
+import type { TourAnchorId } from './anchors';
+import type { TourBrokenReason, ViewerStoreApi } from './types';
+
+/** What resolution needs from a step or a beat: where, and inside which panel. */
+export interface AnchorTarget {
+  anchor?: TourAnchorId;
+  panel?: WorkspacePanelId;
+}
 
 const RESOLVE_TIMEOUT_MS = 2000;
 
@@ -34,7 +46,7 @@ function nextFrame(): Promise<void> {
  */
 export async function resolveAnchor(
   store: ViewerStoreApi,
-  step: TourStep,
+  step: AnchorTarget,
   isCurrent: () => boolean,
 ): Promise<AnchorResolution> {
   if (!step.anchor) return { el: null, reason: 'anchor-missing', redocked: false };

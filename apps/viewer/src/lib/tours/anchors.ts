@@ -25,6 +25,9 @@ export const TOUR_ANCHORS = {
   propertiesPanel: 'properties-panel',
   /** HierarchyPanel root in the left slot. */
   hierarchyPanel: 'hierarchy-panel',
+  /** AddElementPanel root — the element type, its parameters, and the
+   *  auto-space section all live inside it. */
+  addElementPanel: 'add-element-panel',
   /** ViewCube wrapper div (top-right viewport overlay). Card placement
    *  must stay clear of this corner - never anchor a card 'bottom' here. */
   viewcube: 'viewcube',
@@ -123,11 +126,25 @@ export function lensCardAnchor(lensId: string): `lens-card-${string}` {
   return `lens-card-${lensId}`;
 }
 
+/**
+ * One row of a property set, named by the set and the property.
+ *
+ * The first anchors were all whole panels, and a ring around a 226-pixel-wide
+ * panel answers "which panel" when the question was "which line". Named by
+ * pset and property rather than by index: a row's position moves whenever a
+ * model carries one property more, and an anchor that follows the position
+ * would point confidently at the neighbour.
+ */
+export function propertyRowAnchor(psetName: string, propertyName: string): `property-row-${string}` {
+  return `property-row-${psetName}:${propertyName}`;
+}
+
 export type TourAnchorId =
   | (typeof TOUR_ANCHORS)[keyof typeof TOUR_ANCHORS]
   | ReturnType<typeof activityAnchor>
   | ReturnType<typeof toolAnchor>
-  | ReturnType<typeof lensCardAnchor>;
+  | ReturnType<typeof lensCardAnchor>
+  | ReturnType<typeof propertyRowAnchor>;
 
 /** Spread helper: `<div {...tourAnchor(TOUR_ANCHORS.propertiesPanel)}>`. */
 export function tourAnchor(id: TourAnchorId): { 'data-tour': TourAnchorId } {

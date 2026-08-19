@@ -216,6 +216,11 @@ export interface GraphPanelProps {
 
 export function GraphPanel({ onClose }: GraphPanelProps) {
   const models = useViewerStore((s) => s.models);
+  const mutationViews = useViewerStore((s) => s.mutationViews);
+  // The overlay object is stable while a session adds to it, so the counter is
+  // what tells the memos below that the drawing is out of date. Without it the
+  // panel keeps showing the graph as it was before the last element was placed.
+  const mutationVersion = useViewerStore((s) => s.mutationVersion);
   const selectedModelId = useViewerStore((s) => s.selectedModelId);
   const setSelectedEntityId = useViewerStore((s) => s.setSelectedEntityId);
   const setGraphHighlight = useViewerStore((s) => s.setGraphHighlight);
@@ -240,8 +245,13 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
   const store = effectiveModelId
     ? (models.get(effectiveModelId)?.ifcDataStore as GraphStore | null | undefined)
     : null;
+  const overlay = effectiveModelId ? mutationViews.get(effectiveModelId) : null;
 
-  const typeCounts = useMemo(() => (store ? expressTypeCounts(store) : new Map<string, number>()), [store]);
+  const typeCounts = useMemo(
+    () => (store ? expressTypeCounts(store, overlay) : new Map<string, number>()),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mutationVersion is the overlay's change signal; the view object itself never changes identity.
+    [store, overlay, mutationVersion],
+  );
 
   const offeredTypes = useMemo(
     () =>
@@ -251,7 +261,11 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
     [typeCounts],
   );
 
-  const offeredSystems = useMemo(() => (store ? systemsIn(store) : []), [store]);
+  const offeredSystems = useMemo(
+    () => (store ? systemsIn(store, overlay) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see typeCounts above.
+    [store, overlay, mutationVersion],
+  );
 
   // A model swap invalidates both selections: express ids and the type list
   // belong to the model they came from. Picked systems are express ids, so
@@ -269,8 +283,9 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
   const built: { graph: Graph; spec: RelationChain } | null = useMemo(() => {
     if (!store || chosenCount === 0) return null;
     const spec = chain.pick === 'types' ? chain.build(startTypes) : chain.build(startSystems);
-    return { graph: buildRelationGraph(graphSourceFor(store), spec), spec };
-  }, [store, chain, chosenCount, startTypes, startSystems]);
+    return { graph: buildRelationGraph(graphSourceFor(store, overlay), spec), spec };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see typeCounts above.
+  }, [store, overlay, mutationVersion, chain, chosenCount, startTypes, startSystems]);
 
   /**
    * The drawing, which is not always the whole graph.

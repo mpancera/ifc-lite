@@ -20,6 +20,7 @@
 
 import type { MutablePropertyView, NewEntity } from '@ifc-lite/mutations';
 import type { EntityRelationships } from '@ifc-lite/parser';
+import { RELATION_ROLES, referencesElement, refId } from './overlayRelationIndex.js';
 
 export interface RelatedRef {
   id: number;
@@ -34,17 +35,6 @@ export interface OverlayRelationships extends EntityRelationships {
   containedIn: RelatedRef[];
 }
 
-/** `#123` → `123`; anything else → `null`. */
-function refId(value: unknown): number | null {
-  if (typeof value !== 'string' || !value.startsWith('#')) return null;
-  const id = Number(value.slice(1));
-  return Number.isFinite(id) ? id : null;
-}
-
-function includesElement(value: unknown, expressId: number): boolean {
-  return Array.isArray(value) && value.includes(`#${expressId}`);
-}
-
 export interface OverlayRelationshipArgs {
   view: MutablePropertyView | null | undefined;
   expressId: number;
@@ -53,6 +43,18 @@ export interface OverlayRelationshipArgs {
 }
 
 const EMPTY: EntityRelationships = { voids: [], fills: [], groups: [], connections: [] };
+
+/**
+ * The relating side of `entity`, but only when it names `expressId` on its
+ * related side. Attribute positions come from `RELATION_ROLES` so this file
+ * and the whole-graph index cannot drift apart about where a role sits.
+ */
+function relatingFor(entity: NewEntity, expressId: number): number | null {
+  const roles = RELATION_ROLES[entity.type];
+  if (!roles) return null;
+  if (!referencesElement(entity.attributes[roles.related], expressId)) return null;
+  return refId(entity.attributes[roles.relating]);
+}
 
 /**
  * Merge overlay-authored relationships into a parsed result.
@@ -79,26 +81,20 @@ export function withOverlayRelationships(
   for (const entity of entities) {
     switch (entity.type) {
       case 'IfcRelAssignsToGroup': {
-        // (GlobalId, OwnerHistory, Name, Description, RelatedObjects, …, RelatingGroup)
-        if (!includesElement(entity.attributes[4], args.expressId)) break;
-        const groupId = refId(entity.attributes[6]) ?? refId(entity.attributes[5]);
+        const groupId = relatingFor(entity, args.expressId);
         if (groupId === null || seenGroups.has(groupId)) break;
         const ref = args.describe(groupId);
         if (ref) { merged.groups.push(ref); seenGroups.add(groupId); }
         break;
       }
       case 'IfcRelDefinesByType': {
-        // (GlobalId, OwnerHistory, Name, Description, RelatedObjects, RelatingType)
-        if (!includesElement(entity.attributes[4], args.expressId)) break;
-        const typeId = refId(entity.attributes[5]);
+        const typeId = relatingFor(entity, args.expressId);
         const ref = typeId === null ? null : args.describe(typeId);
         if (ref) merged.definedBy.push(ref);
         break;
       }
       case 'IfcRelContainedInSpatialStructure': {
-        // (GlobalId, OwnerHistory, Name, Description, RelatedElements, RelatingStructure)
-        if (!includesElement(entity.attributes[4], args.expressId)) break;
-        const containerId = refId(entity.attributes[5]);
+        const containerId = relatingFor(entity, args.expressId);
         const ref = containerId === null ? null : args.describe(containerId);
         if (ref) merged.containedIn.push(ref);
         break;

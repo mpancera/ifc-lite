@@ -84,6 +84,12 @@ nul
 # Local test models (private, never committed)
 tests/models/local
 
+# Screenflow demo data (private, never committed). The clips under
+# apps/viewer/src/lib/screenflow/ read the models and the caption overrides
+# from here; the repository is public, so neither the building nor the words
+# naming it may land in it. See apps/viewer/src/lib/screenflow/README.md.
+apps/viewer/public/demo-local/
+
 # IFC test fixtures are fetched on demand via `pnpm fixtures` and listed in
 # tests/models/manifest.json. They must NOT be committed to the repo. The
 # fixture directories themselves are ignored too: in a worktree they may be

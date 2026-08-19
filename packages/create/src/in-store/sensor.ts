@@ -7,7 +7,8 @@
  * automation device (fire/smoke/heat detector, movement sensor, etc.),
  * placed as a small box at a single point. Mirrors `door.ts`'s shape:
  * no host/void relationship, just a Body representation + a direct
- * `IfcRelContainedInSpatialStructure` to the storey.
+ * `IfcRelContainedInSpatialStructure` to the room it sits in, or to the
+ * storey when the caller does not know a room.
  *
  * `IfcSensor.PredefinedType` (IfcSensorTypeEnum) only exists from IFC4
  * onward — IFC2X3 has no such attribute, so emitting it there would
@@ -75,6 +76,23 @@ export interface SensorInStoreParams {
   Description?: string;
   ObjectType?: string;
   Tag?: string;
+  /**
+   * Spatial element the sensor is contained in — typically the `IfcSpace`
+   * enclosing `Position`. Defaults to `anchor.storeyId`.
+   *
+   * Same contract as `addLibraryElementToStore`: an element is contained in
+   * exactly ONE spatial element, IFC allows that element to be an `IfcSpace`,
+   * and the storey is still reached transitively through the space's
+   * `IfcRelAggregates`. Stating a detector against its room is what makes
+   * "which detectors are in this room" answerable from the file alone —
+   * measured at a real model, a storey-contained detector leaves the
+   * element-room-storey chain with no edges at all.
+   *
+   * The geometric placement stays chained to the storey either way:
+   * containment is spatial decomposition, `IfcLocalPlacement` is a coordinate
+   * system, and re-parenting the placement would move the device.
+   */
+  ContainerId?: number;
 }
 
 export interface SensorBuildResult {
@@ -119,7 +137,8 @@ export function addSensorToStore(
   }
 
   const sensorId = editor.addEntity('IfcSensor', attrs as Parameters<StoreEditor['addEntity']>[1]).expressId;
-  const relContainedId = emitRelContainedInSpatialStructure(editor, anchor.ownerHistoryId, sensorId, anchor.storeyId, anchor.guidRandom);
+  const containerId = params.ContainerId ?? anchor.storeyId;
+  const relContainedId = emitRelContainedInSpatialStructure(editor, anchor.ownerHistoryId, sensorId, containerId, anchor.guidRandom);
 
   return { sensorId, placementId, profileId, solidId, shapeRepId, productShapeId, relContainedId };
 }

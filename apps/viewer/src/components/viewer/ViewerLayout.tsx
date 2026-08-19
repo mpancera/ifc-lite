@@ -44,6 +44,7 @@ import { GanttPanel } from './schedule/GanttPanel';
 import { CommandPalette } from './CommandPalette';
 import { SearchModal } from './SearchModal';
 import { TourHost } from '@/components/tours/TourHost';
+import { ScreenflowStage } from '@/components/screenflow/ScreenflowStage';
 import { SidebarDock } from './sidebar/SidebarDock';
 import { FloatingPanelHost } from './dock/FloatingPanelHost';
 import { PanelWindowHost } from './dock/PanelWindowHost';
@@ -392,6 +393,7 @@ export function ViewerLayout() {
         <CommandPalette open={commandPaletteOpen} onOpenChange={setCommandPaletteOpen} />
         <SearchModal />
         <TourHost />
+        <ScreenflowStage />
 
         {/* Main Toolbar — compact MobileToolbar on mobile; on desktop the
             user picks classic strip vs tabbed ribbon (issue #1686). */}
