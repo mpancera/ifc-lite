@@ -102,8 +102,20 @@ export interface GenerateSpacesResult {
   detected: DetectedSpace[];
   /** Per-stage planar-graph statistics — surfaced for diagnostics. */
   detectionStats: DetectStats;
-  /** Per-region builder result. Empty when `dryRun: true`. */
-  emitted: Array<{ region: DetectedSpace; result: SpaceBuildResult; name: string }>;
+  /**
+   * Per-region builder result. Empty when `dryRun: true`.
+   *
+   * `outline` is the polygon the IfcSpace solid was actually baked at (the
+   * boundary mode applied), NOT `region.outline`, which stays on the wall
+   * centrelines. A caller that mirrors the new room into a viewer has to draw
+   * the solid that exists, or the picture and the file disagree by half a wall.
+   */
+  emitted: Array<{
+    region: DetectedSpace;
+    result: SpaceBuildResult;
+    name: string;
+    outline: Vec2[];
+  }>;
   /** Detected rooms skipped because they overlap an existing space. */
   skippedExisting: number;
 }
@@ -210,7 +222,7 @@ export function generateSpacesFromWalls(
       ),
       grossFloorArea: region.area,
     });
-    emitted.push({ region, result, name });
+    emitted.push({ region, result, name, outline: netOutline });
   });
 
   return {

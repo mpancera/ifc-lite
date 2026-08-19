@@ -343,7 +343,10 @@ export interface ExistingSpaceEntry {
  * point falls in (e.g. auto "is in space" relationship generation) rather
  * than just deduplicating against space geometry in the aggregate.
  */
-export function existingSpacesByStorey(store: IfcDataStore): Map<number, ExistingSpaceEntry[]> {
+export function existingSpacesByStorey(
+  store: IfcDataStore,
+  overlay?: OverlayWallReader,
+): Map<number, ExistingSpaceEntry[]> {
   const out = new Map<number, ExistingSpaceEntry[]>();
   if (!store.source) return out;
   const extractor = new EntityExtractor(store.source);
@@ -362,8 +365,8 @@ export function existingSpacesByStorey(store: IfcDataStore): Map<number, Existin
       const placementId = numericAttr(ent.attributes[5]);   // ObjectPlacement
       const representationId = numericAttr(ent.attributes[6]); // Representation
       if (placementId === null || representationId === null) continue;
-      const frame = readPlacementFrame(store, extractor, undefined, placementId);
-      const localPts = gatherBodyFootprintPoints(store, extractor, undefined, representationId);
+      const frame = readPlacementFrame(store, extractor, overlay, placementId);
+      const localPts = gatherBodyFootprintPoints(store, extractor, overlay, representationId);
       if (!frame || !localPts || localPts.length < 3) continue;
       entries.push({
         spaceExpressId: id,
@@ -374,6 +377,42 @@ export function existingSpacesByStorey(store: IfcDataStore): Map<number, Existin
       });
     }
     if (entries.length) out.set(st.expressId, entries);
+  }
+
+  // Rooms authored in THIS session are in no relationship index — they live in
+  // the overlay until an export. Without them a second detection run on the
+  // same floor lays a second room over every room the first run made, which is
+  // the ordinary loop when somebody tunes the snap or the minimum area and
+  // presses Generate again.
+  if (overlay) {
+    for (const ent of overlay.getNewEntities()) {
+      if (ent.type.toUpperCase() !== 'IFCRELAGGREGATES') continue;
+      const storeyId = numericAttr(ent.attributes[4]);
+      if (storeyId === null) continue;
+      const related = ent.attributes[5];
+      if (!Array.isArray(related)) continue;
+      for (const member of related) {
+        const spaceId = numericAttr(member as IfcAttributeValue);
+        if (spaceId === null) continue;
+        const space = readEntity(store, extractor, overlay, spaceId);
+        if (!space || (space.type ?? '').toUpperCase() !== 'IFCSPACE') continue;
+        const placementId = numericAttr(space.attributes[5]);
+        const representationId = numericAttr(space.attributes[6]);
+        if (placementId === null || representationId === null) continue;
+        const frame = readPlacementFrame(store, extractor, overlay, placementId);
+        const localPts = gatherBodyFootprintPoints(store, extractor, overlay, representationId);
+        if (!frame || !localPts || localPts.length < 3) continue;
+        const entries = out.get(storeyId) ?? [];
+        entries.push({
+          spaceExpressId: spaceId,
+          polygon: localPts.map((pt) => {
+            const w = applyFrame(frame, pt);
+            return [w[0] * scale, w[1] * scale] as Vec2;
+          }),
+        });
+        out.set(storeyId, entries);
+      }
+    }
   }
   return out;
 }

@@ -39,6 +39,7 @@ import {
   resolveDuplicateSource,
   generateSpacesFromWalls,
   generateSpacesFromDrawing,
+  existingSpacesByStorey,
   type BeamInStoreParams,
   type ColumnInStoreParams,
   type DoorInStoreParams,
@@ -99,6 +100,7 @@ import {
 import { getModelLengthUnitScale } from '@/lib/length-unit-scale.js';
 import type { Point2D } from '@/lib/polygon-clip.js';
 import { registerAuthoredElement } from '@/utils/spatialHierarchy.js';
+import { footprintsToSkip } from '@/lib/spaces/skipFootprints.js';
 
 /**
  * IFC-space directions for {@link MutationSlice.duplicateEntity}.
@@ -116,6 +118,9 @@ export type DuplicateDirection = '+X' | '-X' | '+Y' | '-Y' | '+Z' | '-Z';
 
 /** Default direction used when neither the menu nor `⌘D` provides one. */
 export const DUPLICATE_DEFAULT_DIRECTION: DuplicateDirection = '+X';
+
+/** The generator's own default room height in metres, mirrored for the mesh. */
+const DEFAULT_SPACE_HEIGHT = 3;
 
 /** Fallback step in metres when the source has no mesh in geometry. */
 const DUPLICATE_FALLBACK_STEP = 1;
@@ -135,6 +140,64 @@ function revealAddedGeometryInModelView(get: () => unknown): void {
     setTypeViewMode?: (mode: TypeViewMode) => void;
   };
   if (cross.typeViewMode === 'types') cross.setTypeViewMode?.('model');
+}
+
+/**
+ * Give freshly generated rooms the same standing a hand-drawn one gets:
+ * a node in the spatial tree, a mesh in the scene, and a class that is
+ * switched on so they can be seen.
+ *
+ * The bulk generator emits straight into the overlay and stops there. That is
+ * enough for the export, and nothing else — every surface that draws or lists
+ * rooms reads the spatial hierarchy or the geometry, and neither had heard of
+ * them.
+ */
+function materialiseGeneratedSpaces(
+  get: () => ViewerState,
+  set: (partial: Partial<ViewerState> | ((s: ViewerState) => Partial<ViewerState>)) => void,
+  modelId: string,
+  dataStore: IfcDataStore,
+  storeyExpressId: number,
+  emitted: GenerateSpacesResult['emitted'],
+  height: number,
+): void {
+  const storeyElevation = dataStore.spatialHierarchy?.storeyElevations?.get(storeyExpressId) ?? 0;
+  const meshes: MeshData[] = [];
+
+  for (const { result, name, outline } of emitted) {
+    if (dataStore.spatialHierarchy) {
+      registerAuthoredElement(
+        dataStore.spatialHierarchy, storeyExpressId, result.spaceId, 'IfcSpace', name,
+      );
+    }
+    // The baked outline, not the centreline one: the mesh has to be the solid
+    // the file describes, or picking and the drawing disagree with the export.
+    const mesh = buildElementMesh({
+      type: 'space',
+      globalId: toGlobalIdFromModels(get().models, modelId, result.spaceId),
+      storeyElevation,
+      payload: {
+        type: 'space',
+        // Width/Depth are the rectangle mode's inputs; the polygon branch
+        // reads Height alone, but the payload type carries all three.
+        params: { Width: 0, Depth: 0, Height: height },
+        corners: outline.map(([x, y]) => [x, y, 0] as [number, number, number]),
+      },
+    });
+    if (mesh) meshes.push(mesh);
+  }
+
+  if (meshes.length > 0) {
+    const cross = get() as unknown as { appendGeometryBatch?: (batch: MeshData[]) => void };
+    cross.appendGeometryBatch?.(meshes);
+  }
+
+  // IfcSpace is class-hidden by default, so without this the rooms are in the
+  // scene and still not on screen — the same reveal Space Sketch does.
+  const state = get();
+  if (!state.typeVisibility.spaces) state.toggleTypeVisibility('spaces');
+  revealAddedGeometryInModelView(get);
+  set((s) => ({ mutationVersion: s.mutationVersion + 1 }));
 }
 
 interface ViewerBox {
@@ -2991,13 +3054,26 @@ export const createMutationSlice: StateCreator<
     const editor = getOrCreateStoreEditor(get, set, modelId);
     if (!editor) return { error: 'Failed to create store editor' };
 
+    // What already stands on this storey, so a second run does not lay a second
+    // room over the first. The generator has always been able to do this; the
+    // footprints were never handed to it, which is how a floor ended up with
+    // two complete sets of rooms on top of each other.
+    //
+    // A room deleted in this session drops out of the list: it is still in the
+    // parsed store, and counting it would block the regeneration that the
+    // deletion was the first half of.
+    const existing = existingSpacesByStorey(dataStore, {
+      getNewEntities: () => view.getNewEntities(),
+    }).get(storeyExpressId) ?? [];
+    const skipFootprints = footprintsToSkip(existing, (id) => view.isDeleted(id));
+
     let result: GenerateSpacesResult;
     try {
       result = generateSpacesFromWalls(
         editor,
         dataStore,
         storeyExpressId,
-        options,
+        { ...options, skipFootprints: options?.skipFootprints ?? skipFootprints },
         // The view exposes getNewEntities — pass it in so overlay-only
         // walls (placed via the Add Element tool) participate in the
         // detection without needing a flush to STEP first.
@@ -3011,6 +3087,17 @@ export const createMutationSlice: StateCreator<
 
     // dryRun → nothing emitted; skip undo / dirty bookkeeping.
     if (!result.emitted.length) return result;
+
+    // The generated rooms are real IFC the moment they exist, so make them
+    // real HERE too — the single-element path (`addElementToStore`) has always
+    // done this, and a room that skipped it was a ghost: absent from the
+    // spatial tree, absent from the 3D scene, unlabelled on the plan and
+    // invisible to Clean Rooms, until an export and a reload made it appear.
+    // Measured on the demo model: 17 spaces emitted, 0 in `elementToStorey`,
+    // 0 meshes.
+    materialiseGeneratedSpaces(
+      get, set, modelId, dataStore, storeyExpressId, result.emitted, options?.height ?? DEFAULT_SPACE_HEIGHT,
+    );
 
     set((s) => {
       const newUndoStacks = new Map(s.undoStacks);
