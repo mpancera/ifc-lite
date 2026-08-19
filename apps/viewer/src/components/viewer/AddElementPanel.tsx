@@ -182,6 +182,23 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
   // Auto-pick the first storey when the user hasn't chosen one or
   // the previous choice no longer exists in the active model. Also
   // reset on model change — storey express ids are model-local, so a
+  // Solo shows exactly one storey, so authoring into a different one is a
+  // mistake nobody sees until the element turns up on a floor they are not
+  // looking at. The panel follows the storey on screen whenever that changes;
+  // picking another one by hand still holds until the next solo switch.
+  const levelDisplayMode = useViewerStore((s) => s.levelDisplayMode);
+  const activeStorey = useViewerStore((s) => s.activeStorey);
+  useEffect(() => {
+    if (levelDisplayMode !== 'solo' || !activeStorey) return;
+    // Storey ids are per model, so a soloed storey of ANOTHER model says
+    // nothing about where this panel should author.
+    if (effectiveModelId && activeStorey.modelId !== effectiveModelId) return;
+    if (!storeyOptions.some((o) => o.expressId === activeStorey.expressId)) return;
+    setAddElementStoreyId(activeStorey.expressId);
+  }, [
+    levelDisplayMode, activeStorey, effectiveModelId, storeyOptions, setAddElementStoreyId,
+  ]);
+
   // colliding numeric id from a different federated model would
   // otherwise be silently reused as the placement target.
   useEffect(() => {

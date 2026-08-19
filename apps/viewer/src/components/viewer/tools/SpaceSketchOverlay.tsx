@@ -193,6 +193,11 @@ export function SpaceSketchOverlay() {
   const [discardMode, setDiscardMode] = useState(false);
   /** Also emit one IfcSpace.GFA per storey, named after the storey. */
   const [emitGfa, setEmitGfa] = useState(false);
+  // Confirming writes into the storey on screen. Deriving reaches every floor,
+  // and letting the confirm do the same created rooms in a basement somebody
+  // was not looking at — on top of a floor whose room names had just been
+  // reworked by hand. Off by default, and the confirm button says which.
+  const [bakeAllStoreys, setBakeAllStoreys] = useState(false);
   // Derive-all is a multi-second synchronous run; the ref is the interlock (a
   // second click must be rejected before React re-renders) and the state drives
   // the disabled button.
@@ -524,6 +529,8 @@ export function SpaceSketchOverlay() {
     sketchModelId, ifcDataStore, boundaryMode, sessionsRef, floorToFloor,
     discardedRooms: discardedRef,
     emitGfa,
+    activeStoreyId: storeyId,
+    bakeAllStoreys,
     // The GROSS outline: the hull of the wall rectangles, so the area is
     // measured to the outer wall faces. Convex, so an L- or U-shaped plan
     // comes out too large — said plainly in the option's own label rather
@@ -886,7 +893,8 @@ export function SpaceSketchOverlay() {
         `Created ${res.emitted} ${res.emitted === 1 ? 'space' : 'spaces'}` +
           (res.floors > 1 ? ` across ${res.floors} storeys` : '') +
           (res.gfa > 0 ? `, incl. ${res.gfa} storey area${res.gfa === 1 ? '' : 's'} (GFA)` : '') +
-          (res.discarded > 0 ? ` — ${res.discarded} discarded` : ''),
+          (res.discarded > 0 ? ` — ${res.discarded} discarded` : '') +
+          (res.kept > 0 ? ` · ${res.kept} renamed room${res.kept === 1 ? '' : 's'} left untouched` : ''),
       );
     }
     clearGhosts();
@@ -1500,6 +1508,8 @@ export function SpaceSketchOverlay() {
           boundaryMode={boundaryMode}
           onBoundaryMode={setBoundaryMode}
           emitGfa={emitGfa}
+          bakeAllStoreys={bakeAllStoreys}
+          onBakeAllStoreys={setBakeAllStoreys}
           onEmitGfa={setEmitGfa}
           hasWallData={!!ext}
           snapDelta={snapDelta}

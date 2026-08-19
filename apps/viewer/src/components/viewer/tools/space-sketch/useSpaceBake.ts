@@ -18,6 +18,7 @@
 
 import { useCallback, useRef } from 'react';
 import { useViewerStore } from '@/store';
+import { overlayAttribute } from '@/lib/mutations/overlayAttribute';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import {
   existingSpaceFootprintsByStorey,
@@ -31,6 +32,8 @@ import { planStoreySpaces, planStoreyGfa, type DraftRoom } from './space-bake';
 export interface SpaceBakeResult {
   emitted: number;
   floors: number;
+  /** Rooms left alone because they had been renamed since this tool made them. */
+  kept: number;
   /** Rooms the author discarded — reported so the count is explainable. */
   discarded: number;
   /** Storey-wide GFA spaces created, when that option is on. */
@@ -64,6 +67,16 @@ export interface UseSpaceBakeOptions {
   storeyOutline: (sid: number) => Pt[] | null;
   /** Storey name and long name, for naming the GFA space. */
   storeyNaming: (sid: number) => { name: string; longName?: string | null } | null;
+  /** The storey on screen — the one a confirm writes into by default. */
+  activeStoreyId: number | null;
+  /**
+   * Confirm every storey that has a draft, not just the one on screen.
+   *
+   * Off by default. Deriving is a whole-model action, so leaving the confirm
+   * whole-model too meant somebody working on the first floor could create
+   * rooms in the basement without ever looking at it — and did.
+   */
+  bakeAllStoreys: boolean;
 }
 
 export interface UseSpaceBake {
@@ -83,13 +96,16 @@ export function useSpaceBake({
   emitGfa,
   storeyOutline,
   storeyNaming,
+  activeStoreyId,
+  bakeAllStoreys,
 }: UseSpaceBakeOptions): UseSpaceBake {
   const addSpace = useViewerStore((s) => s.addSpace);
   const removeEntity = useViewerStore((s) => s.removeEntity);
 
-  // IfcSpace expressIds this tool created per storey — so confirming again
-  // replaces the spaces it dropped instead of duplicating.
-  const generatedRef = useRef<Map<number, number[]>>(new Map());
+  // What this tool created per storey, with the name it gave each room — so
+  // confirming again replaces its own spaces instead of duplicating them, and
+  // can tell which of them somebody has since made their own.
+  const generatedRef = useRef<Map<number, Array<{ id: number; name: string }>>>(new Map());
 
   /**
    * IfcSpace is class-hidden by default (TYPE_VISIBILITY_SEMANTIC_DEFAULTS).
@@ -113,17 +129,46 @@ export function useSpaceBake({
     sid: number,
     rooms: DraftRoom[],
     authored: Pt[][],
-  ): { emitted: number; skipped: number; discarded: number; gfa: number; error: string | null } => {
+  ): {
+    emitted: number; skipped: number; discarded: number; gfa: number;
+    /** Rooms kept because they had been renamed since this tool made them. */
+    kept: number;
+    error: string | null;
+  } => {
     if (!sketchModelId) {
-      return { emitted: 0, skipped: 0, discarded: 0, gfa: 0, error: 'no model to create spaces in' };
+      return { emitted: 0, skipped: 0, discarded: 0, gfa: 0, kept: 0, error: 'no model to create spaces in' };
     }
-    for (const id of generatedRef.current.get(sid) ?? []) removeEntity(sketchModelId, id);
+
+    // Replacing is for rooms nobody has touched. A room this tool made and
+    // somebody has since NAMED is their work sitting on the tool's id, and
+    // deleting it to make a fresh "Space 3" threw away an afternoon of room
+    // numbers with no warning and no undo entry that looked like a loss.
+    // Reported from real use, on a basement renamed while the tool was open.
+    const view = useViewerStore.getState().getMutationView(sketchModelId);
+    /** The room's name right now, or `null` when it cannot be read. */
+    const nameOf = (id: number): string | null => {
+      if (!view) return null;
+      const authored = overlayAttribute(view, id, 'Name');
+      if (authored !== null) return authored;
+      const attr = view.getNewEntity(id)?.attributes?.[2];
+      return typeof attr === 'string' ? attr : null;
+    };
+    let kept = 0;
+    for (const made of generatedRef.current.get(sid) ?? []) {
+      // Only a name we can READ and that has changed protects a room. An
+      // unreadable one is not evidence of anything, and treating it as edited
+      // would quietly turn the replace back into a duplicate — the thing this
+      // ledger exists to prevent.
+      const current = nameOf(made.id);
+      if (current !== null && current !== made.name) { kept++; continue; }
+      removeEntity(sketchModelId, made.id);
+    }
     generatedRef.current.delete(sid);
     const height = floorToFloor(sid);
     const { planned, skipped, discarded } = planStoreySpaces(
       rooms, authored, height, discardedRooms.current?.get(sid) ?? [],
     );
-    const newIds: number[] = [];
+    const made: Array<{ id: number; name: string }> = [];
     // An addSpace failure (anchor resolution, missing mutation view, …) is
     // NOT an "already a space" skip — keep the first error so the status
     // line tells the user the truth instead of silently dropping spaces
@@ -138,11 +183,11 @@ export function useSpaceBake({
         Profile: 'polygon',
         OuterCurve: space.OuterCurve,
         Height: space.Height,
-        Name: `Space ${newIds.length + 1}`,
+        Name: `Space ${made.length + 1}`,
         ObjectType: GENERATED_SPACE_OBJECTTYPE,
         grossFloorArea: space.grossFloorArea,
       });
-      if (res && 'expressId' in res) newIds.push(res.expressId);
+      if (res && 'expressId' in res) made.push({ id: res.expressId, name: `Space ${made.length + 1}` });
       else error ??= (res && 'error' in res ? res.error : 'unknown error');
     }
     // The storey's own space, after the rooms so it does not take "Space 1".
@@ -165,13 +210,13 @@ export function useSpaceBake({
           ObjectType: GENERATED_SPACE_OBJECTTYPE,
           grossFloorArea: plan.grossFloorArea,
         });
-        if (res && 'expressId' in res) { newIds.push(res.expressId); gfa = 1; }
+        if (res && 'expressId' in res) { made.push({ id: res.expressId, name: plan.Name }); gfa = 1; }
         else error ??= (res && 'error' in res ? res.error : 'unknown error');
       }
     }
 
-    generatedRef.current.set(sid, newIds);
-    return { emitted: newIds.length, skipped, discarded, gfa, error };
+    generatedRef.current.set(sid, made);
+    return { emitted: made.length, skipped, discarded, gfa, kept, error };
   }, [sketchModelId, removeEntity, addSpace, floorToFloor,
       discardedRooms, emitGfa, storeyOutline, storeyNaming]);
 
@@ -187,15 +232,23 @@ export function useSpaceBake({
     // — with several models loaded and none active we deliberately refuse to
     // guess which one to author into, rather than picking an arbitrary one.
     if (!sketchModelId) {
-      return { emitted: 0, floors: 0, discarded: 0, gfa: 0, error: 'No active model — pick one in the model list, then confirm again.' };
+      return { emitted: 0, floors: 0, discarded: 0, gfa: 0, kept: 0, error: 'No active model — pick one in the model list, then confirm again.' };
     }
     if (!ifcDataStore) {
-      return { emitted: 0, floors: 0, discarded: 0, gfa: 0, error: 'Model data is still loading — confirm again in a moment.' };
+      return { emitted: 0, floors: 0, discarded: 0, gfa: 0, kept: 0, error: 'Model data is still loading — confirm again in a moment.' };
     }
-    const authoredMap = existingSpaceFootprintsByStorey(ifcDataStore);
-    let emitted = 0, floors = 0, discarded = 0, gfa = 0;
+    // The overlay is asked too, so a room this session already created — kept
+    // because somebody named it — counts as "already there" and does not get a
+    // second room laid on top of it.
+    const bakeView = useViewerStore.getState().getMutationView(sketchModelId);
+    const authoredMap = existingSpaceFootprintsByStorey(
+      ifcDataStore,
+      bakeView ? { getNewEntities: () => bakeView.getNewEntities() } : undefined,
+    );
+    let emitted = 0, floors = 0, discarded = 0, gfa = 0, kept = 0;
     let firstError: string | null = null;
     for (const [sid, session] of sessionsRef.current) {
+      if (!bakeAllStoreys && sid !== activeStoreyId) continue;
       if (!session.alive || session.roomCount === 0) continue;
       const rooms = session.rooms().map((r) => ({
         outline: r.outline,
@@ -205,16 +258,20 @@ export function useSpaceBake({
       emitted += res.emitted;
       discarded += res.discarded;
       gfa += res.gfa;
+      kept += res.kept;
       if (res.emitted) floors++;
       firstError ??= res.error;
     }
     if (emitted > 0) revealSpaces();
-    return { emitted, floors, discarded, gfa, error: firstError };
-  }, [sketchModelId, ifcDataStore, boundaryMode, sessionsRef, createSpacesForStorey, revealSpaces]);
+    return { emitted, floors, discarded, gfa, kept, error: firstError };
+  }, [
+    sketchModelId, ifcDataStore, boundaryMode, sessionsRef, createSpacesForStorey, revealSpaces,
+    activeStoreyId, bakeAllStoreys,
+  ]);
 
   const createdIds = useCallback((): number[] => {
     const out: number[] = [];
-    for (const ids of generatedRef.current.values()) out.push(...ids);
+    for (const rooms of generatedRef.current.values()) out.push(...rooms.map((r) => r.id));
     return out;
   }, []);
 

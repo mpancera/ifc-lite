@@ -424,9 +424,12 @@ export function existingSpacesByStorey(
  * still adding rooms an empty part of the floor lacks. Keyed by storey
  * expressId; storeys with no resolvable space footprints are omitted.
  */
-export function existingSpaceFootprintsByStorey(store: IfcDataStore): Map<number, Vec2[][]> {
+export function existingSpaceFootprintsByStorey(
+  store: IfcDataStore,
+  overlay?: OverlayWallReader,
+): Map<number, Vec2[][]> {
   const out = new Map<number, Vec2[][]>();
-  for (const [storeyId, entries] of existingSpacesByStorey(store)) {
+  for (const [storeyId, entries] of existingSpacesByStorey(store, overlay)) {
     out.set(storeyId, entries.map((e) => e.polygon));
   }
   return out;

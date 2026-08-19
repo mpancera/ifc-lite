@@ -13,6 +13,9 @@ export interface OptionsPopoverProps {
   /** Also emit one IfcSpace.GFA per storey, named after the storey. */
   emitGfa: boolean;
   onEmitGfa: (v: boolean) => void;
+  /** Confirm every storey with a draft, not only the one on screen. */
+  bakeAllStoreys: boolean;
+  onBakeAllStoreys: (v: boolean) => void;
   /** Whether this derive carried wall thickness — without it only `center` works. */
   hasWallData: boolean;
   snapDelta: { from: number; to: number } | null;
@@ -29,7 +32,8 @@ export interface OptionsPopoverProps {
 
 export function OptionsPopover(props: OptionsPopoverProps) {
   const {
-    boundaryMode, onBoundaryMode, emitGfa, onEmitGfa, hasWallData, snapDelta, usedTol, snapDisabled,
+    boundaryMode, onBoundaryMode, emitGfa, onEmitGfa, bakeAllStoreys, onBakeAllStoreys,
+    hasWallData, snapDelta, usedTol, snapDisabled,
     onSnap, snapTol, showBuilding, onToggleBuilding, showDiagnostics, onToggleDiagnostics,
   } = props;
   return (
@@ -47,6 +51,18 @@ export function OptionsPopover(props: OptionsPopoverProps) {
             );
           })}
         </div>
+      </div>
+      <div className="space-y-1.5">
+        <div className="font-medium text-foreground">What confirming writes</div>
+        <label className="flex cursor-pointer items-start gap-1.5">
+          <input type="checkbox" className="mt-0.5 h-3 w-3 accent-primary"
+            checked={bakeAllStoreys} onChange={(e) => onBakeAllStoreys(e.target.checked)} />
+          <span>
+            Every storey that has a draft. Off, only the storey on screen is
+            written — deriving reaches the whole model, so confirming everything
+            can create rooms on a floor you never looked at.
+          </span>
+        </label>
       </div>
       <div className="space-y-1.5">
         <div className="font-medium text-foreground">Storey area</div>

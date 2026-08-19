@@ -65,6 +65,9 @@ const discardedRef = { current: new Map<number, [number, number][][]>() };
 /** Everything this file writes into the module-level store, so `afterEach` can
  *  put it all back — the viewer runs its whole suite in ONE process. */
 let storeBackup: Record<string, unknown>;
+/** Scope of the confirm, per test — the default is one storey, see below. */
+let activeStoreyId: number | null = null;
+let bakeAllStoreys = true;
 
 function Harness() {
   const ref = { current: sessions };
@@ -81,11 +84,17 @@ function Harness() {
     emitGfa: false,
     storeyOutline: () => null,
     storeyNaming: () => null,
+    // The cases below were written when a confirm wrote every storey, and they
+    // still assert exactly that; the scope has its own test.
+    activeStoreyId,
+    bakeAllStoreys,
   });
   return null;
 }
 
 beforeEach(() => {
+  activeStoreyId = null;
+  bakeAllStoreys = true;
   added = [];
   removed = [];
   nextId = 5000;
@@ -93,7 +102,12 @@ beforeEach(() => {
   callSeq = 0;
   sessions = new Map();
   const s = useViewerStore.getState();
-  storeBackup = { addSpace: s.addSpace, removeEntity: s.removeEntity, typeVisibility: s.typeVisibility };
+  storeBackup = {
+    addSpace: s.addSpace, removeEntity: s.removeEntity, typeVisibility: s.typeVisibility,
+    // The rename guard reads the overlay through this, and a test that
+    // stubs it must not leak the stub into the next one.
+    getMutationView: s.getMutationView,
+  };
   useViewerStore.setState({
     addSpace: ((modelId: string, storeyId: number, params: { Name: string }) => {
       const seq = callSeq++;
@@ -121,12 +135,66 @@ describe('useSpaceBake', () => {
     sessions.set(1, fakeSession(2));
     sessions.set(2, fakeSession(1));
     const res = api!.createAllSpaces();
-    assert.deepEqual(res, { emitted: 3, floors: 2, discarded: 0, gfa: 0, error: null });
+    assert.deepEqual(res, { emitted: 3, floors: 2, discarded: 0, gfa: 0, kept: 0, error: null });
     assert.deepEqual(added.map((a) => a.storeyId), [1, 1, 2]);
     assert.deepEqual(added.map((a) => a.name), ['Space 1', 'Space 2', 'Space 1'],
       'names restart per storey');
     assert.equal(removed.length, 0, 'a first confirm removes nothing');
     assert.deepEqual(api!.createdIds(), [5000, 5001, 5002]);
+  });
+
+  it('writes only the storey on screen unless asked for all of them', () => {
+    // Deriving reaches every floor at once, so a confirm that did the same
+    // created rooms on floors nobody had looked at — over a basement whose
+    // room numbers had just been reworked by hand. Reported from real use.
+    activeStoreyId = 2;
+    bakeAllStoreys = false;
+    act(() => { root!.render(<Harness />); });
+    sessions.set(1, fakeSession(2));
+    sessions.set(2, fakeSession(1));
+
+    const res = api!.createAllSpaces();
+
+    assert.equal(res.emitted, 1);
+    assert.equal(res.floors, 1);
+    assert.deepEqual(added.map((a) => a.storeyId), [2], 'the other storey is left alone');
+  });
+
+  it('writes every drafted storey when that is switched on', () => {
+    activeStoreyId = 2;
+    bakeAllStoreys = true;
+    act(() => { root!.render(<Harness />); });
+    sessions.set(1, fakeSession(2));
+    sessions.set(2, fakeSession(1));
+
+    api!.createAllSpaces();
+
+    assert.deepEqual(added.map((a) => a.storeyId), [1, 1, 2]);
+  });
+
+  it('does NOT replace a room somebody has renamed since it was made', () => {
+    // The loss this guards: rooms created here, then given real numbers in
+    // Clean Rooms, then wiped by a second confirm that treated them as its own
+    // to throw away. A renamed room is somebody's work sitting on our id.
+    sessions.set(1, fakeSession(2));
+    api!.createAllSpaces();
+    const [first, second] = api!.createdIds();
+
+    // One room keeps the name the tool gave it, the other was renamed.
+    const names = new Map<number, string>([[first, 'Space 1'], [second, '1.04 Elternschlafzimmer']]);
+    useViewerStore.setState({
+      getMutationView: (() => ({
+        getNewEntity: (id: number) => ({ attributes: [null, null, names.get(id) ?? null] }),
+        getForEntity: () => [],
+      })) as unknown as ReturnType<typeof useViewerStore.getState>['getMutationView'],
+    });
+    removed = [];
+    added = [];
+
+    const res = api!.createAllSpaces();
+
+    assert.deepEqual(removed.map((r) => r.id), [first], 'only the untouched room is replaced');
+    assert.equal(res.kept, 1, 'and the count says one was left alone');
   });
 
   it('REPLACES on a second confirm instead of duplicating the file', () => {
@@ -167,7 +235,7 @@ describe('useSpaceBake', () => {
     sessions.set(1, fakeSession(0));
     sessions.set(2, fakeSession(2, false));
     const res = api!.createAllSpaces();
-    assert.deepEqual(res, { emitted: 0, floors: 0, discarded: 0, gfa: 0, error: null });
+    assert.deepEqual(res, { emitted: 0, floors: 0, discarded: 0, gfa: 0, kept: 0, error: null });
     assert.equal(added.length, 0);
   });
 
