@@ -484,6 +484,26 @@ test('restoreCounts: says what would be applied and what stays behind', () => {
   assert.ok(!undisputedExpressIds(report).has(inRoom));
 });
 
+test('restoreCounts: the objects already in the file are not on the button', () => {
+  // Reported from a real dialog: three rows, 24 + 749 + 12, and a button
+  // offering "Übernehmen (785)" — while the first row said in so many words
+  // that those 24 would NOT be inserted again. The button promised 24 objects
+  // it was never going to add.
+  const { snapshot } = capture();
+  const [firstGuid] = authoredGuids(snapshot);
+  const report = reconcileSnapshot(snapshot, 'hash-v2', fileWithAuthoredWork([firstGuid]));
+  const present = report.items.filter((i) => i.informational);
+
+  assert.ok(present.length > 0, 'expected a row about objects already in the file');
+  assert.ok(present.every((i) => i.count > 0), 'the row still states its own count');
+  assert.equal(
+    restoreCounts(report).undisputed,
+    report.items.filter((i) => i.verdict === 'ok' && !i.informational)
+      .reduce((sum, i) => sum + i.count, 0),
+    'the button counts only what accepting actually applies',
+  );
+});
+
 test('reconcile: a saved state with nothing re-identifiable raises no question', () => {
   // Found live: an edit had landed on an entity with no GlobalId (an IfcSIUnit),
   // so capture could not record a base reference for it. The report came back

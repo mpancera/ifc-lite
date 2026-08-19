@@ -151,6 +151,10 @@ export function reconcileSnapshot(
       ...TEXT.alreadyPresent(presentIds.size, file),
       count: presentIds.size,
       expressIds: [],
+      // Nothing is applied for these — the row exists to explain why the
+      // number on the button is smaller than the number of objects the saved
+      // state holds.
+      informational: true,
     });
   }
   if (selfContained.length > 0) {
@@ -301,7 +305,10 @@ export function restoreCounts(report: ReconcileReport): { undisputed: number; he
   let held = 0;
   for (const item of report.items) {
     // `count`, not `expressIds.length`: an edit row restores no authored
-    // object and would otherwise make the button promise nothing.
+    // object and would otherwise make the button promise nothing. A row that
+    // applies nothing at all is left out of both totals — it is a note, not a
+    // decision.
+    if (item.informational) continue;
     if (item.verdict === 'ok') undisputed += item.count;
     else held += item.count;
   }

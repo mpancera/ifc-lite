@@ -146,6 +146,15 @@ export interface ReconcileItem {
    * deletions — those ride along with `applyMutations`.
    */
   expressIds: number[];
+  /**
+   * True for a row that only REPORTS something and applies nothing.
+   *
+   * There is one: the objects already standing in the open file. Accepting
+   * does nothing for them by design — counting them on the button had it
+   * promise 785 while it was about to insert 761, which is the same kind of
+   * lie the count was introduced to stop, pointing the other way.
+   */
+  informational?: boolean;
 }
 
 export interface ReconcileReport {
