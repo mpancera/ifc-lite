@@ -149,7 +149,11 @@ function resolveImport(spec: string, fromFile: string): string | null {
 }
 
 function isStopped(file: string): boolean {
-  const rel = path.relative(SRC, file);
+  // Separators normalised: `path.relative` yields backslashes on Windows, and
+  // STOP_PREFIXES are written with forward slashes. Compared raw, nothing was
+  // ever stopped there — the walk descended into `lib/` and reported fifty
+  // shared-infrastructure symbols as ribbon-only, on every run.
+  const rel = path.relative(SRC, file).split(path.sep).join('/');
   return STOP_PREFIXES.some((prefix) => rel.startsWith(prefix))
     || rel.endsWith('.test.ts')
     || rel.endsWith('.test.tsx');

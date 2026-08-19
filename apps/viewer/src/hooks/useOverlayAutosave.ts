@@ -191,8 +191,6 @@ export function useOverlayAutosave() {
 
       setPendingRestore({ snapshot: candidate, report, modelId: activeModelId });
       settled = true;
-      return;
-      settled = true;
     })();
 
     // The check is marked up front so a re-render can't prompt twice, but a run

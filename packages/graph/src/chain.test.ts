@@ -74,6 +74,12 @@ const RELATIONS: Record<GraphRelation, ReadonlyArray<readonly [number, number]>>
     // something to hide.
   ],
   IfcRelReferencedInSpatialStructure: [],
+  // The port relations belong to the plant-topology chain, which brings its
+  // own fixture. Named here because the map is exhaustive over GraphRelation:
+  // a relation added to the union has to be answered for, even if the answer
+  // is "this fixture has none".
+  IfcRelConnectsPortToElement: [],
+  IfcRelConnectsPorts: [],
 };
 
 const source: GraphSource = {
