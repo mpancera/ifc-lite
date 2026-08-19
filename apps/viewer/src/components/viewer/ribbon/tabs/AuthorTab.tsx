@@ -9,7 +9,7 @@
  * toolbar (viewer/commenter roles cannot unlock authoring).
  */
 
-import { Blocks, Box, Boxes, Brush, DoorOpen, FileDiff, Library, Wand2 } from 'lucide-react';
+import { Blocks, Box, Boxes, Brush, DoorOpen, FileDiff, Library, ListChecks, Wand2 } from 'lucide-react';
 import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, List, Select, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -234,7 +234,18 @@ export function AuthorTab() {
           is a different job from editing its properties. Both work the same
           way — find the elements whose class says too little, group them by
           what the author already told us, and decide a group at a time. */}
-      <RibbonGroup label="Clean">
+      <RibbonGroup label="Housekeeping">
+        {/* Housekeeping first: it is the overview that says WHICH of the
+            cleaners a model needs, so it reads left to right as "look, then
+            fix". It was reachable only from the sidebar until now. */}
+        <RibbonLargeButton
+          icon={ListChecks}
+          label="Housekeeping"
+          tooltip="Überblick über den Modellzustand — was fehlt, was doppelt ist, was aufgeräumt werden sollte"
+          disabled={!ifcDataStore}
+          active={activeWorkspacePanels.has('housekeeping')}
+          onClick={() => toggleWorkspacePanel('housekeeping')}
+        />
         <RibbonLargeButton
           icon={Boxes}
           label="Clean Proxy"
