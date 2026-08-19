@@ -66,6 +66,7 @@ import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds, use
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { useEscapeRouteTool } from '@/hooks/useEscapeRouteTool';
 import { usePlanRoomLabels } from '@/hooks/usePlanRoomLabels';
+import { usePlanDrawnElements } from '@/hooks/usePlanDrawnElements';
 import { roomPlanLabel } from '@/lib/plan/roomLabels';
 import {
   planAnnotations, planAnnotationIdsToReplace, describeAnnotationSet,
@@ -307,6 +308,15 @@ export function PlanView({
     return defaultPlanStorey(storeys);
   }, [activeStorey, storeys]);
 
+  // What the plan is allowed to derive something for. The cut already gets the
+  // hidden and isolated sets; the layers ON TOP of it used to get nothing, so a
+  // deleted room kept its stamp after the room itself was gone.
+  const drawsElement = usePlanDrawnElements({
+    modelId: storeyModelId,
+    hiddenGlobalIds: combinedHiddenIds,
+    isolatedGlobalIds: combinedIsolatedIds,
+  });
+
   // ── The rooms on this floor ─────────────────────────────────────────────
   // Derived whenever the plan is open, not only when the labels are switched
   // on: the toolbar says how many rooms this storey has, and a count that
@@ -317,6 +327,7 @@ export function PlanView({
     dataStore: storeyDataStore,
     modelId: storeyModelId,
     storeyId: storey?.expressId ?? null,
+    drawsElement,
   });
 
   // ── Escape-route routing ────────────────────────────────────────────────
@@ -350,6 +361,7 @@ export function PlanView({
     // The drawing carries the one measurement no model source gets right: how
     // thick the host wall is where a door goes through it.
     drawing,
+    drawsElement,
   });
 
   // Devices, which the cut never shows: a ceiling detector is above it and a
@@ -360,6 +372,7 @@ export function PlanView({
     geometryResult,
     dataStore: storeyDataStore,
     storeyId: storey?.expressId ?? null,
+    drawsElement,
   });
 
   // Room text and door tags are two layers, not one. They look alike and they

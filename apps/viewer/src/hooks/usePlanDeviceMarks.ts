@@ -20,12 +20,15 @@ import { useMemo } from 'react';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import type { GeometryResult, MeshData } from '@ifc-lite/geometry';
 import { deviceSymbolKind, type DeviceMark } from '@/lib/plan/deviceSymbols';
+import type { PlanElementTest } from '@/lib/plan/planVisibility';
 
 export interface UsePlanDeviceMarksOptions {
   enabled: boolean;
   geometryResult: GeometryResult | null | undefined;
   dataStore: IfcDataStore | null | undefined;
   storeyId: number | null;
+  /** Whether the plan draws this element — see `lib/plan/planVisibility`. */
+  drawsElement?: PlanElementTest;
 }
 
 /**
@@ -54,7 +57,7 @@ function footprintCentre(meshes: readonly MeshData[]): { x: number; y: number } 
 }
 
 export function usePlanDeviceMarks({
-  enabled, geometryResult, dataStore, storeyId,
+  enabled, geometryResult, dataStore, storeyId, drawsElement,
 }: UsePlanDeviceMarksOptions): DeviceMark[] {
   return useMemo((): DeviceMark[] => {
     if (!enabled || !dataStore || storeyId === null) return [];
@@ -72,6 +75,9 @@ export function usePlanDeviceMarks({
       const ifcType = mesh.ifcType;
       if (!ifcType || !deviceSymbolKind(ifcType)) continue;
       if (elementToStorey.get(mesh.expressId) !== storeyId) continue;
+      // A deleted detector keeps its mesh in the buffer; its mark would stay
+      // on the plan after the device is gone.
+      if (drawsElement && !drawsElement(mesh.expressId)) continue;
 
       const key = mesh.occurrenceKey ?? String(mesh.expressId);
       const entry = byDevice.get(key);
@@ -96,7 +102,7 @@ export function usePlanDeviceMarks({
       });
     }
     return marks;
-  }, [enabled, geometryResult, dataStore, storeyId]);
+  }, [enabled, geometryResult, dataStore, storeyId, drawsElement]);
 }
 
 export default usePlanDeviceMarks;

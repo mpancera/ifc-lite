@@ -33,6 +33,7 @@ import {
 } from '@/lib/plan/roomLabels';
 import { areaUnitScaleFor } from '@/lib/units/measure-scales';
 import { overlayAttribute } from '@/lib/mutations/overlayAttribute';
+import type { PlanElementTest } from '@/lib/plan/planVisibility';
 
 export interface UsePlanRoomLabelsOptions {
   /** Off entirely when the plan is closed or the labels are switched off. */
@@ -44,6 +45,12 @@ export interface UsePlanRoomLabelsOptions {
   modelId: string | null;
   /** The storey the plan is cut through. */
   storeyId: number | null;
+  /**
+   * Whether the plan draws this element at all — see `lib/plan/planVisibility`.
+   * A deleted room keeps its meshes in the geometry buffer, so without this it
+   * keeps its stamp on the drawing after it is gone from the model.
+   */
+  drawsElement?: PlanElementTest;
 }
 
 /** Every `IfcSpace` under a storey node, by express id. */
@@ -77,7 +84,7 @@ function spacesUnderStorey(root: SpatialNode, storeyId: number): Map<number, Spa
  * nowhere on the drawing that a label for them would be true.
  */
 export function usePlanRoomLabels({
-  enabled, geometryResult, dataStore, modelId, storeyId,
+  enabled, geometryResult, dataStore, modelId, storeyId, drawsElement,
 }: UsePlanRoomLabelsOptions): RoomLabel[] {
   // Quantities authored this session (a bSDD import, a generated space) live in
   // the overlay, not the parsed buffer, so the overlay is asked first — the
@@ -107,6 +114,9 @@ export function usePlanRoomLabels({
       // including one would put a label wherever its template happens to sit.
       if ((mesh.geometryClass ?? 0) === 2) continue;
       if (!spaces.has(mesh.expressId)) continue;
+      // A room deleted this session is still in the geometry buffer — the
+      // renderer only hides its mesh. Its label would outlive it.
+      if (drawsElement && !drawsElement(mesh.expressId)) continue;
       const key = mesh.occurrenceKey ?? String(mesh.expressId);
       const entry = meshesBySpace.get(key);
       if (entry) entry.meshes.push(mesh);
@@ -159,7 +169,7 @@ export function usePlanRoomLabels({
     // `mutationVersion` bumps on every authoring edit — it is what makes a room
     // generated a moment ago show up without reloading the model.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, geometryResult, dataStore, modelId, storeyId, mutationViews, mutationVersion]);
+  }, [enabled, geometryResult, dataStore, modelId, storeyId, drawsElement, mutationViews, mutationVersion]);
 }
 
 export default usePlanRoomLabels;

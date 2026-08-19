@@ -38,6 +38,7 @@ import {
 import { doorReference, doorSize, doorLabelLines, formatDoorSize } from '@/lib/plan/doorLabels';
 import { doorQuantities } from '@/lib/plan/doorQuantities';
 import type { PlanLabel } from '@/lib/plan/roomLabels';
+import type { PlanElementTest } from '@/lib/plan/planVisibility';
 import type { Drawing2D, Point2D } from '@ifc-lite/drawing-2d';
 import { useViewerStore } from '@/store';
 
@@ -116,6 +117,8 @@ export interface UsePlanOpeningSymbolsOptions {
    * real model.
    */
   drawing: Drawing2D | null;
+  /** Whether the plan draws this element — see `lib/plan/planVisibility`. */
+  drawsElement?: PlanElementTest;
 }
 
 /**
@@ -428,7 +431,7 @@ const NO_OPENINGS: PlanOpenings = {
 const DOOR_LABEL_CLEARANCE = 0.35;
 
 export function usePlanOpeningSymbols({
-  enabled, geometryResult, dataStore, storeyId, modelId, drawing,
+  enabled, geometryResult, dataStore, storeyId, modelId, drawing, drawsElement,
 }: UsePlanOpeningSymbolsOptions): PlanOpenings {
   // A correction written this session lives in the overlay, not in the parsed
   // buffer; `mutationVersion` bumps on every edit and is what makes a corrected
@@ -460,6 +463,9 @@ export function usePlanOpeningSymbols({
       const kind = type === 'IfcDoor' ? 'door' : type === 'IfcWindow' ? 'window' : null;
       if (!kind) continue;
       if (elementToStorey.get(mesh.expressId) !== storeyId) continue;
+      // A deleted door keeps its mesh in the buffer; its swing and its tag
+      // would stay on the plan after the door is gone.
+      if (drawsElement && !drawsElement(mesh.expressId)) continue;
 
       // Absent on a flat mesh, where one express id IS one occurrence.
       const key = mesh.occurrenceKey ?? String(mesh.expressId);
@@ -670,7 +676,10 @@ export function usePlanOpeningSymbols({
 
     return { symbols, doorLabels, assumedLinings, wallMeasuredDepths, doorsWithSymbol };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, geometryResult, dataStore, storeyId, modelId, drawing, mutationViews, mutationVersion]);
+  }, [
+    enabled, geometryResult, dataStore, storeyId, modelId, drawing, drawsElement,
+    mutationViews, mutationVersion,
+  ]);
 }
 
 export default usePlanOpeningSymbols;
