@@ -117,6 +117,17 @@ export interface ViewModeSlice {
    */
   planShowDoorLabels: boolean;
   /**
+   * Draw the space graph — the rooms as dots, the doorways as lines, and the
+   * doors-to-safety count each room carries. One flag for BOTH views: it is
+   * the same graph, and two switches for one diagram would drift.
+   *
+   * Off by default: it is a diagnostic, not part of a drawing. It is what the
+   * escape routes are walked on and the door numbers derived from, so it earns
+   * its own switch — the first question about a wrong number is whether the
+   * graph found that doorway at all.
+   */
+  showSpaceGraph: boolean;
+  /**
    * Whether small devices get a mark instead of their own (invisible) shape.
    *
    * On by default: a detector at its real 100 mm is a speck at 1:100 and gone
@@ -132,6 +143,7 @@ export interface ViewModeSlice {
   setPlanShowRoomLabels: (show: boolean) => void;
   setPlanShowOpeningSymbols: (show: boolean) => void;
   setPlanShowDoorLabels: (show: boolean) => void;
+  setShowSpaceGraph: (show: boolean) => void;
   setPlanShowDeviceMarks: (show: boolean) => void;
   setPlanRotation: (radians: number) => void;
   /**
@@ -163,6 +175,7 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   planShowRoomLabels: true,
   planShowOpeningSymbols: true,
   planShowDoorLabels: true,
+  showSpaceGraph: false,
   planShowDeviceMarks: true,
 
   setViewMode: (viewMode) => {
@@ -230,6 +243,7 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
 
   setPlanShowOpeningSymbols: (planShowOpeningSymbols) => set({ planShowOpeningSymbols }),
   setPlanShowDoorLabels: (planShowDoorLabels) => set({ planShowDoorLabels }),
+  setShowSpaceGraph: (showSpaceGraph) => set({ showSpaceGraph }),
 
   setPlanShowDeviceMarks: (planShowDeviceMarks) => set({ planShowDeviceMarks }),
 

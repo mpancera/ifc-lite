@@ -68,6 +68,11 @@ import { useEscapeRouteTool } from '@/hooks/useEscapeRouteTool';
 import { usePlanRoomLabels } from '@/hooks/usePlanRoomLabels';
 import { usePlanDrawnElements } from '@/hooks/usePlanDrawnElements';
 import { boundsOf, centreOn } from '@/lib/plan/planFocus';
+import { useSpaceGraph } from '@/hooks/useSpaceGraph';
+import { isStairwell } from '@/lib/spaceGraph/spaceGraph';
+import { spaceGraphView as buildSpaceGraphView } from '@/lib/spaceGraph/graphView';
+import { stepsToSafety, type NumberingDoor, type NumberingRoom } from '@/lib/doorNumbers/doorNumbers';
+import { PlanSpaceGraph } from './PlanSpaceGraph';
 import { roomPlanLabel } from '@/lib/plan/roomLabels';
 import {
   planAnnotations, planAnnotationIdsToReplace, describeAnnotationSet,
@@ -330,6 +335,42 @@ export function PlanView({
     storeyId: storey?.expressId ?? null,
     drawsElement,
   });
+
+  // ── The space graph, as a diagram ───────────────────────────────────────
+  // The same graph the escape routes are walked on and the door numbers come
+  // from — drawn only when asked for, because it is a diagnostic rather than
+  // part of a drawing.
+  const showSpaceGraph = useViewerStore((s) => s.showSpaceGraph);
+  const setShowSpaceGraph = useViewerStore((s) => s.setShowSpaceGraph);
+  const spaceGraph = useSpaceGraph({
+    enabled: active && showSpaceGraph,
+    geometryResult,
+    dataStore: storeyDataStore,
+    modelId: storeyModelId,
+    storeyId: storey?.expressId ?? null,
+  });
+  const spaceGraphView = useMemo(() => {
+    if (!spaceGraph) return { nodes: [], edges: [] };
+    const rooms: NumberingRoom[] = [];
+    const labels = new Map<number, string>();
+    const safe = new Set<number>();
+    for (const space of spaceGraph.spaces.values()) {
+      const number = storeyDataStore?.entities?.getName?.(space.id) ?? '';
+      labels.set(space.id, String(number).trim() || space.name);
+      if (isStairwell(space)) safe.add(space.id);
+      rooms.push({
+        id: space.id, number: String(number), centre: space.labelPoint, safe: isStairwell(space),
+      });
+    }
+    const doors: NumberingDoor[] = spaceGraph.edges.map((edge) => ({
+      id: edge.doorId,
+      centre: spaceGraph.doors.get(edge.doorId)?.centre ?? edge.threshold[0],
+      sides: [edge.from, edge.to],
+    }));
+    // The very count the door numbering runs on, so the picture and the
+    // numbers can never tell two different stories.
+    return buildSpaceGraphView(spaceGraph, { steps: stepsToSafety(rooms, doors), safe, labels });
+  }, [spaceGraph, storeyDataStore]);
 
   // ── Escape-route routing ────────────────────────────────────────────────
   // The space graph is built only while the tool is selected: it walks every
@@ -1291,6 +1332,16 @@ export function PlanView({
           the application. */}
       {planLabels.length > 0 && <PlanLabels labels={planLabels} transform={planTransform} />}
 
+      {/* The graph on top of everything it describes, so a line is never
+          hidden by the wall it passes through. */}
+      {showSpaceGraph && (
+        <PlanSpaceGraph
+          view={spaceGraphView}
+          transform={planTransform}
+          activeSpaceId={null}
+        />
+      )}
+
       {/* Points already placed, and the rubber band to the cursor. Drawn over
           the canvas rather than into it: it changes on every mouse move, and
           the drawing underneath does not. */}
@@ -1465,6 +1516,9 @@ export function PlanView({
           roomCount={roomLabels.length}
           showDoorLabels={planShowDoorLabels}
           onToggleDoorLabels={() => setPlanShowDoorLabels(!planShowDoorLabels)}
+          showSpaceGraph={showSpaceGraph}
+          onToggleSpaceGraph={() => setShowSpaceGraph(!showSpaceGraph)}
+          graphNodeCount={spaceGraphView.nodes.length}
           showOpeningSymbols={planShowOpeningSymbols}
           onToggleOpeningSymbols={() => setPlanShowOpeningSymbols(!planShowOpeningSymbols)}
           openingCount={openingSymbols.length}

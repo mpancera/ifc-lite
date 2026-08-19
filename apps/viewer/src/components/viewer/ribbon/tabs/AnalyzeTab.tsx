@@ -13,7 +13,7 @@ import { Issue, List, Compare, Layer, Clash, Check, Script, Schedule, Coloring }
 // No house icon for a schematic yet — the icon set is drawn for the panels that
 // predate it. Borrowed from lucide, as the panel registry does for the same
 // reason; worth a matching `@/icons` entry if the Graph earns a second home.
-import { Workflow, Box as ZoneBox } from 'lucide-react';
+import { Workflow, Box as ZoneBox, Waypoints } from 'lucide-react';
 import { useViewerStore } from '@/store';
 import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
 import {
@@ -32,6 +32,8 @@ function chunk<T>(items: T[], size: number): T[][] {
 }
 
 export function AnalyzeTab() {
+  const showSpaceGraph = useViewerStore((s) => s.showSpaceGraph);
+  const setShowSpaceGraph = useViewerStore((s) => s.setShowSpaceGraph);
   const {
     activeWorkspacePanels,
     handleToggleBottomPanel,
@@ -126,6 +128,16 @@ export function AnalyzeTab() {
           tooltip="Script editor"
           active={activeWorkspacePanels.has('script')}
           onClick={() => handleToggleBottomPanel('script')}
+        />
+        {/* Not a panel — an overlay, in whichever view is on screen. It lives
+            in Analyze because it answers a question ABOUT the model rather
+            than changing it: is the way out the software found the way out. */}
+        <RibbonLargeButton
+          icon={Waypoints}
+          label="Raumgraph"
+          tooltip="Räume als Punkte, Türen als Linien, dazu die Anzahl Türen bis ins Sichere — die Grundlage von Fluchtwegen und Türnummern, sichtbar gemacht"
+          active={showSpaceGraph}
+          onClick={() => setShowSpaceGraph(!showSpaceGraph)}
         />
       </RibbonGroup>
 

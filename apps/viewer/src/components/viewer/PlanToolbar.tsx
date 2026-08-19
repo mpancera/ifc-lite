@@ -58,6 +58,11 @@ export interface PlanToolbarProps {
   onToggleRoomLabels: () => void;
   showDoorLabels: boolean;
   onToggleDoorLabels: () => void;
+  /** The space graph as a diagram — what the door numbers are derived from. */
+  showSpaceGraph: boolean;
+  onToggleSpaceGraph: () => void;
+  /** How many rooms the graph found, for the tooltip. */
+  graphNodeCount: number;
   /** How many rooms this storey actually has, for the tooltip. */
   roomCount: number;
 
@@ -128,6 +133,7 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
     displayOptions, onToggleSymbolic, onToggleIfcAnnotations,
     onToggleConstructionProjection, showRoomLabels, onToggleRoomLabels, roomCount,
     showDoorLabels, onToggleDoorLabels,
+    showSpaceGraph, onToggleSpaceGraph, graphNodeCount,
     showOpeningSymbols, onToggleOpeningSymbols, openingCount, assumedLinings,
     wallMeasuredDepths, doorsWithSymbol,
     showDeviceMarks, onToggleDeviceMarks, deviceCount,
@@ -212,6 +218,16 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
             onToggle: onToggleDeviceMarks,
             unavailable: deviceCount === 0
               ? 'Auf diesem Geschoss liegen keine Geräte'
+              : undefined,
+          },
+          {
+            id: 'spaceGraph',
+            label: 'Raumgraph (Fluchtweg-Logik)',
+            count: graphNodeCount,
+            visible: showSpaceGraph,
+            onToggle: onToggleSpaceGraph,
+            unavailable: graphNodeCount === 0
+              ? 'Auf diesem Geschoss gibt es keine Räume, zwischen denen ein Weg bestehen könnte'
               : undefined,
           },
           {

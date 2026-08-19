@@ -64,6 +64,7 @@ import type { MeshData, CoordinateInfo, GeometryResult, PointCloudAsset } from '
 import { type IfcDataStore, type MapConversion } from '@ifc-lite/parser';
 import { getEffectiveGeoreference } from '@/lib/geo/effective-georef';
 import { isMeshVisibleInViewMode, meshClassIsPlaced } from '@/lib/type-view-visibility';
+import { useSpaceGraphOverlay } from '@/hooks/useSpaceGraphOverlay';
 
 const ZERO_VEC3 = { x: 0, y: 0, z: 0 };
 const DEFAULT_COORDINATE_INFO: CoordinateInfo = {
@@ -94,6 +95,10 @@ function unionBounds(acc: Vec3Bounds | undefined, b: Vec3Bounds | undefined): Ve
 }
 
 export function ViewportContainer() {
+  // The space graph as geometry, when it is switched on and the 3D view is the
+  // one on screen. Mounted here because this is the component that owns the
+  // 3D scene for as long as the viewer is open.
+  useSpaceGraphOverlay();
   // Drive Stacked / Solo / Exploded level display from the slice.
   // Mount-once hook — it self-gates on mode + gap + model changes.
   useLevelDisplayEffect();
