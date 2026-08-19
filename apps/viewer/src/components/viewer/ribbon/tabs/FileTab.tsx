@@ -8,7 +8,7 @@
  */
 
 import React from 'react';
-import { BookMarked, FolderOpen, HardHat, Palette, Ruler, ShieldCheck, Spline } from 'lucide-react';
+import { BookMarked, FolderOpen, HardHat, Palette, Ruler, Shapes, ShieldCheck, Spline } from 'lucide-react';
 import { AddFile, CloudSources, Loading, OpenFile, Refresh, Share, CollabsRoom } from '@/icons';
 import {
   DropdownMenu,
@@ -24,6 +24,7 @@ import { ColorPalettePanel } from '../../ColorPalettePanel';
 import { ProjectFolderPanel } from '../../ProjectFolderPanel';
 import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
 import { ClassCatalogPanel } from '@/components/viewer/ClassCatalogPanel';
+import { SymbolCatalogPanel } from '@/components/viewer/SymbolCatalogPanel';
 import { DataPrivacyPanel } from '../../DataPrivacyPanel';
 import { RelationKindsPanel } from '../../RelationKindsPanel';
 import { DisciplineRolePanel } from '../../DisciplineRolePanel';
@@ -208,6 +209,18 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
                 icon={BookMarked}
                 label="Objektkatalog"
                 tooltip="Die Liste der Fachklassen abgleichen, aus der ein Element seine Klasse bekommt"
+              />
+            }
+          />
+          {/* Beside the object catalogue because it is keyed on it: a symbol
+              is looked up by the same Fachklasse an element is classified as.
+              Same gate, same "only when asked" rule. */}
+          <SymbolCatalogPanel
+            trigger={
+              <RibbonSmallButton
+                icon={Shapes}
+                label="Symbolkatalog"
+                tooltip="Die Plansymbole abgleichen, die eine Fachklasse auf der Zeichnung bekommt"
               />
             }
           />
