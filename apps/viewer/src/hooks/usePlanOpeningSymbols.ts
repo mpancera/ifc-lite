@@ -618,10 +618,14 @@ export function usePlanOpeningSymbols({
 
       // ── The door's own label ──────────────────────────────────────────
       // Number and size, read the same way a room's name and area are.
+      // The overlay first, in all three places. A door numbered a moment ago
+      // lives there and nowhere else, so reading the parsed buffer alone left
+      // the plan printing the type designation it had before — the same way
+      // room labels once kept printing the old room name.
       const reference = doorReference({
-        name: attribute(dataStore, expressId, 'Name'),
+        name: attribute(dataStore, expressId, 'Name', overlay),
         psetReference: propertyValue(dataStore, expressId, 'Pset_DoorCommon', 'Reference'),
-        tag: attribute(dataStore, expressId, 'Tag'),
+        tag: attribute(dataStore, expressId, 'Tag', overlay),
       });
       // Nennbreite and Nennhöhe — the rough opening. Marc's choice for the
       // stamp for now; every other measurement is on `quantities` and can be

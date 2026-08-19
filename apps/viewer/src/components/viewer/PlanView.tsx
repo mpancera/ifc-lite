@@ -67,6 +67,7 @@ import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { useEscapeRouteTool } from '@/hooks/useEscapeRouteTool';
 import { usePlanRoomLabels } from '@/hooks/usePlanRoomLabels';
 import { usePlanDrawnElements } from '@/hooks/usePlanDrawnElements';
+import { boundsOf, centreOn } from '@/lib/plan/planFocus';
 import { roomPlanLabel } from '@/lib/plan/roomLabels';
 import {
   planAnnotations, planAnnotationIdsToReplace, describeAnnotationSet,
@@ -1137,6 +1138,48 @@ export function PlanView({
   }, [activeTool, addElementPendingPoints, viewTransform, cursor]);
 
   // ── Selection, as the canvas wants it ───────────────────────────────────
+  // ── Bring one element into view, on request ─────────────────────────────
+  // Panning, not framing: somebody working down a list of doors needs the
+  // scale to stay put, or every row re-sizes the drawing under them.
+  const planFocusRequest = useViewerStore((s) => s.planFocusRequest);
+  useEffect(() => {
+    if (!active || !planFocusRequest || !drawing) return;
+    const container = containerRef.current;
+    if (!container) return;
+
+    const local = fromGlobalIdFromModels(models, planFocusRequest.globalId);
+    const entityId = local?.expressId ?? planFocusRequest.globalId;
+    const modelIndex = local ? (modelIdToIndex?.get(local.modelId) ?? 0) : 0;
+
+    const points: { x: number; y: number }[] = [];
+    for (const polygon of drawing.cutPolygons) {
+      if (polygon.entityId !== entityId || polygon.modelIndex !== modelIndex) continue;
+      points.push(...polygon.polygon.outer);
+    }
+    if (points.length === 0) {
+      for (const line of drawing.lines) {
+        if (line.entityId !== entityId || line.modelIndex !== modelIndex) continue;
+        points.push(line.line.start, line.line.end);
+      }
+    }
+    const bounds = boundsOf(points);
+    // Nothing to centre on is a normal answer: the element may be above the
+    // cut, or on another storey. Leaving the view alone says so better than
+    // panning to the origin would.
+    if (!bounds) return;
+
+    const rect = container.getBoundingClientRect();
+    setViewTransform((prev) => {
+      const next = centreOn(
+        { ...prev, rotation: planRotation }, bounds.centre, rect.width, rect.height,
+      );
+      return { x: next.x, y: next.y, scale: next.scale };
+    });
+    // Only the request drives this; re-running on a transform change would
+    // fight the user's own panning.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planFocusRequest]);
+
   // The store selects on GLOBAL ids; the drawing carries local ids plus the
   // model index. This is the same translation the pick does, run backwards, so
   // clicking an element and seeing it light up are the same statement.

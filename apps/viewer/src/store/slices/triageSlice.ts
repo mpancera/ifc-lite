@@ -21,6 +21,20 @@ import { type StateCreator } from 'zustand';
 import type { ViewerState } from '../index.js';
 
 export interface TriageSlice {
+  /**
+   * Doors whose defining room somebody chose by hand, keyed by door.
+   *
+   * The numbering derives the room from the escape direction and says so; two
+   * rooms equally far from the way out have no direction between them, and
+   * where the model states no swing either there is nothing left to derive
+   * from. That is a decision only a person can make, so it is kept here rather
+   * than guessed — and kept OUTSIDE the model, because it is an input to the
+   * numbering, not a statement about the building.
+   */
+  doorNumberRoom: ReadonlyMap<number, number>;
+  setDoorNumberRoom: (doorId: number, roomId: number) => void;
+  clearDoorNumberRoom: (doorId: number) => void;
+
   proxyTriagePanelVisible: boolean;
   classTriagePanelVisible: boolean;
   roomTriagePanelVisible: boolean;
@@ -32,6 +46,19 @@ export interface TriageSlice {
 }
 
 export const createTriageSlice: StateCreator<ViewerState, [], [], TriageSlice> = (set) => ({
+  doorNumberRoom: new Map<number, number>(),
+  setDoorNumberRoom: (doorId, roomId) => set((state) => {
+    const next = new Map(state.doorNumberRoom);
+    next.set(doorId, roomId);
+    return { doorNumberRoom: next };
+  }),
+  clearDoorNumberRoom: (doorId) => set((state) => {
+    if (!state.doorNumberRoom.has(doorId)) return {};
+    const next = new Map(state.doorNumberRoom);
+    next.delete(doorId);
+    return { doorNumberRoom: next };
+  }),
+
   proxyTriagePanelVisible: false,
   classTriagePanelVisible: false,
   roomTriagePanelVisible: false,

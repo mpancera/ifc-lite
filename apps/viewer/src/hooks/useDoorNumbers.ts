@@ -51,6 +51,14 @@ export interface DoorNumbersSource {
   readonly current: ReadonlyMap<number, string>;
   /** False when there is no graph to decide on — no model, no storey, no rooms. */
   readonly ready: boolean;
+  /**
+   * The rooms either side of each door, outside `null`.
+   *
+   * The panel needs them to offer a choice where the derivation ran out: you
+   * cannot ask somebody which of two rooms a door belongs to without naming
+   * the two rooms.
+   */
+  readonly sidesOf: ReadonlyMap<number, number[]>;
 }
 
 const EMPTY: DoorNumbersSource = {
@@ -58,6 +66,7 @@ const EMPTY: DoorNumbersSource = {
   rooms: new Map(),
   current: new Map(),
   ready: false,
+  sidesOf: new Map(),
 };
 
 export function useDoorNumbers({
@@ -65,6 +74,8 @@ export function useDoorNumbers({
 }: UseDoorNumbersOptions): DoorNumbersSource {
   const mutationViews = useViewerStore((s) => s.mutationViews);
   const mutationVersion = useViewerStore((s) => s.mutationVersion);
+  // A room somebody picked by hand for a door — see `TriageSlice`.
+  const chosen = useViewerStore((s) => s.doorNumberRoom);
 
   const graph = useSpaceGraph({ enabled, geometryResult, dataStore, modelId, storeyId });
   const { symbols } = usePlanOpeningSymbols({
@@ -115,6 +126,7 @@ export function useDoorNumbers({
 
     const doors: NumberingDoor[] = [];
     const current = new Map<number, string>();
+    const sidesOf = new Map<number, number[]>();
     for (const edge of graph.edges) {
       const door = graph.doors.get(edge.doorId);
       if (!door) continue;
@@ -126,18 +138,20 @@ export function useDoorNumbers({
       });
       current.set(edge.doorId, overlayAttribute(overlay, edge.doorId, 'Name')
         ?? text(dataStore.entities?.getName?.(edge.doorId)));
+      sidesOf.set(edge.doorId, [edge.from, edge.to].filter((id): id is number => id !== null));
     }
 
     return {
-      plan: planDoorNumbers(numberingRooms, doors),
+      plan: planDoorNumbers(numberingRooms, doors, chosen),
       rooms,
       current,
       ready: numberingRooms.length > 0 && doors.length > 0,
+      sidesOf,
     };
     // `mutationVersion` is deliberate: a room renamed a moment ago changes
     // every door number derived from it, and the overlay is mutated in place.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, graph, symbols, dataStore, modelId, mutationViews, mutationVersion]);
+  }, [enabled, graph, symbols, dataStore, modelId, chosen, mutationViews, mutationVersion]);
 }
 
 export default useDoorNumbers;

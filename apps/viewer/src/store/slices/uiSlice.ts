@@ -108,6 +108,18 @@ export interface UISlice extends GeometryLoadSettingsState, GeometryLoadSettings
   changesReviewRequests: number;
   /** Ask the pending-changes review to open — see `changesReviewRequests`. */
   requestChangesReview: () => void;
+  /**
+   * "Bring this element into view in the plan", as a request rather than a
+   * state.
+   *
+   * A counter and an id, the same shape as the review request above and for
+   * the same reason: the plan owns its own transform, and a list on the side
+   * can only ASK. Panning on every selection change instead would yank the
+   * drawing whenever anything anywhere selected something.
+   */
+  planFocusRequest: { readonly globalId: number; readonly seq: number } | null;
+  /** Centre the plan on this element, keeping the current zoom. */
+  requestPlanFocus: (globalId: number) => void;
   leftPanelCollapsed: boolean;
   rightPanelCollapsed: boolean;
   activeTool: string;
@@ -236,6 +248,10 @@ export const createUISlice: StateCreator<UISlice & UICrossSliceState, [], [], UI
   changesReviewRequests: 0,
   requestChangesReview: () => set((state) => ({
     changesReviewRequests: state.changesReviewRequests + 1,
+  })),
+  planFocusRequest: null,
+  requestPlanFocus: (globalId) => set((state) => ({
+    planFocusRequest: { globalId, seq: (state.planFocusRequest?.seq ?? 0) + 1 },
   })),
   leftPanelCollapsed: false,
   rightPanelCollapsed: false,

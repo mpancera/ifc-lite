@@ -136,6 +136,52 @@ describe('planDoorNumbers', () => {
     assert.deepEqual(problems, [{ doorId: 12, reason: 'no-direction' }]);
   });
 
+  it('lets a chosen room outrank the derivation, both ways', () => {
+    // The one thing the graph cannot know: which side of a through-door the
+    // number belongs on when the plan says one thing and the building another.
+    const { rooms, doors } = floor();
+    const chosen = new Map([[11, 1]]);   // door 11 named after the corridor
+    const byDoor = new Map(
+      planDoorNumbers(rooms, doors, chosen).numbers.map((n) => [n.doorId, n]),
+    );
+    assert.equal(byDoor.get(11)?.roomId, 1);
+    assert.equal(byDoor.get(11)?.basis, 'manual');
+    assert.equal(byDoor.get(11)?.otherRoomId, 2, 'the other side is still known');
+    // And it renumbers the room it was taken off: the office keeps only the
+    // door it still has.
+    assert.equal(byDoor.get(13)?.number, '1.04.T1');
+  });
+
+  it('ignores a choice that names a room the door does not touch', () => {
+    // A stale choice — the door was redrawn, or the rooms were replaced —
+    // must not name a door after a room on the other side of the building.
+    const { rooms, doors } = floor();
+    const byDoor = new Map(
+      planDoorNumbers(rooms, doors, new Map([[11, 999]])).numbers.map((n) => [n.doorId, n]),
+    );
+    assert.equal(byDoor.get(11)?.roomId, 2, 'falls back to the derived answer');
+    assert.equal(byDoor.get(11)?.basis, 'escape');
+  });
+
+  it('settles a door the rule could not, once somebody picks a side', () => {
+    const rooms = [room(1, '3.01', 0, 0), room(2, '3.02', 10, 0), room(3, '3.03', 5, 10, true)];
+    const doors = [
+      door(10, 2, 5, 1, 3),
+      door(11, 8, 5, 2, 3),
+      door(12, 5, 0, 1, 2),      // equal, no swing — reported without a choice
+    ];
+    assert.deepEqual(planDoorNumbers(rooms, doors).problems, [{ doorId: 12, reason: 'no-direction' }]);
+
+    const settled = planDoorNumbers(rooms, doors, new Map([[12, 1]]));
+    assert.deepEqual(settled.problems, []);
+    const picked = settled.numbers.find((n) => n.doorId === 12);
+    // Room 3.01 already owns the door to the stairwell, so the chosen one
+    // takes the next counter rather than stealing T1 — the count is per room,
+    // not per decision.
+    assert.equal(picked?.number, '3.01.T2');
+    assert.equal(picked?.basis, 'manual');
+  });
+
   it('reports a door whose room has no number yet', () => {
     const rooms = [room(1, '', 0, 0)];
     const { numbers, problems } = planDoorNumbers(rooms, [door(10, -5, 0, 1, null)]);

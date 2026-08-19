@@ -33,12 +33,14 @@ const BASIS_LABEL: Record<NumberBasis, string> = {
   escape: 'Fluchtweg',
   exterior: 'Aussentür',
   swing: 'Aufschlag',
+  manual: 'gewählt',
 };
 
 const BASIS_HINT: Record<NumberBasis, string> = {
   escape: 'Der Raum liegt weiter vom Ausgang weg — man flüchtet durch diese Tür aus ihm heraus.',
   exterior: 'Die Tür führt ins Freie, also benennt sie der eine Raum, an dem sie liegt.',
   swing: 'Beide Seiten sind gleich weit vom Ausgang — entschieden hat, wohin das Blatt aufschlägt.',
+  manual: 'Von Hand gewählt. Nichts Hergeleitetes überstimmt das.',
 };
 
 const PROBLEM_LABEL: Record<DoorProblemReason, string> = {
@@ -73,7 +75,11 @@ export function DoorNumbersPanel({ onClose }: DoorNumbersPanelProps) {
   }, [models, activeModelId, ifcDataStore, legacyGeometry]);
 
   const storeyId = activeStorey?.expressId ?? null;
-  const { plan, rooms, current, ready } = useDoorNumbers({
+  const chosen = useViewerStore((s) => s.doorNumberRoom);
+  const setDoorNumberRoom = useViewerStore((s) => s.setDoorNumberRoom);
+  const clearDoorNumberRoom = useViewerStore((s) => s.clearDoorNumberRoom);
+  const requestPlanFocus = useViewerStore((s) => s.requestPlanFocus);
+  const { plan, rooms, current, ready, sidesOf } = useDoorNumbers({
     enabled: true, geometryResult, dataStore, modelId, storeyId,
   });
 
@@ -139,7 +145,12 @@ export function DoorNumbersPanel({ onClose }: DoorNumbersPanelProps) {
             <button
               type="button"
               key={entry.doorId}
-              onClick={() => modelId && setSelectedEntityIds([toGlobalId(modelId, entry.doorId)])}
+              onClick={() => {
+                if (!modelId) return;
+                const globalId = toGlobalId(modelId, entry.doorId);
+                setSelectedEntityIds([globalId]);
+                requestPlanFocus(globalId);
+              }}
               className="w-full text-left px-3 py-2 border-b border-zinc-100 dark:border-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-950"
             >
               <div className="flex items-baseline justify-between gap-2">
@@ -158,6 +169,33 @@ export function DoorNumbersPanel({ onClose }: DoorNumbersPanelProps) {
                 {other ? ` → ${other.number || '—'} ${other.name}` : ' → ins Freie'}
                 {now && now !== entry.number ? ` · heisst jetzt „${now}"` : ''}
               </div>
+              {/* Turning the door round is one click, because the derived
+                  answer is a proposal and the person reading the plan can see
+                  something the graph cannot. A door with one room has no
+                  other side to offer. */}
+              {entry.otherRoomId !== null && (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  title={entry.basis === 'manual'
+                    ? 'Wieder herleiten lassen'
+                    : `Stattdessen nach ${other?.number || 'dem anderen Raum'} benennen`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (entry.basis === 'manual') clearDoorNumberRoom(entry.doorId);
+                    else setDoorNumberRoom(entry.doorId, entry.otherRoomId as number);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return;
+                    event.stopPropagation();
+                    if (entry.basis === 'manual') clearDoorNumberRoom(entry.doorId);
+                    else setDoorNumberRoom(entry.doorId, entry.otherRoomId as number);
+                  }}
+                  className="mt-1 inline-block cursor-pointer rounded-sm border border-zinc-200 dark:border-zinc-800 px-1.5 py-0.5 text-[10px] font-mono text-zinc-500 hover:border-emerald-400 dark:hover:border-emerald-700"
+                >
+                  {entry.basis === 'manual' ? '↺ herleiten' : '↔ andere Seite'}
+                </span>
+              )}
             </button>
           );
         })}
@@ -167,16 +205,47 @@ export function DoorNumbersPanel({ onClose }: DoorNumbersPanelProps) {
             <div className="text-[10px] font-mono uppercase tracking-wider text-amber-600 dark:text-amber-500 mb-1">
               {plan.problems.length} ohne Nummer
             </div>
-            {plan.problems.map((problem) => (
-              <button
-                type="button"
-                key={problem.doorId}
-                onClick={() => modelId && setSelectedEntityIds([toGlobalId(modelId, problem.doorId)])}
-                className="block w-full text-left text-[10px] font-mono text-zinc-500 dark:text-zinc-400 py-0.5 hover:text-zinc-900 dark:hover:text-zinc-100"
-              >
-                #{problem.doorId} — {PROBLEM_LABEL[problem.reason]}
-              </button>
-            ))}
+            {plan.problems.map((problem) => {
+              const sides = sidesOf.get(problem.doorId) ?? [];
+              return (
+                <div key={problem.doorId} className="py-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!modelId) return;
+                      const globalId = toGlobalId(modelId, problem.doorId);
+                      setSelectedEntityIds([globalId]);
+                      requestPlanFocus(globalId);
+                    }}
+                    className="block w-full text-left text-[10px] font-mono text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
+                  >
+                    #{problem.doorId} — {PROBLEM_LABEL[problem.reason]}
+                  </button>
+                  {/* The one case a person can settle on the spot: the door
+                      joins two rooms and neither is further out. Naming which
+                      side it belongs to is a decision, so it is offered as
+                      one rather than left to a rule that has run out. */}
+                  {problem.reason === 'no-direction' && sides.length === 2 && (
+                    <div className="flex gap-1 pt-1">
+                      {sides.map((roomId) => {
+                        const candidate = rooms.get(roomId);
+                        return (
+                          <button
+                            key={roomId}
+                            type="button"
+                            onClick={() => setDoorNumberRoom(problem.doorId, roomId)}
+                            className="flex-1 h-6 rounded-sm border border-zinc-200 dark:border-zinc-800 text-[10px] font-mono truncate px-1 hover:border-emerald-400 dark:hover:border-emerald-700"
+                            title={`Diese Tür nach ${candidate?.number} ${candidate?.name} benennen`}
+                          >
+                            {candidate?.number || `#${roomId}`}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

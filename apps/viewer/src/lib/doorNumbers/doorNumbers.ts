@@ -74,7 +74,9 @@ export type NumberBasis =
   /** The door leads outside, so the one room it touches defines it. */
   | 'exterior'
   /** Both sides are equally far out; the leaf swings into this room. */
-  | 'swing';
+  | 'swing'
+  /** Somebody said so. Nothing derived outranks that. */
+  | 'manual';
 
 export interface DoorNumber {
   readonly doorId: number;
@@ -178,8 +180,16 @@ function clockwiseFromNorth(from: Point2D, to: Point2D): number {
 function decide(
   door: NumberingDoor,
   steps: ReadonlyMap<number, number>,
+  chosen: ReadonlyMap<number, number> | undefined,
 ): { roomId: number; other: number | null; basis: NumberBasis } | DoorProblemReason {
   const [a, b] = door.sides;
+  // A choice made by hand comes first and is not second-guessed — including
+  // where the derivation would have found an answer, since somebody looking at
+  // the plan knows something the graph does not.
+  const picked = chosen?.get(door.id);
+  if (picked !== undefined && (picked === a || picked === b)) {
+    return { roomId: picked, other: picked === a ? b : a, basis: 'manual' };
+  }
   if (a === null && b === null) return 'no-room';
   if (a === null || b === null) {
     const only = (a ?? b) as number;
@@ -207,6 +217,8 @@ function decide(
 export function planDoorNumbers(
   rooms: readonly NumberingRoom[],
   doors: readonly NumberingDoor[],
+  /** Doors whose room somebody picked by hand — see `NumberBasis.manual`. */
+  chosen?: ReadonlyMap<number, number>,
 ): DoorNumberPlan {
   const steps = stepsToSafety(rooms, doors);
   const byId = new Map(rooms.map((r) => [r.id, r]));
@@ -215,7 +227,7 @@ export function planDoorNumbers(
   // Doors grouped by the room that names them, so the counter is per room.
   const grouped = new Map<number, Array<{ door: NumberingDoor; other: number | null; basis: NumberBasis }>>();
   for (const door of doors) {
-    const decision = decide(door, steps);
+    const decision = decide(door, steps, chosen);
     if (typeof decision === 'string') {
       problems.push({ doorId: door.id, reason: decision });
       continue;
