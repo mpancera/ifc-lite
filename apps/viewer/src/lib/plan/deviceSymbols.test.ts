@@ -17,6 +17,9 @@ describe('deviceSymbolKind', () => {
     assert.equal(deviceSymbolKind('IfcLightFixture'), 'light');
     assert.equal(deviceSymbolKind('IfcOutlet'), 'electrical');
     assert.equal(deviceSymbolKind('IfcAirTerminal'), 'terminal');
+    // What the alarm switches belongs on a fire plan as much as what detects.
+    assert.equal(deviceSymbolKind('IfcDamper'), 'damper');
+    assert.equal(deviceSymbolKind('IfcFan'), 'fan');
   });
 
   it('groups by what a plan distinguishes, not by what the schema does', () => {
@@ -52,7 +55,8 @@ describe('deviceSymbolKind', () => {
 });
 
 describe('deviceMarkPaths', () => {
-  const kinds = ['sensor', 'alarm', 'sprinkler', 'light', 'electrical', 'terminal'] as const;
+  const kinds = ['sensor', 'alarm', 'sprinkler', 'light', 'electrical', 'terminal',
+    'damper', 'fan'] as const;
 
   it('draws every mark inside the unit square it is given', () => {
     // The caller scales this by one number; anything outside ±0.5 would make
@@ -82,7 +86,7 @@ describe('deviceMarkPaths', () => {
   });
 
   it('closes the shapes that are meant to be closed', () => {
-    for (const kind of ['sensor', 'alarm', 'electrical'] as const) {
+    for (const kind of ['sensor', 'alarm', 'electrical', 'damper'] as const) {
       const ring = deviceMarkPaths(kind)[0];
       const a = ring[0];
       const b = ring[ring.length - 1];

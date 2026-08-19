@@ -33,7 +33,9 @@ export type DeviceSymbolKind =
   | 'sprinkler'
   | 'light'
   | 'electrical'
-  | 'terminal';
+  | 'terminal'
+  | 'damper'
+  | 'fan';
 
 /**
  * IFC class to mark, lower-cased for lookup.
@@ -65,6 +67,12 @@ const KIND_BY_TYPE: ReadonlyMap<string, DeviceSymbolKind> = new Map([
   ['ifccommunicationsappliance', 'electrical'],
 
   ['ifcairterminal', 'terminal'],
+
+  // A fire plan turns on what the alarm SWITCHES, not only on what detects:
+  // a smoke damper and an extract fan are results of the cause-effect matrix
+  // and have to be findable on the drawing that carries it.
+  ['ifcdamper', 'damper'],
+  ['ifcfan', 'fan'],
 ]);
 
 /**
@@ -152,6 +160,19 @@ export function deviceMarkPaths(kind: DeviceSymbolKind): { x: number; y: number 
       return [circle(0.5), [{ x: -0.5, y: 0 }, { x: 0.5, y: 0 }], [{ x: 0, y: -0.5 }, { x: 0, y: 0.5 }]];
     case 'terminal':
       return [square(0.5), [{ x: -0.5, y: -0.5 }, { x: 0.5, y: 0.5 }]];
+    case 'damper':
+      // The bow tie every P&ID uses for a damper or a butterfly valve — two
+      // triangles meeting on the axis. Nothing else in this set has a waist.
+      return [[
+        { x: -0.5, y: -0.5 }, { x: -0.5, y: 0.5 }, { x: 0, y: 0 },
+        { x: 0.5, y: 0.5 }, { x: 0.5, y: -0.5 }, { x: 0, y: 0 },
+        { x: -0.5, y: -0.5 },
+      ]];
+    case 'fan':
+      // A housing with a rotor in it: the square says "plant", the ring
+      // inside says "it turns". Distinct from `terminal`, which has no ring,
+      // and from `sensor`, which has no housing.
+      return [square(0.5), circle(0.28)];
     case 'electrical':
     default:
       return [square(0.5)];
