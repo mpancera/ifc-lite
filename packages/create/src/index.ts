@@ -51,6 +51,11 @@ export {
 } from './in-store/spatial-zone-anchored.js';
 export { addSpaceToStore, type SpaceInStoreParams, type SpaceRectangleParams, type SpacePolygonParams, type SpaceBuildResult } from './in-store/space.js';
 export {
+  addSpaceBoundaryToStore,
+  type SpaceBoundaryParams,
+  type SpaceBoundaryResult,
+} from './in-store/space-boundary.js';
+export {
   addSpatialZonesToStore,
   spatialZonesSupported,
   type SpatialZoneInput,

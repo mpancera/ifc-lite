@@ -9,7 +9,7 @@
  * toolbar (viewer/commenter roles cannot unlock authoring).
  */
 
-import { Blocks, Box, Boxes, Brush, DoorOpen, FileDiff, Library, ListChecks, Wand2 } from 'lucide-react';
+import { Blocks, Box, Boxes, Brush, DoorClosed, DoorOpen, FileDiff, Library, ListChecks, Wand2 } from 'lucide-react';
 import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, List, Select, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -269,6 +269,17 @@ export function AuthorTab() {
           disabled={!ifcDataStore}
           active={activeWorkspacePanels.has('roomTriage')}
           onClick={() => toggleWorkspacePanel('roomTriage')}
+        />
+        {/* After Clean Rooms on purpose: a door number is built out of a room
+            number, so numbering doors before the rooms are named produces
+            nothing but a list of rooms without numbers. */}
+        <RibbonLargeButton
+          icon={DoorClosed}
+          label="Türnummern"
+          tooltip="Türen nach dem Raum nummerieren, aus dem man durch sie flüchtet — und sie mit beiden angrenzenden Räumen verknüpfen"
+          disabled={!ifcDataStore}
+          active={activeWorkspacePanels.has('doorNumbers')}
+          onClick={() => toggleWorkspacePanel('doorNumbers')}
         />
       </RibbonGroup>
 

@@ -25,6 +25,7 @@ import {
   ClipboardList,
   Boxes,
   Blocks,
+  DoorClosed,
   DoorOpen,
   Palette,
   Crosshair,
@@ -70,7 +71,8 @@ export type WorkspacePanelId =
   | 'housekeeping'
   | 'proxyTriage'
   | 'classTriage'
-  | 'roomTriage';
+  | 'roomTriage'
+  | 'doorNumbers';
 
 /** Activity-bar clustering — a divider is drawn whenever the group changes. */
 export type PanelGroup = 'navigate' | 'inspect' | 'review' | 'author' | 'work';
@@ -103,10 +105,6 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   { id: 'lens', title: 'Lens rules', short: 'Lens', Icon: Palette, group: 'review', region: 'side' },
   { id: 'clash', title: 'Clash detection', short: 'Clash', Icon: Crosshair, group: 'review', region: 'side' },
   { id: 'extensions', title: 'Extensions', short: 'Extensions', Icon: Puzzle, group: 'author', region: 'side' },
-  // Deliverables: what this project gets issued as, and the batch that
-  // produces them. `work` rather than `author` — it is the step after the
-  // model is authored, not part of authoring it.
-  { id: 'exports', title: 'Exportprodukte', short: 'Exporte', Icon: PackageCheck, group: 'work', region: 'side', prefersWide: true },
   // Bottom-strip panels — launched from the rail, open at the bottom by default.
   { id: 'script', title: 'Script editor', short: 'Script', Icon: Terminal, group: 'work', region: 'bottom', prefersWide: true },
   { id: 'gantt', title: 'Construction schedule', short: 'Schedule', Icon: CalendarRange, group: 'work', region: 'bottom', prefersWide: true },
@@ -172,6 +170,16 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   // Rooms are the exception to the grouping the two above are built on: a
   // number belongs to ONE room, so this one is a queue rather than a grouping.
   { id: 'roomTriage', title: 'Clean Rooms', short: 'Räume', Icon: DoorOpen, group: 'author', region: 'side' },
+  { id: 'doorNumbers', title: 'Türnummern', short: 'Türen', Icon: DoorClosed, group: 'author', region: 'side' },
+  // Deliverables: what this project gets issued as, and the batch that
+  // produces them. `work` rather than `author` — it is the step after the
+  // model is authored, not part of authoring it.
+  //
+  // APPENDED, like everything since #1200. It sat at position eight for a
+  // while, which silently moved Alt+8 off the Script editor and onto this
+  // panel — the frozen mapping is positional, so an insertion anywhere in the
+  // first ten renames somebody's shortcut without saying so.
+  { id: 'exports', title: 'Exportprodukte', short: 'Exporte', Icon: PackageCheck, group: 'work', region: 'side', prefersWide: true },
 ];
 
 /** The bottom-strip panel ids, mapped to their store visibility flag + setter

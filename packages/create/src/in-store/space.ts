@@ -19,6 +19,7 @@
 import { generateIfcGuid } from '@ifc-lite/encoding';
 import type { StoreEditor } from '@ifc-lite/mutations';
 import { toNativeArea, toNativeLength, toNativeVolume, type SpatialAnchor } from './anchor.js';
+import { addSpaceBoundaryToStore } from './space-boundary.js';
 import {
   emitBodyRepresentation,
   emitExtrudedSolid,
@@ -239,18 +240,12 @@ export function addSpaceToStore(
   // + internal/external classification are future refinements.
   const spaceBoundaryIds: number[] = [];
   for (const boundary of params.boundaries ?? []) {
-    const boundaryId = editor.addEntity('IfcRelSpaceBoundary', [
-      generateIfcGuid(anchor.guidRandom),
-      ownerHistoryRef(anchor.ownerHistoryId),
-      null,
-      null,
-      `#${spaceId}`,
-      `#${boundary.elementId}`,
-      null,
-      `.${boundary.physicalOrVirtual ?? 'PHYSICAL'}.`,
-      `.${boundary.internalOrExternal ?? 'NOTDEFINED'}.`,
-    ] as Parameters<StoreEditor['addEntity']>[1]).expressId;
-    spaceBoundaryIds.push(boundaryId);
+    spaceBoundaryIds.push(addSpaceBoundaryToStore(editor, anchor, {
+      spaceId,
+      elementId: boundary.elementId,
+      internalOrExternal: boundary.internalOrExternal,
+      physicalOrVirtual: boundary.physicalOrVirtual,
+    }).boundaryId);
   }
 
   return {

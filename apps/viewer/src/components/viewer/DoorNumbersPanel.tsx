@@ -1,0 +1,204 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/**
+ * Door numbers — proposed, explained, then written.
+ *
+ * Two decisions shape this panel:
+ *
+ * **It proposes before it writes.** A door number is derived from the escape
+ * direction, and the derivation can be wrong where the model is (a room the
+ * graph could not reach, a swing nobody stated). So the list shows what each
+ * door WOULD be called and what it was named after, and one button writes the
+ * lot. Nothing happens until it is pressed.
+ *
+ * **It says how it decided.** `Fluchtweg` means the escape direction settled
+ * it; `Aussentür` that the door leads outside; `Aufschlag` that both sides
+ * were equally far out and the leaf decided instead. That last one is the
+ * weakest of the three, so it is visible rather than buried — those are the
+ * rows to look at first if a number looks wrong.
+ */
+
+import { useMemo, useState } from 'react';
+import { DoorOpen, X } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { toast } from '@/components/ui/toast';
+import { useViewerStore } from '@/store';
+import { useIfc } from '@/hooks/useIfc';
+import { useDoorNumbers } from '@/hooks/useDoorNumbers';
+import type { NumberBasis, DoorProblemReason } from '@/lib/doorNumbers/doorNumbers';
+
+const BASIS_LABEL: Record<NumberBasis, string> = {
+  escape: 'Fluchtweg',
+  exterior: 'Aussentür',
+  swing: 'Aufschlag',
+};
+
+const BASIS_HINT: Record<NumberBasis, string> = {
+  escape: 'Der Raum liegt weiter vom Ausgang weg — man flüchtet durch diese Tür aus ihm heraus.',
+  exterior: 'Die Tür führt ins Freie, also benennt sie der eine Raum, an dem sie liegt.',
+  swing: 'Beide Seiten sind gleich weit vom Ausgang — entschieden hat, wohin das Blatt aufschlägt.',
+};
+
+const PROBLEM_LABEL: Record<DoorProblemReason, string> = {
+  'no-room': 'liegt in keinem Raum dieses Geschosses',
+  'room-has-no-number': 'der benennende Raum hat noch keine Nummer',
+  'no-direction': 'beide Seiten gleich weit vom Ausgang, kein Aufschlag im Modell',
+};
+
+export interface DoorNumbersPanelProps {
+  onClose?: () => void;
+}
+
+export function DoorNumbersPanel({ onClose }: DoorNumbersPanelProps) {
+  const models = useViewerStore((s) => s.models);
+  const activeModelId = useViewerStore((s) => s.activeModelId);
+  const activeStorey = useViewerStore((s) => s.activeStorey);
+  const numberDoors = useViewerStore((s) => s.numberDoors);
+  const setSelectedEntityIds = useViewerStore((s) => s.setSelectedEntityIds);
+  const toGlobalId = useViewerStore((s) => s.toGlobalId);
+  const { geometryResult: legacyGeometry, ifcDataStore } = useIfc();
+  const [busy, setBusy] = useState(false);
+
+  const { modelId, dataStore, geometryResult } = useMemo(() => {
+    const single = models.size === 1 ? [...models.entries()][0] : null;
+    const id = single ? single[0] : models.size === 0 ? 'legacy' : activeModelId;
+    const model = id ? models.get(id) : null;
+    return {
+      modelId: id ?? null,
+      dataStore: model?.ifcDataStore ?? (models.size === 0 ? ifcDataStore : null),
+      geometryResult: model?.geometryResult ?? legacyGeometry,
+    };
+  }, [models, activeModelId, ifcDataStore, legacyGeometry]);
+
+  const storeyId = activeStorey?.expressId ?? null;
+  const { plan, rooms, current, ready } = useDoorNumbers({
+    enabled: true, geometryResult, dataStore, modelId, storeyId,
+  });
+
+  const storeyName = storeyId !== null
+    ? dataStore?.entities?.getName?.(storeyId) || `#${storeyId}`
+    : null;
+
+  const apply = () => {
+    if (!modelId || plan.numbers.length === 0) return;
+    setBusy(true);
+    try {
+      const result = numberDoors(modelId, plan.numbers.map((n) => ({
+        doorId: n.doorId,
+        number: n.number,
+        roomId: n.roomId,
+        otherRoomId: n.otherRoomId,
+      })));
+      if ('error' in result) { toast.error(result.error); return; }
+      toast.success(
+        `${result.numbered} Türnummern geschrieben, ${result.boundaries} Raumbezüge angelegt.`,
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="h-full flex flex-col bg-white dark:bg-black">
+      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950">
+        <div className="flex items-center gap-2">
+          <DoorOpen className="h-4 w-4 text-emerald-600" />
+          <h2 className="font-bold uppercase tracking-wider text-xs text-zinc-900 dark:text-zinc-100">
+            Türnummern
+          </h2>
+        </div>
+        {onClose && (
+          <button type="button" onClick={onClose} aria-label="Schliessen"
+            className="text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100">
+            <X className="h-4 w-4" />
+          </button>
+        )}
+      </div>
+
+      <div className="px-3 py-2 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-zinc-900">
+        {storeyId === null
+          ? 'Kein Geschoss gewählt — wähle links in der Hierarchie eines aus.'
+          : `Geschoss ${storeyName} · ${plan.numbers.length} von ${plan.numbers.length + plan.problems.length} Türen`}
+      </div>
+
+      <div className="flex-1 overflow-auto">
+        {!ready && storeyId !== null && (
+          <p className="px-3 py-3 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 leading-snug">
+            Dieses Geschoss hat keine Räume und Türen, aus denen sich ein Weg nach
+            draussen ableiten liesse.
+          </p>
+        )}
+
+        {plan.numbers.map((entry) => {
+          const room = rooms.get(entry.roomId);
+          const other = entry.otherRoomId === null ? null : rooms.get(entry.otherRoomId);
+          const now = current.get(entry.doorId) ?? '';
+          return (
+            <button
+              type="button"
+              key={entry.doorId}
+              onClick={() => modelId && setSelectedEntityIds([toGlobalId(modelId, entry.doorId)])}
+              className="w-full text-left px-3 py-2 border-b border-zinc-100 dark:border-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-950"
+            >
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="font-mono text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                  {entry.number}
+                </span>
+                <span
+                  title={BASIS_HINT[entry.basis]}
+                  className="text-[10px] font-mono uppercase tracking-wide text-zinc-400 dark:text-zinc-600"
+                >
+                  {BASIS_LABEL[entry.basis]}
+                </span>
+              </div>
+              <div className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400 leading-snug">
+                aus {room?.number || '—'} {room?.name}
+                {other ? ` → ${other.number || '—'} ${other.name}` : ' → ins Freie'}
+                {now && now !== entry.number ? ` · heisst jetzt „${now}"` : ''}
+              </div>
+            </button>
+          );
+        })}
+
+        {plan.problems.length > 0 && (
+          <div className="px-3 py-2 border-t border-zinc-200 dark:border-zinc-800">
+            <div className="text-[10px] font-mono uppercase tracking-wider text-amber-600 dark:text-amber-500 mb-1">
+              {plan.problems.length} ohne Nummer
+            </div>
+            {plan.problems.map((problem) => (
+              <button
+                type="button"
+                key={problem.doorId}
+                onClick={() => modelId && setSelectedEntityIds([toGlobalId(modelId, problem.doorId)])}
+                className="block w-full text-left text-[10px] font-mono text-zinc-500 dark:text-zinc-400 py-0.5 hover:text-zinc-900 dark:hover:text-zinc-100"
+              >
+                #{problem.doorId} — {PROBLEM_LABEL[problem.reason]}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="px-3 py-2 border-t border-zinc-200 dark:border-zinc-800">
+        <Button
+          size="sm"
+          className="w-full h-8 text-[11px] font-mono bg-emerald-600 hover:bg-emerald-700"
+          disabled={busy || plan.numbers.length === 0}
+          onClick={apply}
+        >
+          {plan.numbers.length === 0
+            ? 'Nichts zu schreiben'
+            : `${plan.numbers.length} Türnummern schreiben`}
+        </Button>
+        <p className="pt-1.5 text-[10px] font-mono text-zinc-400 dark:text-zinc-600 leading-snug">
+          Schreibt die Nummer in <span className="font-semibold">Name</span> — dort liest sie
+          der Grundriss — und legt je Tür einen Raumbezug zu beiden angrenzenden Räumen an.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+export default DoorNumbersPanel;

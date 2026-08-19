@@ -40,6 +40,7 @@ import {
   generateSpacesFromWalls,
   generateSpacesFromDrawing,
   existingSpacesByStorey,
+  addSpaceBoundaryToStore,
   type BeamInStoreParams,
   type ColumnInStoreParams,
   type DoorInStoreParams,
@@ -470,6 +471,23 @@ export interface MutationSlice {
    * The type class is derived from the elements' CURRENT class, so this must
    * run after any retype — see `lib/classTriage/groupAssignment`.
    */
+  /**
+   * Write a door number onto each door and relate it to the rooms it joins.
+   *
+   * One action rather than a loop of `setAttribute` calls in the panel: the
+   * number and the two boundaries are one statement about the door, and half
+   * of it in the file would be worse than none.
+   */
+  numberDoors: (
+    modelId: string,
+    entries: readonly {
+      doorId: number;
+      number: string;
+      roomId: number;
+      otherRoomId: number | null;
+    }[],
+  ) => { numbered: number; boundaries: number } | { error: string };
+
   defineElementsByType: (
     modelId: string,
     expressIds: readonly number[],
@@ -1213,7 +1231,15 @@ function runGroupRelation<T>(
 
   const dataStore = get().models.get(modelId)?.ifcDataStore;
   if (!dataStore) return { error: `No model loaded for id "${modelId}"` };
-  if (!get().mutationViews.get(modelId)) return { error: 'Model has no editable mutation view yet' };
+  // Create the overlay rather than refusing for the want of one. A freshly
+  // opened model has none until some surface edits, so the FIRST authoring
+  // action through this path used to fail with "no editable mutation view
+  // yet" — which reads as a defect and is, since the next click after
+  // touching anything else succeeds. `ensureMutationView` is the same
+  // creation the editing surfaces do.
+  if (!get().ensureMutationView(modelId)) {
+    return { error: 'Model has no editable mutation view yet' };
+  }
 
   const editor = getOrCreateStoreEditor(get, set, modelId);
   if (!editor) return { error: 'Failed to create store editor' };
@@ -2661,6 +2687,39 @@ export const createMutationSlice: StateCreator<
     },
   ),
 
+  numberDoors: (modelId, entries) => runGroupRelation(
+    get, set, modelId, entries.map((e) => e.doorId), 'Türnummern schreiben',
+    (editor, anchor) => {
+      let numbered = 0;
+      let boundaries = 0;
+      for (const entry of entries) {
+        // The number goes in `Name`: `doorReference` reads that first, so the
+        // plan shows it the moment it is written (Marc, 2026-08-13).
+        if (get().setAttribute(modelId, entry.doorId, 'Name', entry.number)) numbered += 1;
+        // A boundary per room, so the door is findable from both sides. The
+        // room the number came from is INTERNAL to a second room where there
+        // is one, and EXTERNAL where the door leads outside.
+        addSpaceBoundaryToStore(editor, anchor, {
+          spaceId: entry.roomId,
+          elementId: entry.doorId,
+          internalOrExternal: entry.otherRoomId === null ? 'EXTERNAL' : 'INTERNAL',
+          name: entry.number,
+        });
+        boundaries += 1;
+        if (entry.otherRoomId !== null) {
+          addSpaceBoundaryToStore(editor, anchor, {
+            spaceId: entry.otherRoomId,
+            elementId: entry.doorId,
+            internalOrExternal: 'INTERNAL',
+            name: entry.number,
+          });
+          boundaries += 1;
+        }
+      }
+      return { numbered, boundaries };
+    },
+  ),
+
   defineElementsByType: (modelId, expressIds, target) => runGroupRelation(
     get, set, modelId, expressIds, 'Typ zuweisen',
     (editor, anchor) => {
@@ -2969,7 +3028,18 @@ export const createMutationSlice: StateCreator<
 
   addSensor: (modelId, storeyExpressId, params) => runInStoreElementBuilder(
     get, set, modelId, storeyExpressId, 'IFCSENSOR', 'add sensor',
-    (editor, anchor) => addSensorToStore(editor, anchor, params).sensorId,
+    (editor, anchor) => {
+      // Same rule as addLibraryElement: contain the device in the room it
+      // sits in when the model has one there, and fall back to the storey
+      // otherwise. Both placement paths have to agree — a detector's
+      // containment must not depend on which panel button dropped it.
+      const store = get().models.get(modelId)?.ifcDataStore ?? get().ifcDataStore;
+      const spaceId = resolveSpaceForPlacement(store, storeyExpressId, params.Position);
+      return addSensorToStore(editor, anchor, {
+        ...params,
+        ContainerId: spaceId ?? undefined,
+      }).sensorId;
+    },
     {
       type: 'sensor',
       params: { Width: params.Width ?? 0.1, Depth: params.Depth ?? 0.1, Height: params.Height ?? 0.05, PredefinedType: params.PredefinedType ?? 'NOTDEFINED' },

@@ -650,6 +650,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
       proxyTriagePanelVisible: panel === 'proxyTriage',
       classTriagePanelVisible: panel === 'classTriage',
       roomTriagePanelVisible: panel === 'roomTriage',
+      doorNumbersPanelVisible: panel === 'doorNumbers',
       rightPanelCollapsed: false,
     });
     // A side panel with NO visibility flag of its own (Location zones, #1869)
@@ -708,6 +709,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
         proxyTriagePanelVisible: false,
         classTriagePanelVisible: false,
         roomTriagePanelVisible: false,
+        doorNumbersPanelVisible: false,
         rightPanelCollapsed: false,
       });
       get().setSidebarActivePanel('properties');
@@ -812,6 +814,7 @@ export const SIDEBAR_PANEL_FLAGS: ReadonlyArray<readonly [keyof ViewerState, Wor
   ['proxyTriagePanelVisible', 'proxyTriage'],
   ['classTriagePanelVisible', 'classTriage'],
   ['roomTriagePanelVisible', 'roomTriage'],
+  ['doorNumbersPanelVisible', 'doorNumbers'],
 ];
 
 /**

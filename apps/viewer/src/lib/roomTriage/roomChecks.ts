@@ -100,6 +100,17 @@ export const DEFAULT_SLIVER_AREA = 2;
  * numbering scheme uses for "to be decided".
  */
 const PLACEHOLDER_NAME = /^(?:r|raum|room|space)[\s._-]*\d+[a-z]?$/i;
+/**
+ * The same word with the counter in FRONT (`12.Space`) or with no counter at
+ * all (`Space`).
+ *
+ * Both come out of the room generator: the name pattern is the user's, so
+ * `{n}.Space` is as ordinary as `Space {n}`, and a room drawn by hand gets the
+ * bare word. Found in a real model, where they slipped through as named rooms
+ * and got as far as producing door numbers called `Space.T1`.
+ */
+const PLACEHOLDER_REVERSED = /^\d+[a-z]?[\s._-]*(?:r|raum|room|space)$/i;
+const PLACEHOLDER_BARE = /^(?:raum|room|space)$/i;
 const PLACEHOLDER_NUMBER = /^\d+\.9\d$/;
 const PLACEHOLDER_WORDS = /^(?:unbenannt|unnamed|tbd|xxx|\?+)\b/i;
 
@@ -108,6 +119,8 @@ export function isPlaceholderName(text: string): boolean {
   const value = text.trim();
   if (!value) return false;
   return PLACEHOLDER_NAME.test(value)
+    || PLACEHOLDER_REVERSED.test(value)
+    || PLACEHOLDER_BARE.test(value)
     || PLACEHOLDER_NUMBER.test(value)
     || PLACEHOLDER_WORDS.test(value);
 }

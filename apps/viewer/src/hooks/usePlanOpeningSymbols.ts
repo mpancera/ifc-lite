@@ -87,6 +87,15 @@ export interface PlanOpeningSymbol {
    * against — it shows in the tooltip for exactly that.
    */
   readonly mirrored: boolean;
+  /**
+   * Which side of the wall the leaf swings to, as a multiple of `across` —
+   * `null` for a window, a slider, or a leaf that swings both ways.
+   *
+   * The symbol already knows this; it decides where the arc is drawn. Saying
+   * it out loud lets a caller ask WHICH ROOM a door opens into, which is the
+   * fallback the door numbering uses where the escape direction is a draw.
+   */
+  readonly openTowards: 1 | -1 | null;
 }
 
 /**
@@ -519,6 +528,7 @@ export function usePlanOpeningSymbols({
           correctedOperationType: null,
           name: '',
           mirrored: isMirrored(axes),
+          openTowards: null,
         });
         continue;
       }
@@ -671,6 +681,7 @@ export function usePlanOpeningSymbols({
         correctedOperationType: agrees === false ? shouldSay : null,
         name: reference,
         mirrored: isMirrored(axes),
+        openTowards: operation.motion === 'swing' ? operation.openTowards : null,
       });
     }
 

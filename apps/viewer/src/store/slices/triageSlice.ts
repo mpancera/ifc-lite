@@ -24,16 +24,20 @@ export interface TriageSlice {
   proxyTriagePanelVisible: boolean;
   classTriagePanelVisible: boolean;
   roomTriagePanelVisible: boolean;
+  doorNumbersPanelVisible: boolean;
   setProxyTriagePanelVisible: (visible: boolean) => void;
   setClassTriagePanelVisible: (visible: boolean) => void;
   setRoomTriagePanelVisible: (visible: boolean) => void;
+  setDoorNumbersPanelVisible: (visible: boolean) => void;
 }
 
 export const createTriageSlice: StateCreator<ViewerState, [], [], TriageSlice> = (set) => ({
   proxyTriagePanelVisible: false,
   classTriagePanelVisible: false,
   roomTriagePanelVisible: false,
+  doorNumbersPanelVisible: false,
   setProxyTriagePanelVisible: (proxyTriagePanelVisible) => set({ proxyTriagePanelVisible }),
   setClassTriagePanelVisible: (classTriagePanelVisible) => set({ classTriagePanelVisible }),
   setRoomTriagePanelVisible: (roomTriagePanelVisible) => set({ roomTriagePanelVisible }),
+  setDoorNumbersPanelVisible: (doorNumbersPanelVisible) => set({ doorNumbersPanelVisible }),
 });
