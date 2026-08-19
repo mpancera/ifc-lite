@@ -20,7 +20,7 @@
  * rows to look at first if a number looks wrong.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { DoorOpen, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast';
@@ -58,8 +58,15 @@ export function DoorNumbersPanel({ onClose }: DoorNumbersPanelProps) {
   const activeModelId = useViewerStore((s) => s.activeModelId);
   const activeStorey = useViewerStore((s) => s.activeStorey);
   const numberDoors = useViewerStore((s) => s.numberDoors);
-  const setSelectedEntityIds = useViewerStore((s) => s.setSelectedEntityIds);
+  // The two channels a selection actually travels on: the EntityRef feeds the
+  // property lookup, the GLOBAL id drives the highlight. Setting only
+  // `selectedEntityIds` — the multi-select channel — selected the door in a
+  // place nothing draws, so clicking a row lit nothing up.
+  const setSelectedEntity = useViewerStore((s) => s.setSelectedEntity);
+  const setSelectedEntityId = useViewerStore((s) => s.setSelectedEntityId);
+  const selectedEntityId = useViewerStore((s) => s.selectedEntityId);
   const toGlobalId = useViewerStore((s) => s.toGlobalId);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const { geometryResult: legacyGeometry, ifcDataStore } = useIfc();
   const [busy, setBusy] = useState(false);
 
@@ -82,6 +89,33 @@ export function DoorNumbersPanel({ onClose }: DoorNumbersPanelProps) {
   const { plan, rooms, current, ready, sidesOf, centreOf } = useDoorNumbers({
     enabled: true, geometryResult, dataStore, modelId, storeyId,
   });
+
+  /** Which door the viewer has selected, as a LOCAL id — the list keys on that. */
+  const selectedDoorId = useMemo(() => {
+    if (selectedEntityId === null || !modelId) return null;
+    for (const doorId of centreOf.keys()) {
+      if (toGlobalId(modelId, doorId) === selectedEntityId) return doorId;
+    }
+    return null;
+  }, [selectedEntityId, modelId, centreOf, toGlobalId]);
+
+  // Picking a door in the viewport scrolls its row into view. The other
+  // direction was there from the start; without this one the list is a
+  // one-way street, and on a floor with forty doors "which row is this?" is a
+  // question nobody can answer by scrolling.
+  useEffect(() => {
+    if (selectedDoorId === null) return;
+    const row = listRef.current?.querySelector(`[data-door-row="${selectedDoorId}"]`);
+    row?.scrollIntoView({ block: 'nearest' });
+  }, [selectedDoorId]);
+
+  const select = (doorId: number) => {
+    if (!modelId) return;
+    const globalId = toGlobalId(modelId, doorId);
+    setSelectedEntity({ modelId, expressId: doorId });
+    setSelectedEntityId(globalId);
+    requestPlanFocus(globalId, centreOf.get(doorId));
+  };
 
   const storeyName = storeyId !== null
     ? dataStore?.entities?.getName?.(storeyId) || `#${storeyId}`
@@ -137,7 +171,7 @@ export function DoorNumbersPanel({ onClose }: DoorNumbersPanelProps) {
           : `Geschoss ${storeyName} · ${plan.numbers.length} von ${plan.numbers.length + plan.problems.length} Türen`}
       </div>
 
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto" ref={listRef}>
         {!ready && storeyId !== null && (
           <p className="px-3 py-3 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 leading-snug">
             Dieses Geschoss hat keine Räume und Türen, aus denen sich ein Weg nach
@@ -153,13 +187,14 @@ export function DoorNumbersPanel({ onClose }: DoorNumbersPanelProps) {
             <button
               type="button"
               key={entry.doorId}
-              onClick={() => {
-                if (!modelId) return;
-                const globalId = toGlobalId(modelId, entry.doorId);
-                setSelectedEntityIds([globalId]);
-                requestPlanFocus(globalId, centreOf.get(entry.doorId));
-              }}
-              className="w-full text-left px-3 py-2 border-b border-zinc-100 dark:border-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-950"
+              onClick={() => select(entry.doorId)}
+              data-door-row={entry.doorId}
+              className={[
+                'w-full text-left px-3 py-2 border-b border-zinc-100 dark:border-zinc-900',
+                selectedDoorId === entry.doorId
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40'
+                  : 'hover:bg-zinc-50 dark:hover:bg-zinc-950',
+              ].join(' ')}
             >
               <div className="flex items-baseline justify-between gap-2">
                 <span className="font-mono text-xs font-semibold text-zinc-900 dark:text-zinc-100">
@@ -216,16 +251,16 @@ export function DoorNumbersPanel({ onClose }: DoorNumbersPanelProps) {
             {plan.problems.map((problem) => {
               const sides = sidesOf.get(problem.doorId) ?? [];
               return (
-                <div key={problem.doorId} className="py-1">
+                <div key={problem.doorId} className="py-1" data-door-row={problem.doorId}>
                   <button
                     type="button"
-                    onClick={() => {
-                      if (!modelId) return;
-                      const globalId = toGlobalId(modelId, problem.doorId);
-                      setSelectedEntityIds([globalId]);
-                      requestPlanFocus(globalId, centreOf.get(problem.doorId));
-                    }}
-                    className="block w-full text-left text-[10px] font-mono text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
+                    onClick={() => select(problem.doorId)}
+                    className={[
+                      'block w-full text-left text-[10px] font-mono',
+                      selectedDoorId === problem.doorId
+                        ? 'text-zinc-900 dark:text-zinc-100 font-semibold'
+                        : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100',
+                    ].join(' ')}
                   >
                     #{problem.doorId} — {PROBLEM_LABEL[problem.reason]}
                   </button>
