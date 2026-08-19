@@ -31,6 +31,7 @@
 
 import { Download, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { FolderOpen } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -129,6 +130,15 @@ interface ExportChangesReviewDialogProps {
   totalCount: number;
   isExporting: boolean;
   onConfirm: () => void;
+  /**
+   * Folder the export is written into, or null for the browser's download
+   * folder. Shown before the confirm, because "where did it go" is a question
+   * best answered before the file goes there.
+   */
+  targetFolder?: string | null;
+  /** Absent when the browser cannot hand out a folder at all. */
+  onChooseFolder?: () => void;
+  onClearFolder?: () => void;
 }
 
 export function ExportChangesReviewDialog({
@@ -138,6 +148,9 @@ export function ExportChangesReviewDialog({
   totalCount,
   isExporting,
   onConfirm,
+  targetFolder = null,
+  onChooseFolder,
+  onClearFolder,
 }: ExportChangesReviewDialogProps) {
   const isEmpty = totalCount === 0 || groups.every((g) => g.entities.length === 0 && g.unitemizedCount === 0);
 
@@ -202,6 +215,29 @@ export function ExportChangesReviewDialog({
                 </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Where it lands. A remembered project folder turns every further
+            export into "save the next version where the project lives"; without
+            one this says so plainly rather than leaving the answer to the
+            browser's settings. */}
+        {onChooseFolder && (
+          <div className="flex items-center gap-2 border-t px-6 py-3 text-xs">
+            <FolderOpen className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate text-muted-foreground">
+              {targetFolder
+                ? <>Speichern nach <span className="font-medium text-foreground">{targetFolder}</span></>
+                : 'Speichern in den Download-Ordner des Browsers'}
+            </span>
+            <Button variant="ghost" size="sm" className="h-7 px-2" onClick={onChooseFolder}>
+              {targetFolder ? 'Ordner ändern' : 'Ordner wählen'}
+            </Button>
+            {targetFolder && onClearFolder && (
+              <Button variant="ghost" size="sm" className="h-7 px-2" onClick={onClearFolder}>
+                Zurücksetzen
+              </Button>
+            )}
           </div>
         )}
 

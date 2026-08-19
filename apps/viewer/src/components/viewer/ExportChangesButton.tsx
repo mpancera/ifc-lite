@@ -28,6 +28,11 @@ import {
   type ChangedModelsResult,
 } from '@/lib/export/model-changes';
 import { defaultBuildArtifactsDeps } from '@/lib/export/changed-model-export';
+import { restamp } from '@/lib/export/filename-stamp';
+import {
+  saveTargetsSupported, saveTargetKey, loadSaveTarget, rememberSaveTarget, forgetSaveTarget,
+  ensureWritable, writeIntoTarget, type DirectoryTarget,
+} from '@/lib/export/saveTarget';
 import {
   ExportChangesReviewDialog,
   buildReviewGroups,
@@ -37,15 +42,6 @@ import {
 interface ExportChangesButtonProps {
   /** Optional custom class name */
   className?: string;
-}
-
-/** YYYY-MM-DD for filenames. */
-function formatDate(): string {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
 }
 
 /** Bundle produced files into a zip off the main thread (fflate async `zip`). */
@@ -196,6 +192,45 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
   // badge is a number and this is the list behind it. Only ever opens when
   // there is something to show: an empty review would answer the question
   // "what did that do?" with a blank dialog.
+  // The project folder this model's exports go to, if one was chosen. Keyed on
+  // the name without its stamp, so it survives every further export of the same
+  // model — see `lib/export/saveTarget`.
+  const activeModelName = useViewerStore((s) => (
+    s.activeModelId ? s.models.get(s.activeModelId)?.name ?? null : null
+  ));
+  const targetKey = activeModelName ? saveTargetKey(activeModelName) : null;
+  const [target, setTarget] = useState<DirectoryTarget | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!targetKey || !saveTargetsSupported()) { setTarget(null); return () => { cancelled = true; }; }
+    void loadSaveTarget(targetKey).then((found) => { if (!cancelled) setTarget(found); });
+    return () => { cancelled = true; };
+  }, [targetKey]);
+
+  const chooseFolder = useCallback(async () => {
+    if (!targetKey) return;
+    try {
+      const picked = await (window as unknown as {
+        showDirectoryPicker(options?: { mode?: 'readwrite' }): Promise<DirectoryTarget>;
+      }).showDirectoryPicker({ mode: 'readwrite' });
+      await rememberSaveTarget(targetKey, picked);
+      setTarget(picked);
+      toast.success(`Exporte gehen nach „${picked.name}“`);
+    } catch (error) {
+      // An aborted picker is a decision, not a failure.
+      if ((error as { name?: string })?.name === 'AbortError') return;
+      console.warn('[export] folder picker failed:', error);
+      toast.error('Der Ordner liess sich nicht öffnen.');
+    }
+  }, [targetKey]);
+
+  const clearFolder = useCallback(async () => {
+    if (!targetKey) return;
+    await forgetSaveTarget(targetKey);
+    setTarget(null);
+    toast.info('Exporte gehen wieder in den Download-Ordner.');
+  }, [targetKey]);
+
   const reviewRequests = useViewerStore((s) => s.changesReviewRequests);
   const lastHandledRequest = useRef(reviewRequests);
   useEffect(() => {
@@ -256,13 +291,35 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
         return;
       }
 
-      const date = formatDate();
-      if (files.length === 1) {
-        const f = files[0];
-        downloadFile(f.content, `${f.base}_${date}.${f.ext}`, f.mime);
+      // `restamp`, not "append": the file being exported is often itself a
+      // previous export, and appending grew the name by a stamp per round.
+      const named: Array<{ name: string; content: Blob | Uint8Array | string; mime: string }> =
+        files.length === 1
+          ? [{ name: `${restamp(files[0].base)}.${files[0].ext}`, content: files[0].content, mime: files[0].mime }]
+          : [{
+            name: `${restamp('ifc-lite-changes')}.zip`,
+            content: await zipArtifacts(files),
+            mime: 'application/zip',
+          }];
+
+      // A chosen project folder wins over the download folder — but only with
+      // permission, which the browser re-asks for after a reload and only
+      // inside this click. A refusal falls back to the download rather than
+      // leaving the user with nothing saved.
+      let wroteTo: string | null = null;
+      if (target && await ensureWritable(target, { prompt: true })) {
+        try {
+          for (const file of named) await writeIntoTarget(target, file.name, file.content);
+          wroteTo = target.name;
+        } catch (error) {
+          console.warn('[export] writing into the chosen folder failed:', error);
+          toast.error(`Schreiben nach „${target.name}“ ist fehlgeschlagen — gespeichert im Download-Ordner.`);
+        }
+      }
+      if (!wroteTo) {
+        for (const file of named) downloadFile(file.content, file.name, file.mime);
       } else {
-        const zipped = await zipArtifacts(files);
-        downloadFile(zipped, `ifc-lite-changes_${date}.zip`, 'application/zip');
+        toast.success(`${named[0].name} in „${wroteTo}“ gespeichert`);
       }
 
       setExportStatus('success');
@@ -365,6 +422,9 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
         totalCount={totalCount}
         isExporting={isExporting}
         onConfirm={handleConfirm}
+        targetFolder={target?.name ?? null}
+        onChooseFolder={saveTargetsSupported() ? chooseFolder : undefined}
+        onClearFolder={clearFolder}
       />
     </>
   );
