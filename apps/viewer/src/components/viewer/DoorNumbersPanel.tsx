@@ -79,7 +79,7 @@ export function DoorNumbersPanel({ onClose }: DoorNumbersPanelProps) {
   const setDoorNumberRoom = useViewerStore((s) => s.setDoorNumberRoom);
   const clearDoorNumberRoom = useViewerStore((s) => s.clearDoorNumberRoom);
   const requestPlanFocus = useViewerStore((s) => s.requestPlanFocus);
-  const { plan, rooms, current, ready, sidesOf } = useDoorNumbers({
+  const { plan, rooms, current, ready, sidesOf, centreOf } = useDoorNumbers({
     enabled: true, geometryResult, dataStore, modelId, storeyId,
   });
 
@@ -98,6 +98,14 @@ export function DoorNumbersPanel({ onClose }: DoorNumbersPanelProps) {
         otherRoomId: n.otherRoomId,
       })));
       if ('error' in result) { toast.error(result.error); return; }
+      if (result.refused) {
+        // Part written is not "done". Naming the count AND the reason beats a
+        // green message that hides which half of the statement landed.
+        toast.error(
+          `${result.numbered} von ${plan.numbers.length} Türnummern geschrieben — ${result.refused}`,
+        );
+        return;
+      }
       toast.success(
         `${result.numbered} Türnummern geschrieben, ${result.boundaries} Raumbezüge angelegt.`,
       );
@@ -149,7 +157,7 @@ export function DoorNumbersPanel({ onClose }: DoorNumbersPanelProps) {
                 if (!modelId) return;
                 const globalId = toGlobalId(modelId, entry.doorId);
                 setSelectedEntityIds([globalId]);
-                requestPlanFocus(globalId);
+                requestPlanFocus(globalId, centreOf.get(entry.doorId));
               }}
               className="w-full text-left px-3 py-2 border-b border-zinc-100 dark:border-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-950"
             >
@@ -215,7 +223,7 @@ export function DoorNumbersPanel({ onClose }: DoorNumbersPanelProps) {
                       if (!modelId) return;
                       const globalId = toGlobalId(modelId, problem.doorId);
                       setSelectedEntityIds([globalId]);
-                      requestPlanFocus(globalId);
+                      requestPlanFocus(globalId, centreOf.get(problem.doorId));
                     }}
                     className="block w-full text-left text-[10px] font-mono text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
                   >

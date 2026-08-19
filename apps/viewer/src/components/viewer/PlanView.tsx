@@ -1147,6 +1147,9 @@ export function PlanView({
     const container = containerRef.current;
     if (!container) return;
 
+    // A point from the caller wins: it was measured on the element itself,
+    // while the drawing only holds what the cut happened to pass through.
+    const given = planFocusRequest.point;
     const local = fromGlobalIdFromModels(models, planFocusRequest.globalId);
     const entityId = local?.expressId ?? planFocusRequest.globalId;
     const modelIndex = local ? (modelIdToIndex?.get(local.modelId) ?? 0) : 0;
@@ -1162,16 +1165,16 @@ export function PlanView({
         points.push(line.line.start, line.line.end);
       }
     }
-    const bounds = boundsOf(points);
+    const centre = given ?? boundsOf(points)?.centre;
     // Nothing to centre on is a normal answer: the element may be above the
     // cut, or on another storey. Leaving the view alone says so better than
     // panning to the origin would.
-    if (!bounds) return;
+    if (!centre) return;
 
     const rect = container.getBoundingClientRect();
     setViewTransform((prev) => {
       const next = centreOn(
-        { ...prev, rotation: planRotation }, bounds.centre, rect.width, rect.height,
+        { ...prev, rotation: planRotation }, centre, rect.width, rect.height,
       );
       return { x: next.x, y: next.y, scale: next.scale };
     });

@@ -117,9 +117,21 @@ export interface UISlice extends GeometryLoadSettingsState, GeometryLoadSettings
    * can only ASK. Panning on every selection change instead would yank the
    * drawing whenever anything anywhere selected something.
    */
-  planFocusRequest: { readonly globalId: number; readonly seq: number } | null;
+  planFocusRequest: {
+    readonly globalId: number;
+    readonly seq: number;
+    /**
+     * Where to centre, in drawing coordinates, when the caller knows.
+     *
+     * Without it the plan looks the element up in the DRAWING, which only
+     * finds what the cut passed through. A caller that measured the element
+     * itself — the space graph knows every door's centre — can say so and be
+     * right for the ones the cut missed.
+     */
+    readonly point?: { readonly x: number; readonly y: number };
+  } | null;
   /** Centre the plan on this element, keeping the current zoom. */
-  requestPlanFocus: (globalId: number) => void;
+  requestPlanFocus: (globalId: number, point?: { x: number; y: number }) => void;
   leftPanelCollapsed: boolean;
   rightPanelCollapsed: boolean;
   activeTool: string;
@@ -250,8 +262,8 @@ export const createUISlice: StateCreator<UISlice & UICrossSliceState, [], [], UI
     changesReviewRequests: state.changesReviewRequests + 1,
   })),
   planFocusRequest: null,
-  requestPlanFocus: (globalId) => set((state) => ({
-    planFocusRequest: { globalId, seq: (state.planFocusRequest?.seq ?? 0) + 1 },
+  requestPlanFocus: (globalId, point) => set((state) => ({
+    planFocusRequest: { globalId, point, seq: (state.planFocusRequest?.seq ?? 0) + 1 },
   })),
   leftPanelCollapsed: false,
   rightPanelCollapsed: false,

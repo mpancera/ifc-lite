@@ -59,6 +59,16 @@ export interface DoorNumbersSource {
    * the two rooms.
    */
   readonly sidesOf: ReadonlyMap<number, number[]>;
+  /**
+   * Where each door is, in drawing coordinates.
+   *
+   * The panel hands this to the plan when it asks for a door to be brought
+   * into view. Looking the position up in the DRAWING instead only works for
+   * a door the cut actually passes through — and a fair number do not: a
+   * lintel-height opening, a door whose geometry the cut misses, an `IfcDoor`
+   * that is really a hatch. Those rows did nothing when clicked.
+   */
+  readonly centreOf: ReadonlyMap<number, { x: number; y: number }>;
 }
 
 const EMPTY: DoorNumbersSource = {
@@ -67,6 +77,7 @@ const EMPTY: DoorNumbersSource = {
   current: new Map(),
   ready: false,
   sidesOf: new Map(),
+  centreOf: new Map(),
 };
 
 export function useDoorNumbers({
@@ -127,6 +138,7 @@ export function useDoorNumbers({
     const doors: NumberingDoor[] = [];
     const current = new Map<number, string>();
     const sidesOf = new Map<number, number[]>();
+    const centreOf = new Map<number, { x: number; y: number }>();
     for (const edge of graph.edges) {
       const door = graph.doors.get(edge.doorId);
       if (!door) continue;
@@ -139,6 +151,7 @@ export function useDoorNumbers({
       current.set(edge.doorId, overlayAttribute(overlay, edge.doorId, 'Name')
         ?? text(dataStore.entities?.getName?.(edge.doorId)));
       sidesOf.set(edge.doorId, [edge.from, edge.to].filter((id): id is number => id !== null));
+      centreOf.set(edge.doorId, door.centre);
     }
 
     return {
@@ -147,6 +160,7 @@ export function useDoorNumbers({
       current,
       ready: numberingRooms.length > 0 && doors.length > 0,
       sidesOf,
+      centreOf,
     };
     // `mutationVersion` is deliberate: a room renamed a moment ago changes
     // every door number derived from it, and the overlay is mutated in place.

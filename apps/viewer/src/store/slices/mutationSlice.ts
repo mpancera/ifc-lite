@@ -486,7 +486,12 @@ export interface MutationSlice {
       roomId: number;
       otherRoomId: number | null;
     }[],
-  ) => { numbered: number; boundaries: number } | { error: string };
+  ) => {
+    numbered: number;
+    boundaries: number;
+    /** Why some numbers were not written, when some were not. */
+    refused: string | null;
+  } | { error: string };
 
   defineElementsByType: (
     modelId: string,
@@ -2692,10 +2697,23 @@ export const createMutationSlice: StateCreator<
     (editor, anchor) => {
       let numbered = 0;
       let boundaries = 0;
+      let refused: string | null = null;
       for (const entry of entries) {
         // The number goes in `Name`: `doorReference` reads that first, so the
         // plan shows it the moment it is written (Marc, 2026-08-13).
-        if (get().setAttribute(modelId, entry.doorId, 'Name', entry.number)) numbered += 1;
+        if (get().setAttribute(modelId, entry.doorId, 'Name', entry.number)) {
+          numbered += 1;
+        } else {
+          // A refused write is not a smaller success. Without this the action
+          // reported "42 Raumbezüge angelegt" while every NUMBER had been
+          // turned down — the boundaries go through the editor and do not ask
+          // the same question — and the only visible symptom was a plan that
+          // kept showing the old door marks.
+          const permission = get().canAuthorOn(modelId, entry.doorId);
+          refused ??= permission.allowed
+            ? 'Das Schreiben der Türnummer wurde abgelehnt'
+            : permission.reason;
+        }
         // A boundary per room, so the door is findable from both sides. The
         // room the number came from is INTERNAL to a second room where there
         // is one, and EXTERNAL where the door leads outside.
@@ -2716,7 +2734,8 @@ export const createMutationSlice: StateCreator<
           boundaries += 1;
         }
       }
-      return { numbered, boundaries };
+      if (refused !== null && numbered === 0) throw new Error(refused);
+      return { numbered, boundaries, refused };
     },
   ),
 
@@ -2963,8 +2982,15 @@ export const createMutationSlice: StateCreator<
         // Contain the element in the room it actually sits in, when the model
         // has one there. Falls back to the storey (the previous behaviour) for
         // a corridor, an unmodelled area, or a storey without spaces.
+        //
+        // The overlay is handed in so rooms created in THIS session count: the
+        // ordinary sequence is detect rooms, then place devices into them, and
+        // reading only the parsed file put every device in the storey instead.
         const store = get().models.get(modelId)?.ifcDataStore ?? get().ifcDataStore;
-        const spaceId = resolveSpaceForPlacement(store, storeyExpressId, ifcParams.Position);
+        const spaceId = resolveSpaceForPlacement(
+          store, storeyExpressId, ifcParams.Position,
+          get().mutationViews.get(modelId), get().mutationVersion,
+        );
         const elementId = addLibraryElementToStore(editor, anchor, {
           ...ifcParams,
           ContainerId: spaceId ?? undefined,
@@ -3034,7 +3060,10 @@ export const createMutationSlice: StateCreator<
       // otherwise. Both placement paths have to agree — a detector's
       // containment must not depend on which panel button dropped it.
       const store = get().models.get(modelId)?.ifcDataStore ?? get().ifcDataStore;
-      const spaceId = resolveSpaceForPlacement(store, storeyExpressId, params.Position);
+      const spaceId = resolveSpaceForPlacement(
+        store, storeyExpressId, params.Position,
+        get().mutationViews.get(modelId), get().mutationVersion,
+      );
       return addSensorToStore(editor, anchor, {
         ...params,
         ContainerId: spaceId ?? undefined,
