@@ -54,6 +54,16 @@ export interface UseAnnotation2DParams {
   // Cursor and snap
   setAnnotation2DCursorPos: (pos: Point2D | null) => void;
   setMeasure2DSnapPoint: (pt: Point2D | null) => void;
+  /**
+   * A click for the escape-route tool, in drawing coordinates.
+   *
+   * Passed in rather than handled here: routing needs the space graph, and
+   * this hook deliberately knows nothing about models. Absent where the plan
+   * has no graph to route on, and the tool then does nothing.
+   */
+  onEscapeRoutePick?: (point: Point2D) => void;
+  /** Abandon a half-made route, for the Escape key. */
+  cancelEscapeRoute?: () => void;
 }
 
 export interface UseAnnotation2DResult {
@@ -100,6 +110,8 @@ export function useAnnotation2D({
   moveAnnotation2D,
   setAnnotation2DCursorPos,
   setMeasure2DSnapPoint,
+  onEscapeRoutePick,
+  cancelEscapeRoute,
 }: UseAnnotation2DParams): UseAnnotation2DResult {
 
   const shiftHeldRef = useRef(false);
@@ -344,6 +356,7 @@ export function useAnnotation2D({
       if (e.key === 'Escape') {
         // 1. Cancel in-progress work
         if (activeTool === 'polygon-area') cancelPolygonArea2D();
+        if (activeTool === 'escape-route') cancelEscapeRoute?.();
         else if (activeTool === 'cloud') cancelCloudAnnotation2D();
         else if (activeTool === 'text') setTextAnnotation2DEditing(null);
         // 2. Exit any creation tool back to select/pan
@@ -371,7 +384,7 @@ export function useAnnotation2D({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [activeTool, setActiveTool, cancelPolygonArea2D, cancelCloudAnnotation2D,
+  }, [activeTool, setActiveTool, cancelPolygonArea2D, cancelCloudAnnotation2D, cancelEscapeRoute,
     setTextAnnotation2DEditing, setSelectedAnnotation2D, deleteSelectedAnnotation2D]);
 
   // ── Mouse handlers ────────────────────────────────────────────────────
@@ -401,6 +414,13 @@ export function useAnnotation2D({
           } else {
             addPolygonArea2DPoint(point);
           }
+          return true;
+        }
+        case 'escape-route': {
+          // Two clicks, and the path between them comes from the building
+          // rather than from the mouse — so no shift-constraint and no
+          // near-first-vertex closing gesture applies here.
+          onEscapeRoutePick?.(point);
           return true;
         }
         case 'text': {
@@ -452,6 +472,7 @@ export function useAnnotation2D({
     }
     return false; // not consumed — let panning proceed
   }, [activeTool, containerRef, screenToDrawing, findSnapPoint, isNearFirstVertex,
+    onEscapeRoutePick,
     applyShiftConstraint, polygonArea2DPoints, addPolygonArea2DPoint, completePolygonArea2D,
     addTextAnnotation2D, setTextAnnotation2DEditing,
     cloudAnnotation2DPoints, addCloudAnnotation2DPoint, completeCloudAnnotation2D,

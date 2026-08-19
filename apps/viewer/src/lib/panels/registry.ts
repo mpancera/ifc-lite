@@ -38,6 +38,7 @@ import {
   Box,
   Ruler,
   Workflow,
+  PackageCheck,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -62,6 +63,7 @@ export type WorkspacePanelId =
   | 'collab'
   | 'layers'
   | 'zones'
+  | 'exports'
   | 'heights'
   | 'graph'
   | 'housekeeping'
@@ -99,6 +101,10 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   { id: 'lens', title: 'Lens rules', short: 'Lens', Icon: Palette, group: 'review', region: 'side' },
   { id: 'clash', title: 'Clash detection', short: 'Clash', Icon: Crosshair, group: 'review', region: 'side' },
   { id: 'extensions', title: 'Extensions', short: 'Extensions', Icon: Puzzle, group: 'author', region: 'side' },
+  // Deliverables: what this project gets issued as, and the batch that
+  // produces them. `work` rather than `author` — it is the step after the
+  // model is authored, not part of authoring it.
+  { id: 'exports', title: 'Exportprodukte', short: 'Exporte', Icon: PackageCheck, group: 'work', region: 'side', prefersWide: true },
   // Bottom-strip panels — launched from the rail, open at the bottom by default.
   { id: 'script', title: 'Script editor', short: 'Script', Icon: Terminal, group: 'work', region: 'bottom', prefersWide: true },
   { id: 'gantt', title: 'Construction schedule', short: 'Schedule', Icon: CalendarRange, group: 'work', region: 'bottom', prefersWide: true },

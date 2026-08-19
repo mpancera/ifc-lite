@@ -85,12 +85,19 @@ export { addScaleStamp } from './scale-stamp.js';
 // Sheet types
 export type {
   ViewportBounds,
+  SheetViewport,
   DrawingSheet,
   SheetCreationOptions,
 } from './sheet-types.js';
 export {
   calculateViewportBounds,
   calculateDrawingTransform,
+  sheetViewports,
+  hasMultipleViews,
+  viewportScale,
+  viewportRotation,
+  placeViewports,
+  calculateViewportTransform,
 } from './sheet-types.js';
 
 // Renderers

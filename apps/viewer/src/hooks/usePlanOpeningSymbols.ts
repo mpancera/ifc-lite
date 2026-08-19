@@ -145,8 +145,15 @@ function cutRingsFor(drawing: Drawing2D | null, entityId: number): Point2D[][] {
   return rings;
 }
 
-/** An element's meshes reduced to the three things a symbol needs. */
-interface OpeningGeometry {
+/**
+ * An element's meshes reduced to the three things a symbol needs.
+ *
+ * Exported because the space graph needs the same measurement: a door's centre
+ * and its axes are what decide which two rooms it joins, and a second
+ * implementation of "where is this door" would be free to disagree with the
+ * symbol drawn on the very same doorway.
+ */
+export interface OpeningGeometry {
   readonly centre: { x: number; y: number };
   readonly extent: LocalExtent;
   /** The opening's extent along the wall, for measuring the wall right there. */
@@ -156,7 +163,7 @@ interface OpeningGeometry {
 }
 
 /** The placement matrix an element's meshes agree on, or `undefined`. */
-function placementOf(meshes: readonly MeshData[]): number[] | undefined {
+export function placementOf(meshes: readonly MeshData[]): number[] | undefined {
   for (const mesh of meshes) {
     if (mesh.localToWorld) return mesh.localToWorld;
   }
@@ -178,7 +185,7 @@ function placementOf(meshes: readonly MeshData[]): number[] | undefined {
  * The extents come from the local box, so the width is measured across the
  * door rather than across the drawing.
  */
-function openingGeometry(meshes: readonly MeshData[], axes: PlanAxes): OpeningGeometry | null {
+export function openingGeometry(meshes: readonly MeshData[], axes: PlanAxes): OpeningGeometry | null {
   const { along, across } = axes;
 
   // Measure ONLY the pieces that are in the wall. Everything else about an

@@ -20,7 +20,11 @@ import {
 export type Drawing2DStatus = 'idle' | 'generating' | 'ready' | 'error';
 
 /** Active 2D annotation tool */
-export type Annotation2DTool = 'none' | 'measure' | 'polygon-area' | 'text' | 'cloud';
+// `escape-route` is a TWO-CLICK tool, unlike the free-hand ones beside it:
+// the author marks a start and a target, and the path between them is
+// derived from the space graph rather than drawn. See
+// `hooks/useEscapeRouteTool.ts`.
+export type Annotation2DTool = 'none' | 'measure' | 'polygon-area' | 'text' | 'cloud' | 'escape-route';
 
 /** Point in 2D drawing coordinates */
 export interface Point2D {

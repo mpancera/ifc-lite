@@ -524,6 +524,16 @@ export {
   calculateViewportBounds,
   calculateDrawingTransform,
 
+  // Multi-view sheets: a sheet may carry several views, each with its own
+  // scale and rotation. `sheetViewports` answers with a list for every sheet,
+  // old or new, so a caller never handles both shapes.
+  sheetViewports,
+  hasMultipleViews,
+  viewportScale,
+  viewportRotation,
+  placeViewports,
+  calculateViewportTransform,
+
   // Scale stamp: the sheet's own record of the scale it was drawn at (#2042).
   // Grows the page around an EXISTING to-scale layout and returns its
   // transform untouched, unlike `calculateDrawingTransform`, which re-fits.
@@ -568,6 +578,7 @@ export type {
   ViewportBounds,
   DrawingSheet,
   SheetCreationOptions,
+  SheetViewport,
 
   // Scale stamp types
   ScaleStampRect,

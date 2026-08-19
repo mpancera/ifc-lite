@@ -65,6 +65,9 @@ import { createHousekeepingSlice, type HousekeepingSlice } from './slices/housek
 import { createTriageSlice, type TriageSlice } from './slices/triageSlice.js';
 import { createProjectSlice, type ProjectSlice } from './slices/projectSlice.js';
 import { createViewModeSlice, type ViewModeSlice } from './slices/viewModeSlice.js';
+import { createPlanProductsSlice, type PlanProductsSlice } from './slices/planProductsSlice.js';
+import { createExportProductsSlice, type ExportProductsSlice } from './slices/exportProductsSlice.js';
+import { createEscapeRoutesSlice, type EscapeRoutesSlice } from './slices/escapeRoutesSlice.js';
 import { invalidateVisibleBasketCache } from './basketVisibleSet.js';
 import {
   endClashScenePresentation,
@@ -195,6 +198,9 @@ export type ViewerState = LoadingSlice &
   TriageSlice &
   ProjectSlice &
   ViewModeSlice &
+  PlanProductsSlice &
+  ExportProductsSlice &
+  EscapeRoutesSlice &
   ExtensionsSlice &
   SourcesSlice & {
     resetViewerState: () => void;
@@ -292,6 +298,9 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
   ...createHousekeepingSlice(...args),
   ...createProjectSlice(...args),
   ...createViewModeSlice(...args),
+  ...createPlanProductsSlice(...args),
+  ...createExportProductsSlice(...args),
+  ...createEscapeRoutesSlice(...args),
   ...createExtensionsSlice(...args),
   ...createSourcesSlice(...args),
 

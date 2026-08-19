@@ -15,6 +15,8 @@ import {
   renderFrame,
   renderTitleBlock,
   calculateDrawingTransform,
+  calculateViewportTransform,
+  sheetViewports,
   exportToDXF,
   type DXFPlanText,
   type DXFRoomPolygon,
@@ -718,36 +720,13 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     // Sheet dimensions in mm
     const paperWidth = activeSheet.paper.widthMm;
     const paperHeight = activeSheet.paper.heightMm;
-    const viewport = activeSheet.viewportBounds;
+    // One pass per view on the sheet. A single-view sheet loops once, over
+    // exactly the bounds and scale it always exported at, so an existing
+    // sheet exports byte-for-byte what it did before.
+    const sheetViews = sheetViewports(activeSheet);
+    // The title block states the PRINCIPAL view's scale — a sheet names one.
+    let principalScaleFactor: number | null = null;
 
-    // Calculate transform to fit drawing into viewport
-    const drawingTransform = calculateDrawingTransform(
-      { minX: bounds.min.x, minY: bounds.min.y, maxX: bounds.max.x, maxY: bounds.max.y },
-      viewport,
-      activeSheet.scale
-    );
-
-    const { translateX, translateY, scaleFactor } = drawingTransform;
-
-    // Axis-specific flipping (matching canvas rendering)
-    // - 'down' (plan view): DON'T flip Y so north (Z+) is up
-    // - 'front' and 'side': flip Y so height (Y+) is up
-    // - 'side': also flip X to look from conventional direction
-    const currentAxis = sectionPlane.axis;
-    const flipY = currentAxis !== 'down';
-    const flipX = currentAxis === 'side';
-
-    // Helper: convert model coordinates to paper mm (matching canvas rendering exactly)
-    const modelToPaper = (x: number, y: number): { x: number; y: number } => {
-      const adjustedX = flipX ? -x : x;
-      const adjustedY = flipY ? -y : y;
-      return {
-        x: adjustedX * scaleFactor + translateX,
-        y: adjustedY * scaleFactor + translateY,
-      };
-    };
-
-    // Start building SVG (paper coordinates in mm)
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg"
      width="${paperWidth}mm"
@@ -758,183 +737,219 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
 
 `;
 
-    // Create clipping path for viewport FIRST (so it can be used by drawing content)
-    svg += `  <defs>
-    <clipPath id="viewport-clip">
-      <rect x="${viewport.x.toFixed(2)}" y="${viewport.y.toFixed(2)}" width="${viewport.width.toFixed(2)}" height="${viewport.height.toFixed(2)}"/>
-    </clipPath>
-  </defs>
+    for (const sheetView of sheetViews) {
+      const viewport = sheetView.bounds;
 
-`;
+      // Calculate transform to fit drawing into viewport, at THIS view's
+      // scale — which is the sheet's for an ordinary single-view sheet, and
+      // its own on a sheet carrying an overview beside a floor plan.
+      const drawingTransform = calculateViewportTransform(
+        { minX: bounds.min.x, minY: bounds.min.y, maxX: bounds.max.x, maxY: bounds.max.y },
+        sheetView,
+        activeSheet
+      );
 
-    // Drawing content FIRST (so frame/title block render on top)
-    svg += `  <g id="drawing-content" clip-path="url(#viewport-clip)">
-`;
+      const { translateX, translateY, scaleFactor } = drawingTransform;
 
-    // Helper to escape XML
-    const escapeXml = (str: string): string => {
-      return str
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&apos;');
-    };
+      // Axis-specific flipping (matching canvas rendering)
+      // - 'down' (plan view): DON'T flip Y so north (Z+) is up
+      // - 'front' and 'side': flip Y so height (Y+) is up
+      // - 'side': also flip X to look from conventional direction
+      const currentAxis = sectionPlane.axis;
+      const flipY = currentAxis !== 'down';
+      const flipX = currentAxis === 'side';
 
-    // Helper to get polygon path in paper coordinates
-    const polygonToPath = (polygon: { outer: { x: number; y: number }[]; holes: { x: number; y: number }[][] }): string => {
-      let path = '';
-      if (polygon.outer.length > 0) {
-        const first = modelToPaper(polygon.outer[0].x, polygon.outer[0].y);
-        path += `M ${first.x.toFixed(4)} ${first.y.toFixed(4)}`;
-        for (let i = 1; i < polygon.outer.length; i++) {
-          const pt = modelToPaper(polygon.outer[i].x, polygon.outer[i].y);
-          path += ` L ${pt.x.toFixed(4)} ${pt.y.toFixed(4)}`;
-        }
-        path += ' Z';
-      }
-      for (const hole of polygon.holes) {
-        if (hole.length > 0) {
-          const holeFirst = modelToPaper(hole[0].x, hole[0].y);
-          path += ` M ${holeFirst.x.toFixed(4)} ${holeFirst.y.toFixed(4)}`;
-          for (let i = 1; i < hole.length; i++) {
-            const pt = modelToPaper(hole[i].x, hole[i].y);
+      // Helper: convert model coordinates to paper mm (matching canvas rendering exactly)
+      const modelToPaper = (x: number, y: number): { x: number; y: number } => {
+        const adjustedX = flipX ? -x : x;
+        const adjustedY = flipY ? -y : y;
+        return {
+          x: adjustedX * scaleFactor + translateX,
+          y: adjustedY * scaleFactor + translateY,
+        };
+      };
+
+      // Start building SVG (paper coordinates in mm)
+
+      // Create clipping path for viewport FIRST (so it can be used by drawing content)
+      svg += `  <defs>
+      <clipPath id="viewport-clip-${sheetView.id}">
+        <rect x="${viewport.x.toFixed(2)}" y="${viewport.y.toFixed(2)}" width="${viewport.width.toFixed(2)}" height="${viewport.height.toFixed(2)}"/>
+      </clipPath>
+    </defs>
+
+  `;
+
+      // Drawing content FIRST (so frame/title block render on top)
+      svg += `  <g id="drawing-content" clip-path="url(#viewport-clip-${sheetView.id})">
+  `;
+
+      // Helper to escape XML
+      const escapeXml = (str: string): string => {
+        return str
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&apos;');
+      };
+
+      // Helper to get polygon path in paper coordinates
+      const polygonToPath = (polygon: { outer: { x: number; y: number }[]; holes: { x: number; y: number }[][] }): string => {
+        let path = '';
+        if (polygon.outer.length > 0) {
+          const first = modelToPaper(polygon.outer[0].x, polygon.outer[0].y);
+          path += `M ${first.x.toFixed(4)} ${first.y.toFixed(4)}`;
+          for (let i = 1; i < polygon.outer.length; i++) {
+            const pt = modelToPaper(polygon.outer[i].x, polygon.outer[i].y);
             path += ` L ${pt.x.toFixed(4)} ${pt.y.toFixed(4)}`;
           }
           path += ' Z';
         }
-      }
-      return path;
-    };
-
-    // DXF reference underlays (issue #1782) - beneath everything. Data
-    // exists only for plan ('down') sections, where the sheet mapping has
-    // no axis flips, so the plain drawing→paper transform matches the canvas.
-    svg += buildDxfUnderlaySvg(
-      dxfUnderlays,
-      (x, y) => ({ x: x * scaleFactor + translateX, y: y * scaleFactor + translateY }),
-      (mm) => mm * 0.3, // mm on paper, matching the model outline convention
-      scaleFactor, // metres -> mm on paper
-      escapeXml,
-    );
-
-    // Render polygon fills
-    svg += '    <g id="polygon-fills">\n';
-    for (const polygon of drawing.cutPolygons) {
-      let fillColor = getFillColorForType(polygon.ifcType);
-      let opacity = 1;
-
-      if (activePresetId === 'preset-3d-colors') {
-        const materialColor = entityColorMap.get(polygon.entityId);
-        if (materialColor) {
-          const r = Math.round(materialColor[0] * 255);
-          const g = Math.round(materialColor[1] * 255);
-          const b = Math.round(materialColor[2] * 255);
-          fillColor = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
-          opacity = materialColor[3];
+        for (const hole of polygon.holes) {
+          if (hole.length > 0) {
+            const holeFirst = modelToPaper(hole[0].x, hole[0].y);
+            path += ` M ${holeFirst.x.toFixed(4)} ${holeFirst.y.toFixed(4)}`;
+            for (let i = 1; i < hole.length; i++) {
+              const pt = modelToPaper(hole[i].x, hole[i].y);
+              path += ` L ${pt.x.toFixed(4)} ${pt.y.toFixed(4)}`;
+            }
+            path += ' Z';
+          }
         }
-      } else if (overridesEnabled) {
-        const elementData: ElementData = {
-          expressId: polygon.entityId,
-          ifcType: polygon.ifcType,
-        };
-        const result = overrideEngine.applyOverrides(elementData);
-        fillColor = result.style.fillColor;
-        opacity = result.style.opacity;
-      }
+        return path;
+      };
 
-      const pathData = polygonToPath(polygon.polygon);
-      if (pathData) {
-        svg += `      <path d="${pathData}" fill="${fillColor}" fill-opacity="${opacity.toFixed(2)}" fill-rule="evenodd" data-entity-id="${polygon.entityId}" data-ifc-type="${escapeXml(polygon.ifcType)}"/>\n`;
-      }
-    }
-    svg += '    </g>\n';
-
-    // Render polygon outlines
-    svg += '    <g id="polygon-outlines">\n';
-    for (const polygon of drawing.cutPolygons) {
-      let strokeColor = '#000000';
-      let lineWeight = 0.5;
-
-      if (overridesEnabled) {
-        const elementData: ElementData = {
-          expressId: polygon.entityId,
-          ifcType: polygon.ifcType,
-        };
-        const result = overrideEngine.applyOverrides(elementData);
-        strokeColor = result.style.strokeColor;
-        lineWeight = result.style.lineWeight;
-      }
-
-      const pathData = polygonToPath(polygon.polygon);
-      if (pathData) {
-        // lineWeight is in mm on paper
-        const svgLineWeight = lineWeight * 0.3; // Scale down for better appearance
-        svg += `      <path d="${pathData}" fill="none" stroke="${strokeColor}" stroke-width="${svgLineWeight.toFixed(4)}" data-entity-id="${polygon.entityId}"/>\n`;
-      }
-    }
-    svg += '    </g>\n';
-
-    // Render drawing lines
-    const lineBounds = drawing.bounds;
-    const lineMargin = Math.max(lineBounds.max.x - lineBounds.min.x, lineBounds.max.y - lineBounds.min.y) * 0.5;
-    const lineMinX = lineBounds.min.x - lineMargin;
-    const lineMaxX = lineBounds.max.x + lineMargin;
-    const lineMinY = lineBounds.min.y - lineMargin;
-    const lineMaxY = lineBounds.max.y + lineMargin;
-
-    svg += '    <g id="drawing-lines">\n';
-    for (const line of drawing.lines) {
-      if (line.category === 'cut') continue;
-      if (!displayOptions.showHiddenLines && line.visibility === 'hidden') continue;
-
-      const { start, end } = line.line;
-      if (!isFinite(start.x) || !isFinite(start.y) || !isFinite(end.x) || !isFinite(end.y)) continue;
-      if (start.x < lineMinX || start.x > lineMaxX || start.y < lineMinY || start.y > lineMaxY ||
-        end.x < lineMinX || end.x > lineMaxX || end.y < lineMinY || end.y > lineMaxY) continue;
-
-      let strokeColor = '#000000';
-      let lineWidth = 0.25;
-      let dashArray = '';
-
-      switch (line.category) {
-        case 'projection': lineWidth = 0.25; break;
-        case 'hidden': lineWidth = 0.18; strokeColor = '#666666'; dashArray = '1 0.5'; break;
-        case 'silhouette': lineWidth = 0.35; break;
-        case 'crease': lineWidth = 0.18; break;
-        case 'boundary': lineWidth = 0.25; break;
-        case 'annotation': lineWidth = 0.13; break;
-      }
-
-      if (line.visibility === 'hidden') {
-        strokeColor = '#888888';
-        dashArray = '1 0.5';
-        lineWidth *= 0.7;
-      }
-
-      const paperStart = modelToPaper(start.x, start.y);
-      const paperEnd = modelToPaper(end.x, end.y);
-
-      // lineWidth is in mm on paper
-      const svgLineWidth = lineWidth * 0.3;
-      const dashAttr = dashArray ? ` stroke-dasharray="${dashArray}"` : '';
-      svg += `      <line x1="${paperStart.x.toFixed(4)}" y1="${paperStart.y.toFixed(4)}" x2="${paperEnd.x.toFixed(4)}" y2="${paperEnd.y.toFixed(4)}" stroke="${strokeColor}" stroke-width="${svgLineWidth.toFixed(4)}"${dashAttr}/>\n`;
-    }
-    svg += '    </g>\n';
-
-    // POINT-CLOUD SCAN OVERLAY (issue #1805) — on top, inside the clipped
-    // drawing-content group like everything else. `modelToPaper` already
-    // applies the same flip + scale/translate the rest of the sheet uses.
-    if (displayOptions.showScanSection && displayOptions.scanSectionIncludeInExport) {
-      svg += buildScanSectionSvg(
-        scanSection.points,
-        modelToPaper,
-        0.3, // mm on paper
-        displayOptions.scanSectionOpacity,
+      // DXF reference underlays (issue #1782) - beneath everything. Data
+      // exists only for plan ('down') sections, where the sheet mapping has
+      // no axis flips, so the plain drawing→paper transform matches the canvas.
+      svg += buildDxfUnderlaySvg(
+        dxfUnderlays,
+        (x, y) => ({ x: x * scaleFactor + translateX, y: y * scaleFactor + translateY }),
+        (mm) => mm * 0.3, // mm on paper, matching the model outline convention
+        scaleFactor, // metres -> mm on paper
+        escapeXml,
       );
-    }
 
-    svg += '  </g>\n\n';
+      // Render polygon fills
+      svg += '    <g id="polygon-fills">\n';
+      for (const polygon of drawing.cutPolygons) {
+        let fillColor = getFillColorForType(polygon.ifcType);
+        let opacity = 1;
+
+        if (activePresetId === 'preset-3d-colors') {
+          const materialColor = entityColorMap.get(polygon.entityId);
+          if (materialColor) {
+            const r = Math.round(materialColor[0] * 255);
+            const g = Math.round(materialColor[1] * 255);
+            const b = Math.round(materialColor[2] * 255);
+            fillColor = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+            opacity = materialColor[3];
+          }
+        } else if (overridesEnabled) {
+          const elementData: ElementData = {
+            expressId: polygon.entityId,
+            ifcType: polygon.ifcType,
+          };
+          const result = overrideEngine.applyOverrides(elementData);
+          fillColor = result.style.fillColor;
+          opacity = result.style.opacity;
+        }
+
+        const pathData = polygonToPath(polygon.polygon);
+        if (pathData) {
+          svg += `      <path d="${pathData}" fill="${fillColor}" fill-opacity="${opacity.toFixed(2)}" fill-rule="evenodd" data-entity-id="${polygon.entityId}" data-ifc-type="${escapeXml(polygon.ifcType)}"/>\n`;
+        }
+      }
+      svg += '    </g>\n';
+
+      // Render polygon outlines
+      svg += '    <g id="polygon-outlines">\n';
+      for (const polygon of drawing.cutPolygons) {
+        let strokeColor = '#000000';
+        let lineWeight = 0.5;
+
+        if (overridesEnabled) {
+          const elementData: ElementData = {
+            expressId: polygon.entityId,
+            ifcType: polygon.ifcType,
+          };
+          const result = overrideEngine.applyOverrides(elementData);
+          strokeColor = result.style.strokeColor;
+          lineWeight = result.style.lineWeight;
+        }
+
+        const pathData = polygonToPath(polygon.polygon);
+        if (pathData) {
+          // lineWeight is in mm on paper
+          const svgLineWeight = lineWeight * 0.3; // Scale down for better appearance
+          svg += `      <path d="${pathData}" fill="none" stroke="${strokeColor}" stroke-width="${svgLineWeight.toFixed(4)}" data-entity-id="${polygon.entityId}"/>\n`;
+        }
+      }
+      svg += '    </g>\n';
+
+      // Render drawing lines
+      const lineBounds = drawing.bounds;
+      const lineMargin = Math.max(lineBounds.max.x - lineBounds.min.x, lineBounds.max.y - lineBounds.min.y) * 0.5;
+      const lineMinX = lineBounds.min.x - lineMargin;
+      const lineMaxX = lineBounds.max.x + lineMargin;
+      const lineMinY = lineBounds.min.y - lineMargin;
+      const lineMaxY = lineBounds.max.y + lineMargin;
+
+      svg += '    <g id="drawing-lines">\n';
+      for (const line of drawing.lines) {
+        if (line.category === 'cut') continue;
+        if (!displayOptions.showHiddenLines && line.visibility === 'hidden') continue;
+
+        const { start, end } = line.line;
+        if (!isFinite(start.x) || !isFinite(start.y) || !isFinite(end.x) || !isFinite(end.y)) continue;
+        if (start.x < lineMinX || start.x > lineMaxX || start.y < lineMinY || start.y > lineMaxY ||
+          end.x < lineMinX || end.x > lineMaxX || end.y < lineMinY || end.y > lineMaxY) continue;
+
+        let strokeColor = '#000000';
+        let lineWidth = 0.25;
+        let dashArray = '';
+
+        switch (line.category) {
+          case 'projection': lineWidth = 0.25; break;
+          case 'hidden': lineWidth = 0.18; strokeColor = '#666666'; dashArray = '1 0.5'; break;
+          case 'silhouette': lineWidth = 0.35; break;
+          case 'crease': lineWidth = 0.18; break;
+          case 'boundary': lineWidth = 0.25; break;
+          case 'annotation': lineWidth = 0.13; break;
+        }
+
+        if (line.visibility === 'hidden') {
+          strokeColor = '#888888';
+          dashArray = '1 0.5';
+          lineWidth *= 0.7;
+        }
+
+        const paperStart = modelToPaper(start.x, start.y);
+        const paperEnd = modelToPaper(end.x, end.y);
+
+        // lineWidth is in mm on paper
+        const svgLineWidth = lineWidth * 0.3;
+        const dashAttr = dashArray ? ` stroke-dasharray="${dashArray}"` : '';
+        svg += `      <line x1="${paperStart.x.toFixed(4)}" y1="${paperStart.y.toFixed(4)}" x2="${paperEnd.x.toFixed(4)}" y2="${paperEnd.y.toFixed(4)}" stroke="${strokeColor}" stroke-width="${svgLineWidth.toFixed(4)}"${dashAttr}/>\n`;
+      }
+      svg += '    </g>\n';
+
+      // POINT-CLOUD SCAN OVERLAY (issue #1805) — on top, inside the clipped
+      // drawing-content group like everything else. `modelToPaper` already
+      // applies the same flip + scale/translate the rest of the sheet uses.
+      if (displayOptions.showScanSection && displayOptions.scanSectionIncludeInExport) {
+        svg += buildScanSectionSvg(
+          scanSection.points,
+          modelToPaper,
+          0.3, // mm on paper
+          displayOptions.scanSectionOpacity,
+        );
+      }
+
+      svg += '  </g>\n\n';
+      if (principalScaleFactor === null) principalScaleFactor = scaleFactor;
+    }
 
     // Render frame (on top of drawing content)
     const frameResult = renderFrame(activeSheet.paper, activeSheet.frame);
@@ -948,7 +963,7 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
       scaleBar: activeSheet.scaleBar,
       northArrow: activeSheet.northArrow,
       scale: activeSheet.scale,
-      effectiveScaleFactor: scaleFactor,
+      effectiveScaleFactor: principalScaleFactor ?? 1,
     };
     const titleBlockResult = renderTitleBlock(
       activeSheet.titleBlock,

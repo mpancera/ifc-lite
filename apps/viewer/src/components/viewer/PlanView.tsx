@@ -64,12 +64,18 @@ import { useDrawingExport } from '@/hooks/useDrawingExport';
 import { useSymbolicAnnotationsForDrawing } from '@/hooks/useSymbolicAnnotations';
 import { useDxfUnderlaysForDrawing, dxfWorldShift, dxfUnderlayDrawingBounds, useDxfMapToWorldTransform } from '@/hooks/useDxfUnderlay';
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
+import { useEscapeRouteTool } from '@/hooks/useEscapeRouteTool';
 import { usePlanRoomLabels } from '@/hooks/usePlanRoomLabels';
 import { roomPlanLabel } from '@/lib/plan/roomLabels';
 import {
   planAnnotations, planAnnotationIdsToReplace, describeAnnotationSet,
+  textHeightMetres,
   type PlanAnnotationKind,
 } from '@/lib/plan/planAnnotations';
+import {
+  escapeRouteAnnotations, escapeRouteIdsToReplace, describeEscapeRouteSet,
+  type EscapeRouteAnnotationKind,
+} from '@/lib/plan/escapeRoutes';
 import { pixelsPerMetreForScale, scaleDenominator } from '@/lib/plan/planChrome';
 import { usePlanOpeningSymbols } from '@/hooks/usePlanOpeningSymbols';
 import { usePlanDeviceMarks } from '@/hooks/usePlanDeviceMarks';
@@ -305,6 +311,21 @@ export function PlanView({
   // appeared only once you had already asked to see them would be useless.
   const roomLabels = usePlanRoomLabels({
     enabled: active,
+    geometryResult,
+    dataStore: storeyDataStore,
+    modelId: storeyModelId,
+    storeyId: storey?.expressId ?? null,
+  });
+
+  // ── Escape-route routing ────────────────────────────────────────────────
+  // The space graph is built only while the tool is selected: it walks every
+  // mesh on the storey, which is wasted work on a plan nobody is routing on.
+  const escapeRoutes2D = useViewerStore((s) => s.escapeRoutes2D);
+  const escapeRouteStart = useViewerStore((s) => s.escapeRouteStart);
+  const cancelEscapeRoute = useViewerStore((s) => s.cancelEscapeRoute);
+
+  const escapeRouteTool = useEscapeRouteTool({
+    enabled: active && annotation2DActiveTool === 'escape-route',
     geometryResult,
     dataStore: storeyDataStore,
     modelId: storeyModelId,
@@ -590,6 +611,8 @@ export function PlanView({
     measure2DResults, polygonArea2DResults,
     selectedAnnotation2D, setSelectedAnnotation2D, deleteSelectedAnnotation2D,
     moveAnnotation2D, setAnnotation2DCursorPos, setMeasure2DSnapPoint,
+    onEscapeRoutePick: escapeRouteTool.pick,
+    cancelEscapeRoute,
   });
 
   // Centre an underlay on the generated drawing. Same derivation the 2D Section
@@ -773,6 +796,76 @@ export function PlanView({
     toast.success(`${describeAnnotationSet(set)} übernommen${replaced}`);
   }, [storey, storeyModelId, storeyDataStore, roomLabels, doorLabels, openingSymbols,
       viewTransform.scale, ensureMutationView, addAnnotation, removeEntity]);
+
+  /**
+   * Write the drawn escape routes into the model as `IfcAnnotation`.
+   *
+   * The same shape as `commitPlanAnnotations` above, and deliberately a
+   * SEPARATE action with its own markers: committing room labels must never
+   * sweep away somebody's routes. A label can be regenerated from the model at
+   * any time; a route is something a person drew, and nothing else in the file
+   * can reproduce it.
+   *
+   * Routes stay in the session until this runs. That is what makes them
+   * durable — and why the button says "übernehmen" rather than "speichern".
+   */
+  const commitEscapeRoutes = useCallback(() => {
+    if (!storey || !storeyModelId) return;
+    if (!ensureMutationView(storeyModelId)) return;
+
+    if (escapeRoutes2D.length === 0) {
+      toast.info('Keine Fluchtwege gezeichnet.');
+      return;
+    }
+
+    const scale = scaleDenominator(viewTransform.scale);
+    const set = escapeRouteAnnotations({
+      routes: escapeRoutes2D,
+      scaleDenominator: scale,
+      textHeightMetres: textHeightMetres(scale),
+    });
+
+    const kinds: EscapeRouteAnnotationKind[] = ['route', 'arrow', 'label'];
+    const params = kinds.flatMap((kind) => set[kind]);
+    if (params.length === 0) {
+      toast.info('Nichts zu übernehmen.');
+      return;
+    }
+
+    // Both sources, for the reason `commitPlanAnnotations` gives: a committed
+    // annotation lives in the overlay until export and in the source after.
+    const store = storeyDataStore;
+    const overlay = useViewerStore.getState().mutationViews.get(storeyModelId);
+    const candidates: { expressId: number; attributes?: readonly unknown[] }[] = [];
+    for (const [type, ids] of store?.entityIndex?.byType ?? []) {
+      if (type.toUpperCase() !== 'IFCANNOTATION') continue;
+      for (const id of ids) {
+        candidates.push({ expressId: id, attributes: store?.getEntity?.(id)?.attributes });
+      }
+    }
+    for (const entity of overlay?.getNewEntities?.() ?? []) {
+      if (entity.type.toUpperCase() !== 'IFCANNOTATION') continue;
+      candidates.push({ expressId: entity.expressId, attributes: entity.attributes });
+    }
+
+    const stale = escapeRouteIdsToReplace(candidates, kinds);
+    let removed = 0;
+    for (const id of stale) if (removeEntity(storeyModelId, id)) removed += 1;
+
+    let written = 0;
+    for (const param of params) {
+      const result = addAnnotation(storeyModelId, storey.expressId, param);
+      if (!('error' in result)) written += 1;
+    }
+
+    if (written === 0) {
+      toast.error('Übernahme fehlgeschlagen — nichts geschrieben.');
+      return;
+    }
+    const replaced = removed > 0 ? ` (${removed} ersetzt)` : '';
+    toast.success(`${describeEscapeRouteSet(set)} übernommen${replaced}`);
+  }, [storey, storeyModelId, storeyDataStore, escapeRoutes2D, viewTransform.scale,
+      ensureMutationView, addAnnotation, removeEntity]);
 
   const { handleExportSVG, handleExportDXF, handlePrint } = useDrawingExport({
     drawing, displayOptions, sectionPlane, activePresetId,
@@ -1098,6 +1191,8 @@ export function PlanView({
           annotation2DActiveTool={annotation2DActiveTool}
           annotation2DCursorPos={annotation2DCursorPos}
           polygonAreaPoints={polygonArea2DPoints}
+          escapeRoutes={escapeRoutes2D}
+          escapeRouteStart={escapeRouteStart}
           polygonAreaResults={polygonArea2DResults}
           textAnnotations={textAnnotations2D}
           textAnnotationEditing={textAnnotation2DEditing}
@@ -1321,6 +1416,8 @@ export function PlanView({
           onCommitAnnotation={commitSelectedAnnotation}
           doorLabelCount={doorLabels.length}
           onCommitPlanAnnotations={commitPlanAnnotations}
+          onCommitEscapeRoutes={commitEscapeRoutes}
+          escapeRouteCount={escapeRoutes2D.length}
           onClearAnnotations={() => { clearAllAnnotations2D(); clearMeasure2DResults(); }}
           pixelsPerMetre={viewTransform.scale}
           onSetScale={setPlanScale}

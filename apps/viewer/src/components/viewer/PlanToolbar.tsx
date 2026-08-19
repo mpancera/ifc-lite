@@ -26,7 +26,8 @@ import React from 'react';
 import {
   Box, Shapes, Tag, Layers, PenTool, FileText, ZoomIn, ZoomOut,
   Maximize2, Download, FileDown, Printer, RefreshCw, Ruler,
-  Hexagon, Type, Cloud, Trash2, FilePlus2, DoorOpen, Radio, Stamp,
+  Hexagon,
+  LogOut, Type, Cloud, Trash2, FilePlus2, DoorOpen, Radio, Stamp,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -91,6 +92,10 @@ export interface PlanToolbarProps {
   doorLabelCount: number;
   /** Write the plan's own writing and graphics into the model. */
   onCommitPlanAnnotations: (kinds: readonly PlanAnnotationKind[]) => void;
+  /** Write the drawn escape routes into the model. */
+  onCommitEscapeRoutes: () => void;
+  /** How many routes are drawn, for the menu entry. */
+  escapeRouteCount: number;
 
   /** Screen pixels per drawing metre, for the scale readout. */
   pixelsPerMetre: number;
@@ -150,6 +155,7 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
     settingsOpen, onToggleSettings, dxfOpen, onToggleDxf,
     activeTool, onSetTool, hasAnnotations, onClearAnnotations,
     canCommitAnnotation, onCommitAnnotation, doorLabelCount, onCommitPlanAnnotations,
+    onCommitEscapeRoutes, escapeRouteCount,
     pixelsPerMetre, onSetScale, onZoomIn, onZoomOut, onFitToView,
     onExportSVG, onExportDXF, onPrint, onRegenerate, busy, children,
   } = props;
@@ -307,6 +313,13 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
         <Hexagon className="h-4 w-4" />
       </ToolButton>
       <ToolButton
+        active={activeTool === 'escape-route'}
+        onClick={() => onSetTool(activeTool === 'escape-route' ? 'none' : 'escape-route')}
+        title="Fluchtweg: Start klicken, dann Ziel — der Weg folgt Räumen und Türen"
+      >
+        <LogOut className="h-4 w-4" />
+      </ToolButton>
+      <ToolButton
         active={activeTool === 'text'}
         onClick={() => onSetTool(activeTool === 'text' ? 'none' : 'text')}
         title="Textfeld"
@@ -373,6 +386,16 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
             onClick={() => onCommitPlanAnnotations(['openingSymbol'])}
           >
             Plangrafik übernehmen{openingCount > 0 ? ` (${openingCount})` : ''}
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          {/* Its own entry, not folded into "Alles übernehmen": routes carry
+              their own markers, and a person committing labels must not have
+              their routes rewritten as a side effect. */}
+          <DropdownMenuItem
+            disabled={escapeRouteCount === 0}
+            onClick={onCommitEscapeRoutes}
+          >
+            Fluchtwege übernehmen{escapeRouteCount > 0 ? ` (${escapeRouteCount})` : ''}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem

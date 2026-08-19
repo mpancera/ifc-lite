@@ -6,6 +6,8 @@ import React, { useRef, useState, useEffect } from 'react';
 import {
   GraphicOverrideEngine,
   calculateDrawingTransform,
+  calculateViewportTransform,
+  sheetViewports,
   type Drawing2D,
   type ElementData,
 } from '@ifc-lite/drawing-2d';
@@ -398,6 +400,14 @@ interface Drawing2DCanvasProps {
   annotation2DActiveTool?: Annotation2DTool;
   annotation2DCursorPos?: Point2D | null;
   polygonAreaPoints?: Point2D[];
+  /** Escape routes drawn this session, with their walked lengths. */
+  escapeRoutes?: readonly {
+    id: string;
+    points: readonly Point2D[];
+    length: number;
+  }[];
+  /** The first click of a route in progress. */
+  escapeRouteStart?: Point2D | null;
   polygonAreaResults?: PolygonArea2DResult[];
   textAnnotations?: TextAnnotation2D[];
   textAnnotationEditing?: string | null;
@@ -467,6 +477,8 @@ export function Drawing2DCanvas({
   annotation2DActiveTool = 'none',
   annotation2DCursorPos = null,
   polygonAreaPoints = [],
+  escapeRoutes = [],
+  escapeRouteStart = null,
   polygonAreaResults = [],
   textAnnotations = [],
   textAnnotationEditing = null,
@@ -532,7 +544,6 @@ export function Drawing2DCanvas({
       const paper = activeSheet.paper;
       const frame = activeSheet.frame;
       const titleBlock = activeSheet.titleBlock;
-      const viewport = activeSheet.viewportBounds;
       const scaleBar = activeSheet.scaleBar;
       const northArrow = activeSheet.northArrow;
 
@@ -765,267 +776,287 @@ export function Drawing2DCanvas({
         }
       }
 
-      // ─────────────────────────────────────────────────────────────────────
-      // 4. Clip to viewport and draw model content
-      // ─────────────────────────────────────────────────────────────────────
-      ctx.save();
+      // Every view on the sheet, each with its own scale and rotation. An
+      // ordinary single-view sheet yields exactly one, with exactly the
+      // bounds and scale it always drew at, so nothing about it moves.
+      const sheetViews = sheetViewports(activeSheet);
+      // The scale bar and the printed scale below report the PRINCIPAL view:
+      // a sheet states one scale, and on a multi-view sheet that is the
+      // scale of the drawing it is named after.
+      let principalTransform: { translateX: number; translateY: number; scaleFactor: number } | null = null;
 
-      // Create clip region for viewport
-      ctx.beginPath();
-      ctx.rect(
-        mmToScreenX(viewport.x),
-        mmToScreenY(viewport.y),
-        mmToScreen(viewport.width),
-        mmToScreen(viewport.height)
-      );
-      ctx.clip();
+      for (const sheetView of sheetViews) {
+        const viewport = sheetView.bounds;
+        // ─────────────────────────────────────────────────────────────────────
+        // 4. Clip to viewport and draw model content
+        // ─────────────────────────────────────────────────────────────────────
+        ctx.save();
 
-      // Calculate drawing transform to fit in viewport
-      const drawingBounds = {
-        minX: drawing.bounds.min.x,
-        minY: drawing.bounds.min.y,
-        maxX: drawing.bounds.max.x,
-        maxY: drawing.bounds.max.y,
-      };
+        // Create clip region for viewport
+        ctx.beginPath();
+        ctx.rect(
+          mmToScreenX(viewport.x),
+          mmToScreenY(viewport.y),
+          mmToScreen(viewport.width),
+          mmToScreen(viewport.height)
+        );
+        ctx.clip();
 
-      // Axis-specific flipping
-      const flipY = sectionAxis !== 'down';
-      const flipX = sectionAxis === 'side';
-
-      // Use cached transform when pinned, otherwise calculate new one
-      let drawingTransform: { translateX: number; translateY: number; scaleFactor: number };
-
-      if (isPinned && cachedSheetTransformRef?.current) {
-        // Use cached transform to keep model fixed in place
-        drawingTransform = cachedSheetTransformRef.current;
-      } else {
-        // Calculate new transform
-        const baseTransform = calculateDrawingTransform(drawingBounds, viewport, activeSheet.scale);
-
-        // Adjust for axis-specific flipping
-        // calculateDrawingTransform assumes Y-flip (uses maxY), but for 'down' view we don't flip Y
-        drawingTransform = {
-          ...baseTransform,
-          translateY: flipY
-            ? baseTransform.translateY
-            : baseTransform.translateY - (drawingBounds.maxY + drawingBounds.minY) * baseTransform.scaleFactor,
+        // Calculate drawing transform to fit in viewport
+        const drawingBounds = {
+          minX: drawing.bounds.min.x,
+          minY: drawing.bounds.min.y,
+          maxX: drawing.bounds.max.x,
+          maxY: drawing.bounds.max.y,
         };
 
-        // Cache the transform for pinned mode
-        if (cachedSheetTransformRef) {
-          cachedSheetTransformRef.current = drawingTransform;
+        // Axis-specific flipping
+        const flipY = sectionAxis !== 'down';
+        const flipX = sectionAxis === 'side';
+
+        // Use cached transform when pinned, otherwise calculate new one
+        let drawingTransform: { translateX: number; translateY: number; scaleFactor: number };
+
+        // The cache holds ONE transform, so it can only serve a sheet that has
+        // one view. On a multi-view sheet it would pin every view to the first
+        // one's scale — an overview drawn at the floor plan's 1:200. Pinning
+        // then recomputes instead, which costs a fit calculation per frame and
+        // is correct, rather than being cheap and wrong.
+        if (isPinned && sheetViews.length === 1 && cachedSheetTransformRef?.current) {
+          // Use cached transform to keep model fixed in place
+          drawingTransform = cachedSheetTransformRef.current;
+        } else {
+          // Calculate new transform
+          const baseTransform = calculateViewportTransform(drawingBounds, sheetView, activeSheet);
+
+          // Adjust for axis-specific flipping
+          // calculateDrawingTransform assumes Y-flip (uses maxY), but for 'down' view we don't flip Y
+          drawingTransform = {
+            ...baseTransform,
+            translateY: flipY
+              ? baseTransform.translateY
+              : baseTransform.translateY - (drawingBounds.maxY + drawingBounds.minY) * baseTransform.scaleFactor,
+          };
+
+          // Cache the transform for pinned mode. Single-view sheets only, for
+          // the reason above: storing the last of several views would hand
+          // that one's scale to every view on the next frame.
+          if (cachedSheetTransformRef && sheetViews.length === 1) {
+            cachedSheetTransformRef.current = drawingTransform;
+          }
         }
-      }
 
-      // Apply combined transform: sheet mm -> screen, then drawing coords -> sheet mm
-      // Drawing coord (meters) * scaleFactor = sheet mm, + translateX/Y
-      // Then sheet mm -> screen via mmToScreenX/Y
-      const drawModelContent = () => {
-        // Determine flip behavior based on section axis
-        // - 'down' (plan view): DON'T flip Y so north (Z+) is up
-        // - 'front' and 'side': flip Y so height (Y+) is up
-        // - 'side': also flip X to look from conventional direction
+        // Apply combined transform: sheet mm -> screen, then drawing coords -> sheet mm
+        // Drawing coord (meters) * scaleFactor = sheet mm, + translateX/Y
+        // Then sheet mm -> screen via mmToScreenX/Y
+        const drawModelContent = () => {
+          // Determine flip behavior based on section axis
+          // - 'down' (plan view): DON'T flip Y so north (Z+) is up
+          // - 'front' and 'side': flip Y so height (Y+) is up
+          // - 'side': also flip X to look from conventional direction
 
-        // For each polygon/line, transform from model coords to screen coords
-        const modelToScreen = (x: number, y: number) => {
-          // Apply axis-specific flipping
-          const adjustedX = flipX ? -x : x;
-          const adjustedY = flipY ? -y : y;
-          // Model to sheet mm
-          const sheetX = adjustedX * drawingTransform.scaleFactor + drawingTransform.translateX;
-          const sheetY = adjustedY * drawingTransform.scaleFactor + drawingTransform.translateY;
-          // Sheet mm to screen
-          return { x: mmToScreenX(sheetX), y: mmToScreenY(sheetY) };
-        };
-
-        // Line width in screen pixels (convert mm to screen)
-        const mmLineToScreen = (mmWeight: number) => Math.max(0.5, mmToScreen(mmWeight / drawingTransform.scaleFactor * 0.001));
-
-        // DXF reference underlays render first, beneath the cut geometry
-        // (issue #1782). Data is pre-mapped drawing space and exists only
-        // for plan ('down') sections, where the sheet mapping has no
-        // axis flips — so the plain drawing→paper transform applies.
-        drawDxfUnderlaysScreenSpace(
-          ctx,
-          dxfUnderlays,
-          (x, y) => {
-            const sheetX = x * drawingTransform.scaleFactor + drawingTransform.translateX;
-            const sheetY = y * drawingTransform.scaleFactor + drawingTransform.translateY;
+          // For each polygon/line, transform from model coords to screen coords
+          const modelToScreen = (x: number, y: number) => {
+            // Apply axis-specific flipping
+            const adjustedX = flipX ? -x : x;
+            const adjustedY = flipY ? -y : y;
+            // Model to sheet mm
+            const sheetX = adjustedX * drawingTransform.scaleFactor + drawingTransform.translateX;
+            const sheetY = adjustedY * drawingTransform.scaleFactor + drawingTransform.translateY;
+            // Sheet mm to screen
             return { x: mmToScreenX(sheetX), y: mmToScreenY(sheetY) };
-          },
-          (mm) => Math.max(0.5, mmToScreen(mm) * 0.3),
-          (worldHeight) => worldHeight * drawingTransform.scaleFactor * transform.scale,
-        );
+          };
 
-        // Fill cut polygons
-        for (const polygon of drawing.cutPolygons) {
-          let fillColor = getFillColorForType(polygon.ifcType);
-          let opacity = 1;
+          // Line width in screen pixels (convert mm to screen)
+          const mmLineToScreen = (mmWeight: number) => Math.max(0.5, mmToScreen(mmWeight / drawingTransform.scaleFactor * 0.001));
 
-          if (useIfcMaterials) {
-            // Per-layer fill (material-layer wall/slab) wins over the per-entity
-          // colour, so each sliced layer paints with its own IfcMaterial colour
-          // instead of one colour for the whole element. Falls back to the
-          // per-entity map for ordinary single-material elements.
-          const materialColor = polygon.color ?? entityColorMap.get(polygon.entityId);
-            if (materialColor) {
-              const r = Math.round(materialColor[0] * 255);
-              const g = Math.round(materialColor[1] * 255);
-              const b = Math.round(materialColor[2] * 255);
-              fillColor = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
-              opacity = materialColor[3];
+          // DXF reference underlays render first, beneath the cut geometry
+          // (issue #1782). Data is pre-mapped drawing space and exists only
+          // for plan ('down') sections, where the sheet mapping has no
+          // axis flips — so the plain drawing→paper transform applies.
+          drawDxfUnderlaysScreenSpace(
+            ctx,
+            dxfUnderlays,
+            (x, y) => {
+              const sheetX = x * drawingTransform.scaleFactor + drawingTransform.translateX;
+              const sheetY = y * drawingTransform.scaleFactor + drawingTransform.translateY;
+              return { x: mmToScreenX(sheetX), y: mmToScreenY(sheetY) };
+            },
+            (mm) => Math.max(0.5, mmToScreen(mm) * 0.3),
+            (worldHeight) => worldHeight * drawingTransform.scaleFactor * transform.scale,
+          );
+
+          // Fill cut polygons
+          for (const polygon of drawing.cutPolygons) {
+            let fillColor = getFillColorForType(polygon.ifcType);
+            let opacity = 1;
+
+            if (useIfcMaterials) {
+              // Per-layer fill (material-layer wall/slab) wins over the per-entity
+            // colour, so each sliced layer paints with its own IfcMaterial colour
+            // instead of one colour for the whole element. Falls back to the
+            // per-entity map for ordinary single-material elements.
+            const materialColor = polygon.color ?? entityColorMap.get(polygon.entityId);
+              if (materialColor) {
+                const r = Math.round(materialColor[0] * 255);
+                const g = Math.round(materialColor[1] * 255);
+                const b = Math.round(materialColor[2] * 255);
+                fillColor = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+                opacity = materialColor[3];
+              }
+            } else if (overridesEnabled) {
+              const elementData: ElementData = {
+                expressId: polygon.entityId,
+                ifcType: polygon.ifcType,
+              };
+              const result = overrideEngine.applyOverrides(elementData);
+              fillColor = result.style.fillColor;
+              opacity = result.style.opacity;
             }
-          } else if (overridesEnabled) {
-            const elementData: ElementData = {
-              expressId: polygon.entityId,
-              ifcType: polygon.ifcType,
-            };
-            const result = overrideEngine.applyOverrides(elementData);
-            fillColor = result.style.fillColor;
-            opacity = result.style.opacity;
-          }
 
-          ctx.globalAlpha = opacity;
-          ctx.fillStyle = fillColor;
-          ctx.beginPath();
+            ctx.globalAlpha = opacity;
+            ctx.fillStyle = fillColor;
+            ctx.beginPath();
 
-          if (polygon.polygon.outer.length > 0) {
-            const first = modelToScreen(polygon.polygon.outer[0].x, polygon.polygon.outer[0].y);
-            ctx.moveTo(first.x, first.y);
-            for (let i = 1; i < polygon.polygon.outer.length; i++) {
-              const pt = modelToScreen(polygon.polygon.outer[i].x, polygon.polygon.outer[i].y);
-              ctx.lineTo(pt.x, pt.y);
-            }
-            ctx.closePath();
+            if (polygon.polygon.outer.length > 0) {
+              const first = modelToScreen(polygon.polygon.outer[0].x, polygon.polygon.outer[0].y);
+              ctx.moveTo(first.x, first.y);
+              for (let i = 1; i < polygon.polygon.outer.length; i++) {
+                const pt = modelToScreen(polygon.polygon.outer[i].x, polygon.polygon.outer[i].y);
+                ctx.lineTo(pt.x, pt.y);
+              }
+              ctx.closePath();
 
-            for (const hole of polygon.polygon.holes) {
-              if (hole.length > 0) {
-                const holeFirst = modelToScreen(hole[0].x, hole[0].y);
-                ctx.moveTo(holeFirst.x, holeFirst.y);
-                for (let i = 1; i < hole.length; i++) {
-                  const pt = modelToScreen(hole[i].x, hole[i].y);
-                  ctx.lineTo(pt.x, pt.y);
+              for (const hole of polygon.polygon.holes) {
+                if (hole.length > 0) {
+                  const holeFirst = modelToScreen(hole[0].x, hole[0].y);
+                  ctx.moveTo(holeFirst.x, holeFirst.y);
+                  for (let i = 1; i < hole.length; i++) {
+                    const pt = modelToScreen(hole[i].x, hole[i].y);
+                    ctx.lineTo(pt.x, pt.y);
+                  }
+                  ctx.closePath();
                 }
-                ctx.closePath();
               }
             }
-          }
-          ctx.fill('evenodd');
-          ctx.globalAlpha = 1;
-        }
-
-        // Stroke polygon outlines
-        for (const polygon of drawing.cutPolygons) {
-          let strokeColor = '#000000';
-          let lineWeight = 0.5;
-
-          if (overridesEnabled) {
-            const elementData: ElementData = {
-              expressId: polygon.entityId,
-              ifcType: polygon.ifcType,
-            };
-            const result = overrideEngine.applyOverrides(elementData);
-            strokeColor = result.style.strokeColor;
-            lineWeight = result.style.lineWeight;
+            ctx.fill('evenodd');
+            ctx.globalAlpha = 1;
           }
 
-          ctx.strokeStyle = strokeColor;
-          ctx.lineWidth = Math.max(0.5, mmToScreen(lineWeight) * 0.3);
-          ctx.beginPath();
+          // Stroke polygon outlines
+          for (const polygon of drawing.cutPolygons) {
+            let strokeColor = '#000000';
+            let lineWeight = 0.5;
 
-          if (polygon.polygon.outer.length > 0) {
-            const first = modelToScreen(polygon.polygon.outer[0].x, polygon.polygon.outer[0].y);
-            ctx.moveTo(first.x, first.y);
-            for (let i = 1; i < polygon.polygon.outer.length; i++) {
-              const pt = modelToScreen(polygon.polygon.outer[i].x, polygon.polygon.outer[i].y);
-              ctx.lineTo(pt.x, pt.y);
+            if (overridesEnabled) {
+              const elementData: ElementData = {
+                expressId: polygon.entityId,
+                ifcType: polygon.ifcType,
+              };
+              const result = overrideEngine.applyOverrides(elementData);
+              strokeColor = result.style.strokeColor;
+              lineWeight = result.style.lineWeight;
             }
-            ctx.closePath();
 
-            for (const hole of polygon.polygon.holes) {
-              if (hole.length > 0) {
-                const holeFirst = modelToScreen(hole[0].x, hole[0].y);
-                ctx.moveTo(holeFirst.x, holeFirst.y);
-                for (let i = 1; i < hole.length; i++) {
-                  const pt = modelToScreen(hole[i].x, hole[i].y);
-                  ctx.lineTo(pt.x, pt.y);
+            ctx.strokeStyle = strokeColor;
+            ctx.lineWidth = Math.max(0.5, mmToScreen(lineWeight) * 0.3);
+            ctx.beginPath();
+
+            if (polygon.polygon.outer.length > 0) {
+              const first = modelToScreen(polygon.polygon.outer[0].x, polygon.polygon.outer[0].y);
+              ctx.moveTo(first.x, first.y);
+              for (let i = 1; i < polygon.polygon.outer.length; i++) {
+                const pt = modelToScreen(polygon.polygon.outer[i].x, polygon.polygon.outer[i].y);
+                ctx.lineTo(pt.x, pt.y);
+              }
+              ctx.closePath();
+
+              for (const hole of polygon.polygon.holes) {
+                if (hole.length > 0) {
+                  const holeFirst = modelToScreen(hole[0].x, hole[0].y);
+                  ctx.moveTo(holeFirst.x, holeFirst.y);
+                  for (let i = 1; i < hole.length; i++) {
+                    const pt = modelToScreen(hole[i].x, hole[i].y);
+                    ctx.lineTo(pt.x, pt.y);
+                  }
+                  ctx.closePath();
                 }
-                ctx.closePath();
               }
             }
-          }
-          ctx.stroke();
-        }
-
-        // Draw lines (projection, silhouette, etc.)
-        const lineBounds = drawing.bounds;
-        const lineMargin = Math.max(lineBounds.max.x - lineBounds.min.x, lineBounds.max.y - lineBounds.min.y) * 0.5;
-        const lineMinX = lineBounds.min.x - lineMargin;
-        const lineMaxX = lineBounds.max.x + lineMargin;
-        const lineMinY = lineBounds.min.y - lineMargin;
-        const lineMaxY = lineBounds.max.y + lineMargin;
-
-        for (const line of drawing.lines) {
-          if (line.category === 'cut') continue;
-          if (!showHiddenLines && line.visibility === 'hidden') continue;
-
-          const { start, end } = line.line;
-          if (!isFinite(start.x) || !isFinite(start.y) || !isFinite(end.x) || !isFinite(end.y)) continue;
-          if (start.x < lineMinX || start.x > lineMaxX || start.y < lineMinY || start.y > lineMaxY ||
-            end.x < lineMinX || end.x > lineMaxX || end.y < lineMinY || end.y > lineMaxY) continue;
-
-          let strokeColor = '#000000';
-          let lineWidth = 0.25;
-          let dashPattern: number[] = [];
-
-          switch (line.category) {
-            case 'projection': lineWidth = 0.25; break;
-            case 'hidden': lineWidth = 0.18; strokeColor = '#666666'; dashPattern = [4, 2]; break;
-            case 'silhouette': lineWidth = 0.35; break;
-            case 'crease': lineWidth = 0.18; break;
-            case 'boundary': lineWidth = 0.25; break;
-            case 'annotation': lineWidth = 0.13; break;
+            ctx.stroke();
           }
 
-          if (line.visibility === 'hidden') {
-            strokeColor = '#888888';
-            dashPattern = [4, 2];
-            lineWidth *= 0.7;
+          // Draw lines (projection, silhouette, etc.)
+          const lineBounds = drawing.bounds;
+          const lineMargin = Math.max(lineBounds.max.x - lineBounds.min.x, lineBounds.max.y - lineBounds.min.y) * 0.5;
+          const lineMinX = lineBounds.min.x - lineMargin;
+          const lineMaxX = lineBounds.max.x + lineMargin;
+          const lineMinY = lineBounds.min.y - lineMargin;
+          const lineMaxY = lineBounds.max.y + lineMargin;
+
+          for (const line of drawing.lines) {
+            if (line.category === 'cut') continue;
+            if (!showHiddenLines && line.visibility === 'hidden') continue;
+
+            const { start, end } = line.line;
+            if (!isFinite(start.x) || !isFinite(start.y) || !isFinite(end.x) || !isFinite(end.y)) continue;
+            if (start.x < lineMinX || start.x > lineMaxX || start.y < lineMinY || start.y > lineMaxY ||
+              end.x < lineMinX || end.x > lineMaxX || end.y < lineMinY || end.y > lineMaxY) continue;
+
+            let strokeColor = '#000000';
+            let lineWidth = 0.25;
+            let dashPattern: number[] = [];
+
+            switch (line.category) {
+              case 'projection': lineWidth = 0.25; break;
+              case 'hidden': lineWidth = 0.18; strokeColor = '#666666'; dashPattern = [4, 2]; break;
+              case 'silhouette': lineWidth = 0.35; break;
+              case 'crease': lineWidth = 0.18; break;
+              case 'boundary': lineWidth = 0.25; break;
+              case 'annotation': lineWidth = 0.13; break;
+            }
+
+            if (line.visibility === 'hidden') {
+              strokeColor = '#888888';
+              dashPattern = [4, 2];
+              lineWidth *= 0.7;
+            }
+
+            ctx.strokeStyle = strokeColor;
+            ctx.lineWidth = Math.max(0.5, mmToScreen(lineWidth) * 0.3);
+            ctx.setLineDash(dashPattern);
+
+            const screenStart = modelToScreen(start.x, start.y);
+            const screenEnd = modelToScreen(end.x, end.y);
+
+            ctx.beginPath();
+            ctx.moveTo(screenStart.x, screenStart.y);
+            ctx.lineTo(screenEnd.x, screenEnd.y);
+            ctx.stroke();
+            ctx.setLineDash([]);
           }
 
-          ctx.strokeStyle = strokeColor;
-          ctx.lineWidth = Math.max(0.5, mmToScreen(lineWidth) * 0.3);
-          ctx.setLineDash(dashPattern);
+          // IFC annotation overlay (issue #812)
+          drawIfcAnnotationsScreenSpace(
+            ctx,
+            ifcAnnotationLines,
+            ifcAnnotationTexts,
+            ifcAnnotationFills,
+            modelToScreen,
+            (mm) => Math.max(0.5, mmToScreen(mm) * 0.3),
+            (worldHeight) => Math.max(8, worldHeight * drawingTransform.scaleFactor * transform.scale),
+          );
 
-          const screenStart = modelToScreen(start.x, start.y);
-          const screenEnd = modelToScreen(end.x, end.y);
+          // Point-cloud scan overlay (issue #1805) — drawn last, on top of the
+          // cut geometry. `scanPoints` are already in the same drawing space
+          // as `cutPolygons`/`lines`, so the same `modelToScreen` applies.
+          drawScanSectionScreenSpace(ctx, scanPoints, modelToScreen, scanOpacity);
+        };
 
-          ctx.beginPath();
-          ctx.moveTo(screenStart.x, screenStart.y);
-          ctx.lineTo(screenEnd.x, screenEnd.y);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
-
-        // IFC annotation overlay (issue #812)
-        drawIfcAnnotationsScreenSpace(
-          ctx,
-          ifcAnnotationLines,
-          ifcAnnotationTexts,
-          ifcAnnotationFills,
-          modelToScreen,
-          (mm) => Math.max(0.5, mmToScreen(mm) * 0.3),
-          (worldHeight) => Math.max(8, worldHeight * drawingTransform.scaleFactor * transform.scale),
-        );
-
-        // Point-cloud scan overlay (issue #1805) — drawn last, on top of the
-        // cut geometry. `scanPoints` are already in the same drawing space
-        // as `cutPolygons`/`lines`, so the same `modelToScreen` applies.
-        drawScanSectionScreenSpace(ctx, scanPoints, modelToScreen, scanOpacity);
-      };
-
-      drawModelContent();
-      ctx.restore();
+        drawModelContent();
+        ctx.restore();
+        if (principalTransform === null) principalTransform = drawingTransform;
+      }
 
       // ─────────────────────────────────────────────────────────────────────
       // 6. Draw scale bar at BOTTOM LEFT of title block
@@ -1038,7 +1069,7 @@ export function Drawing2DCanvas({
 
         // Calculate effective scale from the actual drawing transform
         // scaleFactor = mm per meter, so effective scale ratio = 1000 / scaleFactor
-        const effectiveScaleFactor = drawingTransform.scaleFactor;
+        const effectiveScaleFactor = (principalTransform ?? { scaleFactor: 1 }).scaleFactor;
 
         // Scale bar length: we want to show a nice round number of meters
         // Calculate how many mm on paper for the desired real-world length
@@ -1753,6 +1784,106 @@ export function Drawing2DCanvas({
       ctx.fillText(perimText, cx, cy + 8);
     }
 
+    // ── Escape routes ───────────────────────────────────────────────────
+    // Drawn in screen space like every other overlay, so the arrows keep a
+    // readable size at any zoom. The COMMITTED annotation is sized in paper
+    // millimetres instead (`lib/plan/escapeRoutes.ts`) — on screen a fixed
+    // pixel size is what stays legible, on paper a fixed paper size is.
+    for (const route of escapeRoutes) {
+      if (route.points.length < 2) continue;
+
+      const screen = route.points.map((point) => ({
+        x: drawingToScreenX(point.x, point.y),
+        y: drawingToScreenY(point.x, point.y),
+      }));
+
+      ctx.strokeStyle = '#16a34a';
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(screen[0].x, screen[0].y);
+      for (let i = 1; i < screen.length; i += 1) ctx.lineTo(screen[i].x, screen[i].y);
+      ctx.stroke();
+
+      // An arrow head on every segment: on a route that turns twice, one head
+      // at the end leaves the middle ambiguous about which way out is.
+      ctx.fillStyle = '#16a34a';
+      for (let i = 1; i < screen.length; i += 1) {
+        const from = screen[i - 1];
+        const to = screen[i];
+        const dx = to.x - from.x;
+        const dy = to.y - from.y;
+        const len = Math.hypot(dx, dy);
+        // A segment shorter than the head itself gets none: the head would be
+        // longer than the line it sits on.
+        if (len < 14) continue;
+
+        const angle = Math.atan2(dy, dx);
+        const size = 8;
+        ctx.beginPath();
+        ctx.moveTo(to.x, to.y);
+        ctx.lineTo(
+          to.x - Math.cos(angle - 0.35) * size,
+          to.y - Math.sin(angle - 0.35) * size,
+        );
+        ctx.lineTo(
+          to.x - Math.cos(angle + 0.35) * size,
+          to.y - Math.sin(angle + 0.35) * size,
+        );
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // Start dot: where the measurement begins, which is the point a fire
+      // concept is assessed from.
+      ctx.beginPath();
+      ctx.arc(screen[0].x, screen[0].y, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // The length, at the middle of the drawn line.
+      const mid = screen[Math.floor(screen.length / 2)];
+      const text = `${route.length.toFixed(1)} m`;
+      ctx.font = 'bold 12px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      const width = ctx.measureText(text).width;
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fillRect(mid.x - width / 2 - 3, mid.y - 22, width + 6, 15);
+      ctx.fillStyle = '#15803d';
+      ctx.fillText(text, mid.x, mid.y - 11);
+    }
+
+    // The half-made route: one click down, waiting for the target.
+    if (escapeRouteStart && annotation2DActiveTool === 'escape-route') {
+      const x = drawingToScreenX(escapeRouteStart.x, escapeRouteStart.y);
+      const y = drawingToScreenY(escapeRouteStart.x, escapeRouteStart.y);
+
+      ctx.strokeStyle = '#16a34a';
+      ctx.fillStyle = 'rgba(22,163,74,0.25)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.arc(x, y, 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // A straight hint to the cursor — NOT the route, which follows the
+      // building. Dashed and thin so it cannot be mistaken for the answer.
+      if (annotation2DCursorPos) {
+        ctx.strokeStyle = 'rgba(22,163,74,0.4)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 4]);
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(
+          drawingToScreenX(annotation2DCursorPos.x, annotation2DCursorPos.y),
+          drawingToScreenY(annotation2DCursorPos.x, annotation2DCursorPos.y),
+        );
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
     // Draw in-progress polygon
     if (polygonAreaPoints.length > 0 && annotation2DActiveTool === 'polygon-area') {
       // Draw lines between placed vertices
@@ -2016,7 +2147,7 @@ export function Drawing2DCanvas({
         }
       }
     }
-  }, [drawing, transform, showHiddenLines, canvasSize, overrideEngine, overridesEnabled, entityColorMap, useIfcMaterials, measureMode, measureStart, measureCurrent, measureResults, measureSnapPoint, sheetEnabled, activeSheet, sectionAxis, isPinned, annotation2DActiveTool, annotation2DCursorPos, polygonAreaPoints, polygonAreaResults, textAnnotations, textAnnotationEditing, cloudAnnotationPoints, cloudAnnotations, selectedAnnotation, ifcAnnotationLines, ifcAnnotationTexts, ifcAnnotationFills, dxfUnderlays, scanPoints, scanOpacity, alignmentOverlay, selectedEntityKeys, colorKeys, unitDisplayOverrides]);
+  }, [drawing, transform, showHiddenLines, canvasSize, overrideEngine, overridesEnabled, entityColorMap, useIfcMaterials, measureMode, measureStart, measureCurrent, measureResults, measureSnapPoint, sheetEnabled, activeSheet, sectionAxis, isPinned, annotation2DActiveTool, annotation2DCursorPos, polygonAreaPoints, polygonAreaResults, escapeRoutes, escapeRouteStart, textAnnotations, textAnnotationEditing, cloudAnnotationPoints, cloudAnnotations, selectedAnnotation, ifcAnnotationLines, ifcAnnotationTexts, ifcAnnotationFills, dxfUnderlays, scanPoints, scanOpacity, alignmentOverlay, selectedEntityKeys, colorKeys, unitDisplayOverrides]);
 
   return (
     <canvas
