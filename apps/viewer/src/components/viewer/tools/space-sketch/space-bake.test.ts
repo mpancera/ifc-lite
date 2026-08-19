@@ -5,7 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Pt } from '@/lib/space-sketch-geometry.js';
-import { BAKE_HEIGHT, floorToFloorHeight, planStoreySpaces, type DraftRoom } from './space-bake.js';
+import { BAKE_HEIGHT, floorToFloorHeight, planStoreySpaces, planStoreyGfa, type DraftRoom } from './space-bake.js';
 
 const STOREYS = [
   { id: 10, elev: 0 },
@@ -101,6 +101,73 @@ describe('planStoreySpaces', () => {
   });
 
   it('plans nothing from no rooms', () => {
-    assert.deepEqual(planStoreySpaces([], [square(0, 0, 1)], 3), { planned: [], skipped: 0 });
+    assert.deepEqual(planStoreySpaces([], [square(0, 0, 1)], 3),
+      { planned: [], skipped: 0, discarded: 0 });
+  });
+});
+
+describe('planStoreySpaces — rooms the author discarded', () => {
+  it('leaves out a room the author said no to', () => {
+    // The reason this exists: a tangled region that cannot be dissolved through
+    // the topology (a node joining three or more walls) still has to be
+    // possible to leave out of the file.
+    const rooms = [room(square(0, 0, 4)), room(square(10, 0, 2))];
+    const result = planStoreySpaces(rooms, [], 3, [square(0, 0, 4)]);
+    assert.equal(result.discarded, 1);
+    assert.equal(result.planned.length, 1);
+    assert.equal(result.planned[0].grossFloorArea, 4, 'the far room survives');
+  });
+
+  it('counts a discard as a DECISION, not as a duplicate skip', () => {
+    // Reported as one number, a deliberate choice would look like the tool
+    // being clever behind the author's back.
+    const result = planStoreySpaces([room(square(0, 0, 4))], [square(0, 0, 4)], 3, [square(0, 0, 4)]);
+    assert.equal(result.discarded, 1);
+    assert.equal(result.skipped, 0);
+  });
+
+  it('brings a room back once its centre leaves the discarded place', () => {
+    // Matching is by outline, not by face id: a room edited until its centre
+    // moves away is a different statement, and the honest reading is that the
+    // author changed their mind by changing the room.
+    const moved = [room(square(20, 20, 4))];
+    assert.equal(planStoreySpaces(moved, [], 3, [square(0, 0, 4)]).discarded, 0);
+    assert.equal(planStoreySpaces(moved, [], 3, [square(0, 0, 4)]).planned.length, 1);
+  });
+
+  it('changes nothing when nothing was discarded', () => {
+    const rooms = [room(square(0, 0, 4))];
+    assert.deepEqual(planStoreySpaces(rooms, [], 3), planStoreySpaces(rooms, [], 3, []));
+  });
+});
+
+describe('planStoreyGfa', () => {
+  it('names the storey space after the storey, not after a room number', () => {
+    // A reader seeing "Space 7" would go looking for a room.
+    const gfa = planStoreyGfa(square(0, 0, 10), 3.4, { name: '00', longName: 'Erdgeschoss' });
+    assert.equal(gfa?.Name, '00');
+    assert.equal(gfa?.LongName, 'Erdgeschoss');
+  });
+
+  it('takes the raw floor-to-floor as its height', () => {
+    // It measures the floor as a whole, not a clear internal height.
+    assert.equal(planStoreyGfa(square(0, 0, 10), 3.4, { name: '00' })?.Height, 3.4);
+  });
+
+  it('measures its own outline', () => {
+    assert.equal(planStoreyGfa(square(0, 0, 10), 3, { name: '00' })?.grossFloorArea, 100);
+  });
+
+  it('leaves LongName null rather than empty', () => {
+    assert.equal(planStoreyGfa(square(0, 0, 4), 3, { name: '00', longName: '  ' })?.LongName, null);
+    assert.equal(planStoreyGfa(square(0, 0, 4), 3, { name: '00' })?.LongName, null);
+  });
+
+  it('refuses an outline that encloses nothing', () => {
+    // A zero-area space would put a quantity in the file that later reads as a
+    // real measurement of nothing.
+    assert.equal(planStoreyGfa([[0, 0], [1, 1]], 3, { name: '00' }), null);
+    assert.equal(planStoreyGfa([], 3, { name: '00' }), null);
+    assert.equal(planStoreyGfa([[0, 0], [1, 0], [2, 0]], 3, { name: '00' }), null);
   });
 });

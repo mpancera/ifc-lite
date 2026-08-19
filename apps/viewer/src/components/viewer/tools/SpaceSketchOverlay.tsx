@@ -30,11 +30,11 @@ import { pointerButton, isRemoveModifier } from '@/lib/space-interaction';
 import { type Room, type Boundary } from '@/lib/space-plate-session';
 import { wallRectsFromMeshes, type WallRect } from '@/lib/wall-rects-from-meshes';
 import {
-  polyArea, uniqueVerts, distToSeg, projectOnSeg,
+  polyArea, uniqueVerts, distToSeg, projectOnSeg, pointInPoly, centroid,
   sX, sY, wX, wY, PAD, type Pt,
 } from '@/lib/space-sketch-geometry';
 import { type BoundaryMode } from '@ifc-lite/create';
-import { X, Undo2, Redo2, Layers, Maximize, Magnet, SlidersHorizontal, HelpCircle, Eraser, Square, PenLine, Frame, Check, Minus, Building2 } from 'lucide-react';
+import { X, Undo2, Redo2, Layers, Maximize, Magnet, SlidersHorizontal, HelpCircle, Eraser, Square, PenLine, Frame, Check, Minus, Building2, Ban } from 'lucide-react';
 import { toast } from '@/components/ui/toast';
 import { SpaceSketchCanvas } from './space-sketch/SpaceSketchCanvas';
 import { OptionsPopover, HelpPopover } from './space-sketch/SpaceSketchPopovers';
@@ -46,7 +46,7 @@ import { useSpacePlateSessions } from './space-sketch/useSpacePlateSessions';
 import { useSpaceViewport } from './space-sketch/useSpaceViewport';
 import { useSpaceSketchKeys } from './space-sketch/useSpaceSketchKeys';
 import { useSpaceBake } from './space-sketch/useSpaceBake';
-import { floorToFloorHeight } from './space-sketch/space-bake';
+import { floorToFloorHeight, outlineContaining } from './space-sketch/space-bake';
 import type { Hover, SplitTarget, IntentTone } from './space-sketch/types';
 
 const PICK_PX = 12;
@@ -169,10 +169,30 @@ export function SpaceSketchOverlay() {
   const [status, setStatus] = useState('Pick a storey to derive rooms from its walls.');
   const [showBuilding, setShowBuilding] = useState(true);
   const [showDiagnostics, setShowDiagnostics] = useState(false); // Issue 7 — leak diagnostics
-  // Default to the wall AXIS (face-based rooms are the gaps between wall
-  // rectangles): `center` puts the room outline + nodes on the true wall
-  // centreline. `inner`/`outer` show the net/gross faces.
-  const [boundaryMode, setBoundaryMode] = useState<BoundaryMode>('center');
+  // The room outline and its nodes are always edited on the wall CENTRELINE —
+  // that is the topology. What this picks is the boundary the room is DRAWN
+  // and EMITTED at: `inner` = the net faces, `outer` = the gross ones,
+  // `center` = the centreline itself.
+  //
+  // `inner` by default, because a room is net (Marc, 2026-08-19): an IfcSpace
+  // is what a person can stand in, so its boundary is the inner face of the
+  // walls around it. On the centreline every room is a wall-thickness too
+  // large and neighbouring rooms meet inside the wall, which is a plausible
+  // enough picture that the areas get used before anybody checks them.
+  const [boundaryMode, setBoundaryMode] = useState<BoundaryMode>('inner');
+  /**
+   * Rooms the author has said no to, as OUTLINES, per storey.
+   *
+   * A ref and not state because the bake reads it at confirm time; the counter
+   * beside it is what re-renders the canvas. Outlines rather than face ids —
+   * see `space-bake.ts` for why a DCEL face id cannot carry this.
+   */
+  const discardedRef = useRef<Map<number, Pt[][]>>(new Map());
+  const [discardTick, setDiscardTick] = useState(0);
+  /** Armed: the next room click discards it (or takes it back). */
+  const [discardMode, setDiscardMode] = useState(false);
+  /** Also emit one IfcSpace.GFA per storey, named after the storey. */
+  const [emitGfa, setEmitGfa] = useState(false);
   // Derive-all is a multi-second synchronous run; the ref is the interlock (a
   // second click must be rejected before React re-renders) and the state drives
   // the disabled button.
@@ -186,11 +206,24 @@ export function SpaceSketchOverlay() {
 
   // Every IfcBuildingStorey with its resolved name + elevation, low → high.
   const storeys = useMemo(() => {
-    if (!ifcDataStore) return [] as { id: number; name: string; elev: number }[];
+    if (!ifcDataStore) return [] as { id: number; name: string; longName: string | null; elev: number }[];
     const elevs = ifcDataStore.spatialHierarchy?.storeyElevations;
+    // LongName is the storey's descriptive name ("Erdgeschoss" beside "00").
+    // It lives on the spatial hierarchy node, not on the entity index.
+    const longNames = new Map<number, string>();
+    const walk = (node: { expressId: number; longName?: string | null; children: unknown[] }) => {
+      if (node.longName) longNames.set(node.expressId, node.longName);
+      for (const child of node.children) {
+        walk(child as { expressId: number; longName?: string | null; children: unknown[] });
+      }
+    };
+    const root = ifcDataStore.spatialHierarchy?.project;
+    if (root) walk(root as never);
+
     const list = ifcDataStore.getEntitiesByType('IfcBuildingStorey').map((s) => ({
       id: s.expressId,
       name: ifcDataStore.entities.getName(s.expressId) || `Storey #${s.expressId}`,
+      longName: longNames.get(s.expressId) ?? null,
       elev: elevs?.get(s.expressId) ?? 0,
     }));
     list.sort((a, b) => a.elev - b.elev);
@@ -489,6 +522,26 @@ export function SpaceSketchOverlay() {
   // ids it authored, so confirming twice replaces rather than duplicates.
   const { createAllSpaces, createdIds } = useSpaceBake({
     sketchModelId, ifcDataStore, boundaryMode, sessionsRef, floorToFloor,
+    discardedRooms: discardedRef,
+    emitGfa,
+    // The GROSS outline: the hull of the wall rectangles, so the area is
+    // measured to the outer wall faces. Convex, so an L- or U-shaped plan
+    // comes out too large — said plainly in the option's own label rather
+    // than left for somebody to discover in a quantity take-off.
+    storeyOutline: useCallback((sid: number): Pt[] | null => {
+      const st = storeys.find((x) => x.id === sid);
+      const storeyMeshes = geometryResult?.meshes;
+      if (!st || !storeyMeshes) return null;
+      const rects = wallRectsFromMeshes(
+        storeyMeshes, geometryResult?.coordinateInfo, st.elev, floorToFloor(sid),
+      );
+      const hull = exteriorPerimeter(rects);
+      return hull.length >= 3 ? hull : null;
+    }, [storeys, geometryResult, floorToFloor]),
+    storeyNaming: useCallback((sid: number) => {
+      const st = storeys.find((x) => x.id === sid);
+      return st ? { name: st.name, longName: st.longName } : null;
+    }, [storeys]),
   });
 
   /**
@@ -825,9 +878,15 @@ export function SpaceSketchOverlay() {
     if (res.emitted > 0) {
       const store = useViewerStore.getState();
       store.setSelectedEntityIds(createdIds().map((id) => toGlobalId(sketchModelId ?? 'legacy', id)));
+      // The discard count is named separately from the emitted one: a room
+      // deliberately left out is a decision the author made, and a total that
+      // silently absorbed it would leave them counting rooms to find out
+      // whether the tool did what they asked.
       toast.success(
         `Created ${res.emitted} ${res.emitted === 1 ? 'space' : 'spaces'}` +
-          (res.floors > 1 ? ` across ${res.floors} storeys` : ''),
+          (res.floors > 1 ? ` across ${res.floors} storeys` : '') +
+          (res.gfa > 0 ? `, incl. ${res.gfa} storey area${res.gfa === 1 ? '' : 's'} (GFA)` : '') +
+          (res.discarded > 0 ? ` — ${res.discarded} discarded` : ''),
       );
     }
     clearGhosts();
@@ -1127,6 +1186,32 @@ export function SpaceSketchOverlay() {
     const mod = isRemoveModifier(e);
     const tol = PICK_PX / fitRef.current.scale;
 
+    // 0a. Discard tool (modal): click a room to leave it out of the file, click
+    // it again to take it back. Deliberately touches NO topology — that is the
+    // whole point. A region the editor cannot dissolve (a node joining three or
+    // more walls has no wall whose removal merges two rooms) can still be kept
+    // out of the export, and the drawing stays exactly as it is.
+    if (discardMode && !mod) {
+      const sid = derivedStorey;
+      if (sid == null) { setStatus('No storey — derive rooms first.'); return; }
+
+      const hit = rooms.find((r) => pointInPoly(wx, wy, r.outline));
+      if (!hit) { setStatus('Click inside a room to discard it.'); return; }
+
+      const list = discardedRef.current.get(sid) ?? [];
+      const already = outlineContaining([wx, wy], list);
+      if (already >= 0) {
+        list.splice(already, 1);
+        setStatus(`Room kept — ${list.length} discarded on this storey.`);
+      } else {
+        list.push(hit.outline.map((p) => [p[0], p[1]] as Pt));
+        setStatus(`Room discarded — ${list.length} on this storey. It stays drawn, but is not created.`);
+      }
+      discardedRef.current.set(sid, list);
+      setDiscardTick((t) => t + 1);
+      return;
+    }
+
     // 0. Rectangle tool (modal): first click sets a corner, second commits the
     // room. Drag/cut/draw are suspended while it's active.
     if (drawMode === 'rect' && !mod) {
@@ -1270,18 +1355,25 @@ export function SpaceSketchOverlay() {
   // fully-internal room in Outer mode) — flag those so the toggle doesn't look
   // broken (Issue 6).
   const boundaryInfo = useMemo(
-    () =>
-      rooms.map((r) => {
-        if (boundaryMode === 'center') return { disp: r.outline, unbounded: false };
-        // Net/gross outline straight from the engine (per-edge wall thickness);
-        // it falls back to the centreline when no wall offset applies, so a
-        // no-change result flags the room as unbounded (Issue 6).
+    () => {
+      const discarded = derivedStorey == null
+        ? []
+        : discardedRef.current.get(derivedStorey) ?? [];
+      return rooms.map((r) => {
+        const isDiscarded = outlineContaining(centroid(r.outline), discarded) >= 0;
+        if (boundaryMode === 'center') {
+          return { disp: r.outline, unbounded: false, discarded: isDiscarded };
+        }
         const disp = sessionRef.current?.boundaryOutline(r.face, boundaryMode) ?? r.outline;
-        return { disp, unbounded: Math.abs(polyArea(disp) - r.area) < 1e-3 };
-      }),
-    // `hist` re-derives this after a plate edit (rooms identity also changes then).
+        return {
+          disp,
+          unbounded: disp === r.outline || polyArea(disp) === polyArea(r.outline),
+          discarded: isDiscarded,
+        };
+      });
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [rooms, boundaryMode, hist],
+    [rooms, boundaryMode, hist, derivedStorey, discardTick],
   );
   const unboundedCount = boundaryMode === 'center' ? 0 : boundaryInfo.filter((b) => b.unbounded).length;
 
@@ -1371,6 +1463,10 @@ export function SpaceSketchOverlay() {
           title={footprintArmed
             ? `Click again to replace this storey's ${rooms.length} drafted room(s) with one footprint room`
             : 'Footprint: one room over the whole storey outline (convex outline of its walls)'}><Frame className="h-4 w-4" /></button>
+        <button className={`${iconBtn} ${discardMode ? 'bg-destructive/15 text-destructive hover:bg-destructive/20' : ''}`}
+          onClick={() => { setDiscardMode((v) => !v); setStatus(discardMode ? '' : 'Discard: click a room to leave it out of the file (click again to keep it).'); }}
+          aria-pressed={discardMode} disabled={!rooms.length}
+          title="Discard a room: click it to leave it out of the file. Changes no walls — use this for a region that cannot be dissolved."><Ban className="h-4 w-4" /></button>
         <span className="mx-0.5 h-5 w-px bg-border" />
         <button className={iconBtn} onClick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)"><Undo2 className="h-4 w-4" /></button>
         <button className={iconBtn} onClick={redo} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)"><Redo2 className="h-4 w-4" /></button>
@@ -1403,6 +1499,8 @@ export function SpaceSketchOverlay() {
         <OptionsPopover
           boundaryMode={boundaryMode}
           onBoundaryMode={setBoundaryMode}
+          emitGfa={emitGfa}
+          onEmitGfa={setEmitGfa}
           hasWallData={!!ext}
           snapDelta={snapDelta}
           usedTol={usedTol}

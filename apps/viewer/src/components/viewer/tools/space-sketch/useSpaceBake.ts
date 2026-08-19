@@ -26,11 +26,15 @@ import {
 } from '@ifc-lite/create';
 import type { SpacePlateSession } from '@/lib/space-plate-session';
 import type { Pt } from '@/lib/space-sketch-geometry';
-import { planStoreySpaces, type DraftRoom } from './space-bake';
+import { planStoreySpaces, planStoreyGfa, type DraftRoom } from './space-bake';
 
 export interface SpaceBakeResult {
   emitted: number;
   floors: number;
+  /** Rooms the author discarded — reported so the count is explainable. */
+  discarded: number;
+  /** Storey-wide GFA spaces created, when that option is on. */
+  gfa: number;
   error: string | null;
 }
 
@@ -43,6 +47,23 @@ export interface UseSpaceBakeOptions {
   /** Every storey's draft plate, keyed by storey expressId. */
   sessionsRef: React.RefObject<Map<number, SpacePlateSession>>;
   floorToFloor: (sid: number) => number;
+  /**
+   * Outlines of the rooms the author discarded, per storey.
+   *
+   * The escape hatch for a region the topology editor cannot dissolve — a node
+   * joining three or more walls has no wall to remove that would merge two
+   * rooms, so without this such a region can only be left in the file.
+   */
+  discardedRooms: React.RefObject<Map<number, Pt[][]>>;
+  /** Also emit one `IfcSpace.GFA` per storey, named after the storey. */
+  emitGfa: boolean;
+  /**
+   * The storey's gross outline, for the GFA space. `null` where none can be
+   * derived, which is a normal answer on a storey whose walls were not found.
+   */
+  storeyOutline: (sid: number) => Pt[] | null;
+  /** Storey name and long name, for naming the GFA space. */
+  storeyNaming: (sid: number) => { name: string; longName?: string | null } | null;
 }
 
 export interface UseSpaceBake {
@@ -58,6 +79,10 @@ export function useSpaceBake({
   boundaryMode,
   sessionsRef,
   floorToFloor,
+  discardedRooms,
+  emitGfa,
+  storeyOutline,
+  storeyNaming,
 }: UseSpaceBakeOptions): UseSpaceBake {
   const addSpace = useViewerStore((s) => s.addSpace);
   const removeEntity = useViewerStore((s) => s.removeEntity);
@@ -88,11 +113,16 @@ export function useSpaceBake({
     sid: number,
     rooms: DraftRoom[],
     authored: Pt[][],
-  ): { emitted: number; skipped: number; error: string | null } => {
-    if (!sketchModelId) return { emitted: 0, skipped: 0, error: 'no model to create spaces in' };
+  ): { emitted: number; skipped: number; discarded: number; gfa: number; error: string | null } => {
+    if (!sketchModelId) {
+      return { emitted: 0, skipped: 0, discarded: 0, gfa: 0, error: 'no model to create spaces in' };
+    }
     for (const id of generatedRef.current.get(sid) ?? []) removeEntity(sketchModelId, id);
     generatedRef.current.delete(sid);
-    const { planned, skipped } = planStoreySpaces(rooms, authored, floorToFloor(sid));
+    const height = floorToFloor(sid);
+    const { planned, skipped, discarded } = planStoreySpaces(
+      rooms, authored, height, discardedRooms.current?.get(sid) ?? [],
+    );
     const newIds: number[] = [];
     // An addSpace failure (anchor resolution, missing mutation view, …) is
     // NOT an "already a space" skip — keep the first error so the status
@@ -115,9 +145,35 @@ export function useSpaceBake({
       if (res && 'expressId' in res) newIds.push(res.expressId);
       else error ??= (res && 'error' in res ? res.error : 'unknown error');
     }
+    // The storey's own space, after the rooms so it does not take "Space 1".
+    // Emitted even where every room was discarded: the floor still has an area,
+    // and that is a different statement from the rooms on it.
+    let gfa = 0;
+    if (emitGfa) {
+      const outline = storeyOutline(sid);
+      const naming = storeyNaming(sid);
+      const plan = outline && naming ? planStoreyGfa(outline, height, naming) : null;
+      if (plan) {
+        const res = addSpace(sketchModelId, sid, {
+          Profile: 'polygon',
+          OuterCurve: plan.OuterCurve,
+          Height: plan.Height,
+          Name: plan.Name,
+          LongName: plan.LongName ?? undefined,
+          // The storey area, not a room somebody stands in.
+          PredefinedType: 'GFA',
+          ObjectType: GENERATED_SPACE_OBJECTTYPE,
+          grossFloorArea: plan.grossFloorArea,
+        });
+        if (res && 'expressId' in res) { newIds.push(res.expressId); gfa = 1; }
+        else error ??= (res && 'error' in res ? res.error : 'unknown error');
+      }
+    }
+
     generatedRef.current.set(sid, newIds);
-    return { emitted: newIds.length, skipped, error };
-  }, [sketchModelId, removeEntity, addSpace, floorToFloor]);
+    return { emitted: newIds.length, skipped, discarded, gfa, error };
+  }, [sketchModelId, removeEntity, addSpace, floorToFloor,
+      discardedRooms, emitGfa, storeyOutline, storeyNaming]);
 
   /**
    * Confirm: turn EVERY storey's collected draft into IfcSpace at once — the
@@ -131,13 +187,13 @@ export function useSpaceBake({
     // — with several models loaded and none active we deliberately refuse to
     // guess which one to author into, rather than picking an arbitrary one.
     if (!sketchModelId) {
-      return { emitted: 0, floors: 0, error: 'No active model — pick one in the model list, then confirm again.' };
+      return { emitted: 0, floors: 0, discarded: 0, gfa: 0, error: 'No active model — pick one in the model list, then confirm again.' };
     }
     if (!ifcDataStore) {
-      return { emitted: 0, floors: 0, error: 'Model data is still loading — confirm again in a moment.' };
+      return { emitted: 0, floors: 0, discarded: 0, gfa: 0, error: 'Model data is still loading — confirm again in a moment.' };
     }
     const authoredMap = existingSpaceFootprintsByStorey(ifcDataStore);
-    let emitted = 0, floors = 0;
+    let emitted = 0, floors = 0, discarded = 0, gfa = 0;
     let firstError: string | null = null;
     for (const [sid, session] of sessionsRef.current) {
       if (!session.alive || session.roomCount === 0) continue;
@@ -147,11 +203,13 @@ export function useSpaceBake({
       }));
       const res = createSpacesForStorey(sid, rooms, authoredMap.get(sid) ?? []);
       emitted += res.emitted;
+      discarded += res.discarded;
+      gfa += res.gfa;
       if (res.emitted) floors++;
       firstError ??= res.error;
     }
     if (emitted > 0) revealSpaces();
-    return { emitted, floors, error: firstError };
+    return { emitted, floors, discarded, gfa, error: firstError };
   }, [sketchModelId, ifcDataStore, boundaryMode, sessionsRef, createSpacesForStorey, revealSpaces]);
 
   const createdIds = useCallback((): number[] => {

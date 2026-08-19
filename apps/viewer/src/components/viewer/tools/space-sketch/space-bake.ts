@@ -67,22 +67,55 @@ export interface PlannedSpace {
   grossFloorArea: number;
 }
 
+/** The storey-wide gross-floor-area space, named after its storey. */
+export interface PlannedGfaSpace {
+  readonly OuterCurve: Pt[];
+  readonly Height: number;
+  readonly Name: string;
+  readonly LongName: string | null;
+  readonly grossFloorArea: number;
+}
+
 /**
  * Decide which of a storey's draft rooms become IfcSpace.
  *
- * A room whose centroid falls inside an already-authored space footprint is
- * skipped: the tool derives rooms from walls, so on a model that already has
- * spaces every one of them would otherwise be emitted a second time.
+ * Two reasons a room is left out, kept apart because they mean different
+ * things to the person watching:
+ *
+ * - **skipped**: its centroid falls inside an already-authored space. The tool
+ *   derives rooms from walls, so on a model that already has spaces every one
+ *   of them would otherwise be emitted a second time.
+ * - **discarded**: the author said no to this one. That is a decision, not a
+ *   duplicate, and reporting the two as one number would make a deliberate
+ *   choice look like the tool being clever.
+ *
+ * # Why discarding is matched by OUTLINE and not by face id
+ * A DCEL face id is a handle into a live topology: split a room, undo an edit,
+ * and the same number can name a different piece of floor. Discarding by id
+ * would then quietly drop whatever inherited the id. An outline is a statement
+ * about a PLACE, so the room that is skipped is the room the author pointed at
+ * — and a room later edited until its centre leaves that place comes back,
+ * which is the honest reading of having changed it.
  */
 export function planStoreySpaces(
   rooms: DraftRoom[],
   authored: Pt[][],
   height: number,
-): { planned: PlannedSpace[]; skipped: number } {
+  discarded: Pt[][] = [],
+): { planned: PlannedSpace[]; skipped: number; discarded: number } {
   const planned: PlannedSpace[] = [];
   let skipped = 0;
+  let dropped = 0;
+
   for (const room of rooms) {
     const [cx, cy] = centroid(room.outline);
+    // The author's decision is checked FIRST: a room they discarded stays
+    // discarded even where it also overlaps an authored space, so the count
+    // they see reflects what they did.
+    if (discarded.some((fp) => pointInPoly(cx, cy, fp))) {
+      dropped++;
+      continue;
+    }
     if (authored.some((fp) => pointInPoly(cx, cy, fp))) {
       skipped++;
       continue;
@@ -93,5 +126,41 @@ export function planStoreySpaces(
       grossFloorArea: polyArea(room.outline),
     });
   }
-  return { planned, skipped };
+  return { planned, skipped, discarded: dropped };
+}
+
+/** Whether a point falls in any of the given outlines. */
+export function outlineContaining(point: Pt, outlines: Pt[][]): number {
+  return outlines.findIndex((fp) => pointInPoly(point[0], point[1], fp));
+}
+
+/**
+ * The storey's own space: `IfcSpace.GFA`, one per floor.
+ *
+ * Not a room somebody stands in — a measured area for the floor as a whole,
+ * which is why it carries the STOREY's name rather than a room number, and why
+ * its height is the raw floor-to-floor rather than a clear internal height.
+ *
+ * `null` for an outline that cannot enclose anything: two points do not bound
+ * a floor, and emitting a degenerate space would put a zero-area quantity into
+ * the file that later reads as a real measurement of nothing.
+ */
+export function planStoreyGfa(
+  outline: Pt[],
+  height: number,
+  storey: { name: string; longName?: string | null },
+): PlannedGfaSpace | null {
+  if (outline.length < 3) return null;
+  const area = polyArea(outline);
+  if (!(area > 0)) return null;
+
+  return {
+    OuterCurve: outline,
+    Height: height,
+    // The storey names it, both fields, because that is what the figure is
+    // about — a reader seeing "Space 7" would look for a room.
+    Name: storey.name,
+    LongName: storey.longName?.trim() || null,
+    grossFloorArea: area,
+  };
 }

@@ -10,6 +10,9 @@ import type { BoundaryMode } from '@ifc-lite/create';
 export interface OptionsPopoverProps {
   boundaryMode: BoundaryMode;
   onBoundaryMode: (m: BoundaryMode) => void;
+  /** Also emit one IfcSpace.GFA per storey, named after the storey. */
+  emitGfa: boolean;
+  onEmitGfa: (v: boolean) => void;
   /** Whether this derive carried wall thickness — without it only `center` works. */
   hasWallData: boolean;
   snapDelta: { from: number; to: number } | null;
@@ -26,7 +29,7 @@ export interface OptionsPopoverProps {
 
 export function OptionsPopover(props: OptionsPopoverProps) {
   const {
-    boundaryMode, onBoundaryMode, hasWallData, snapDelta, usedTol, snapDisabled,
+    boundaryMode, onBoundaryMode, emitGfa, onEmitGfa, hasWallData, snapDelta, usedTol, snapDisabled,
     onSnap, snapTol, showBuilding, onToggleBuilding, showDiagnostics, onToggleDiagnostics,
   } = props;
   return (
@@ -44,6 +47,18 @@ export function OptionsPopover(props: OptionsPopoverProps) {
             );
           })}
         </div>
+      </div>
+      <div className="space-y-1.5">
+        <div className="font-medium text-foreground">Storey area</div>
+        <label className="flex cursor-pointer items-start gap-1.5">
+          <input type="checkbox" className="mt-0.5 h-3 w-3 accent-primary"
+            checked={emitGfa} onChange={(e) => onEmitGfa(e.target.checked)} />
+          <span>
+            Also create <span className="text-foreground">IfcSpace.GFA</span> per storey,
+            named after the storey. Outline is the CONVEX hull of the storey&apos;s walls —
+            exact for a rectangular plan, too large for an L or U shape.
+          </span>
+        </label>
       </div>
       <div className="space-y-1.5">
         <div className="flex items-center justify-between">

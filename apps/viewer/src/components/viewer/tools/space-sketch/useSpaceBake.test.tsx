@@ -60,6 +60,8 @@ let root: Root | null = null;
 let container: HTMLElement | null = null;
 let api: UseSpaceBake | null = null;
 let sessions: Map<number, SpacePlateSession>;
+/** Empty for every existing case — the discard path has its own tests. */
+const discardedRef = { current: new Map<number, [number, number][][]>() };
 /** Everything this file writes into the module-level store, so `afterEach` can
  *  put it all back — the viewer runs its whole suite in ONE process. */
 let storeBackup: Record<string, unknown>;
@@ -72,6 +74,13 @@ function Harness() {
     boundaryMode: 'center',
     sessionsRef: ref,
     floorToFloor: () => 3,
+    // The two features this harness does not exercise: no room is discarded
+    // and no storey space is emitted, so these existing cases keep asserting
+    // exactly what they always did.
+    discardedRooms: discardedRef,
+    emitGfa: false,
+    storeyOutline: () => null,
+    storeyNaming: () => null,
   });
   return null;
 }
@@ -112,7 +121,7 @@ describe('useSpaceBake', () => {
     sessions.set(1, fakeSession(2));
     sessions.set(2, fakeSession(1));
     const res = api!.createAllSpaces();
-    assert.deepEqual(res, { emitted: 3, floors: 2, error: null });
+    assert.deepEqual(res, { emitted: 3, floors: 2, discarded: 0, gfa: 0, error: null });
     assert.deepEqual(added.map((a) => a.storeyId), [1, 1, 2]);
     assert.deepEqual(added.map((a) => a.name), ['Space 1', 'Space 2', 'Space 1'],
       'names restart per storey');
@@ -158,7 +167,7 @@ describe('useSpaceBake', () => {
     sessions.set(1, fakeSession(0));
     sessions.set(2, fakeSession(2, false));
     const res = api!.createAllSpaces();
-    assert.deepEqual(res, { emitted: 0, floors: 0, error: null });
+    assert.deepEqual(res, { emitted: 0, floors: 0, discarded: 0, gfa: 0, error: null });
     assert.equal(added.length, 0);
   });
 

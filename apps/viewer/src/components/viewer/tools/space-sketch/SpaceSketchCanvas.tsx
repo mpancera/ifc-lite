@@ -36,7 +36,12 @@ const INTENT_DOT_CLASS: Record<IntentTone, string> = {
 };
 
 interface GridLine { x1: number; y1: number; x2: number; y2: number }
-interface BoundaryInfo { disp: Pt[]; unbounded: boolean }
+interface BoundaryInfo {
+  disp: Pt[];
+  unbounded: boolean;
+  /** The author left this room out of the file — drawn, but greyed and struck. */
+  discarded?: boolean;
+}
 interface Diagnostic { a: Pt; b: Pt; bounding: boolean }
 
 export interface SpaceSketchCanvasProps {
@@ -110,7 +115,7 @@ export function SpaceSketchCanvas(props: SpaceSketchCanvasProps) {
 
         {rooms.map((r, ri) => {
           const color = ROOM_COLORS[ri % ROOM_COLORS.length];
-          const { disp, unbounded } = boundaryInfo[ri];
+          const { disp, unbounded, discarded } = boundaryInfo[ri];
           const pts = disp.map((p) => `${sX(f, p[0])},${sY(f, p[1])}`).join(' ');
           const [cwx, cwy] = centroid(disp);
           const cx = sX(f, cwx), cy = sY(f, cwy);
@@ -123,13 +128,24 @@ export function SpaceSketchCanvas(props: SpaceSketchCanvasProps) {
                 <polygon points={r.outline.map((p) => `${sX(f, p[0])},${sY(f, p[1])}`).join(' ')}
                   fill="none" stroke={color} strokeOpacity={0.25} strokeDasharray="3 3" strokeWidth={1} />
               )}
-              <polygon points={pts} fill={bad ? '#ef4444' : color} fillOpacity={lit ? 0.42 : bad ? 0.3 : 0.16}
-                stroke={bad ? '#ef4444' : color} strokeWidth={lit ? 3 : 2}
-                strokeDasharray={unbounded && !bad ? '5 4' : undefined}>
-                {unbounded && <title>Boundary “{boundaryMode}” made no change to this room — no wall offset applies (no wall runs along its edges, or it's fully internal in Outer mode).</title>}
+              {/* A discarded room keeps its shape — the author is not editing
+                  the drawing, only deciding what leaves it — but goes grey and
+                  hatched so it cannot be mistaken for one that will be created. */}
+              <polygon points={pts}
+                fill={discarded ? '#94a3b8' : bad ? '#ef4444' : color}
+                fillOpacity={discarded ? 0.1 : lit ? 0.42 : bad ? 0.3 : 0.16}
+                stroke={discarded ? '#94a3b8' : bad ? '#ef4444' : color}
+                strokeWidth={discarded ? 1.5 : lit ? 3 : 2}
+                strokeDasharray={discarded ? '2 3' : unbounded && !bad ? '5 4' : undefined}>
+                {discarded && <title>Discarded — this room stays drawn but is not created. Click it again with the discard tool to keep it.</title>}
+                {!discarded && unbounded && <title>Boundary “{boundaryMode}” made no change to this room — no wall offset applies (no wall runs along its edges, or it's fully internal in Outer mode).</title>}
               </polygon>
-              <text x={cx} y={cy - 5} textAnchor="middle" fontSize={12} fontWeight={600} fill="currentColor" className="pointer-events-none">{area.toFixed(2)}</text>
-              <text x={cx} y={cy + 9} textAnchor="middle" fontSize={9} fill="currentColor" opacity={0.55} className="pointer-events-none">m²</text>
+              <text x={cx} y={cy - 5} textAnchor="middle" fontSize={12} fontWeight={600}
+                fill="currentColor" opacity={discarded ? 0.45 : 1}
+                textDecoration={discarded ? 'line-through' : undefined}
+                className="pointer-events-none">{area.toFixed(2)}</text>
+              <text x={cx} y={cy + 9} textAnchor="middle" fontSize={9} fill="currentColor"
+                opacity={discarded ? 0.35 : 0.55} className="pointer-events-none">m²</text>
             </g>
           );
         })}
