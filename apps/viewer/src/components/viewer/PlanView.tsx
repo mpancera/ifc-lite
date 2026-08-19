@@ -146,11 +146,13 @@ export function PlanView({
   const planRotationPicking = useViewerStore((s) => s.planRotationPicking);
   const setPlanRotationPicking = useViewerStore((s) => s.setPlanRotationPicking);
   const planShowRoomLabels = useViewerStore((s) => s.planShowRoomLabels);
+  const planShowDoorLabels = useViewerStore((s) => s.planShowDoorLabels);
   const setPlanShowRoomLabels = useViewerStore((s) => s.setPlanShowRoomLabels);
   const planShowOpeningSymbols = useViewerStore((s) => s.planShowOpeningSymbols);
   const planShowDeviceMarks = useViewerStore((s) => s.planShowDeviceMarks);
   const setPlanShowDeviceMarks = useViewerStore((s) => s.setPlanShowDeviceMarks);
   const setPlanShowOpeningSymbols = useViewerStore((s) => s.setPlanShowOpeningSymbols);
+  const setPlanShowDoorLabels = useViewerStore((s) => s.setPlanShowDoorLabels);
   const models = useViewerStore((s) => s.models);
   const activeTool = useViewerStore((s) => s.activeTool);
   const addElementPendingPoints = useViewerStore((s) => s.addElementPendingPoints);
@@ -360,11 +362,17 @@ export function PlanView({
     storeyId: storey?.expressId ?? null,
   });
 
-  // Room and door text are one layer: they are the same thing on a drawing,
-  // and one switch is what somebody reaching for "turn the writing off" means.
+  // Room text and door tags are two layers, not one. They look alike and they
+  // answer different questions: a room schedule wants the room text alone, a
+  // door list wants the tags alone, and a fire plan usually wants the rooms
+  // named with the door numbers out of the escape route's way. Merged here for
+  // drawing, each half gated by its own switch.
   const planLabels = useMemo(
-    () => [...roomLabels.map(roomPlanLabel), ...doorLabels],
-    [roomLabels, doorLabels],
+    () => [
+      ...(planShowRoomLabels ? roomLabels.map(roomPlanLabel) : []),
+      ...(planShowDoorLabels ? doorLabels : []),
+    ],
+    [roomLabels, doorLabels, planShowRoomLabels, planShowDoorLabels],
   );
 
   // ── Solo ────────────────────────────────────────────────────────────────
@@ -873,7 +881,7 @@ export function PlanView({
     measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D,
     // Only what is on screen gets exported: switching the labels off is a
     // statement about the drawing, not about the viewport.
-    planLabels: planShowRoomLabels ? planLabels : undefined,
+    planLabels: planLabels.length > 0 ? planLabels : undefined,
     openingSymbols: planShowOpeningSymbols ? openingSymbols : undefined,
     deviceMarks: planShowDeviceMarks ? deviceMarks : undefined,
     // A plan is not a sheet. Laying one out on paper is the 2D Section tool's
@@ -1222,7 +1230,7 @@ export function PlanView({
       {/* Room names and areas. Above the drawing and below the tools, which is
           where a reader expects to find them: part of the plan, not part of
           the application. */}
-      {planShowRoomLabels && <PlanLabels labels={planLabels} transform={planTransform} />}
+      {planLabels.length > 0 && <PlanLabels labels={planLabels} transform={planTransform} />}
 
       {/* Points already placed, and the rubber band to the cursor. Drawn over
           the canvas rather than into it: it changes on every mouse move, and
@@ -1395,7 +1403,9 @@ export function PlanView({
           onToggleConstructionProjection={() => updateDisplayOptions({ showConstructionProjection: !displayOptions.showConstructionProjection })}
           showRoomLabels={planShowRoomLabels}
           onToggleRoomLabels={() => setPlanShowRoomLabels(!planShowRoomLabels)}
-          roomCount={planLabels.length}
+          roomCount={roomLabels.length}
+          showDoorLabels={planShowDoorLabels}
+          onToggleDoorLabels={() => setPlanShowDoorLabels(!planShowDoorLabels)}
           showOpeningSymbols={planShowOpeningSymbols}
           onToggleOpeningSymbols={() => setPlanShowOpeningSymbols(!planShowOpeningSymbols)}
           openingCount={openingSymbols.length}

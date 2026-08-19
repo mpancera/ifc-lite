@@ -106,6 +106,17 @@ export interface ViewModeSlice {
    */
   planShowOpeningSymbols: boolean;
   /**
+   * Whether doors get their number written next to them.
+   *
+   * Its own flag, split out of `planShowRoomLabels`: the two answer different
+   * questions on the same drawing. A room schedule wants the room text and
+   * nothing else; a door list wants the door tags and nothing else, and a fire
+   * plan usually wants the rooms named while the door numbers stay out of the
+   * way of the escape route. One flag for both meant losing one to get rid of
+   * the other.
+   */
+  planShowDoorLabels: boolean;
+  /**
    * Whether small devices get a mark instead of their own (invisible) shape.
    *
    * On by default: a detector at its real 100 mm is a speck at 1:100 and gone
@@ -120,6 +131,7 @@ export interface ViewModeSlice {
   setPlanCutHeight: (metres: number) => void;
   setPlanShowRoomLabels: (show: boolean) => void;
   setPlanShowOpeningSymbols: (show: boolean) => void;
+  setPlanShowDoorLabels: (show: boolean) => void;
   setPlanShowDeviceMarks: (show: boolean) => void;
   setPlanRotation: (radians: number) => void;
   /**
@@ -150,6 +162,7 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   planRotationProject: null,
   planShowRoomLabels: true,
   planShowOpeningSymbols: true,
+  planShowDoorLabels: true,
   planShowDeviceMarks: true,
 
   setViewMode: (viewMode) => {
@@ -216,6 +229,7 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   setPlanShowRoomLabels: (planShowRoomLabels) => set({ planShowRoomLabels }),
 
   setPlanShowOpeningSymbols: (planShowOpeningSymbols) => set({ planShowOpeningSymbols }),
+  setPlanShowDoorLabels: (planShowDoorLabels) => set({ planShowDoorLabels }),
 
   setPlanShowDeviceMarks: (planShowDeviceMarks) => set({ planShowDeviceMarks }),
 

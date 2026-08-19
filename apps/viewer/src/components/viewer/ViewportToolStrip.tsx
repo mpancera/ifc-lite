@@ -16,6 +16,8 @@
  */
 
 import React from 'react';
+import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 export interface ViewportToolStripProps {
   children: React.ReactNode;
@@ -51,3 +53,39 @@ export function ToolStripDivider(): React.ReactElement {
 }
 
 export default ViewportToolStrip;
+
+/**
+ * One icon button of a viewport tool strip.
+ *
+ * Lived privately inside `PlanToolbar` until a second surface — the 2D layer
+ * menu — needed its trigger to look like every other button in the strip. Two
+ * copies of a button are two buttons that stop matching, so it moved here,
+ * where the strip and its divider already live.
+ */
+export function ToolStripButton({
+  active, onClick, title, children, disabled, ...rest
+}: {
+  active?: boolean;
+  onClick?: () => void;
+  title: string;
+  children: React.ReactNode;
+  disabled?: boolean;
+} & React.ComponentPropsWithoutRef<'button'>): React.ReactElement {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          variant={active ? 'default' : 'ghost'}
+          size="icon-sm"
+          onClick={onClick}
+          disabled={disabled}
+          aria-pressed={active}
+          {...rest}
+        >
+          {children}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom" className="text-xs">{title}</TooltipContent>
+    </Tooltip>
+  );
+}

@@ -37,7 +37,8 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { Annotation2DTool } from '@/store';
 import { ViewModeToggle } from './ViewportOverlays';
-import { ViewportToolStrip, ToolStripDivider } from './ViewportToolStrip';
+import { PlanLayersMenu } from './PlanLayersMenu';
+import { ViewportToolStrip, ToolStripDivider, ToolStripButton } from './ViewportToolStrip';
 import { ASSUMED_LINING_THICKNESS } from '@/lib/plan/doorQuantities';
 import { scaleDenominator, formatScaleRatio, STANDARD_SCALES } from '@/lib/plan/planChrome';
 import type { PlanAnnotationKind } from '@/lib/plan/planAnnotations';
@@ -55,6 +56,8 @@ export interface PlanToolbarProps {
   /** Room names + areas written into the rooms. */
   showRoomLabels: boolean;
   onToggleRoomLabels: () => void;
+  showDoorLabels: boolean;
+  onToggleDoorLabels: () => void;
   /** How many rooms this storey actually has, for the tooltip. */
   roomCount: number;
 
@@ -117,38 +120,14 @@ export interface PlanToolbarProps {
 
 /** The strip's own hairline, shared with the 3D viewport's strip. */
 const Divider = ToolStripDivider;
-
-function ToolButton({
-  active, onClick, title, children, disabled,
-}: {
-  active?: boolean;
-  onClick: () => void;
-  title: string;
-  children: React.ReactNode;
-  disabled?: boolean;
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          variant={active ? 'default' : 'ghost'}
-          size="icon-sm"
-          onClick={onClick}
-          disabled={disabled}
-          aria-pressed={active}
-        >
-          {children}
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent side="bottom" className="text-xs">{title}</TooltipContent>
-    </Tooltip>
-  );
-}
+/** Shared with the 3D strip so the two cannot drift apart. */
+const ToolButton = ToolStripButton;
 
 export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
   const {
     displayOptions, onToggleSymbolic, onToggleIfcAnnotations,
     onToggleConstructionProjection, showRoomLabels, onToggleRoomLabels, roomCount,
+    showDoorLabels, onToggleDoorLabels,
     showOpeningSymbols, onToggleOpeningSymbols, openingCount, assumedLinings,
     wallMeasuredDepths, doorsWithSymbol,
     showDeviceMarks, onToggleDeviceMarks, deviceCount,
@@ -187,49 +166,71 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
           ? <Shapes className="h-4 w-4" />
           : <Box className="h-4 w-4" />}
       </ToolButton>
-      <ToolButton
-        active={displayOptions.showIfcAnnotations}
-        onClick={onToggleIfcAnnotations}
-        title="IFC-Beschriftungen aus dem Modell einblenden"
-      >
-        <Tag className="h-4 w-4" />
-      </ToolButton>
-      <ToolButton
-        active={displayOptions.showConstructionProjection}
-        onClick={onToggleConstructionProjection}
-        title="Projektion unter dem Schnitt — der Boden, auf dem der Grundriss steht"
-      >
-        <Layers className="h-4 w-4" />
-      </ToolButton>
-      {/* Disabled rather than hidden when the storey has no rooms: a control
-          that comes and goes reads as a bug, and "no rooms on this floor" is
-          itself the answer somebody is looking for. */}
-      <ToolButton
-        active={showRoomLabels}
-        onClick={onToggleRoomLabels}
-        disabled={roomCount === 0}
-        title={
-          roomCount === 0
-            ? 'Raumbeschriftung — auf diesem Geschoss liegen keine Räume (IfcSpace)'
-            : `Raumbeschriftung: Name und Fläche in ${roomCount} ${roomCount === 1 ? 'Raum' : 'Räumen'}`
-        }
-      >
-        {/* A "T", because the button puts TEXT on the plan. */}
-        <Type className="h-4 w-4" />
-      </ToolButton>
-      <ToolButton
-        active={showOpeningSymbols}
-        onClick={onToggleOpeningSymbols}
-        disabled={openingCount === 0}
-        title={
-          openingCount === 0
-            ? 'Tür-/Fenstersymbole — auf diesem Geschoss liessen sich keine ableiten'
-            : `Tür-/Fenstersymbole für ${openingCount} Öffnung${openingCount === 1 ? '' : 'en'} — abgeleitet, nicht aus dem Modell gezeichnet`
-        }
-      >
-        {/* A door with its swing — the plan graphic this button draws. */}
-        <DoorOpen className="h-4 w-4" />
-      </ToolButton>
+      {/* Everything the plan DRAWS on top of the cut, in one list with an eye
+          each. Six pictograms in a row said nothing about what they were until
+          each was hovered, and the row grew with every layer the plan learned
+          to derive. The assumptions the opening symbols had to make stay
+          visible in the strip, because they are a caveat about the drawing,
+          not a switch. */}
+      <PlanLayersMenu
+        layers={[
+          {
+            id: 'roomLabels',
+            label: 'Raumnummer und -name',
+            count: roomCount,
+            visible: showRoomLabels,
+            onToggle: onToggleRoomLabels,
+            unavailable: roomCount === 0
+              ? 'Auf diesem Geschoss liegen keine Räume (IfcSpace)'
+              : undefined,
+          },
+          {
+            id: 'doorLabels',
+            label: 'Türnummern',
+            count: doorLabelCount,
+            visible: showDoorLabels,
+            onToggle: onToggleDoorLabels,
+            unavailable: doorLabelCount === 0
+              ? 'Auf diesem Geschoss liessen sich keine Türnummern ableiten'
+              : undefined,
+          },
+          {
+            id: 'openingSymbols',
+            label: 'Tür- und Fenstersymbole',
+            count: openingCount,
+            visible: showOpeningSymbols,
+            onToggle: onToggleOpeningSymbols,
+            unavailable: openingCount === 0
+              ? 'Auf diesem Geschoss liessen sich keine ableiten'
+              : undefined,
+          },
+          {
+            id: 'deviceMarks',
+            label: 'Gerätesymbole',
+            count: deviceCount,
+            visible: showDeviceMarks,
+            onToggle: onToggleDeviceMarks,
+            unavailable: deviceCount === 0
+              ? 'Auf diesem Geschoss liegen keine Geräte'
+              : undefined,
+          },
+          {
+            id: 'ifcAnnotations',
+            label: 'IFC-Beschriftungen aus dem Modell',
+            count: null,
+            visible: displayOptions.showIfcAnnotations,
+            onToggle: onToggleIfcAnnotations,
+          },
+          {
+            id: 'constructionProjection',
+            label: 'Projektion unter dem Schnitt',
+            count: null,
+            visible: displayOptions.showConstructionProjection,
+            onToggle: onToggleConstructionProjection,
+          },
+        ]}
+      />
+
       {showOpeningSymbols && assumedLinings > 0 && (
         // Declared, not hidden in a tooltip. On every model met so far this is
         // the NORMAL case — no door states a lining thickness — and a plan that
@@ -270,19 +271,6 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
           </TooltipContent>
         </Tooltip>
       )}
-
-      <ToolButton
-        active={showDeviceMarks}
-        onClick={onToggleDeviceMarks}
-        disabled={deviceCount === 0}
-        title={
-          deviceCount === 0
-            ? 'Gerätesymbole — auf diesem Geschoss liegen keine Geräte'
-            : `Gerätesymbole: ${deviceCount} ${deviceCount === 1 ? 'Gerät' : 'Geräte'} als Zeichen statt in ihrer unlesbar kleinen wahren Grösse`
-        }
-      >
-        <Radio className="h-4 w-4" />
-      </ToolButton>
 
       <Divider />
 
