@@ -23,7 +23,7 @@ import { AxisHelper, type AxisHelperRef } from './AxisHelper';
 import { BasepointOverlay } from './BasepointOverlay';
 import { SelectionOriginOverlay } from './SelectionOriginOverlay';
 import { PointCloudPanel } from './PointCloudPanel';
-import { Crosshair } from 'lucide-react';
+import { Axis3d, Crosshair } from 'lucide-react';
 
 export function ViewportOverlays({ hideViewCube = false }: { hideViewCube?: boolean } = {}) {
   const selectedStoreys = useViewerStore((s) => s.selectedStoreys);
@@ -258,6 +258,7 @@ export function ViewportOverlays({ hideViewCube = false }: { hideViewCube?: bool
             rotationY={initialRotationY}
           />
           <BasepointToggleButton />
+          <SelectionOriginToggleButton />
         </div>
       )}
 
@@ -346,6 +347,46 @@ function BasepointToggleButton() {
       </TooltipTrigger>
       <TooltipContent side="top" className="text-xs">
         {showModelBasepoints ? 'Hide model basepoints' : 'Show model basepoints (IFC 0,0,0)'}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/**
+ * Toggle for the triad on the selected element.
+ *
+ * Beside the basepoint toggle rather than only in the ribbon: the two are the
+ * same kind of thing — a marker that says where something is in the scene —
+ * and this cluster is on screen whichever toolbar the user has chosen, which
+ * the ribbon is not.
+ */
+function SelectionOriginToggleButton() {
+  const showSelectionOrigin = useViewerStore((s) => s.showSelectionOrigin);
+  const setShowSelectionOrigin = useViewerStore((s) => s.setShowSelectionOrigin);
+  const modelCount = useViewerStore((s) => s.models.size);
+  if (modelCount === 0) return null;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={() => setShowSelectionOrigin(!showSelectionOrigin)}
+          aria-label={showSelectionOrigin ? 'Koordinatensystem der Auswahl ausblenden' : 'Koordinatensystem der Auswahl zeigen'}
+          className={cn(
+            'h-6 w-6 inline-flex items-center justify-center border transition-colors',
+            showSelectionOrigin
+              ? 'border-teal-500 bg-teal-50 dark:bg-teal-950/40 text-teal-700 dark:text-teal-300'
+              : 'border-zinc-300 dark:border-zinc-700 bg-white/80 dark:bg-zinc-900/80 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800',
+          )}
+          aria-pressed={showSelectionOrigin}
+        >
+          <Axis3d className="h-3 w-3" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top" className="text-xs">
+        {showSelectionOrigin
+          ? 'Koordinatensystem der Auswahl ausblenden'
+          : 'Kleines Koordinatensystem auf dem gewählten Bauteil'}
       </TooltipContent>
     </Tooltip>
   );

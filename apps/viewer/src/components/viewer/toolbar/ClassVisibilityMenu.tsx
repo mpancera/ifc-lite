@@ -20,6 +20,7 @@
 
 import React from 'react';
 import {
+  Axis3d,
   Box,
   BoxSelect,
   Boxes,
@@ -111,6 +112,8 @@ export function ClassVisibilityMenuContent({ align = 'start' }: { align?: 'start
   // #2544: a pinned `?geomTier=` override is otherwise invisible and permanent.
   const geomTierOverride = useViewerStore((state) => state.geomTierOverride);
   const clearGeomTierOverride = useViewerStore((state) => state.clearGeomTierOverride);
+  const showSelectionOrigin = useViewerStore((state) => state.showSelectionOrigin);
+  const setShowSelectionOrigin = useViewerStore((state) => state.setShowSelectionOrigin);
   const { visible: visibleClassCount, total: classToggleCount } = useVisibleClassCount();
 
   return (
@@ -266,6 +269,21 @@ export function ClassVisibilityMenuContent({ align = 'start' }: { align?: 'start
         description="Structural axes"
         checked={typeVisibility.ifcGrid}
         onChange={() => toggleTypeVisibility('ifcGrid')}
+      />
+
+      <DropdownMenuSeparator className="my-1" />
+
+      {/* Not a class toggle: a marker drawn ON the selection rather than a
+          kind of geometry shown or hidden. It sits with them because the
+          question it answers is the same one — what can I see, and where is
+          it — and because this menu is the classic strip's home for view
+          options that are not camera commands. */}
+      <ClassVisibilityRow
+        icon={<Axis3d className="h-4 w-4 shrink-0 text-primary" />}
+        label="Selection origin"
+        description="Kleines Koordinatensystem auf dem gewählten Bauteil"
+        checked={showSelectionOrigin}
+        onChange={() => setShowSelectionOrigin(!showSelectionOrigin)}
       />
 
       <DropdownMenuSeparator className="my-1" />
