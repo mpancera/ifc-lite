@@ -547,7 +547,26 @@ export function PlanView({
   // empty). "Fit to view" is one click away when that happens.
   const hasFittedRef = useRef(false);
 
+  // The extent of the reference drawings, for fitting when there is no cut to
+  // fit to — a DXF under a model with nothing in it yet, which is exactly the
+  // state somebody is in while tracing one.
+  const underlayBounds = useMemo(() => {
+    const shift = dxfWorldShift(geometryResult?.coordinateInfo);
+    let box: { min: { x: number; y: number }; max: { x: number; y: number } } | null = null;
+    for (const entry of dxfUnderlays) {
+      if (entry.visible === false) continue;
+      const b = dxfUnderlayDrawingBounds(entry, shift, false);
+      if (!b) continue;
+      box = box === null ? b : {
+        min: { x: Math.min(box.min.x, b.min.x), y: Math.min(box.min.y, b.min.y) },
+        max: { x: Math.max(box.max.x, b.max.x), y: Math.max(box.max.y, b.max.y) },
+      };
+    }
+    return box;
+  }, [dxfUnderlays, geometryResult]);
+
   const { viewTransform, setViewTransform, zoomIn, zoomOut, fitToView } = useViewControls({
+    fallbackBounds: underlayBounds,
     drawing,
     sectionPlane,
     containerRef,
@@ -624,7 +643,13 @@ export function PlanView({
       window.removeEventListener('resize', publish);
       setPlanViewport(null);
     };
-  }, [planTransform]);
+    // `active` is load-bearing here even though the body never reads it: this
+    // component returns null while the plan is not showing, so on mount there
+    // is no container and the effect bails -- and nothing re-runs it when the
+    // view switches over, because `planTransform` does not change at that
+    // moment. Without it nothing was ever published and every 2D beat fell
+    // back to the 3D camera, which is the bug this effect exists to fix.
+  }, [planTransform, active]);
 
   // ── Selecting ───────────────────────────────────────────────────────────
   // The drawing carries LOCAL express ids plus the model they came from; the
@@ -1243,9 +1268,42 @@ export function PlanView({
   // scale to stay put, or every row re-sizes the drawing under them.
   const planFocusRequest = useViewerStore((s) => s.planFocusRequest);
   useEffect(() => {
-    if (!active || !planFocusRequest || !drawing) return;
+    if (!active || !planFocusRequest) return;
     const container = containerRef.current;
     if (!container) return;
+
+    // Fit and zoom are answered BEFORE a drawing is required. They are about
+    // the paper, not about an element on it, and the plan can have content
+    // with no cut at all — a DXF underlay over a model that has nothing in it
+    // yet is exactly the state somebody is in while tracing one. Requiring a
+    // drawing here dropped every fit and zoom in that state, silently.
+    //
+    // "Show me the whole thing" rather than "show me that one" — the same
+    // request because it is the same intent, and because two mechanisms
+    // competing for this transform leave the view half panned, half fitted.
+    if (planFocusRequest.fit) {
+      fitToView();
+      return;
+    }
+    // Zoom about the middle of the window, so what the reader was looking at
+    // stays where they were looking. The same arithmetic the wheel handler
+    // uses, which is why it lives beside it rather than in the store.
+    const zoom = planFocusRequest.zoom;
+    if (zoom && zoom > 0) {
+      const box = container.getBoundingClientRect();
+      const cx = box.width / 2;
+      const cy = box.height / 2;
+      setViewTransform((prev) => ({
+        ...prev,
+        scale: prev.scale * zoom,
+        x: cx - (cx - prev.x) * zoom,
+        y: cy - (cy - prev.y) * zoom,
+      }));
+      return;
+    }
+
+    // Everything below is about ONE element, and needs the cut to find it.
+    if (!drawing) return;
 
     // A point from the caller wins: it was measured on the element itself,
     // while the drawing only holds what the cut happened to pass through.

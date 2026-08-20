@@ -17,7 +17,7 @@ import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { planScreenToDrawing } from './planPick.js';
 import { planPointToViewport, planViewport, setPlanViewport } from './planViewport.js';
-import { ifcStoreyLocalToPlan } from '../screenflow/worldPointer.js';
+import { ifcStoreyLocalToPlan, projectIfcPoint } from '../screenflow/worldPointer.js';
 
 const RECT = { left: 240, top: 64, width: 900, height: 600 };
 
@@ -77,5 +77,25 @@ describe('ifcStoreyLocalToPlan', () => {
 
   it('drops the height — a plan is a cut seen from above', () => {
     assert.deepEqual(ifcStoreyLocalToPlan([1, 2, 0]), ifcStoreyLocalToPlan([1, 2, 9]));
+  });
+});
+
+describe('projectIfcPoint chooses the view that is actually showing', () => {
+  const state = {
+    cameraCallbacks: { projectToScreen: () => ({ x: 999, y: 999 }) },
+  } as unknown as Parameters<typeof projectIfcPoint>[0];
+
+  it('answers from the plan while one is mounted', () => {
+    mount({ x: 0, y: 0, scale: 10 });
+    const at = projectIfcPoint(state, [3, 4, 0], 0);
+    // Not the camera's 999/999: the plan is the thing on screen, and reading
+    // the camera instead is what put the drawn cursor beside the line it was
+    // tracing in every 2D beat.
+    assert.deepEqual(at, { x: RECT.left + 30, y: RECT.top - 40 });
+  });
+
+  it('falls back to the camera once the plan is gone', () => {
+    setPlanViewport(null);
+    assert.deepEqual(projectIfcPoint(state, [3, 4, 0], 0), { x: 999, y: 999 });
   });
 });

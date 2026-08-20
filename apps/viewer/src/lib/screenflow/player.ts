@@ -124,6 +124,21 @@ type ProofResult = 'held' | 'timeout' | 'skipped';
  * during a slow model load -- a decision, not a defect, and recording it as
  * one would put an amber dot on every demo given over a coffee break.
  */
+/**
+ * Wait until the beat's proof holds, or give up and record a fault.
+ *
+ * # A proof must be a function of the VIEWER STORE
+ * The predicate is evaluated once up front and then only when the store
+ * changes. A proof that reads anything else — a module variable, the DOM, a
+ * React state — is checked once, before the work it is waiting for has landed,
+ * and then never again: the beat times out however well it actually worked,
+ * and the fault says the opposite of what happened. If the thing to wait for
+ * is not store state, make it store state; the plan's `planFitVersion` exists
+ * for exactly that reason.
+ *
+ * (Reading the DOM is fine INSIDE a predicate that also depends on store
+ * state, because the store change is what re-triggers the check.)
+ */
 function waitForProof(
   predicate: (s: ViewerState) => boolean,
   timeoutMs: number,

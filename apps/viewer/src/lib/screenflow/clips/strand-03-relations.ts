@@ -33,6 +33,7 @@
 
 import { propertyRowAnchor } from '@/lib/tours/anchors';
 import { getViewerStoreApi } from '@/store';
+import { parseIfcZoneKey } from '@/store/slices/ifcZonesSlice';
 import { authoredCount, authoredDevices, authoredSpaces, buildDemoBuilding, catalogEntry, placeFromCatalogue, target } from './demo-building';
 import type { ScreenflowBeat, ScreenflowClip, ScreenflowStoreApi } from '../types';
 import type { IfcStoreyLocalPoint } from '../worldPointer';
@@ -59,6 +60,87 @@ const ZONES: ReadonlyArray<{ name: string; colour: string; rooms: number[] }> = 
   { name: 'MG 14', colour: '#0ea5e9', rooms: [1, 2] },
 ];
 
+/**
+ * Where the pointer sits while each zone is painted — the middle of its first
+ * room, in storey-local metres. Written out rather than derived from the room
+ * geometry: a space authored this session has its footprint in the overlay,
+ * and reading it back here would make the pointer depend on the very write the
+ * beat is still waiting to prove.
+ */
+const ZONE_POINTS: ReadonlyArray<[number, number, number]> = [
+  [2.25, 4, 1.2],
+  [6.5, 4, 1.2],
+];
+
+/**
+ * One beat per zone: create it, then paint its rooms into it.
+ *
+ * Two beats per zone rather than one, because the interesting half is the
+ * second: creating a zone is bookkeeping, deciding which rooms belong in it is
+ * the engineering. The brush is left on between them so what the audience sees
+ * is the tool being used, not a result appearing.
+ */
+function paintZoneBeats(): ScreenflowBeat[] {
+  const beats: ScreenflowBeat[] = [];
+  ZONES.forEach((zone, index) => {
+    beats.push({
+      id: `zone-${index}-new`,
+      anchor: 'activity-zones',
+      captionDe: `Eine neue Gruppe: ${zone.name}.`,
+      captionEn: `A new group: ${zone.name}.`,
+      perform: (store) => {
+        const at = target(store);
+        if (!at) return;
+        const zoneId = store.getState().createIfcZone(at.modelId, {
+          name: zone.name,
+          colour: zone.colour,
+          // `IfcZone` has no PredefinedType; ObjectType is where a refinement
+          // can live, and this is what a trigger zone IS.
+          objectType: 'TriggerZone',
+        });
+        if (zoneId === null) return;
+        // The brush needs a target, or the next beat's strokes go nowhere.
+        store.getState().setActiveIfcZone(at.modelId, zoneId);
+        store.getState().setIfcZoneBrushActive(true);
+      },
+      settled: () => authoredCount(getViewerStoreApi(), 'IfcZone') >= index + 1,
+      settleTimeoutMs: 10_000,
+      holdMs: 3000,
+    });
+    beats.push({
+      id: `zone-${index}-paint`,
+      // Pointed at the first room of the group, in the building rather than at
+      // the panel: the click that matters happens on the model.
+      worldPoint: ZONE_POINTS[index],
+      captionDe: zone.rooms.length === 1
+        ? 'Ein Raum hinein – mehr gehört nicht dazu.'
+        : 'Zwei Räume hinein – die gehören zusammen.',
+      captionEn: zone.rooms.length === 1
+        ? 'One room into it - nothing else belongs.'
+        : 'Two rooms into it - those belong together.',
+      perform: (store) => {
+        const at = target(store);
+        const parsed = parseIfcZoneKey(store.getState().activeIfcZoneKey);
+        if (!at || !parsed) return;
+        const rooms = authoredSpaces(store);
+        const members = zone.rooms
+          .map((i) => rooms[i])
+          .filter((id): id is number => id !== undefined);
+        if (members.length > 0) store.getState().paintIfcZone(at.modelId, parsed.zoneId, members, 'add');
+      },
+      settled: (s) => {
+        const at = target(getViewerStoreApi());
+        if (!at) return false;
+        const zones = s.ifcZonesOf(at.modelId);
+        return (zones[index]?.memberIds.length ?? 0) >= zone.rooms.length;
+      },
+      settleTimeoutMs: 10_000,
+      holdMs: 4200,
+    });
+  });
+  return beats;
+}
+
 /** Total devices once the later three have landed. */
 const DEVICES_AFTER = 5 + LATER_PLACEMENTS.length;
 
@@ -66,6 +148,11 @@ function selectDevice(store: ScreenflowStoreApi, index: number): void {
   const expressId = authoredDevices(store)[index];
   const modelId = [...store.getState().models.keys()][0];
   if (expressId === undefined || !modelId) return;
+  // The triad, not just the highlight: these are 15 cm devices on a ceiling,
+  // and a highlighted one behind a wall looks exactly like a highlighted one
+  // two rooms away. Set here rather than in a beat of its own so it holds for
+  // every selection this clip makes.
+  store.getState().setShowSelectionOrigin(true);
   store.getState().setActiveTool('select');
   store.getState().showWorkspacePanel('properties');
   store.getState().setPropertiesActiveTab('properties');
@@ -163,7 +250,12 @@ export const STRAND_03_RELATIONS: ScreenflowClip = {
       panel: 'graph',
       captionDe: 'Daraus fällt das Blockschema: Geräte unter Räumen, Räume unter dem Geschoss.',
       captionEn: 'The block schema falls out: devices under rooms, rooms under the storey.',
-      prepare: showBlockSchema,
+      prepare: (store) => {
+        // At the default 300 px a chain graph shows a row of boxes and the
+        // top of the next -- the shape it exists to make visible is cut off.
+        store.getState().setBottomPanelHeight(560);
+        showBlockSchema(store);
+      },
       settled: (s) => s.graphPanelVisible && s.graphChainId === 'storey' && s.graphStartTypes.length > 0,
       settleTimeoutMs: 8000,
       holdMs: 5200,
@@ -182,32 +274,41 @@ export const STRAND_03_RELATIONS: ScreenflowClip = {
       holdMs: 4600,
     },
     {
-      id: 'zones',
+      // The zones used to be created and filled inside one beat, which meant
+      // two of them appeared complete with no visible act in between: the step
+      // that carries the whole idea -- a person decides which rooms belong
+      // together -- happened in a single frame. Now the brush is picked up
+      // first, and each zone is painted room by room.
+      id: 'zone-brush',
       anchor: 'activity-zones',
-      panel: 'zones',
-      captionDe: 'Jetzt die Auslösezonen: zwei Meldergruppen, je mit ihrer Nummer.',
-      captionEn: 'Now the trigger zones: two detection groups, each with its number.',
-      prepare: (store) => { store.getState().showWorkspacePanel('zones'); },
-      perform: (store) => {
-        const at = target(store);
-        if (!at) return;
-        const rooms = authoredSpaces(store);
-        for (const zone of ZONES) {
-          const zoneId = store.getState().createIfcZone(at.modelId, {
-            name: zone.name,
-            colour: zone.colour,
-            // `IfcZone` has no PredefinedType; ObjectType is where a
-            // refinement can live, and this is what a trigger zone IS.
-            objectType: 'TriggerZone',
-          });
-          if (zoneId === null) continue;
-          const members = zone.rooms.map((i) => rooms[i]).filter((id): id is number => id !== undefined);
-          if (members.length > 0) store.getState().paintIfcZone(at.modelId, zoneId, members, 'add');
-        }
+      captionDe: 'Auslösezonen zeichnet man – mit dem Pinsel, Raum für Raum.',
+      captionEn: 'Trigger zones are painted - with the brush, room by room.',
+      prepare: (store) => {
+        const state = store.getState();
+        // Rooms back on: they are what gets painted. Strand 1 turned them off
+        // so the devices could be seen, and this clip starts from its result.
+        if (!state.typeVisibility.rooms) state.toggleTypeVisibility('rooms');
+        state.setActiveTool('zonePaint');
       },
-      settled: () => authoredCount(getViewerStoreApi(), 'IfcZone') >= ZONES.length,
-      settleTimeoutMs: 10_000,
+      settled: (s) => s.activeTool === 'zonePaint' && s.typeVisibility.rooms,
+      settleTimeoutMs: 8000,
       holdMs: 4200,
+    },
+    ...paintZoneBeats(),
+    {
+      id: 'zones-in-the-lens',
+      anchor: 'activity-lens',
+      panel: 'lens',
+      captionDe: 'Und im Modell steht die Zuordnung als Farbe.',
+      captionEn: 'And in the model the grouping stands as colour.',
+      prepare: (store) => {
+        store.getState().setActiveTool('select');
+        store.getState().showWorkspacePanel('lens');
+      },
+      perform: (store) => store.getState().setActiveLens('lens-by-zone'),
+      settled: (s) => s.activeLensId === 'lens-by-zone',
+      settleTimeoutMs: 8000,
+      holdMs: 5200,
     },
     {
       id: 'detection-tree',

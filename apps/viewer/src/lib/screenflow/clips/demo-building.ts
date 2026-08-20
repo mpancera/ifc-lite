@@ -48,10 +48,22 @@ export const WALL_HEIGHT = 2.8;
  *  all, because thick walls never meet exactly on axis. */
 export const SNAP_TOLERANCE = 1.0;
 
-/** Two doors, one per divider, so all three rooms connect. */
-export const DOORS: ReadonlyArray<{ at: IfcStoreyLocalPoint; name: string }> = [
-  { at: [4.5, 4, 0], name: 'Tuer Buero-Sitzung' },
-  { at: [8.5, 4, 0], name: 'Tuer Sitzung-Lager' },
+/**
+ * Two doors, one per divider, so all three rooms connect.
+ *
+ * `along` is the direction the leaf runs, and it is not optional in practice:
+ * both dividers run north-south, and a door built without it lies along the
+ * placement's X axis — square ACROSS its wall rather than in it. It is the
+ * divider's own direction, written out rather than derived, so the drawing,
+ * the wall and the door cannot disagree about which way that wall goes.
+ */
+export const DOORS: ReadonlyArray<{
+  at: IfcStoreyLocalPoint;
+  along: [number, number, number];
+  name: string;
+}> = [
+  { at: [4.5, 4, 0], along: [0, 1, 0], name: 'Tuer Buero-Sitzung' },
+  { at: [8.5, 4, 0], along: [0, 1, 0], name: 'Tuer Sitzung-Lager' },
 ];
 
 /**

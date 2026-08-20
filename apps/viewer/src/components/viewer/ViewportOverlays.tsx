@@ -21,6 +21,7 @@ import { cn } from '@/lib/utils';
 import { ViewCube, type ViewCubeRef } from './ViewCube';
 import { AxisHelper, type AxisHelperRef } from './AxisHelper';
 import { BasepointOverlay } from './BasepointOverlay';
+import { SelectionOriginOverlay } from './SelectionOriginOverlay';
 import { PointCloudPanel } from './PointCloudPanel';
 import { Crosshair } from 'lucide-react';
 
@@ -263,6 +264,7 @@ export function ViewportOverlays({ hideViewCube = false }: { hideViewCube?: bool
       {/* Per-model IFC (0,0,0) markers — toggled via BasepointToggleButton.
           Hidden by default; component returns null when the toggle is off. */}
       <BasepointOverlay />
+      <SelectionOriginOverlay />
     </>
   );
 }

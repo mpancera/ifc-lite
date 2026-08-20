@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Drawing2D, DrawingSheet } from '@ifc-lite/drawing-2d';
 import { rotatedBounds } from '@/lib/plan/planRotation';
+import { useViewerStore } from '@/store';
 
 interface UseViewControlsParams {
   drawing: Drawing2D | null;
@@ -28,6 +29,15 @@ interface UseViewControlsParams {
    * be framed with its corners cut off.
    */
   rotation?: number;
+  /**
+   * Bounds to fit when there is no cut drawing — the reference underlays.
+   *
+   * A plan can have content with no drawing at all: a DXF laid under a model
+   * that has nothing in it yet is the starting state of tracing one. Without
+   * this, fitting did nothing there, the paper stayed at scale 1, and the
+   * drawing sat in a corner a few pixels across.
+   */
+  fallbackBounds?: { min: { x: number; y: number }; max: { x: number; y: number } } | null;
 }
 
 interface UseViewControlsResult {
@@ -49,6 +59,7 @@ function useViewControls({
   isPinned,
   cachedSheetTransformRef,
   rotation = 0,
+  fallbackBounds = null,
 }: UseViewControlsParams): UseViewControlsResult {
   const [viewTransform, setViewTransform] = useState({ x: 0, y: 0, scale: 1 });
   const [needsFit, setNeedsFit] = useState(true); // Force fit on first open and axis change
@@ -101,8 +112,17 @@ function useViewControls({
     setViewTransform((prev) => ({ ...prev, scale: Math.max(0.01, prev.scale / 1.2) }));
   }, []);
 
+  // Whether there is anything on the paper worth framing. A cut is the usual
+  // answer; a reference underlay over a model with no geometry is the other
+  // one, and the plan should frame what it shows either way -- otherwise the
+  // drawing lands at scale 1 and sits in a corner a few pixels across.
+  const hasSomethingToFit = drawing !== null || fallbackBounds !== null;
+
   const fitToView = useCallback(() => {
-    if (!drawing || !containerRef.current) return;
+    if (!containerRef.current) return;
+    // The cut when there is one, the underlays when there is not.
+    const fitBounds = drawing?.bounds ?? fallbackBounds;
+    if (!fitBounds) return;
     const rect = containerRef.current.getBoundingClientRect();
 
     // Sheet mode: fit the entire paper into view
@@ -124,11 +144,12 @@ function useViewControls({
         x: (rect.width - paperWidth * scale) / 2,
         y: (rect.height - paperHeight * scale) / 2,
       });
+      useViewerStore.getState().notePlanFitted();
       return;
     }
 
-    // Non-sheet mode: fit the drawing bounds, as TURNED on screen.
-    const bounds = rotatedBounds(drawing.bounds, rotation);
+    // Non-sheet mode: fit the bounds, as TURNED on screen.
+    const bounds = rotatedBounds(fitBounds, rotation);
     const width = bounds.max.x - bounds.min.x;
     const height = bounds.max.y - bounds.min.y;
 
@@ -164,7 +185,12 @@ function useViewControls({
       x: rect.width / 2 - adjustedCenterX * scale,
       y: rect.height / 2 - adjustedCenterY * scale,
     });
-  }, [drawing, sheetEnabled, activeSheet, sectionPlane.axis, rotation]);
+    // Announced as a store fact so a watcher can wait for it. The transform
+    // itself stays out of the store — it changes on every wheel tick — but a
+    // re-frame is rare, and a change nothing can subscribe to is a change
+    // nothing can learn about.
+    useViewerStore.getState().notePlanFitted();
+  }, [drawing, fallbackBounds, sheetEnabled, activeSheet, sectionPlane.axis, rotation]);
 
   // Track axis changes for forced fit-to-view
   const lastFitAxisRef = useRef(sectionPlane.axis);
@@ -192,20 +218,20 @@ function useViewControls({
       prevSheetEnabledRef.current = sheetEnabled;
       cachedSheetTransformRef.current = null; // Clear cached transform
       // Auto-fit when sheet mode is toggled
-      if (status === 'ready' && drawing && containerRef.current) {
+      if (status === 'ready' && hasSomethingToFit && containerRef.current) {
         const timeout = setTimeout(() => {
           fitToView();
         }, 50);
         return () => clearTimeout(timeout);
       }
     }
-  }, [sheetEnabled, status, drawing, fitToView]);
+  }, [sheetEnabled, status, hasSomethingToFit, fitToView]);
 
   // Auto-fit when: (1) needsFit is true (first open or axis change), or (2) not pinned after regenerate
   // ALWAYS fit when axis changed, regardless of pin state
   // Also re-run when panelVisible changes so we fit when panel opens with existing drawing
   useEffect(() => {
-    if (status === 'ready' && drawing && containerRef.current && panelVisible) {
+    if (status === 'ready' && hasSomethingToFit && containerRef.current && panelVisible) {
       const axisChanged = lastFitAxisRef.current !== sectionPlane.axis;
 
       // Fit if needsFit (first open/axis change) OR if not pinned OR if axis just changed
@@ -221,7 +247,7 @@ function useViewControls({
         return () => clearTimeout(timeout);
       }
     }
-  }, [status, drawing, fitToView, isPinned, needsFit, sectionPlane.axis, panelVisible]);
+  }, [status, hasSomethingToFit, fitToView, isPinned, needsFit, sectionPlane.axis, panelVisible]);
 
   return {
     viewTransform,

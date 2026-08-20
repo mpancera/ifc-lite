@@ -43,10 +43,13 @@ import { propertyRowAnchor } from '@/lib/tours/anchors';
 import { underlayDemoFile } from '../dataset';
 import { midpoint } from '../worldPointer';
 import { modelsSettled } from '../model-lookup';
+import { planViewport } from '@/lib/plan/planViewport';
 import {
   authoredCount, authoredDevices, catalogEntry, DOORS, makeEditable, placeFromCatalogue,
   PLACEMENTS, SNAP_TOLERANCE, target, WALL_HEIGHT, WALL_THICKNESS, WALLS,
 } from './demo-building';
+import { IfcTypeEnum } from '@ifc-lite/data';
+import type { ListDefinition } from '@ifc-lite/lists';
 import type { ScreenflowBeat, ScreenflowClip } from '../types';
 
 /**
@@ -166,6 +169,48 @@ function placeDeviceBeats(): ScreenflowBeat[] {
   });
 }
 
+/**
+ * The list this clip shows: what was placed, and where it hangs.
+ *
+ * Built here rather than picked from the presets because none of them is this
+ * list — the closest is "All Elements", which answers with the walls and the
+ * rooms too, and the beat's whole claim is that the five devices came out
+ * carrying their room. A list that does not match its caption is worse than no
+ * list, because the caption is what the audience will remember.
+ */
+const DEVICE_LIST: ListDefinition = {
+  id: 'screenflow-devices',
+  name: 'Platzierte Geraete',
+  description: 'Was in diesem Geschoss gesetzt wurde, mit Nummer und Raum',
+  createdAt: 0,
+  updatedAt: 0,
+  entityTypes: [IfcTypeEnum.IfcSensor, IfcTypeEnum.IfcAlarm],
+  conditions: [],
+  columns: [
+    { id: 'attr-name', source: 'attribute', propertyName: 'Name' },
+    { id: 'attr-objecttype', source: 'attribute', propertyName: 'ObjectType' },
+    // The number the rule assigns on placement -- the point of three earlier
+    // beats, and the reason this list is worth exporting at all.
+    {
+      id: 'prop-occurrence-assetidentifier',
+      source: 'property',
+      psetName: 'Pset_ConstructionOccurence',
+      propertyName: 'AssetIdentifier',
+      label: 'AssetIdentifier',
+    },
+    { id: 'spatial-container', source: 'spatial', propertyName: 'Container', label: 'Raum' },
+  ],
+};
+
+/**
+ * The plan's fit counter as it stood before the fit beat asked for one.
+ *
+ * Module-level rather than closed over because `prepare` and `settled` are
+ * separate calls on the same beat object, and a clip is a value rather than an
+ * instance -- there is nowhere else for one beat to keep a note to itself.
+ */
+let fitFrom: number | null = null;
+
 export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
   id: 'strand-01-from-a-drawing',
   number: 1,
@@ -187,19 +232,65 @@ export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
       id: 'blank-project',
       captionDe: 'Ein leeres Projekt – noch nichts darin ausser einem Geschoss.',
       captionEn: 'An empty project - nothing in it yet but a storey.',
-      perform: () => {
+      perform: (store) => {
+        // Room visibility is persisted in localStorage, so a previous run that
+        // switched it off (this clip does, before the lens) leaves the next
+        // one generating three rooms nobody can see. A clip has to start from
+        // a state it set, not from whatever the last one left behind.
+        if (!store.getState().typeVisibility.rooms) store.getState().toggleTypeVisibility('rooms');
         window.dispatchEvent(new CustomEvent(EVENT_LOAD_FILE, { detail: createBlankIfcFile() }));
       },
-      settled: (s) => modelsSettled(s, 1),
+      settled: (s) => modelsSettled(s, 1) && s.typeVisibility.rooms,
       settleTimeoutMs: 60_000,
     },
     {
+      // The role decides whether anything may be written at all. Switching it
+      // in one beat looked like the software deciding for itself; this shows
+      // the choice being made, which is what it is.
+      id: 'roles-shown',
+      captionDe: 'Wer darf hier eigentlich etwas ändern? Die Fachrolle entscheidet das.',
+      captionEn: 'Who is allowed to change anything here? The discipline role decides.',
+      // The File tab first, and not for show: the ribbon renders only the
+      // active tab, so the role control is not in the tree at all until this
+      // runs -- the request went nowhere and the beat timed out. Measured on
+      // the first take of this version.
+      prepare: (store) => store.getState().setRibbonTab('file'),
+      perform: (store) => store.getState().setRoleDialogOpen(true),
+      settled: () => document.querySelector('[role="dialog"]') !== null,
+      settleTimeoutMs: 6000,
+      holdMs: 5200,
+    },
+    {
       id: 'make-editable',
-      captionDe: 'Rolle auf Bearbeiten – ab hier darf das Modell wachsen.',
-      captionEn: 'Role set to editing - from here the model may grow.',
-      perform: makeEditable,
-      settled: (s) => s.activeDisciplineSystemId !== 'viewer' && s.mutationViews.size > 0,
-      settleTimeoutMs: 5000,
+      captionDe: 'Ansehen, oder eine Anlage bearbeiten – hier: Bearbeiten.',
+      captionEn: 'View only, or author one installation - here: authoring.',
+      perform: (store) => {
+        makeEditable(store);
+        // The dialog has done its job; leaving it up would cover the next
+        // beat. Closed through the store: the first version sent an Escape
+        // keystroke, which the screenflow's own handler reads as "stop the
+        // clip" -- it would have ended the recording, not the dialog.
+        store.getState().setRoleDialogOpen(false);
+      },
+      settled: (s) =>
+        s.activeDisciplineSystemId !== 'viewer'
+        && s.mutationViews.size > 0
+        && document.querySelector('[role="dialog"]') === null,
+      settleTimeoutMs: 6000,
+      holdMs: 2600,
+    },
+    {
+      // Plan FIRST, drawing second. The other order put the drawing into a
+      // perspective view where nobody could read it, and then cut to a 2D view
+      // that already had everything in it -- the arrival of the drawing, which
+      // is the point of this stretch, happened off screen.
+      id: 'plan-view',
+      captionDe: 'Grundriss statt Perspektive – gezeichnet wird in 2D.',
+      captionEn: 'Plan view, not perspective - drawing happens in 2D.',
+      perform: (store) => store.getState().setViewMode('2d'),
+      settled: (s) => s.viewMode === '2d',
+      settleTimeoutMs: 8000,
+      holdMs: 2800,
     },
     {
       id: 'underlay',
@@ -208,23 +299,61 @@ export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
       perform: () => underlayDemoFile('plan'),
       settled: (s) => s.dxfUnderlays.length > 0,
       settleTimeoutMs: 30_000,
+      holdMs: 2600,
     },
     {
-      id: 'plan-view',
-      captionDe: 'Grundriss statt Perspektive – gezeichnet wird in 2D.',
-      captionEn: 'Plan view, not perspective - drawing happens in 2D.',
-      perform: (store) => {
-        store.getState().setViewMode('2d');
-        store.getState().cameraCallbacks.fitAll?.();
-      },
-      settled: (s) => s.viewMode === '2d',
+      id: 'zoom-to-drawing',
+      captionDe: 'Massstäblich hinterlegt – nicht importiert.',
+      captionEn: 'Placed underneath to scale - not imported.',
+      // The proof is the view itself, because framing changes no fact about
+      // the model — and it has to be a MOVE, not merely a different number.
+      //
+      // Fitting is what makes the drawing visible at all here. The plan does
+      // NOT frame itself in this state: its auto-fit waits for a cut, and
+      // there is no cut yet — nothing has been traced. So the paper sits at
+      // one pixel per metre and a 12 m building is twelve pixels wide, which
+      // is what the earlier takes of this beat were showing.
+      //
+      // The proof reads `planFitVersion` and not the transform itself. A
+      // `settled` predicate is re-evaluated when the VIEWER STORE changes and
+      // at no other time, so a proof that watches a module variable is checked
+      // once, before the work lands, and then never again -- it times out
+      // however well the beat worked. Measured, three takes running.
+      prepare: (store) => { fitFrom = store.getState().planFitVersion; },
+      perform: (store) => store.getState().requestPlanFit(),
+      settled: (s) => fitFrom !== null && s.planFitVersion > fitFrom,
       settleTimeoutMs: 8000,
+      holdMs: 4200,
     },
     {
       id: 'what-is-in-the-drawing',
       captionDe: 'Möbel, Bemassung, Raster, Raumstempel – davon wird nichts zum Bauteil.',
       captionEn: 'Furniture, dimensions, grid, room stamps - none of it becomes an element.',
       holdMs: 4600,
+    },
+    {
+      id: 'underlay-in-3d',
+      captionDe: 'Und räumlich liegt sie auf der Höhe ihres Geschosses.',
+      captionEn: 'And in space it sits at the level of its own storey.',
+      perform: (store) => {
+        store.getState().setViewMode('3d');
+        store.getState().cameraCallbacks.fitAll?.();
+      },
+      settled: (s) => s.viewMode === '3d',
+      settleTimeoutMs: 8000,
+      holdMs: 4200,
+    },
+    {
+      id: 'back-to-plan',
+      captionDe: 'Nachgezogen wird trotzdem im Grundriss – da stimmen die Masse.',
+      captionEn: 'Tracing still happens in the plan - that is where the measurements are.',
+      perform: (store) => {
+        store.getState().setViewMode('2d');
+        store.getState().requestPlanFit();
+      },
+      settled: (s) => s.viewMode === '2d',
+      settleTimeoutMs: 8000,
+      holdMs: 2400,
     },
     ...traceWallBeats(),
     {
@@ -238,6 +367,10 @@ export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
         for (const door of DOORS) {
           store.getState().addDoor(at.modelId, at.storeyId, {
             Position: [...door.at] as [number, number, number],
+            // Without this the leaf runs along X and stands square across a
+            // north-south divider instead of in it -- a visible modelling
+            // error in a clip about producing a correct model.
+            RefDirection: door.along,
             Width: 1,
             Height: 2.1,
             Name: door.name,
@@ -300,6 +433,17 @@ export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
       settleTimeoutMs: 15_000,
     },
     {
+      // Between the preview and the commit, because the preview IS the answer
+      // and it was on screen for no time at all: the pointer sat on the same
+      // panel through three beats and then three rooms appeared at once, which
+      // read as the software having done something unexplained.
+      id: 'room-preview-read',
+      captionDe: 'Drei Flächen, weil zwei Trennwände drin stehen.',
+      captionEn: 'Three areas, because two dividers stand in there.',
+      worldPoint: [6, 4, 0],
+      holdMs: 4800,
+    },
+    {
       id: 'rooms',
       anchor: 'add-element-panel',
       captionDe: 'Übernehmen – und die drei Räume stehen als Volumen im Modell.',
@@ -314,6 +458,14 @@ export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
       // the traced walls did not close, which is worth failing the take over.
       settled: () => authoredCount(getViewerStoreApi(), 'IfcSpace') >= 3,
       settleTimeoutMs: 30_000,
+      holdMs: 3600,
+    },
+    {
+      id: 'rooms-named',
+      captionDe: 'Büro, Sitzung, Lager – benannt, mit Fläche, und jeder kennt sein Geschoss.',
+      captionEn: 'Office, meeting, store - named, with an area, each knowing its storey.',
+      worldPoint: [6, 4, 0],
+      holdMs: 4400,
     },
     {
       id: 'open-library',
@@ -330,7 +482,17 @@ export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
       },
       settled: (s) => s.addElementType === 'library',
       settleTimeoutMs: 6000,
-      holdMs: 4200,
+      holdMs: 3600,
+    },
+    {
+      // The range itself, held long enough to read. Everything placed in the
+      // next eight beats comes out of this list, and a viewer who never saw
+      // the list reads the placements as drawing rather than as picking.
+      id: 'library-range',
+      anchor: 'add-element-panel',
+      captionDe: 'Eine bereinigte Produktpalette, jedes Gerät mit seinen Daten.',
+      captionEn: 'A curated product range, each device with its data.',
+      holdMs: 5600,
     },
     ...placeDeviceBeats(),
     {
@@ -351,15 +513,31 @@ export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
       holdMs: 4200,
     },
     {
+      // Rooms off BEFORE the lens, not after. Coloured by class the rooms get
+      // a colour like everything else, and three opaque volumes then stand in
+      // front of every device inside them -- the lens showed the argument and
+      // hid the evidence for it.
+      id: 'rooms-out-of-the-way',
+      captionDe: 'Die Raumvolumen weg – sonst verdecken sie genau das, worum es gleich geht.',
+      captionEn: 'Room volumes out of the way - they hide exactly what comes next.',
+      perform: (store) => {
+        if (store.getState().typeVisibility.rooms) store.getState().toggleTypeVisibility('rooms');
+      },
+      settled: (s) => !s.typeVisibility.rooms,
+      settleTimeoutMs: 6000,
+      holdMs: 2800,
+    },
+    {
       id: 'lens',
       anchor: 'activity-lens',
       panel: 'lens',
-      captionDe: 'Eine Lens färbt nach Bauteilart – Wand, Tür, Raum, Gerät.',
-      captionEn: 'A lens colours by element class - wall, door, room, device.',
+      captionDe: 'Eine Lens färbt nach Bauteilart – Wand, Tür, Gerät.',
+      captionEn: 'A lens colours by element class - wall, door, device.',
       prepare: (store) => store.getState().showWorkspacePanel('lens'),
       perform: (store) => store.getState().setActiveLens('lens-by-class'),
       settled: (s) => s.activeLensId !== null,
       settleTimeoutMs: 6000,
+      holdMs: 4200,
     },
     showIdentifierBeat(
       0,
@@ -382,9 +560,40 @@ export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
       panel: 'lists',
       captionDe: 'Alles Gesetzte steht als Liste – fünf Geräte, mit ihrem Raum.',
       captionEn: 'Everything placed is a list - five devices, each with its room.',
-      perform: (store) => store.getState().showWorkspacePanel('lists'),
-      settled: (s) => s.listPanelVisible,
-      settleTimeoutMs: 6000,
+      perform: (store) => {
+        store.getState().showWorkspacePanel('lists');
+        // At the default 300 px the table showed a header and two rows, which
+        // is not a list -- it is the promise of one.
+        store.getState().setBottomPanelHeight(560);
+        // And the list has to be ANSWERED, not merely opened. Showing the
+        // panel alone left an empty builder on screen, and the two export
+        // beats after it had nothing to export -- both timed out, measured.
+        store.getState().requestListRun(DEVICE_LIST);
+      },
+      settled: (s) => s.listPanelVisible && (s.listResult?.rows.length ?? 0) >= PLACEMENTS.length,
+      settleTimeoutMs: 20_000,
+      holdMs: 5200,
+    },
+    {
+      id: 'list-export-csv',
+      panel: 'lists',
+      captionDe: 'Und sie verlässt das Werkzeug – als CSV, für die Tabelle daneben.',
+      captionEn: 'And it leaves the tool - as CSV, for the spreadsheet next door.',
+      perform: (store) => store.getState().requestListExport('csv'),
+      // The request is consumed by the table; cleared means it was taken.
+      settled: (s) => s.listExportRequested === null,
+      settleTimeoutMs: 15_000,
+      holdMs: 3200,
+    },
+    {
+      id: 'list-export-xlsx',
+      panel: 'lists',
+      captionDe: 'Oder als XLSX – mit den Gruppen und Summen, die auf dem Schirm stehen.',
+      captionEn: 'Or as XLSX - with the groups and totals that are on the screen.',
+      perform: (store) => store.getState().requestListExport('xlsx'),
+      settled: (s) => s.listExportRequested === null,
+      settleTimeoutMs: 15_000,
+      holdMs: 3200,
     },
     {
       id: 'close',

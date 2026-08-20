@@ -13,7 +13,7 @@
  * being mid-placement.
  */
 
-import { useEffect, useState } from 'react';
+
 import { Eye, HardHat, Lock, Unlock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -59,22 +59,14 @@ interface DisciplineRolePanelProps {
 }
 
 export function DisciplineRolePanel({ trigger }: DisciplineRolePanelProps) {
-  const [open, setOpen] = useState(false);
+  // Open state in the store rather than here, so a caller elsewhere — a demo,
+  // the command palette — can both show the roles and put them away again. The
+  // role governs whether anything may be written at all; one that flips with
+  // nobody having seen it reads as the software deciding for itself.
+  const open = useViewerStore((s) => s.roleDialogOpen);
+  const setOpen = useViewerStore((s) => s.setRoleDialogOpen);
   const activeId = useViewerStore((s) => s.activeDisciplineSystemId);
   const setActiveId = useViewerStore((s) => s.setActiveDisciplineSystemId);
-
-  // Opened from elsewhere — a demo, the command palette — through the same
-  // consumed-once handoff the flavor dialog uses. The role governs whether
-  // anything may be written, so it has to be readable on screen before it
-  // changes; a role that flips with no visible cause reads as the software
-  // deciding for itself.
-  const requested = useViewerStore((s) => s.roleDialogRequested);
-  const setRequested = useViewerStore((s) => s.setRoleDialogRequested);
-  useEffect(() => {
-    if (!requested) return;
-    setOpen(true);
-    setRequested(false);
-  }, [requested, setRequested]);
   const active: DisciplineSystem | null = findDisciplineSystem(activeId);
 
   // Three levels of write access, each with its own colour so the current one

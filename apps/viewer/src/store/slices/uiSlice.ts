@@ -132,9 +132,29 @@ export interface UISlice extends GeometryLoadSettingsState, GeometryLoadSettings
      * right for the ones the cut missed.
      */
     readonly point?: { readonly x: number; readonly y: number };
+    /**
+     * Fit the whole drawing to the window instead of centring on one element.
+     *
+     * Same request because it is the same thing to a reader — "put that where
+     * I can see it" — and because two mechanisms racing for the same transform
+     * is how a view ends up half panned and half fitted.
+     */
+    readonly fit?: boolean;
+    /**
+     * Multiply the plan's scale by this, about the middle of the window.
+     *
+     * A fit is idempotent — the plan already fits itself when a drawing
+     * arrives — so "show me that closer" cannot be expressed as one. Same
+     * request as the others because all three end in the same transform.
+     */
+    readonly zoom?: number;
   } | null;
   /** Centre the plan on this element, keeping the current zoom. */
   requestPlanFocus: (globalId: number, point?: { x: number; y: number }) => void;
+  /** Fit the whole drawing to the plan window. */
+  requestPlanFit: () => void;
+  /** Multiply the plan's zoom by `factor`, about the middle of the window. */
+  requestPlanZoom: (factor: number) => void;
   leftPanelCollapsed: boolean;
   rightPanelCollapsed: boolean;
   /**
@@ -148,6 +168,26 @@ export interface UISlice extends GeometryLoadSettingsState, GeometryLoadSettings
    * not an override.
    */
   bottomPanelHeight: number;
+  /**
+   * Draw a small XYZ triad on the selected element.
+   *
+   * The highlight answers "which one" and stops there. Where the interesting
+   * elements are 15 cm devices on a ceiling that is not enough — a highlighted
+   * detector two rooms away and one behind a wall look the same, and neither
+   * says which way it is turned.
+   */
+  showSelectionOrigin: boolean;
+  /**
+   * Bumped every time the plan re-frames itself — a fit, from the toolbar, a
+   * request, or the automatic one after a regenerate.
+   *
+   * The transform itself deliberately does NOT live in the store: it changes
+   * on every wheel tick and every drag frame, and only an overlay reads it.
+   * But "the paper was re-framed" is a rare event, and it has to be a store
+   * fact for anything to be able to WAIT for it — a watcher subscribes to the
+   * store, so a change it cannot see is a change it never learns about.
+   */
+  planFitVersion: number;
   activeTool: string;
   /**
    * Global edit mode. When `true`, all in-place editing affordances
@@ -214,6 +254,8 @@ export interface UISlice extends GeometryLoadSettingsState, GeometryLoadSettings
   // Actions
   setLeftPanelCollapsed: (collapsed: boolean) => void;
   setBottomPanelHeight: (height: number) => void;
+  setShowSelectionOrigin: (show: boolean) => void;
+  notePlanFitted: () => void;
   setRightPanelCollapsed: (collapsed: boolean) => void;
   setActiveTool: (tool: string) => void;
   /** Collapse the Space Sketch panel to a reopen pill (or restore it). */
@@ -280,9 +322,17 @@ export const createUISlice: StateCreator<UISlice & UICrossSliceState, [], [], UI
   requestPlanFocus: (globalId, point) => set((state) => ({
     planFocusRequest: { globalId, point, seq: (state.planFocusRequest?.seq ?? 0) + 1 },
   })),
+  requestPlanFit: () => set((state) => ({
+    planFocusRequest: { globalId: 0, fit: true, seq: (state.planFocusRequest?.seq ?? 0) + 1 },
+  })),
+  requestPlanZoom: (zoom) => set((state) => ({
+    planFocusRequest: { globalId: 0, zoom, seq: (state.planFocusRequest?.seq ?? 0) + 1 },
+  })),
   leftPanelCollapsed: false,
   rightPanelCollapsed: false,
   bottomPanelHeight: 300,
+  showSelectionOrigin: false,
+  planFitVersion: 0,
   activeTool: UI_DEFAULTS.ACTIVE_TOOL,
   editEnabled: false,
   spaceSketchMinimized: false,
@@ -311,6 +361,8 @@ export const createUISlice: StateCreator<UISlice & UICrossSliceState, [], [], UI
   setLeftPanelCollapsed: (leftPanelCollapsed) => set({ leftPanelCollapsed }),
   setRightPanelCollapsed: (rightPanelCollapsed) => set({ rightPanelCollapsed }),
   setBottomPanelHeight: (bottomPanelHeight) => set({ bottomPanelHeight }),
+  setShowSelectionOrigin: (showSelectionOrigin) => set({ showSelectionOrigin }),
+  notePlanFitted: () => set((state) => ({ planFitVersion: state.planFitVersion + 1 })),
   setActiveTool: (activeTool) => {
     // Authoring tools require edit mode. Entering one of them flips
     // the global toggle on so the rest of the UI (Properties panel,

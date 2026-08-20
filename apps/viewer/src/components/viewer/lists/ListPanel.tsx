@@ -258,6 +258,18 @@ export function ListPanel({ onClose }: ListPanelProps) {
     });
   }, [hasData, modelProviderPairs, setActiveListId, setListResult, setListExecuting]);
 
+  // Run a definition handed over from elsewhere — the command palette, a
+  // screenflow. Separate from the draft above because being asked to answer a
+  // list and being asked to edit one are different intentions.
+  const runListRequested = useViewerStore((s) => s.runListRequested);
+  const requestListRun = useViewerStore((s) => s.requestListRun);
+  React.useEffect(() => {
+    if (!runListRequested) return;
+    setView('results');
+    handleExecuteList(runListRequested);
+    requestListRun(null);
+  }, [runListRequested, handleExecuteList, requestListRun]);
+
   const handleCreateNew = useCallback(() => {
     setEditingList(null);
     setView('builder');

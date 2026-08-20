@@ -34,6 +34,8 @@ export function ViewTab() {
   // Cesium 3D overlay state
   const cesiumAvailable = useViewerStore((state) => state.cesiumAvailable);
   const cesiumEnabled = useViewerStore((state) => state.cesiumEnabled);
+  const showSelectionOrigin = useViewerStore((state) => state.showSelectionOrigin);
+  const setShowSelectionOrigin = useViewerStore((state) => state.setShowSelectionOrigin);
   const toggleCesium = useViewerStore((state) => state.toggleCesium);
   const cesiumPlacementEditMode = useViewerStore((state) => state.cesiumPlacementEditMode);
   const setCesiumPlacementEditMode = useViewerStore((state) => state.setCesiumPlacementEditMode);
@@ -147,6 +149,16 @@ export function ViewTab() {
               onClick={command.run}
             />
           ))}
+        {/* A display aid rather than a camera command, so it sits after them
+            rather than in their generated list. */}
+        <RibbonLargeButton
+          icon={Viewpoint}
+          label="Origin"
+          tooltip="Kleines Koordinatensystem auf dem gewählten Bauteil"
+          active={showSelectionOrigin}
+          activeClassName="bg-teal-600/20 text-foreground ring-1 ring-inset ring-teal-600/50"
+          onClick={() => setShowSelectionOrigin(!showSelectionOrigin)}
+        />
       </RibbonGroup>
 
       <RibbonGroupDivider />

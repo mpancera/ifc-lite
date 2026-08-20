@@ -285,16 +285,16 @@ export interface AddElementSlice {
   activeDisciplineSystemId: string;
 
   /**
-   * When true, the role dialog should open itself. Consumed once and cleared
-   * by the dialog, the same handoff `flavorDialogRequested` uses.
+   * Whether the role dialog is open.
    *
-   * The dialog owns its open state, which is right for a control a person
-   * clicks. But the role governs whether anything may be written at all, so
-   * both a demo and the command palette need to put it on screen before it
-   * changes — a role that flips with no visible cause reads as the software
-   * deciding on its own.
+   * State rather than a consumed-once request, and here rather than inside the
+   * dialog, because opening is not the only thing a caller needs: a demo that
+   * shows the roles has to close the dialog again afterwards, and a
+   * fire-and-forget request cannot say that. The first version was a request
+   * plus an Escape keystroke to dismiss, which reached the screenflow's own
+   * Escape handler and would have stopped the clip.
    */
-  roleDialogRequested: boolean;
+  roleDialogOpen: boolean;
 
   /** Rectangle (2 clicks) or polygon (N clicks + Enter to close). */
   addElementSlabMode: AddElementSlabMode;
@@ -304,7 +304,7 @@ export interface AddElementSlice {
   addElementHoverPoint: AddElementVec3 | null;
 
   setActiveDisciplineSystemId: (id: string) => void;
-  setRoleDialogRequested: (open: boolean) => void;
+  setRoleDialogOpen: (open: boolean) => void;
   setAddElementType: (t: AddElementType) => void;
   setAddElementStoreyId: (id: number | null) => void;
   setAddElementModelId: (id: string | null) => void;
@@ -393,7 +393,7 @@ export const createAddElementSlice: StateCreator<AddElementSlice, [], [], AddEle
   addElementPendingPoints: [],
   addElementHoverPoint: null,
   activeDisciplineSystemId: readStoredRole(),
-  roleDialogRequested: false,
+  roleDialogOpen: false,
 
   setActiveDisciplineSystemId: (activeDisciplineSystemId) => {
     // Persisted because the role now decides what may be edited, not just how
@@ -406,7 +406,7 @@ export const createAddElementSlice: StateCreator<AddElementSlice, [], [], AddEle
     }
     set({ activeDisciplineSystemId });
   },
-  setRoleDialogRequested: (roleDialogRequested) => set({ roleDialogRequested }),
+  setRoleDialogOpen: (roleDialogOpen) => set({ roleDialogOpen }),
   setAddElementType: (addElementType) =>
     // Switching types resets the pending-click queue — a wall's start
     // doesn't make sense as a slab's first corner. Hover is cleared

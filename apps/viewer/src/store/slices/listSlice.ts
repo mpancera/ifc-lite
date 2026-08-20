@@ -31,6 +31,15 @@ export interface ListSlice {
    * divergent model builder somewhere else.
    */
   listExportRequested: 'csv' | 'xlsx' | 'pdf' | null;
+  /**
+   * Run this list and show its result. Consumed once and cleared by the panel.
+   *
+   * Distinct from `pendingListDraft`, which opens the BUILDER: handing a
+   * definition over to be edited and handing one over to be answered are
+   * different intentions, and one field carrying both would need a second
+   * field to say which.
+   */
+  runListRequested: ListDefinition | null;
 
   // Actions
   setListDefinitions: (definitions: ListDefinition[]) => void;
@@ -41,6 +50,7 @@ export interface ListSlice {
   setListResult: (result: ListResult | null) => void;
   setListPanelVisible: (visible: boolean) => void;
   requestListExport: (format: 'csv' | 'xlsx' | 'pdf' | null) => void;
+  requestListRun: (definition: ListDefinition | null) => void;
   toggleListPanel: () => void;
   setListExecuting: (executing: boolean) => void;
   setPendingListDraft: (definition: ListDefinition | null) => void;
@@ -55,6 +65,7 @@ export const createListSlice: StateCreator<ListSlice, [], [], ListSlice> = (set,
   listExecuting: false,
   pendingListDraft: null,
   listExportRequested: null,
+  runListRequested: null,
 
   // Actions
   setListDefinitions: (listDefinitions) => {
@@ -88,6 +99,7 @@ export const createListSlice: StateCreator<ListSlice, [], [], ListSlice> = (set,
   setListResult: (listResult) => set({ listResult }),
   setListPanelVisible: (listPanelVisible) => set({ listPanelVisible }),
   requestListExport: (listExportRequested) => set({ listExportRequested }),
+  requestListRun: (runListRequested) => set({ runListRequested }),
   toggleListPanel: () => set((state) => ({ listPanelVisible: !state.listPanelVisible })),
   setListExecuting: (listExecuting) => set({ listExecuting }),
   setPendingListDraft: (pendingListDraft) => set({ pendingListDraft }),
