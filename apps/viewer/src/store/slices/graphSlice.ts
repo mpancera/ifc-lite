@@ -39,6 +39,27 @@ export interface GraphSlice {
    */
   graphHighlightInView: boolean;
 
+  /**
+   * What the drawing is OF: which chain, and what it starts from.
+   *
+   * In the store rather than in the panel because it is a choice about the
+   * model, not about a mounted component. It survives closing the panel, and
+   * it is drivable from outside — a screenflow that wants to show the block
+   * schema has to be able to ask for one, and component state cannot be
+   * asked. `graphStartTypes` feeds the type-picking chains, `graphStartSystems`
+   * the system-picking ones; only one is ever in play.
+   */
+  graphChainId: string;
+  graphStartTypes: string[];
+  graphStartSystems: number[];
+
+  setGraphChainId: (id: string) => void;
+  setGraphStartTypes: (types: string[]) => void;
+  setGraphStartSystems: (systems: number[]) => void;
+  /** Both start sets at once, for a model swap: express ids and type names
+   *  both belong to the model they came from. */
+  clearGraphStarts: () => void;
+
   setGraphPanelVisible: (visible: boolean) => void;
   toggleGraphPanel: () => void;
   setGraphHighlight: (highlight: GraphHighlight | null) => void;
@@ -46,6 +67,14 @@ export interface GraphSlice {
 }
 
 export const createGraphSlice: StateCreator<GraphSlice, [], [], GraphSlice> = (set, get) => ({
+  graphChainId: 'zone',
+  graphStartTypes: [],
+  graphStartSystems: [],
+  setGraphChainId: (graphChainId) => set({ graphChainId }),
+  setGraphStartTypes: (graphStartTypes) => set({ graphStartTypes }),
+  setGraphStartSystems: (graphStartSystems) => set({ graphStartSystems }),
+  clearGraphStarts: () => set({ graphStartTypes: [], graphStartSystems: [] }),
+
   graphPanelVisible: false,
   graphHighlight: null,
   graphHighlightInView: true,

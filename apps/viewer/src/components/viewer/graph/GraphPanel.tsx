@@ -232,9 +232,15 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
   useGraphOverlay();
 
   const [modelId, setModelId] = useState<string | null>(null);
-  const [chainId, setChainId] = useState<string>('zone');
-  const [startTypes, setStartTypes] = useState<string[]>([]);
-  const [startSystems, setStartSystems] = useState<number[]>([]);
+  // The drawing's subject lives in the store, so it survives closing the panel
+  // and can be asked for from outside (a screenflow showing the block schema).
+  const chainId = useViewerStore((s) => s.graphChainId);
+  const setChainId = useViewerStore((s) => s.setGraphChainId);
+  const startTypes = useViewerStore((s) => s.graphStartTypes);
+  const setStartTypes = useViewerStore((s) => s.setGraphStartTypes);
+  const startSystems = useViewerStore((s) => s.graphStartSystems);
+  const setStartSystems = useViewerStore((s) => s.setGraphStartSystems);
+  const clearGraphStarts = useViewerStore((s) => s.clearGraphStarts);
   const [positioned, setPositioned] = useState<{ nodes: Node[]; edges: Edge[] } | null>(null);
   const [laying, setLaying] = useState(false);
 
@@ -271,9 +277,9 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
   // belong to the model they came from. Picked systems are express ids, so
   // carrying them over would point at whatever happens to share the number.
   useEffect(() => {
-    setStartTypes([]);
-    setStartSystems([]);
+    clearGraphStarts();
     setPositioned(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the setter is stable; re-running on it would clear the picks the effect just allowed.
   }, [effectiveModelId]);
 
   const chosenCount = chain.pick === 'types' ? startTypes.length : startSystems.length;
@@ -446,15 +452,19 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
     [effectiveModelId, models, setSelectedEntityId],
   );
 
+  // Read-then-write rather than an updater: the store setters take a value,
+  // and the current list is already subscribed above.
   const toggleType = useCallback((name: string) => {
-    setStartTypes((prev) => (prev.includes(name) ? prev.filter((t) => t !== name) : [...prev, name]));
-  }, []);
+    setStartTypes(startTypes.includes(name)
+      ? startTypes.filter((t) => t !== name)
+      : [...startTypes, name]);
+  }, [startTypes, setStartTypes]);
 
   const toggleSystem = useCallback((expressId: number) => {
-    setStartSystems((prev) =>
-      prev.includes(expressId) ? prev.filter((id) => id !== expressId) : [...prev, expressId],
-    );
-  }, []);
+    setStartSystems(startSystems.includes(expressId)
+      ? startSystems.filter((id) => id !== expressId)
+      : [...startSystems, expressId]);
+  }, [startSystems, setStartSystems]);
 
   // Deliberately the FULL graph, not the drawn one: a device dropped from the
   // picture is still a device with no connection point.

@@ -25,6 +25,7 @@
 
 import { CLIP_01_FEDERATION } from './clips/clip-01-federation';
 import { STRAND_01_FROM_A_DRAWING } from './clips/strand-01-from-a-drawing';
+import { STRAND_03_RELATIONS } from './clips/strand-03-relations';
 import type { ScreenflowClip } from './types';
 
 /**
@@ -37,6 +38,7 @@ import type { ScreenflowClip } from './types';
 export const SCREENFLOW_REGISTRY: readonly ScreenflowClip[] = [
   CLIP_01_FEDERATION,
   STRAND_01_FROM_A_DRAWING,
+  STRAND_03_RELATIONS,
 ];
 
 export function getClip(id: string): ScreenflowClip | undefined {
@@ -66,12 +68,6 @@ export const PLANNED_CLIPS: readonly PlannedClip[] = [
     titleDe: 'Wenn das Modell schon da ist',
     stepDe: 'Modell öffnen, geforderte Qualität per IDS nachweisen, Planprodukte und Mengen ausgeben',
     needsDe: 'IDS und Plan-Exporte vorhanden; DXF trägt keine Metadaten am Polygon, und Listen sind noch kein Exportprodukt',
-  },
-  {
-    number: 3,
-    titleDe: 'Beziehungen, Blockschema, Auslösezonen',
-    stepDe: 'Blockschema erzeugen, Zonen anlegen, Detektionsbaum ableiten',
-    needsDe: 'nachgemessen 2026-08-19: die Kette Element-Raum-Geschoss liefert 54 Knoten und 0 Kanten. Platzierte Geraete haengen am Geschoss, nicht am Raum, und der Graph liest je Datei. Raumbezug, foederierte Sicht und der Graph-Export fehlen',
   },
   {
     number: 4,

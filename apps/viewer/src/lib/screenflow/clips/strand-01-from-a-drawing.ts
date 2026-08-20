@@ -37,85 +37,24 @@
  */
 
 import { createBlankIfcFile } from '@/utils/createBlankIfc';
-import { EDITOR_ROLE_ID } from '@/lib/roles/disciplineRoles';
 import { EVENT_LOAD_FILE } from '@/lib/tours/events';
 import { getViewerStoreApi } from '@/store';
-import { underlayDemoFile } from '../dataset';
 import { propertyRowAnchor } from '@/lib/tours/anchors';
-import { LocalSeedCatalogProvider, type CatalogEntry } from '@/lib/catalog';
+import { underlayDemoFile } from '../dataset';
 import { midpoint } from '../worldPointer';
 import { modelsSettled } from '../model-lookup';
+import {
+  authoredCount, authoredDevices, catalogEntry, DOORS, makeEditable, placeFromCatalogue,
+  PLACEMENTS, SNAP_TOLERANCE, target, WALL_HEIGHT, WALL_THICKNESS, WALLS,
+} from './demo-building';
 import type { ScreenflowBeat, ScreenflowClip, ScreenflowStoreApi } from '../types';
 import type { IfcStoreyLocalPoint } from '../worldPointer';
-
-/** Wall axes in storey-local metres — the same list the DXF is drawn from. */
-const WALLS: ReadonlyArray<{ start: IfcStoreyLocalPoint; end: IfcStoreyLocalPoint; name: string }> = [
-  { start: [0, 0, 0], end: [12, 0, 0], name: 'Aussenwand Sued' },
-  { start: [12, 0, 0], end: [12, 8, 0], name: 'Aussenwand Ost' },
-  { start: [12, 8, 0], end: [0, 8, 0], name: 'Aussenwand Nord' },
-  { start: [0, 8, 0], end: [0, 0, 0], name: 'Aussenwand West' },
-  { start: [4.5, 0, 0], end: [4.5, 8, 0], name: 'Trennwand 1' },
-  { start: [8.5, 0, 0], end: [8.5, 8, 0], name: 'Trennwand 2' },
-];
-
-const WALL_THICKNESS = 0.2;
-const WALL_HEIGHT = 2.8;
-
-/** Two doors, one per divider, so all three rooms connect. */
-const DOORS: ReadonlyArray<{ at: IfcStoreyLocalPoint; name: string }> = [
-  { at: [4.5, 4, 0], name: 'Tuer Buero-Sitzung' },
-  { at: [8.5, 4, 0], name: 'Tuer Sitzung-Lager' },
-];
-
-/**
- * Five placements across the three rooms, named by CATALOGUE ENTRY.
- *
- * Only the id and the position live here. What the element is — its IFC class,
- * its predefined type, its size, its technical data — comes from the catalogue
- * at placement time, because that is the argument this beat makes: these are
- * products off a maintained range, not shapes the demo invented. A clip that
- * restated the geometry would be a second, drifting copy of the range.
- *
- * Four kinds in five placements, with two of one kind in one room: the counter
- * in the identifier rule is scoped per room and type, so that pair is what
- * shows 001 and 002 later.
- */
-const PLACEMENTS: ReadonlyArray<{ catalogId: string; at: IfcStoreyLocalPoint }> = [
-  { catalogId: 'fire.smoke-detector', at: [2.2, 5.4, 2.7] },
-  { catalogId: 'fire.smoke-detector', at: [2.2, 2.2, 2.7] },
-  { catalogId: 'fire.manual-call-point', at: [4.9, 3.4, 1.4] },
-  { catalogId: 'fire.siren', at: [6.5, 7.7, 2.3] },
-  { catalogId: 'fire.heat-detector', at: [10.2, 4.0, 2.7] },
-];
-
-/** The catalogue the demo places from, read without a React hook. */
-const catalogue = new LocalSeedCatalogProvider();
-
-function catalogEntry(catalogId: string): CatalogEntry | null {
-  const entries = catalogue.listEntries();
-  return Array.isArray(entries) ? entries.find((e) => e.id === catalogId) ?? null : null;
-}
 
 /**
  * Where the numbering rule writes: the standard occurrence pset. The clip
  * points at this exact row, so it and the rule cannot drift apart.
  */
 const IDENTIFIER = { pset: 'Pset_ConstructionOccurence', property: 'AssetIdentifier' } as const;
-
-/** The n-th device this session created, in creation order. */
-function authoredDevice(store: ScreenflowStoreApi, index: number): number | null {
-  const state = store.getState();
-  const modelId = [...state.models.keys()][0];
-  const view = modelId ? state.mutationViews.get(modelId) : undefined;
-  if (!view) return null;
-  const devices: number[] = [];
-  for (const entity of view.getNewEntities()) {
-    if ((entity.type === 'IfcSensor' || entity.type === 'IfcAlarm') && !view.isDeleted(entity.expressId)) {
-      devices.push(entity.expressId);
-    }
-  }
-  return devices[index] ?? null;
-}
 
 /**
  * Select one device and show its properties.
@@ -133,7 +72,7 @@ function showIdentifierBeat(index: number, captionDe: string, captionEn: string)
     captionDe,
     captionEn,
     prepare: (store) => {
-      const expressId = authoredDevice(store, index);
+      const expressId = authoredDevices(store)[index] ?? null;
       const modelId = [...store.getState().models.keys()][0];
       if (expressId === null || !modelId) return;
       // Belt and braces with the beat that switches back to 3D: an active
@@ -145,56 +84,10 @@ function showIdentifierBeat(index: number, captionDe: string, captionEn: string)
       store.getState().setSelectedEntity({ modelId, expressId });
       store.getState().setSelectedEntityId(expressId);
     },
-    settled: (s) => s.selectedEntityId === authoredDevice(getViewerStoreApi(), index),
+    settled: (s) => s.selectedEntityId === authoredDevices(getViewerStoreApi())[index],
     settleTimeoutMs: 6000,
     holdMs: index === 0 ? 4600 : 3400,
   };
-}
-
-/**
- * How many entities of this type the session has authored.
- *
- * Every beat that creates something proves itself against this rather than
- * against `models.size > 0`. Learned the hard way: written as `settled: () =>
- * true`, five wall beats played their captions, advanced happily, and created
- * nothing at all — the clip looked right and the model stayed empty, which is
- * exactly the failure the proof exists to catch.
- */
-export function authoredCount(store: ScreenflowStoreApi, ifcType: string): number {
-  const state = store.getState();
-  const modelId = [...state.models.keys()][0];
-  const view = modelId ? state.mutationViews.get(modelId) : undefined;
-  if (!view) return 0;
-  let count = 0;
-  for (const entity of view.getNewEntities()) {
-    if (entity.type === ifcType && !view.isDeleted(entity.expressId)) count += 1;
-  }
-  return count;
-}
-
-/**
- * Make the project editable.
- *
- * Two gates stand between a loaded model and a created element, and both fail
- * SILENTLY — `runInStoreElementBuilder` returns `{ error }` that nobody reads.
- * The role must not be the viewer one (`mayCreateEntities`), and the model
- * needs a mutation overlay (`ensureMutationView`). A person clicking through
- * the UI passes both without noticing; a clip has to ask for them.
- */
-function makeEditable(store: ScreenflowStoreApi): void {
-  const state = store.getState();
-  state.setActiveDisciplineSystemId(EDITOR_ROLE_ID);
-  const modelId = [...state.models.keys()][0];
-  if (modelId) state.ensureMutationView(modelId);
-}
-
-/** The blank project has exactly one model and one storey; both are the first. */
-function target(store: ScreenflowStoreApi): { modelId: string; storeyId: number } | null {
-  const state = store.getState();
-  const [modelId, model] = [...state.models.entries()][0] ?? [];
-  const ids = model?.ifcDataStore?.entityIndex?.byType?.get('IFCBUILDINGSTOREY');
-  if (!modelId || !ids || ids.length === 0) return null;
-  return { modelId, storeyId: ids[0] };
 }
 
 /** One beat per wall, so the tracing reads as tracing and not as a jump cut. */
@@ -264,22 +157,7 @@ function placeDeviceBeats(): ScreenflowBeat[] {
         // Show which product is being used, in the panel, while it is used.
         if (entry) store.getState().setAddElementLibrarySelection(entry);
       },
-      perform: (store) => {
-        const at = target(store);
-        if (!at || !entry) return;
-        store.getState().addLibraryElement(at.modelId, at.storeyId, {
-          IfcEntity: entry.ifc.entity,
-          Position: [...placement.at] as [number, number, number],
-          PredefinedType: entry.ifc.predefinedType,
-          Name: entry.label,
-          Width: entry.geometry?.width,
-          Depth: entry.geometry?.depth,
-          Height: entry.geometry?.height,
-          Discipline: entry.discipline,
-          CatalogEntryId: entry.id,
-          TechnicalData: entry.technicalData,
-        });
-      },
+      perform: (store) => placeFromCatalogue(store, placement),
       settled: () => {
         const store = getViewerStoreApi();
         return authoredCount(store, 'IfcSensor') + authoredCount(store, 'IfcAlarm') > i;
@@ -430,7 +308,7 @@ export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
       perform: (store) => {
         const at = target(store);
         if (!at) return;
-        store.getState().generateSpacesFromWalls(at.modelId, at.storeyId, { snapTolerance: 1.0 });
+        store.getState().generateSpacesFromWalls(at.modelId, at.storeyId, { snapTolerance: SNAP_TOLERANCE });
         store.getState().setAddElementAutoSpacePreview(null);
       },
       // Three rooms is the whole point of the two dividers; fewer would mean
