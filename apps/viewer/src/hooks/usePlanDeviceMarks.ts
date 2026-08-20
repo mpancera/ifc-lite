@@ -165,9 +165,15 @@ export function usePlanDeviceMarks({
       // a Meldergruppe has given one it is the thing to print. The product
       // name ("Rauchmelder") is what stands in until then — and stays in the
       // tooltip either way.
+      // Session-authored only. `EntityTable` has getters for Name, Description
+      // and ObjectType and none for `Tag`, so a device that carried one in the
+      // FILE cannot be read here — the alternative is
+      // `extractEntityAttributesOnDemand`, which re-parses the source buffer
+      // and is exactly what must not happen once per device in a loop. Adding
+      // `getTag` to the table is the fix; until then a tag from a parsed model
+      // is simply not drawn, and nothing pretends otherwise.
       const tag = overlayAttribute(overlay, expressId, 'Tag')
         ?? (typeof authored?.[7] === 'string' ? authored[7] : null)
-        ?? dataStore.entities?.getTag?.(expressId)
         ?? '';
       const name = tag || overlayAttribute(overlay, expressId, 'Name')
         || (typeof authored?.[2] === 'string' ? authored[2] : null)
