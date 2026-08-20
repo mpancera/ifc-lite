@@ -326,7 +326,7 @@ export function useWorkspacePanelControls() {
     if (activeWorkspacePanels.has('zonePaint')) return 'Zones';
     if (activeWorkspacePanels.has('layers')) return 'Layer Stack';
     if (activeWorkspacePanels.has('collab')) return 'Collaboration Room';
-    if (activeWorkspacePanels.has('zones')) return 'Location Zones';
+    if (activeWorkspacePanels.has('zones')) return 'Compartments';
     return activeAnalysisExtension?.label ?? 'Analysis';
   }, [activeAnalysisExtension?.label, activeWorkspacePanels]);
 

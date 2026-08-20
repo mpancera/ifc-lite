@@ -475,7 +475,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
       // is only as reachable as the LAST surface that learned about it.
       { id: 'panel:sources', label: 'Cloud Sources', keywords: 'cde common data environment connect provider bim360 acc trimble dalux integration remote', category: 'Panels', icon: Cloud,
         action: () => { activateRightPanel('sources'); } },
-      { id: 'panel:zones', label: 'Location Zones', keywords: 'zone section takt area construction location apportionment storey', category: 'Panels', icon: Box,
+      { id: 'panel:zones', label: 'Compartments', keywords: 'compartment abschnitt zone section takt area construction location apportionment storey', category: 'Panels', icon: Box,
         action: () => { activateRightPanel('zones'); } },
       ...(isCollabEnabled()
         ? [{ id: 'panel:collab', label: 'Collaboration Room', keywords: 'share invite live multiplayer presence room realtime sync', category: 'Panels' as const, icon: Users,

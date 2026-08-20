@@ -683,7 +683,7 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
             onCheckedChange={() => toggleWorkspacePanel('zones')}
           >
             <Box className="h-4 w-4 mr-2" />
-            Location Zones
+            Compartments
           </DropdownMenuCheckboxItem>
           {collabEnabled && (
             <DropdownMenuCheckboxItem
