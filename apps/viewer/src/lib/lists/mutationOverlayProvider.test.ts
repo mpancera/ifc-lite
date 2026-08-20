@@ -159,3 +159,53 @@ test('withMutationOverlay: property sets authored on an existing entity are visi
   const names = wrapped.getPropertySets(100).flatMap((p) => p.properties.map((prop) => prop.name));
   assert.ok(names.includes('Owner'));
 });
+
+/**
+ * A storey holding one room, with a sensor placed in the room — all authored
+ * this session, none of it in the parse.
+ */
+function viewWithRoomedSensor() {
+  const { view, editor, sensorId } = viewWithSensor();
+  const storeyId = editor.addEntity('IfcBuildingStorey', [
+    'GID-STOREY', '#5', '01', null, null, null, null, '1. Obergeschoss', '.ELEMENT.', 3.0,
+  ]).expressId;
+  const roomId = editor.addEntity('IfcSpace', [
+    'GID-ROOM', '#5', '03', null, null, null, null, 'Buero', '.ELEMENT.', '.INTERNAL.', 3.0,
+  ]).expressId;
+  // (GlobalId, OwnerHistory, Name, Description, RelatedElements, RelatingStructure)
+  editor.addEntity('IfcRelContainedInSpatialStructure', [
+    'GID-CONT', '#5', null, null, [`#${sensorId}`], `#${roomId}`,
+  ]);
+  // (GlobalId, OwnerHistory, Name, Description, RelatingObject, RelatedObjects)
+  editor.addEntity('IfcRelAggregates', [
+    'GID-AGG', '#5', null, null, `#${storeyId}`, [`#${roomId}`],
+  ]);
+  return { view, sensorId, roomId, storeyId };
+}
+
+test('withMutationOverlay: the Room column names a room drawn this session', () => {
+  // The regression: the base provider builds its ancestry out of the PARSED
+  // spatial hierarchy, so a room that exists only in the overlay was invisible
+  // to it and every device in one reported its container class — a list full
+  // of "unknown" next to a model that plainly had rooms.
+  const { view, sensorId } = viewWithRoomedSensor();
+  const wrapped = withMutationOverlay(baseProvider(), view, { isRowEntity: (id) => id === sensorId });
+  assert.equal(wrapped.getSpaceName?.(sensorId), '03');
+  assert.equal(wrapped.getStoreyName?.(sensorId), '01');
+});
+
+test('withMutationOverlay: the container column names the room, not its class', () => {
+  const { view, sensorId } = viewWithRoomedSensor();
+  const wrapped = withMutationOverlay(baseProvider(), view, { isRowEntity: (id) => id === sensorId });
+  assert.equal(wrapped.getContainerName?.(sensorId), '03');
+});
+
+test('withMutationOverlay: an element in no authored room falls through to the file', () => {
+  // Nothing this session placed it, so the parsed answer must survive — a
+  // wrapper that answered '' here would blank the column of every model
+  // nobody has edited.
+  const { view } = viewWithRoomedSensor();
+  const base = { ...baseProvider(), getSpaceName: (id: number) => (id === 100 ? 'Parsed Room' : '') };
+  const wrapped = withMutationOverlay(base as typeof base & ListDataProvider, view);
+  assert.equal(wrapped.getSpaceName?.(100), 'Parsed Room');
+});

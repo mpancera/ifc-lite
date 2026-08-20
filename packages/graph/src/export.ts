@@ -44,6 +44,8 @@ export interface GraphTreeNode {
   kind: GraphNodeKind;
   ifcType: string;
   name: string;
+  /** The occurrence's asset identifier, or `''` when it has none. */
+  assetIdentifier: string;
   children: GraphTreeNode[];
 }
 
@@ -123,7 +125,14 @@ export function graphTreeOf(graph: Graph, chain: RelationChain): GraphTreeNode[]
       .map((id) => byId.get(id))
       .filter((n): n is GraphNode => n !== undefined)
       .map((child) => build(child, nextSeen));
-    return { expressId: node.expressId, kind: node.kind, ifcType: node.ifcType, name: node.name, children };
+    return {
+      expressId: node.expressId,
+      kind: node.kind,
+      ifcType: node.ifcType,
+      name: node.name,
+      assetIdentifier: node.assetIdentifier,
+      children,
+    };
   };
 
   const outermost = ranks[ranks.length - 1];
@@ -138,7 +147,14 @@ export function graphTreeOf(graph: Graph, chain: RelationChain): GraphTreeNode[]
   for (const node of graph.nodes) {
     if (placed.has(String(node.expressId))) continue;
     if (node.kind === outermost) continue;
-    trees.push({ expressId: node.expressId, kind: node.kind, ifcType: node.ifcType, name: node.name, children: [] });
+    trees.push({
+      expressId: node.expressId,
+      kind: node.kind,
+      ifcType: node.ifcType,
+      name: node.name,
+      assetIdentifier: node.assetIdentifier,
+      children: [],
+    });
   }
   return trees;
 }
@@ -171,10 +187,18 @@ export function graphToCsv(graph: Graph, chain: RelationChain): string {
     return [...line].reverse().map((n) => csvCell(n?.name ?? ''));
   });
 
-  const leafExtra = ['IfcType', 'ExpressId'];
+  // The identifier goes next to the leaf, not into the ancestor columns: it
+  // belongs to the occurrence, and a row whose Space column said `A.01.03` and
+  // whose identifier column said the same would be one fact printed twice.
+  const leafExtra = ['AssetIdentifier', 'IfcType', 'ExpressId'];
   const body = rows.map((cells, i) => {
     const leaf = leaves[i];
-    return [...cells, csvCell(leaf.ifcType), String(leaf.expressId)].join(';');
+    return [
+      ...cells,
+      csvCell(leaf.assetIdentifier),
+      csvCell(leaf.ifcType),
+      String(leaf.expressId),
+    ].join(';');
   });
   return [[...header, ...leafExtra].join(';'), ...body].join('\r\n');
 }

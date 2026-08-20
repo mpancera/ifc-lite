@@ -19,6 +19,7 @@ import type { PropertySet, QuantitySet } from '@ifc-lite/data';
 import { IfcTypeEnumFromString } from '@ifc-lite/data';
 import type { MutablePropertyView } from '@ifc-lite/mutations';
 import type { ListDataProvider } from '@ifc-lite/lists';
+import { buildOverlayRelationIndex } from '@/lib/mutations/overlayRelationIndex';
 import { resolveOverlayDefiningTypeId } from '@/lib/mutations/overlayTypeLink';
 import { authoredEntities } from '@/lib/mutations/authoredEntities';
 import { readZones } from '@/lib/ifcZones/membership';
@@ -125,6 +126,98 @@ export function withMutationOverlay(
 
   const overlayDefiningTypeId = (entityId: number) => resolveOverlayDefiningTypeId(view, entityId);
 
+  /**
+   * The spatial containers this session authored, indexed once.
+   *
+   * The base provider builds its ancestry out of `store.spatialHierarchy` and
+   * `store.entities.getName` — both the parsed file. A room drawn in this
+   * session is in neither, so a device placed into it had no room, and the
+   * column fell back to the container's CLASS: every detector reading
+   * "unknown" while the model plainly had rooms.
+   */
+  const relations = buildOverlayRelationIndex([...view.getNewEntities()]);
+
+  /**
+   * Every spatial ancestor of `id`, nearest first.
+   *
+   * Both edges are walked because a device carries both: the placement anchors
+   * it to the storey, and drawing it into a room adds the room. Which of the
+   * two comes back first is an accident of insertion order, so nothing here
+   * may depend on it — see `spatialPick`.
+   */
+  function overlayAncestors(id: number): number[] {
+    const out: number[] = [];
+    const seen = new Set<number>([id]);
+    const queue: number[] = [id];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      const parents = [
+        ...relations.related(current, 'IfcRelContainedInSpatialStructure', 'inverse'),
+        ...relations.related(current, 'IfcRelAggregates', 'inverse'),
+      ];
+      for (const parent of parents) {
+        if (seen.has(parent)) continue;
+        seen.add(parent);
+        out.push(parent);
+        queue.push(parent);
+      }
+    }
+    return out;
+  }
+
+  /** The nearest ancestor that is one of `kinds`, or `null`. */
+  function overlayAncestorOf(id: number, kinds: ReadonlySet<string>): number | null {
+    for (const ancestor of overlayAncestors(id)) {
+      const type = overlayById.get(ancestor)?.type;
+      if (type && kinds.has(type)) return ancestor;
+    }
+    return null;
+  }
+
+  /**
+   * How specific a spatial class is. Higher wins.
+   *
+   * A device sitting in a room is also, truthfully, in that room's storey. The
+   * Container column wants the innermost of the two: answering with the storey
+   * when a room exists throws away the only part of the answer the reader did
+   * not already know.
+   */
+  const SPATIAL_RANK: Readonly<Record<string, number>> = {
+    IfcSpace: 4,
+    IfcBuildingStorey: 3,
+    IfcBuilding: 2,
+    IfcSite: 1,
+  };
+
+  /** The innermost spatial ancestor of `id`, or `null`. */
+  function spatialPick(id: number): number | null {
+    let best: number | null = null;
+    let bestRank = 0;
+    for (const ancestor of overlayAncestors(id)) {
+      const rank = SPATIAL_RANK[overlayById.get(ancestor)?.type ?? ''] ?? 0;
+      // Strictly greater: ties keep the nearer one, which is the earlier entry.
+      if (rank > bestRank) {
+        best = ancestor;
+        bestRank = rank;
+      }
+    }
+    return best;
+  }
+
+  /** An overlay entity's Name, edits included. `''` when it has none. */
+  function overlayNameOf(id: number | null): string {
+    if (id === null) return '';
+    const edited = editedAttr(id, 'Name');
+    if (edited !== null) return edited;
+    const authored = overlayById.get(id);
+    return authored ? attrString(authored.attributes, ATTR_INDEX.Name) : '';
+  }
+
+  const SPACE_KINDS = new Set(['IfcSpace']);
+  const STOREY_KINDS = new Set(['IfcBuildingStorey']);
+  const BUILDING_KINDS = new Set(['IfcBuilding']);
+
+
   return {
     ...base,
 
@@ -153,6 +246,32 @@ export function withMutationOverlay(
     },
 
     getEntityTypeName: (id) => overlayById.get(id)?.type ?? base.getEntityTypeName(id),
+
+    // Spatial columns, overlay first. Each falls through to the parsed file
+    // when this session authored nothing for the element, so a model nobody
+    // has edited behaves exactly as before.
+    getSpaceName(id: number): string {
+      const room = overlayAncestorOf(id, SPACE_KINDS);
+      // A room with no name is still a room: answering with the file's blank
+      // is right, and falling through would report the storey instead.
+      if (room !== null) return overlayNameOf(room);
+      return base.getSpaceName?.(id) ?? '';
+    },
+    getContainerName(id: number): string {
+      const container = spatialPick(id);
+      if (container !== null) return overlayNameOf(container) || overlayById.get(container)?.type || '';
+      return base.getContainerName?.(id) ?? '';
+    },
+    getStoreyName(id: number): string {
+      const storey = overlayAncestorOf(id, STOREY_KINDS);
+      if (storey !== null) return overlayNameOf(storey);
+      return base.getStoreyName?.(id) ?? '';
+    },
+    getBuildingName(id: number): string {
+      const building = overlayAncestorOf(id, BUILDING_KINDS);
+      if (building !== null) return overlayNameOf(building);
+      return base.getBuildingName?.(id) ?? '';
+    },
     getEntityName: (id) => readAttr(id, 'Name', base.getEntityName),
     getEntityGlobalId: (id) => readAttr(id, 'GlobalId', base.getEntityGlobalId),
     getEntityDescription: (id) => readAttr(id, 'Description', base.getEntityDescription),

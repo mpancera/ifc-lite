@@ -104,7 +104,14 @@ export function buildRelationGraph(source: GraphSource, chain: RelationChain): G
     // An id the source cannot type is not an entity we can draw. It is also the
     // shape a dangling STEP reference takes, so silently skipping it is right.
     if (!ifcType) return null;
-    const node: GraphNode = { id, expressId, kind, ifcType, name: source.nameOf(expressId) ?? '' };
+    const node: GraphNode = {
+      id,
+      expressId,
+      kind,
+      ifcType,
+      name: source.nameOf(expressId) ?? '',
+      assetIdentifier: source.identifierOf?.(expressId) ?? '',
+    };
     nodes.set(id, node);
     return node;
   };

@@ -431,6 +431,7 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
               kind: n.kind,
               ifcType: n.ifcType,
               name: n.name,
+              assetIdentifier: n.assetIdentifier,
               dangling: dangling.has(n.id),
             } satisfies GraphNodeData,
           })),

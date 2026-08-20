@@ -45,6 +45,12 @@ export interface GraphStore {
   relationships?: {
     getRelated(entityId: number, relType: RelationshipType, direction: RelationDirection): number[];
   };
+  properties?: {
+    getForEntity(expressId: number): readonly {
+      name: string;
+      properties: readonly { name: string; value: unknown }[];
+    }[];
+  };
 }
 
 const RELATION_TO_STORE: Record<GraphRelation, RelationshipType> = {
@@ -119,6 +125,36 @@ function overlaySideFor(view: MutablePropertyView | null | undefined): OverlaySi
   };
 }
 
+/** Where the numbering rule writes. The standard occurrence pset. */
+const IDENTIFIER_PSET = 'Pset_ConstructionOccurence';
+const IDENTIFIER_PROP = 'AssetIdentifier';
+
+/**
+ * The asset identifier of one entity, this session's edits first.
+ *
+ * `getPropertyValue` already resolves in the order that matters — a pending
+ * mutation, then a pset created this session, then the parsed file — so a
+ * device numbered moments ago answers with its number rather than with the
+ * nothing the parse still holds. Without an overlay the parsed store is asked
+ * directly, which is the case for a model nobody has edited.
+ */
+function readIdentifier(
+  view: MutablePropertyView | null | undefined,
+  store: GraphStore,
+  expressId: number,
+): string | null {
+  const fromOverlay = view?.getPropertyValue(expressId, IDENTIFIER_PSET, IDENTIFIER_PROP);
+  if (typeof fromOverlay === 'string' && fromOverlay.trim()) return fromOverlay.trim();
+  if (typeof fromOverlay === 'number') return String(fromOverlay);
+  if (view) return null;
+
+  const pset = store.properties?.getForEntity(expressId)
+    ?.find((candidate) => candidate.name === IDENTIFIER_PSET);
+  const value = pset?.properties.find((p) => p.name === IDENTIFIER_PROP)?.value;
+  if (typeof value === 'string') return value.trim() || null;
+  return typeof value === 'number' ? String(value) : null;
+}
+
 /**
  * A `GraphSource` over one loaded model.
  *
@@ -149,6 +185,7 @@ export function graphSourceFor(
       return name && name !== 'Unknown' ? name : null;
     },
     nameOf: (expressId) => overlay?.nameOf(expressId) ?? store.entities?.getName(expressId) ?? null,
+    identifierOf: (expressId) => readIdentifier(view, store, expressId),
     related: (expressId, relation, direction) => {
       const parsed = store.relationships?.getRelated(expressId, RELATION_TO_STORE[relation], direction) ?? [];
       const authored = index.related(expressId, relation, direction);

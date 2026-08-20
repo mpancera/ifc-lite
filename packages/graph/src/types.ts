@@ -78,6 +78,15 @@ export interface GraphNode {
   ifcType: string;
   /** The entity's `Name`, or an empty string when it carries none. */
   name: string;
+  /**
+   * The occurrence's asset identifier — `A.01.03_FST.RM.001` — or `''`.
+   *
+   * On the node rather than looked up at draw time because the export needs it
+   * too, and a graph handed to a caller should answer for itself. Empty for
+   * every node that has none, which is most of them: rooms, storeys and zones
+   * are not numbered this way.
+   */
+  assetIdentifier: string;
 }
 
 export interface GraphEdge {

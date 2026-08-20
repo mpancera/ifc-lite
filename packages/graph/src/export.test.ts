@@ -13,8 +13,14 @@ import { elementInSpaceInStorey, elementInSpaceInZone } from './chain.js';
 import { edgeId } from './types.js';
 import type { Graph, GraphNode, GraphNodeKind } from './types.js';
 
-function node(expressId: number, kind: GraphNodeKind, ifcType: string, name: string): GraphNode {
-  return { id: String(expressId), expressId, kind, ifcType, name };
+function node(
+  expressId: number,
+  kind: GraphNodeKind,
+  ifcType: string,
+  name: string,
+  assetIdentifier = '',
+): GraphNode {
+  return { id: String(expressId), expressId, kind, ifcType, name, assetIdentifier };
 }
 
 /** Storey 1 holds rooms 10 and 11; room 10 holds two detectors, 11 holds one. */
@@ -23,9 +29,9 @@ function floorGraph(): Graph {
     node(1, 'storey', 'IfcBuildingStorey', '00'),
     node(10, 'space', 'IfcSpace', '0.01'),
     node(11, 'space', 'IfcSpace', '0.02'),
-    node(100, 'element', 'IfcSensor', 'RM 001'),
-    node(101, 'element', 'IfcSensor', 'RM 002'),
-    node(102, 'element', 'IfcAlarm', 'Sirene'),
+    node(100, 'element', 'IfcSensor', 'RM 001', 'A.01.01_FST.RM.001'),
+    node(101, 'element', 'IfcSensor', 'RM 002', 'A.01.01_FST.RM.002'),
+    node(102, 'element', 'IfcAlarm', 'Sirene', 'A.01.02_FST.Si.001'),
   ];
   const link = (source: number, target: number, relation: Parameters<typeof edgeId>[2]) => ({
     id: edgeId(String(source), String(target), relation),
@@ -99,9 +105,9 @@ describe('graphToCsv', () => {
   it('puts the outermost rank first and the element last', () => {
     const csv = graphToCsv(floorGraph(), CHAIN);
     const [header, ...rows] = csv.split('\r\n');
-    expect(header).toBe('Storey;Space;Element;IfcType;ExpressId');
-    expect(rows).toContain('00;0.01;RM 001;IfcSensor;100');
-    expect(rows).toContain('00;0.02;Sirene;IfcAlarm;102');
+    expect(header).toBe('Storey;Space;Element;AssetIdentifier;IfcType;ExpressId');
+    expect(rows).toContain('00;0.01;RM 001;A.01.01_FST.RM.001;IfcSensor;100');
+    expect(rows).toContain('00;0.02;Sirene;A.01.02_FST.Si.001;IfcAlarm;102');
   });
 
   it('writes one row per element and no more', () => {
@@ -113,21 +119,40 @@ describe('graphToCsv', () => {
     const graph = floorGraph();
     graph.nodes.push(node(103, 'element', 'IfcSensor', 'RM 999'));
     const rows = graphToCsv(graph, CHAIN).split('\r\n').slice(1);
-    expect(rows).toContain(';;RM 999;IfcSensor;103');
+    expect(rows).toContain(';;RM 999;;IfcSensor;103');
   });
 
   it('neutralises a name a spreadsheet would execute', () => {
     const graph = floorGraph();
     graph.nodes.push(node(104, 'element', 'IfcSensor', '=1+1'));
-    expect(graphToCsv(graph, CHAIN)).toContain(";;'=1+1;IfcSensor;104");
+    expect(graphToCsv(graph, CHAIN)).toContain(";;'=1+1;;IfcSensor;104");
   });
 
   it('quotes a name carrying the separator', () => {
     const graph = floorGraph();
     graph.nodes.push(node(105, 'element', 'IfcSensor', 'A;B'));
-    expect(graphToCsv(graph, CHAIN)).toContain(';;"A;B";IfcSensor;105');
+    expect(graphToCsv(graph, CHAIN)).toContain(';;"A;B";;IfcSensor;105');
   });
 });
+
+  it('quotes an identifier the way it quotes a name', () => {
+    // The identifier is machine-made and will not contain a semicolon today.
+    // It goes through the same guard anyway: the rule is user-editable, and a
+    // column that skipped the guard would be the one place a `;` in a
+    // separator silently shifts every cell after it one to the left.
+    const graph = floorGraph();
+    graph.nodes.push(node(106, 'element', 'IfcSensor', 'RM 003', 'A;B'));
+    expect(graphToCsv(graph, CHAIN)).toContain(';;RM 003;"A;B";IfcSensor;106');
+  });
+
+  it('carries the identifier into the JSON tree', () => {
+    const [storey] = graphTreeOf(floorGraph(), CHAIN);
+    const room = storey.children.find((c) => c.name === '0.01');
+    expect(room?.children.map((c) => c.assetIdentifier)).toEqual([
+      'A.01.01_FST.RM.001',
+      'A.01.01_FST.RM.002',
+    ]);
+  });
 
 describe('graphToJson', () => {
   it('names the rank order outermost first, so the depth is readable', () => {

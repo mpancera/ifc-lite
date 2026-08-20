@@ -35,6 +35,15 @@ export interface GraphSource {
   nameOf(expressId: number): string | null;
 
   /**
+   * The entity's asset identifier, or `null` when it carries none.
+   *
+   * Optional because a source over a bare relationship table has nowhere to
+   * read it from, and requiring it would make every such source lie with an
+   * empty string. Absent and empty mean the same thing to the caller.
+   */
+  identifierOf?(expressId: number): string | null;
+
+  /**
    * The entities `expressId` reaches over `relation` in `direction`.
    *
    * Order is the source's; the extraction does not depend on it.

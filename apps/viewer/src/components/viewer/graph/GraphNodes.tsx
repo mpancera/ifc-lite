@@ -25,6 +25,8 @@ export interface GraphNodeData extends Record<string, unknown> {
   /** Exact EXPRESS name, e.g. `IfcSensor`. */
   ifcType: string;
   name: string;
+  /** The occurrence's asset identifier, or `''` when it has none. */
+  assetIdentifier: string;
   /** True when nothing leaves this node — the chain could not place it. */
   dangling: boolean;
 }
@@ -52,7 +54,7 @@ const KIND_STYLE: Record<GraphNodeKind, string> = {
 };
 
 export function GraphBoxNode({ data, selected }: NodeProps) {
-  const { kind, ifcType, name, dangling } = data as GraphNodeData;
+  const { kind, ifcType, name, assetIdentifier, dangling } = data as GraphNodeData;
   const size = NODE_SIZE[kind];
 
   return (
@@ -67,14 +69,21 @@ export function GraphBoxNode({ data, selected }: NodeProps) {
         selected && 'ring-2 ring-sky-500 ring-offset-1 dark:ring-offset-zinc-950',
       )}
       style={{ width: size.width, height: size.height }}
-      title={`${ifcType}${name ? ` — ${name}` : ''}`}
+      title={[assetIdentifier, ifcType, name].filter(Boolean).join(' — ')}
     >
       <Handle type="target" position={Position.Left} className="!h-1.5 !w-1.5 !border-0 !bg-zinc-400" />
       <span className="truncate font-medium">{name || '(ohne Name)'}</span>
-      {/* A port box is a third the width and carries a two-character name;
-          `IfcDistributionPort` under it would be an ellipsis. The class is in
-          the tooltip, where it is one hover away rather than never. */}
-      {kind !== 'port' && <span className="truncate text-[10px] opacity-60">{ifcType}</span>}
+      {/* The identifier displaces the class where there is one. Ten devices in
+          a row all reading `IfcSensor` distinguish nothing, and the number is
+          what the drawing, the list and the export all say — a node that
+          cannot be matched against them by eye is the thing being fixed here.
+          A port box is a third the width and carries a two-character name, so
+          it gets neither; both are in the tooltip, one hover away. */}
+      {kind !== 'port' && (
+        <span className={cn('truncate text-[10px]', assetIdentifier ? 'font-mono opacity-80' : 'opacity-60')}>
+          {assetIdentifier || ifcType}
+        </span>
+      )}
       <Handle type="source" position={Position.Right} className="!h-1.5 !w-1.5 !border-0 !bg-zinc-400" />
     </div>
   );
