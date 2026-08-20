@@ -40,6 +40,8 @@ import '@xyflow/react/dist/style.css';
 import { Loader2, X } from 'lucide-react';
 import {
   buildRelationGraph,
+  graphToCsv,
+  graphToJson,
   chainRanks,
   danglingNodes,
   elementInSpaceInStorey,
@@ -60,6 +62,7 @@ import { GRAPH_NODE_TYPES, type GraphNodeData } from './GraphNodes';
 import { useGraphOverlay } from '@/hooks/useGraphOverlay';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import { Button } from '@/components/ui/button';
+import { downloadBlob, sanitizeFilename } from '@/lib/export/download';
 import { cn } from '@/lib/utils';
 
 /**
@@ -193,6 +196,23 @@ function RelationLegendRow({
       <span className="ml-auto shrink-0 text-[10px] opacity-50">{ifcEntity}</span>
     </div>
   );
+}
+
+/**
+ * Hand the drawn chain over as a file.
+ *
+ * The name says what it is and what it was read as, because a folder of
+ * `graph.csv` files is unusable: `detektionsbaum-zone-2026-08-19.csv`.
+ */
+function downloadGraph(graph: Graph, chain: RelationChain, format: 'csv' | 'json'): void {
+  const ranks = chainRanks(chain).join('-');
+  const stamp = new Date().toISOString().slice(0, 10);
+  const name = sanitizeFilename(`graph-${ranks}-${stamp}.${format}`);
+  const body = format === 'csv'
+    ? graphToCsv(graph, chain)
+    : JSON.stringify(graphToJson(graph, chain), null, 2);
+  const mime = format === 'csv' ? 'text/csv;charset=utf-8' : 'application/json;charset=utf-8';
+  downloadBlob(new Blob([body], { type: mime }), name);
 }
 
 function gapsFor(graph: Graph, chain: RelationChain): string[] {
@@ -542,6 +562,23 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
             ))}
           </select>
         </label>
+
+        {graph && built && (
+          <div className="flex gap-1.5">
+            {/* Exports the FULL graph, not the drawing: `drawn` may hold back
+                unconnected nodes to keep the picture readable, and a file that
+                quietly omitted them would be the one thing a detection tree
+                must not do. */}
+            <Button variant="outline" size="sm" className="h-7 flex-1 text-[11px]"
+              onClick={() => downloadGraph(built.graph, built.spec, 'csv')}>
+              CSV
+            </Button>
+            <Button variant="outline" size="sm" className="h-7 flex-1 text-[11px]"
+              onClick={() => downloadGraph(built.graph, built.spec, 'json')}>
+              JSON
+            </Button>
+          </div>
+        )}
 
         {graph && (
           <div className="text-zinc-500 dark:text-zinc-400">

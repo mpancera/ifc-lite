@@ -101,7 +101,12 @@ function laterPlacementBeats(): ScreenflowBeat[] {
 /** Draw the block schema: devices, the rooms they are in, the storey above. */
 function showBlockSchema(store: ScreenflowStoreApi): void {
   const state = store.getState();
-  state.showWorkspacePanel('graph');
+  // `setGraphPanelVisible`, not `showWorkspacePanel('graph')`: the latter's
+  // bottom-panel branch sets the script, schedule, list and heights flags and
+  // does not know about the graph, so asking it to reveal the graph silently
+  // does nothing. Reported rather than patched here — `store/index.ts` is
+  // being worked on elsewhere.
+  state.setGraphPanelVisible(true);
   state.setGraphChainId('storey');
   state.setGraphStartTypes(['IfcSensor', 'IfcAlarm']);
 }
@@ -159,7 +164,7 @@ export const STRAND_03_RELATIONS: ScreenflowClip = {
       captionDe: 'Daraus fällt das Blockschema: Geräte unter Räumen, Räume unter dem Geschoss.',
       captionEn: 'The block schema falls out: devices under rooms, rooms under the storey.',
       prepare: showBlockSchema,
-      settled: (s) => s.graphStartTypes.length > 0 && s.graphChainId === 'storey',
+      settled: (s) => s.graphPanelVisible && s.graphChainId === 'storey' && s.graphStartTypes.length > 0,
       settleTimeoutMs: 8000,
       holdMs: 5200,
     },
@@ -170,7 +175,7 @@ export const STRAND_03_RELATIONS: ScreenflowClip = {
       panel: 'graph',
       captionDe: 'Zurück zum Schema – die drei stehen an ihrer Stelle, ohne Zutun.',
       captionEn: 'Back to the schema - the three are in place, with nothing done for them.',
-      prepare: (store) => { store.getState().showWorkspacePanel('graph'); },
+      prepare: (store) => { store.getState().setGraphPanelVisible(true); },
       perform: showBlockSchema,
       settled: () => authoredDevices(getViewerStoreApi()).length >= DEVICES_AFTER,
       settleTimeoutMs: 8000,
@@ -210,13 +215,13 @@ export const STRAND_03_RELATIONS: ScreenflowClip = {
       panel: 'graph',
       captionDe: 'Und derselbe Bestand nochmal – diesmal nach Auslösezone gelesen.',
       captionEn: 'And the same stock again - read by trigger zone this time.',
-      prepare: (store) => { store.getState().showWorkspacePanel('graph'); },
+      prepare: (store) => { store.getState().setGraphPanelVisible(true); },
       perform: (store) => {
         const state = store.getState();
         state.setGraphChainId('zone');
         state.setGraphStartTypes(['IfcSensor', 'IfcAlarm']);
       },
-      settled: (s) => s.graphChainId === 'zone' && s.graphStartTypes.length > 0,
+      settled: (s) => s.graphPanelVisible && s.graphChainId === 'zone' && s.graphStartTypes.length > 0,
       settleTimeoutMs: 8000,
       holdMs: 5200,
     },

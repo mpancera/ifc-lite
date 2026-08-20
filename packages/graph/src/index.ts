@@ -25,3 +25,6 @@ export {
   systemMembersInSpace,
 } from './chain.js';
 export type { ChainStart, HopDirection, RelationChain, RelationHop } from './chain.js';
+
+export { graphToCsv, graphToJson, graphTreeOf } from './export.js';
+export type { GraphJsonExport, GraphTreeNode } from './export.js';
