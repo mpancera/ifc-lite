@@ -49,6 +49,7 @@ import {
   Blocks,
   Boxes,
   DoorClosed,
+  Radio,
   DoorOpen,
   ListChecks,
   Workflow,
@@ -766,6 +767,14 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
           >
             <DoorClosed className="h-4 w-4 mr-2" />
             Türnummern
+          </DropdownMenuCheckboxItem>
+          <DropdownMenuCheckboxItem
+            checked={activeWorkspacePanels.has('detectorGroups')}
+            disabled={!ifcDataStore}
+            onCheckedChange={() => toggleWorkspacePanel('detectorGroups')}
+          >
+            <Radio className="h-4 w-4 mr-2" />
+            Meldergruppen
           </DropdownMenuCheckboxItem>
           {(rightAnalysisExtensions.length > 0 || bottomAnalysisExtensions.length > 0) && (
             <>

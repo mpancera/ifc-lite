@@ -69,6 +69,7 @@ function setDockedVisible(id: AnalysisPanelId, visible: boolean): void {
     case 'proxyTriage': s.setProxyTriagePanelVisible(visible); break;
     case 'roomTriage': s.setRoomTriagePanelVisible(visible); break;
     case 'doorNumbers': s.setDoorNumbersPanelVisible(visible); break;
+    case 'detectorGroups': s.setDetectorGroupsPanelVisible(visible); break;
     case 'classTriage': s.setClassTriagePanelVisible(visible); break;
   }
 }

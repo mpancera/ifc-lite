@@ -63,6 +63,63 @@ export function addDistributionSystemToStore(
 }
 
 /**
+ * Create an `IfcDistributionCircuit` — a named partition of a system.
+ *
+ * IFC's own word for a subdivision of an installation: the fire-detection
+ * system is one `IfcDistributionSystem`, and the Meldergruppen that partition
+ * it are circuits under it. As a bare `IfcGroup` a Meldergruppe would say
+ * nothing about the installation it divides; as a circuit aggregated under its
+ * system it says exactly that, and stays an `IfcGroup` subtype, so membership
+ * is the same `IfcRelAssignsToGroup` as everything else.
+ *
+ * Attribute order is the system's — `IfcDistributionCircuit` adds none of its
+ * own: IfcRoot (GlobalId, OwnerHistory, Name, Description) + IfcObject
+ * (ObjectType) + IfcSystem (LongName) + IfcDistributionSystem
+ * (PredefinedType).
+ */
+export function addDistributionCircuitToStore(
+  editor: StoreEditor,
+  ownerHistoryId: number | null,
+  params: DistributionSystemInStoreParams,
+  random?: RandomSource,
+): { circuitId: number } {
+  const circuitId = editor.addEntity('IfcDistributionCircuit', [
+    generateIfcGuid(random),
+    ownerHistoryRef(ownerHistoryId),
+    params.Name ?? null,
+    params.Description ?? null,
+    params.ObjectType ?? null,
+    params.LongName ?? null,
+    `.${params.PredefinedType}.`,
+  ]).expressId;
+
+  return { circuitId };
+}
+
+/**
+ * Aggregate objects under a parent — here, circuits under their system.
+ *
+ * Attribute order: IfcRoot (GlobalId, OwnerHistory, Name, Description) +
+ * IfcRelDecomposes (RelatingObject) + IfcRelAggregates (RelatedObjects).
+ */
+export function emitRelAggregates(
+  editor: StoreEditor,
+  ownerHistoryId: number | null,
+  relatingObjectId: number,
+  relatedObjectIds: readonly number[],
+  random?: RandomSource,
+): number {
+  return editor.addEntity('IfcRelAggregates', [
+    generateIfcGuid(random),
+    ownerHistoryRef(ownerHistoryId),
+    null,
+    null,
+    `#${relatingObjectId}`,
+    relatedObjectIds.map((id) => `#${id}`),
+  ]).expressId;
+}
+
+/**
  * Assign elements to a system (or any other `IfcGroup`).
  *
  * Attribute order: IfcRoot (GlobalId, OwnerHistory, Name, Description) +

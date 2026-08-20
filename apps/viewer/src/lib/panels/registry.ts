@@ -41,6 +41,7 @@ import {
   Ruler,
   Workflow,
   PackageCheck,
+  Radio,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -72,7 +73,8 @@ export type WorkspacePanelId =
   | 'proxyTriage'
   | 'classTriage'
   | 'roomTriage'
-  | 'doorNumbers';
+  | 'doorNumbers'
+  | 'detectorGroups';
 
 /** Activity-bar clustering — a divider is drawn whenever the group changes. */
 export type PanelGroup = 'navigate' | 'inspect' | 'review' | 'author' | 'work';
@@ -180,6 +182,10 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   // panel — the frozen mapping is positional, so an insertion anywhere in the
   // first ten renames somebody's shortcut without saying so.
   { id: 'exports', title: 'Exportprodukte', short: 'Exporte', Icon: PackageCheck, group: 'work', region: 'side', prefersWide: true },
+  // Meldergruppen: derived from the Auslösezonen, so it belongs beside the
+  // other derivations rather than in the zone tool that feeds it.
+  // APPENDED, for the reason above it.
+  { id: 'detectorGroups', title: 'Meldergruppen', short: 'Melder', Icon: Radio, group: 'author', region: 'side' },
 ];
 
 /** The bottom-strip panel ids, mapped to their store visibility flag + setter

@@ -9,7 +9,8 @@
  * toolbar (viewer/commenter roles cannot unlock authoring).
  */
 
-import { Blocks, Box, Boxes, Brush, DoorClosed, DoorOpen, FileDiff, Library, ListChecks, Wand2 } from 'lucide-react';
+import { Blocks, Box, Boxes, Brush, DoorClosed,
+  Radio, DoorOpen, FileDiff, Library, ListChecks, Wand2 } from 'lucide-react';
 import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, List, Select, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -280,6 +281,17 @@ export function AuthorTab() {
           disabled={!ifcDataStore}
           active={activeWorkspacePanels.has('doorNumbers')}
           onClick={() => toggleWorkspacePanel('doorNumbers')}
+        />
+        {/* Last in the group because it is last in the sequence: rooms named,
+            devices placed, zones painted — only then is there a group to
+            derive. */}
+        <RibbonLargeButton
+          icon={Radio}
+          label="Meldergruppen"
+          tooltip="Je Auslösezone einen Melderkreis bilden und die Melder mit ihrem Kennzeichen beschriften"
+          disabled={!ifcDataStore}
+          active={activeWorkspacePanels.has('detectorGroups')}
+          onClick={() => toggleWorkspacePanel('detectorGroups')}
         />
       </RibbonGroup>
 

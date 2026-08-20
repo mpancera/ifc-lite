@@ -24,6 +24,8 @@ import {
   addLibraryElementToStore,
   addLibraryTypeToStore,
   addDistributionSystemToStore,
+  addDistributionCircuitToStore,
+  emitRelAggregates,
   emitRelAssignsToGroup,
   emitRelDefinesByType,
   findDistributionSystem,
@@ -66,6 +68,15 @@ import type { MeshData } from '@ifc-lite/geometry';
 import { getEntityBounds, getEntityCenter } from '@/utils/viewportUtils';
 import type { CatalogEntry } from '@/lib/catalog';
 import { disciplineSystemName, findDisciplineSystem, normalizeRoleId } from '@/lib/roles/disciplineRoles';
+import { readZones } from '@/lib/ifcZones/membership';
+import { themeOfZone } from '@/lib/ifcZones/themes';
+import { authoredEntities } from '@/lib/mutations/authoredEntities';
+import { overlayAttribute } from '@/lib/mutations/overlayAttribute';
+import {
+  CIRCUIT_OBJECT_TYPE, detectorMark, nextMarks, planCircuits, readCircuits,
+  type CircuitPlan,
+} from '@/lib/detectorGroups/circuits';
+import { isDeviceType } from '@/lib/plan/deviceSymbols';
 import { mayCreateEntities, mayEditEntity, type EditPermission } from '@/lib/roles/roleGuard';
 import { typeClassFor } from '@/lib/classTriage/groupAssignment';
 import { preserveZoneColour } from '@/lib/ifcZones/zoneDisplay';
@@ -795,6 +806,18 @@ export interface MutationSlice {
     storeyExpressId: number,
     params: MemberInStoreParams
   ) => { expressId: number } | { error: string };
+  /**
+   * Build one Meldergruppe per Auslösezone: an `IfcDistributionCircuit` of the
+   * detectors standing in that zone's rooms, aggregated under the active
+   * installation, each detector marked `<Zone>.<nn>`.
+   *
+   * Derived rather than painted: which rooms belong together is a judgement
+   * (the zone), which detectors follow from it is not. Re-running is the
+   * ordinary way to work — a detector already in its group keeps its mark.
+   */
+  buildDetectorCircuits: (
+    modelId: string,
+  ) => { plan: CircuitPlan; created: number; marked: number } | { error: string };
   /** Add a free-standing IfcSensor (fire detector, etc.) anchored to a storey. */
   addSensor: (
     modelId: string,
@@ -3068,6 +3091,129 @@ export const createMutationSlice: StateCreator<
         discipline: Discipline,
       },
     );
+  },
+
+  buildDetectorCircuits: (modelId) => {
+    const state = get();
+    const view = state.mutationViews.get(modelId);
+    const dataStore = state.models.get(modelId)?.ifcDataStore;
+    if (!dataStore) return { error: `No model loaded for id "${modelId}"` };
+
+    const system = findDisciplineSystem(state.activeDisciplineSystemId);
+    if (!system) {
+      return { error: 'Keine Anlage aktiv — auf die Rolle der Installation wechseln (z.B. Branddetektion).' };
+    }
+
+    const entities = view ? authoredEntities(view) : [];
+    // Only the zones of the theme this installation triggers on. A room is in
+    // one fire compartment AND one Auslösezone, and building groups from both
+    // would put every detector in two.
+    const theme = system.objectType === 'GasDetection' ? 'gas-trigger' : 'fire-trigger';
+    const zones = readZones(entities)
+      .filter((zone) => themeOfZone(zone.objectType)?.id === theme)
+      .map((zone) => ({ expressId: zone.expressId, name: zone.name, memberIds: zone.memberIds }));
+    if (zones.length === 0) {
+      return { error: 'Keine Auslösezone gefunden — zuerst Zonen anlegen und Räume hineinmalen.' };
+    }
+
+    // The detectors, with the room each stands in. `bySpace` is what the
+    // placement wrote and what `registerAuthoredElement` keeps current, so a
+    // device set a minute ago counts.
+    const bySpace = dataStore.spatialHierarchy?.bySpace;
+    const overlayTypes = new Map<number, string>();
+    for (const entity of entities) overlayTypes.set(entity.expressId, entity.type);
+    const devices: Array<{ id: number; roomId: number | null }> = [];
+    const seen = new Set<number>();
+    for (const [roomId, elementIds] of bySpace ?? []) {
+      for (const id of elementIds) {
+        if (seen.has(id)) continue;
+        const typeName = overlayTypes.get(id) ?? dataStore.entities?.getTypeName?.(id) ?? '';
+        if (!isDeviceType(typeName)) continue;
+        seen.add(id);
+        devices.push({ id, roomId });
+      }
+    }
+
+    const circuits = readCircuits(entities);
+    const plan = planCircuits({ zones, devices, circuits });
+
+    // The mark lives in `Tag`, which is IfcElement's own word for "the mark
+    // this element carries on the drawing". NOT in `Name`: a detector placed
+    // from the catalogue is called "Rauchmelder" there, and overwriting that
+    // would trade the product for its number — the plan can show both.
+    const markOf = (expressId: number): string => {
+      const overlaid = overlayAttribute(view, expressId, 'Tag');
+      if (overlaid !== null) return overlaid;
+      const authored = view?.getNewEntities
+        ? [...view.getNewEntities()].find((e) => e.expressId === expressId)
+        : undefined;
+      const value = authored?.attributes?.[7];
+      return typeof value === 'string' ? value.trim() : '';
+    };
+
+    const touched = plan.entries.flatMap((entry) => entry.deviceIds);
+    if (touched.length === 0) {
+      return { error: 'In den Auslösezonen steht kein Melder.' };
+    }
+
+    const result = runGroupRelation(
+      get, set, modelId, touched, 'build detector circuits',
+      (editor, anchor) => {
+        const systemId = findDistributionSystem(
+          get().mutationViews.get(modelId)?.getNewEntities() ?? [],
+          system.predefinedType, system.objectType,
+        ) ?? addDistributionSystemToStore(editor, anchor.ownerHistoryId, {
+          PredefinedType: system.predefinedType,
+          ObjectType: system.objectType,
+          Name: disciplineSystemName(system),
+        }, anchor.guidRandom).systemId;
+
+        let created = 0;
+        let marked = 0;
+        for (const entry of plan.entries) {
+          let circuitId: number;
+          if (entry.circuitId !== null) {
+            circuitId = entry.circuitId;
+          } else {
+            circuitId = addDistributionCircuitToStore(editor, anchor.ownerHistoryId, {
+              Name: entry.name,
+              ObjectType: CIRCUIT_OBJECT_TYPE,
+              PredefinedType: system.predefinedType,
+            }, anchor.guidRandom).circuitId;
+            // The aggregation is what makes it a partition OF that system
+            // rather than a group with a suggestive name.
+            emitRelAggregates(editor, anchor.ownerHistoryId, systemId, [circuitId]);
+            created += 1;
+          }
+
+          // Marks continue past the ones the group already carries, so a
+          // second run over two new detectors does not renumber seventeen.
+          const staying = entry.deviceIds.filter((id) => !entry.joining.includes(id));
+          const fresh = nextMarks(entry.name, staying.map(markOf), entry.joining.length);
+          entry.joining.forEach((id, i) => {
+            editor.setAttribute(id, 'Tag', fresh[i] ?? detectorMark(entry.name, i + 1));
+            marked += 1;
+          });
+          // A detector whose room left the zone keeps nothing: a mark naming a
+          // group it is not in reads as correct and is worse than none.
+          for (const id of entry.leaving) editor.setAttribute(id, 'Tag', '');
+
+          const existing = readCircuits(
+            authoredEntities(get().mutationViews.get(modelId)!),
+          ).find((c) => c.expressId === circuitId);
+          const members = entry.deviceIds.map((id) => `#${id}`);
+          if (existing?.relExpressId != null) {
+            editor.setPositionalAttribute(existing.relExpressId, 4, members);
+          } else {
+            emitRelAssignsToGroup(editor, anchor.ownerHistoryId, entry.deviceIds, circuitId, anchor.guidRandom);
+          }
+        }
+        return { created, marked };
+      },
+    );
+
+    if ('error' in result) return result;
+    return { plan, created: result.created, marked: result.marked };
   },
 
   addSensor: (modelId, storeyExpressId, params) => runInStoreElementBuilder(
