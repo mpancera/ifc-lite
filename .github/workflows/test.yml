@@ -390,6 +390,16 @@ jobs:
         run: pnpm fixtures
       - name: Check test wiring
         run: node scripts/check-test-wiring.mjs
+      # That guard is the only thing standing between a package script and a
+      # POSIX-shell-only spelling, and it is the one gate whose own subject CI
+      # cannot exercise: this runner IS Linux, so `$(find …)` works here and
+      # the defect is invisible. apps/viewer shipped exactly that and its
+      # 583-file suite could not be started on a Windows checkout at all.
+      # Pointing the guard at the real repo proves nothing either — a tick
+      # looks the same whether it worked or matched nothing — so these run it
+      # against fixtures carrying one known defect each.
+      - name: Check the test-wiring guard actually catches its cases
+        run: node --test scripts/check-test-wiring.test.mjs
       # typecheck-tests.mjs writes the `extends` of every generated test
       # program. A bare (non-`./`-prefixed) value is resolved by tsc as a NODE
       # MODULE, so the base config is not found and the `noEmit` it carries
