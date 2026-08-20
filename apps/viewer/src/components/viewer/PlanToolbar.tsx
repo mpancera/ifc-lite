@@ -222,7 +222,7 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
           },
           {
             id: 'spaceGraph',
-            label: 'Raumgraph (Fluchtweg-Logik)',
+            label: 'SpatialGraph (Fluchtweg-Logik)',
             count: graphNodeCount,
             visible: showSpaceGraph,
             onToggle: onToggleSpaceGraph,

@@ -4,7 +4,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { spaceGraphMeshes, GRAPH_HEIGHT } from './graphMeshes.js';
+import { spaceGraphMeshes, GRAPH_HEIGHT, GRAPH_ID_BASE } from './graphMeshes.js';
 import type { SpaceGraphView } from './graphView.js';
 
 const view: SpaceGraphView = {
@@ -27,11 +27,32 @@ function bounds(positions: Float32Array) {
   return { minX, maxX, minY, maxY, minZ, maxZ };
 }
 
+/** The mesh whose centre sits at this drawing point — how the eye finds it. */
+function at(meshes: ReturnType<typeof spaceGraphMeshes>, x: number, z: number) {
+  return meshes.find((m) => {
+    const b = bounds(m.positions);
+    return Math.abs((b.minX + b.maxX) / 2 - x) < 0.01 && Math.abs((b.minZ + b.maxZ) / 2 - z) < 0.01;
+  })!;
+}
+
 describe('spaceGraphMeshes', () => {
   it('builds one mesh per node and one per edge', () => {
     const meshes = spaceGraphMeshes(view, { elevation: 0 });
     assert.equal(meshes.length, 3);
-    assert.deepEqual(meshes.map((m) => m.expressId).sort((a, b) => a - b), [1, 2, 10]);
+  });
+
+  it('never stamps a mesh with the express id of the room or door it stands for', () => {
+    // The overlay only clears ids that resolve to nothing, so that no leaked
+    // ghost can take building geometry with it. A diagram wearing a room's own
+    // id survives being switched off — the bug this test exists for.
+    const meshes = spaceGraphMeshes(view, { elevation: 0 });
+    const real = new Set([1, 2, 10]);
+    for (const mesh of meshes) {
+      assert.ok(!real.has(mesh.expressId), `synthetic, got ${mesh.expressId}`);
+      assert.ok(mesh.expressId > GRAPH_ID_BASE, 'counted off the diagram base');
+    }
+    const ids = new Set(meshes.map((m) => m.expressId));
+    assert.equal(ids.size, meshes.length, 'and each one distinct');
   });
 
   it('hangs the diagram above the floor it describes', () => {
@@ -48,14 +69,16 @@ describe('spaceGraphMeshes', () => {
   it('puts drawing x on the renderer X and drawing y on the renderer Z', () => {
     // The mapping `planPick` pins. Getting it wrong turns the diagram on its
     // side and no test of the maths alone would notice.
-    const node = spaceGraphMeshes(view, { elevation: 0 }).find((m) => m.expressId === 2)!;
+    const node = at(spaceGraphMeshes(view, { elevation: 0 }), 10, 0);
     const b = bounds(node.positions);
-    assert.ok(Math.abs((b.minX + b.maxX) / 2 - 10) < 1e-6, 'x');
-    assert.ok(Math.abs((b.minZ + b.maxZ) / 2 - 0) < 1e-6, 'z');
+    assert.ok(b.maxX - b.minX < 1, 'a node, not the bar');
+    assert.ok(Math.abs((b.minZ + b.maxZ) / 2) < 1e-6, 'z');
   });
 
   it('spans the edge bar from one room to the other', () => {
-    const bar = spaceGraphMeshes(view, { elevation: 0 }).find((m) => m.expressId === 10)!;
+    const bar = spaceGraphMeshes(view, { elevation: 0 }).find(
+      (m) => bounds(m.positions).maxX - bounds(m.positions).minX > 1,
+    )!;
     const b = bounds(bar.positions);
     assert.ok(Math.abs(b.minX - 0) < 0.01, `starts at the first room (${b.minX})`);
     assert.ok(Math.abs(b.maxX - 10) < 0.01, `ends at the second (${b.maxX})`);
@@ -63,9 +86,7 @@ describe('spaceGraphMeshes', () => {
 
   it('colours the way out apart from the rooms', () => {
     const meshes = spaceGraphMeshes(view, { elevation: 0 });
-    const room = meshes.find((m) => m.expressId === 1)!;
-    const safe = meshes.find((m) => m.expressId === 2)!;
-    assert.notDeepEqual(room.color, safe.color);
+    assert.notDeepEqual(at(meshes, 0, 0).color, at(meshes, 10, 0).color);
   });
 
   it('skips a doorway between two rooms that sit on the same spot', () => {

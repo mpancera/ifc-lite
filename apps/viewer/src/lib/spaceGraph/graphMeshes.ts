@@ -21,10 +21,27 @@
  * The overlay channel takes meshes. A line primitive would be thinner and
  * cheaper, and there is no line primitive here — so a bar it is, sized in
  * metres so it stays readable at building scale.
+ *
+ * # The ids MUST be synthetic
+ * Clearing the overlay drops every id it put in the scene — but only those
+ * that resolve to no real entity, a guard that exists so a leaked ghost can
+ * never delete building geometry. Meshes stamped with a room's OWN express id
+ * are therefore never removed, and the diagram stays in the scene after it has
+ * been switched off. So the ids are counted off {@link GRAPH_ID_BASE} and the
+ * room and door they stand for live in the view, not in the mesh.
  */
 
 import type { MeshData } from '@ifc-lite/geometry';
 import type { SpaceGraphView, GraphNodeKind } from './graphView.js';
+
+/**
+ * Where the diagram's synthetic ids start.
+ *
+ * Above `GHOST_ID_BASE` (0x70000000) so the space-sketch ghosts and this
+ * diagram can never claim the same id, and far above any real express id so
+ * the overlay's clear-up can actually remove them.
+ */
+export const GRAPH_ID_BASE = 0x71000000;
 
 /** Metres. A node is a cube of this size, an edge a bar of this thickness. */
 export const NODE_SIZE = 0.6;
@@ -90,6 +107,11 @@ function box(
 export interface GraphMeshOptions {
   /** Storey floor level in renderer units (metres). */
   readonly elevation: number;
+  /**
+   * First synthetic id. Defaults to {@link GRAPH_ID_BASE}; pass a different
+   * one only to keep two diagrams apart in the same scene.
+   */
+  readonly idBase?: number;
   /** Metres above the floor. */
   readonly height?: number;
   readonly nodeSize?: number;
@@ -104,6 +126,8 @@ export function spaceGraphMeshes(
   const nodeHalf = (options.nodeSize ?? NODE_SIZE) / 2;
   const edgeHalf = (options.edgeThickness ?? EDGE_THICKNESS) / 2;
   const out: MeshData[] = [];
+  // Synthetic, never the room's or the door's own id — see the note above.
+  let nextId = options.idBase ?? GRAPH_ID_BASE;
 
   for (const edge of view.edges) {
     const dx = edge.to.x - edge.from.x;
@@ -113,7 +137,7 @@ export function spaceGraphMeshes(
     // nothing to draw — it happens where a room was detected twice.
     if (length < 1e-6) continue;
     out.push(box(
-      edge.doorId,
+      nextId += 1,
       [(edge.from.x + edge.to.x) / 2, y, (edge.from.y + edge.to.y) / 2],
       [length / 2, edgeHalf, edgeHalf],
       edge.exterior ? EXTERIOR_EDGE_COLOR : EDGE_COLOR,
@@ -123,7 +147,7 @@ export function spaceGraphMeshes(
 
   for (const node of view.nodes) {
     out.push(box(
-      node.spaceId,
+      nextId += 1,
       [node.at.x, y, node.at.y],
       [nodeHalf, nodeHalf, nodeHalf],
       NODE_COLOR[node.kind],

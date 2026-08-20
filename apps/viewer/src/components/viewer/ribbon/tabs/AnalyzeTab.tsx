@@ -134,7 +134,7 @@ export function AnalyzeTab() {
             than changing it: is the way out the software found the way out. */}
         <RibbonLargeButton
           icon={Waypoints}
-          label="Raumgraph"
+          label="SpatialGraph"
           tooltip="Räume als Punkte, Türen als Linien, dazu die Anzahl Türen bis ins Sichere — die Grundlage von Fluchtwegen und Türnummern, sichtbar gemacht"
           active={showSpaceGraph}
           onClick={() => setShowSpaceGraph(!showSpaceGraph)}
