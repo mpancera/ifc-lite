@@ -20,6 +20,7 @@
  */
 
 import { DEMO_FILES, missingDemoFiles, type DemoFileId } from './dataset';
+import { storedDemoFileIds } from './demoFileStore';
 import { PLANNED_CLIPS, SCREENFLOW_REGISTRY } from './registry';
 import type { ScreenflowClip } from './types';
 
@@ -31,6 +32,28 @@ export type JourneyState =
   /** No clip yet — the row says what the product still owes it. */
   | 'planned';
 
+/** Where a slot's file is coming from right now. */
+export type DemoSlotSource =
+  /** The user put a file in this slot; it lives in this browser only. */
+  | 'uploaded'
+  /** The server has it, out of the git-ignored `public/demo-local/`. */
+  | 'served'
+  /** Neither. */
+  | 'missing';
+
+export interface DemoSlotStatus extends MissingDemoFile {
+  source: DemoSlotSource;
+}
+
+export interface MissingDemoFile {
+  /** The slot, so the launcher can offer to fill it. */
+  id: DemoFileId;
+  name: string;
+  /** What a file picker for this slot should offer. */
+  accept: string;
+  howToGetDe: string;
+}
+
 export interface JourneyStep {
   number: number;
   titleDe: string;
@@ -40,7 +63,7 @@ export interface JourneyStep {
   /** Present exactly when a clip exists — what a start button starts. */
   clipId: string | null;
   /** Files the clip needs that are not here, each with how to get it. */
-  missingFiles: Array<{ name: string; howToGetDe: string }>;
+  missingFiles: MissingDemoFile[];
   /** What the product still owes this strand (`planned` only). */
   needsDe: string | null;
 }
@@ -106,9 +129,37 @@ export async function journeySteps(): Promise<JourneyStep[]> {
     return {
       ...row,
       state: 'missing-data' as const,
-      missingFiles: gone.map((id) => ({ name: DEMO_FILES[id].name, howToGetDe: DEMO_FILES[id].howToGetDe })),
+      missingFiles: gone.map((id) => ({
+        id,
+        name: DEMO_FILES[id].name,
+        accept: DEMO_FILES[id].accept,
+        howToGetDe: DEMO_FILES[id].howToGetDe,
+      })),
     };
   });
+}
+
+/**
+ * Every demo slot with where its file currently comes from.
+ *
+ * Separate from the steps because the two answer different questions. A step
+ * asks "can I press start", and only names what that one clip reads — which
+ * left the federation models unreachable, since no step of the journey
+ * requires them. This asks "what data do I have on this machine", and the
+ * answer has to cover every slot or a file nobody can upload is a file nobody
+ * can supply at all.
+ */
+export async function demoDataSlots(): Promise<DemoSlotStatus[]> {
+  const ids = Object.keys(DEMO_FILES) as DemoFileId[];
+  const uploaded = new Set(await storedDemoFileIds());
+  const missing = new Set(await missingDemoFiles(ids));
+  return ids.map((id) => ({
+    id,
+    name: DEMO_FILES[id].name,
+    accept: DEMO_FILES[id].accept,
+    howToGetDe: DEMO_FILES[id].howToGetDe,
+    source: uploaded.has(id) ? 'uploaded' : missing.has(id) ? 'missing' : 'served',
+  }));
 }
 
 /** The journey without asking the disk — for a caller that only needs the plan. */

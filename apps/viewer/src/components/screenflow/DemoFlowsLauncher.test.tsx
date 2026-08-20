@@ -44,6 +44,11 @@ function dialog(): Element | null {
   return document.querySelector('[role="dialog"][aria-label="Demo-Flows"]');
 }
 
+/** The five journey rows, not the demo-data rows below them. */
+function stepRows(): Element[] {
+  return [...(dialog()?.querySelectorAll('[aria-label="Journey-Schritte"] > li') ?? [])];
+}
+
 describe('DemoFlowsLauncher', () => {
   afterEach(() => {
     cleanup();
@@ -60,8 +65,7 @@ describe('DemoFlowsLauncher', () => {
     const restore = serveEverything();
     try {
       await open();
-      const rows = dialog()?.querySelectorAll('li') ?? [];
-      assert.equal(rows.length, 5, 'the journey is five steps');
+      assert.equal(stepRows().length, 5, 'the journey is five steps');
     } finally {
       restore();
     }
@@ -71,12 +75,28 @@ describe('DemoFlowsLauncher', () => {
     const restore = serveEverything();
     try {
       await open();
-      for (const row of dialog()?.querySelectorAll('li') ?? []) {
+      for (const row of stepRows()) {
         const text = row.textContent ?? '';
         const starts = [...row.querySelectorAll('button')].some((b) => /Vorführen/.test(b.textContent ?? ''));
         // A row that says "geplant" with a start button would hand the
         // presenter a button that does nothing in front of an audience.
         assert.equal(starts, !/geplant/.test(text), `wrong start offer on: ${text.slice(0, 40)}`);
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  it('offers every demo slot, not only the ones a step happens to need', async () => {
+    // The federation models belong to no step of the journey. When the upload
+    // sat beside the step that needed a file, they were unreachable — there
+    // was no control for them anywhere, so they could not be supplied at all.
+    const restore = serveEverything();
+    try {
+      await open();
+      const text = dialog()?.textContent ?? '';
+      for (const name of ['demo-architecture.ifc', 'demo-fire-detection.ifc', 'demo-plan.dxf']) {
+        assert.ok(text.includes(name), `no row for ${name}`);
       }
     } finally {
       restore();

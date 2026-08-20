@@ -17,16 +17,24 @@
  * A hand-kept list here would be a second copy of the plan, and the copy would
  * be the one that goes stale.
  *
- * # Readiness is asked of the disk
+ * # Readiness is asked of the machine, not of the code
  * A built strand can still be unplayable: the demo data it reads lives outside
- * the repository. The row says which file is missing instead of letting
- * somebody press start and watch nothing happen.
+ * the repository. A row says so instead of letting somebody press start and
+ * watch nothing happen.
+ *
+ * # Why the data section lists every slot, not just what a step is missing
+ * The first version offered an upload beside the step that needed the file,
+ * which left the two federation models unreachable — no step of the journey
+ * requires them, so nothing ever rendered a control for them and there was no
+ * way to supply them at all. The section below answers "what data does this
+ * machine have", which has to cover every slot to be usable.
  */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
-import { journeySteps, type JourneyStep } from '@/lib/screenflow/journey';
+import { demoDataSlots, journeySteps, type DemoSlotStatus, type JourneyStep } from '@/lib/screenflow/journey';
+import { removeStoredDemoFile, storeDemoFile } from '@/lib/screenflow/demoFileStore';
 import { playClip } from '@/lib/screenflow/player';
 import { patchScreenflowState, useScreenflowStore } from '@/lib/screenflow/screenflow-store';
 
@@ -50,6 +58,98 @@ export function openDemoFlows(): void {
   patchScreenflowState({ launcherOpen: true });
 }
 
+/** Present, and where from — the same three states the section explains. */
+const SOURCE_LABEL: Record<DemoSlotStatus['source'], string> = {
+  uploaded: 'hochgeladen',
+  served: 'lokal vorhanden',
+  missing: 'fehlt',
+};
+
+const SOURCE_CLASS: Record<DemoSlotStatus['source'], string> = {
+  uploaded: 'bg-sky-500/15 text-sky-700 dark:text-sky-400',
+  served: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400',
+  missing: 'bg-amber-500/15 text-amber-700 dark:text-amber-400',
+};
+
+/**
+ * One demo slot, fillable from the machine the presenter is sitting at.
+ *
+ * The file goes into the browser, never onto the server: `public/demo-local/`
+ * is copied verbatim into every build, so a model placed there would be
+ * downloadable from any deployment at a predictable URL. This way it exists in
+ * one browser profile and nowhere else, which is what makes uploading a real
+ * building acceptable at all.
+ */
+function SlotRow({ slot, onChanged }: { slot: DemoSlotStatus; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const guard = async (work: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await work();
+      onChanged();
+    } catch (err) {
+      // Named, not swallowed: a quota rejection on a 200 MB model looks
+      // exactly like a click that did nothing.
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <li className="border-t border-zinc-200 py-2 first:border-t-0 dark:border-zinc-800">
+      <div className="flex items-center gap-2">
+        <code className="shrink-0 text-[11px]">{slot.name}</code>
+        <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${SOURCE_CLASS[slot.source]}`}>
+          {SOURCE_LABEL[slot.source]}
+        </span>
+        <span className="flex-1" />
+        {slot.source === 'uploaded' && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 shrink-0 text-[11px]"
+            disabled={busy}
+            onClick={() => void guard(() => removeStoredDemoFile(slot.id))}
+          >
+            Entfernen
+          </Button>
+        )}
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-6 shrink-0 text-[11px]"
+          disabled={busy}
+          onClick={() => inputRef.current?.click()}
+        >
+          {busy ? 'Lädt …' : slot.source === 'missing' ? 'Hochladen' : 'Ersetzen'}
+        </Button>
+      </div>
+      {slot.source === 'missing' && (
+        <p className="mt-0.5 text-[11px] leading-snug text-zinc-500 dark:text-zinc-400">{slot.howToGetDe}</p>
+      )}
+      <input
+        ref={inputRef}
+        type="file"
+        accept={slot.accept}
+        className="hidden"
+        onChange={(e) => {
+          const picked = e.target.files?.[0];
+          // Cleared so picking the same file twice fires again — after a
+          // failed first attempt that is exactly what a person does.
+          e.target.value = '';
+          if (picked) void guard(() => storeDemoFile(slot.id, picked));
+        }}
+      />
+      {error && <p className="mt-0.5 text-[11px] text-red-600 dark:text-red-400">Fehlgeschlagen: {error}</p>}
+    </li>
+  );
+}
+
 function StepRow({ step }: { step: JourneyStep }) {
   const start = (mode: 'record' | 'present') => {
     if (!step.clipId) return;
@@ -71,13 +171,9 @@ function StepRow({ step }: { step: JourneyStep }) {
         </div>
         <p className="mt-0.5 text-[12px] leading-snug text-zinc-500 dark:text-zinc-400">{step.subtitleDe}</p>
         {step.state === 'missing-data' && (
-          <ul className="mt-1 space-y-0.5 text-[12px] leading-snug text-amber-700 dark:text-amber-400">
-            {step.missingFiles.map((file) => (
-              <li key={file.name}>
-                <code>{file.name}</code> fehlt in <code>apps/viewer/public/demo-local/</code> — {file.howToGetDe}
-              </li>
-            ))}
-          </ul>
+          <p className="mt-1 text-[12px] leading-snug text-amber-700 dark:text-amber-400">
+            Braucht {step.missingFiles.map((f) => f.name).join(', ')} — unten unter Demodaten hochladen.
+          </p>
         )}
         {step.needsDe && (
           <p className="mt-1 text-[12px] leading-snug text-zinc-500 dark:text-zinc-400">
@@ -103,16 +199,20 @@ export function DemoFlowsLauncher() {
   const open = useScreenflowStore((s) => s.launcherOpen);
   const status = useScreenflowStore((s) => s.status);
   const [steps, setSteps] = useState<JourneyStep[] | null>(null);
+  const [slots, setSlots] = useState<DemoSlotStatus[] | null>(null);
+  const [reloads, setReloads] = useState(0);
+  const recheck = useCallback(() => setReloads((n) => n + 1), []);
 
-  // Re-asked on every open: a file can be dropped into `demo-local` while the
-  // app is running, and a launcher that answered from the first open would go
-  // on claiming the data is missing.
+  // Re-asked on every open, and again after an upload: a file can also be
+  // dropped into `demo-local` while the app runs, and a launcher that answered
+  // once would go on claiming the data is missing.
   useEffect(() => {
-    if (!open) { setSteps(null); return; }
+    if (!open) { setSteps(null); setSlots(null); return; }
     let cancelled = false;
     void journeySteps().then((rows) => { if (!cancelled) setSteps(rows); });
+    void demoDataSlots().then((rows) => { if (!cancelled) setSlots(rows); });
     return () => { cancelled = true; };
-  }, [open]);
+  }, [open, reloads]);
 
   useEffect(() => {
     if (!open) return;
@@ -144,16 +244,33 @@ export function DemoFlowsLauncher() {
         <p className="mt-1 text-[12px] leading-relaxed text-zinc-500 dark:text-zinc-400">
           <strong>Vorführen</strong> hält auf Leertaste an und lässt sich per Kapitel steuern.{' '}
           <strong>Aufnehmen</strong> läuft ohne Bedienelemente durch — für den Bildschirmrekorder.
-          Escape beendet beides.
+          Escape beendet beides. Fehlende Demodaten lassen sich hier hochladen; sie bleiben in
+          diesem Browser und werden weder ins Repository noch auf den Server geschrieben.
         </p>
 
         {steps === null ? (
           <p className="mt-4 text-[12px] text-zinc-500">Wird geprüft …</p>
         ) : (
-          <ul className="mt-3">
+          <ul className="mt-3" aria-label="Journey-Schritte">
             {steps.map((step) => <StepRow key={step.number} step={step} />)}
           </ul>
         )}
+
+        <div className="mt-5 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+          <h3 className="text-[12px] font-semibold">Demodaten</h3>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+            Hochgeladene Dateien bleiben in diesem Browser — sie gehen weder ins Repository noch auf
+            einen Server, und ein anderes Gerät sieht sie nicht. Der Name im Modellbaum ist immer der
+            hier gezeigte, nicht der der hochgeladenen Datei.
+          </p>
+          {slots === null ? (
+            <p className="mt-2 text-[11px] text-zinc-500">Wird geprüft …</p>
+          ) : (
+            <ul className="mt-2" aria-label="Demodaten">
+              {slots.map((slot) => <SlotRow key={slot.id} slot={slot} onChanged={recheck} />)}
+            </ul>
+          )}
+        </div>
 
         <div className="mt-4 flex justify-end">
           <Button variant="ghost" size="sm" onClick={closeDemoFlows}>Schliessen</Button>
