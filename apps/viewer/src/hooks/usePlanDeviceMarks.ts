@@ -17,13 +17,17 @@
  */
 
 import { useMemo } from 'react';
+import { useViewerStore } from '@/store';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import type { GeometryResult, MeshData } from '@ifc-lite/geometry';
 import { deviceSymbolKind, type DeviceMark } from '@/lib/plan/deviceSymbols';
 import type { PlanElementTest } from '@/lib/plan/planVisibility';
+import { overlayAttribute } from '@/lib/mutations/overlayAttribute';
 
 export interface UsePlanDeviceMarksOptions {
   enabled: boolean;
+  /** Which model the express ids belong to, for reading the authoring overlay. */
+  modelId?: string | null;
   geometryResult: GeometryResult | null | undefined;
   dataStore: IfcDataStore | null | undefined;
   storeyId: number | null;
@@ -56,9 +60,30 @@ function footprintCentre(meshes: readonly MeshData[]): { x: number; y: number } 
   return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
 }
 
+/**
+ * A STEP enum out of an overlay-authored entity's attributes: `.SMOKESENSOR.`
+ *
+ * Searched from the END rather than by index: `PredefinedType` is the last
+ * attribute on every device entity this draws (IfcSensor, IfcAlarm, IfcActuator
+ * and the rest of IfcDistributionControlElement), but at different positions,
+ * and one table per entity would be a table to keep in step with the schema.
+ */
+function overlayPredefinedType(attributes: readonly unknown[]): string | null {
+  for (let i = attributes.length - 1; i >= 0; i -= 1) {
+    const value = attributes[i];
+    if (typeof value !== 'string') continue;
+    const match = /^\.([A-Z0-9_]+)\.$/.exec(value);
+    if (match) return match[1];
+  }
+  return null;
+}
+
 export function usePlanDeviceMarks({
-  enabled, geometryResult, dataStore, storeyId, drawsElement,
+  enabled, geometryResult, dataStore, storeyId, drawsElement, modelId,
 }: UsePlanDeviceMarksOptions): DeviceMark[] {
+  const mutationViews = useViewerStore((s) => s.mutationViews);
+  const mutationVersion = useViewerStore((s) => s.mutationVersion);
+
   return useMemo((): DeviceMark[] => {
     if (!enabled || !dataStore || storeyId === null) return [];
     const elementToStorey = dataStore.spatialHierarchy?.elementToStorey;
@@ -86,23 +111,58 @@ export function usePlanDeviceMarks({
     }
     if (byDevice.size === 0) return [];
 
+    const overlay = modelId
+      ? mutationViews.get(modelId === 'legacy' ? '__legacy__' : modelId)
+      : undefined;
+    // A device authored this session has no row in the parsed store at all,
+    // and one renamed this session has a stale one — the mark has to read the
+    // overlay first or a fresh Melderkennzeichen appears only after a reload.
+    const overlayAttributes = new Map<number, readonly unknown[]>();
+    if (overlay) {
+      for (const entity of overlay.getNewEntities()) {
+        overlayAttributes.set(entity.expressId, entity.attributes);
+      }
+    }
+
     const marks: DeviceMark[] = [];
     for (const [key, { expressId, ifcType, meshes }] of byDevice) {
       const kind = deviceSymbolKind(ifcType);
       if (!kind) continue;
       const position = footprintCentre(meshes);
       if (!position) continue;
+      const authored = overlayAttributes.get(expressId);
+      // The MARK first: `Tag` is what a device carries on a drawing, and where
+      // a Meldergruppe has given one it is the thing to print. The product
+      // name ("Rauchmelder") is what stands in until then — and stays in the
+      // tooltip either way.
+      const mark = overlayAttribute(overlay, expressId, 'Tag')
+        ?? (typeof authored?.[7] === 'string' ? authored[7] : null)
+        ?? '';
+      const name = mark || overlayAttribute(overlay, expressId, 'Name')
+        || (typeof authored?.[2] === 'string' ? authored[2] : null)
+        || dataStore.entities?.getName(expressId) || '';
+      const objectType = overlayAttribute(overlay, expressId, 'ObjectType')
+        ?? (typeof authored?.[4] === 'string' ? authored[4] : null)
+        ?? dataStore.entities?.getObjectType?.(expressId) ?? '';
+
       marks.push({
         key,
         expressId,
         kind,
         position,
-        name: dataStore.entities?.getName(expressId) ?? '',
+        name,
         ifcType,
+        predefinedType: (authored ? overlayPredefinedType(authored) : null)
+          ?? dataStore.entities?.getPredefinedType?.(expressId)
+          ?? null,
+        objectType: objectType || null,
       });
     }
     return marks;
-  }, [enabled, geometryResult, dataStore, storeyId, drawsElement]);
+    // `mutationVersion` bumps on every authoring edit, so a detector marked a
+    // moment ago carries its Kennzeichen on the plan without a reload.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, geometryResult, dataStore, storeyId, drawsElement, modelId, mutationViews, mutationVersion]);
 }
 
 export default usePlanDeviceMarks;

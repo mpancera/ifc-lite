@@ -415,6 +415,7 @@ export function PlanView({
     dataStore: storeyDataStore,
     storeyId: storey?.expressId ?? null,
     drawsElement,
+    modelId: storeyModelId,
   });
 
   // Room text and door tags are two layers, not one. They look alike and they

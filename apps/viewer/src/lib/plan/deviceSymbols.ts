@@ -103,6 +103,18 @@ export interface DeviceMark {
   readonly name: string;
   /** Its IFC class, for the tooltip — the mark families lump several together. */
   readonly ifcType: string;
+  /**
+   * The rest of the Fachklasse, for looking the drawn symbol up.
+   *
+   * `IfcSensor` alone says "a device"; `IfcSensor.SMOKESENSOR` is what the
+   * symbol catalogue is keyed on, and what decides whether a plan shows a
+   * smoke detector or a heat detector. Absent where the model states none —
+   * the lookup falls back to the bare entity, which is the whole reason
+   * `classKeyCandidates` returns a list.
+   */
+  readonly predefinedType: string | null;
+  /** Refinement, only meaningful where `predefinedType` is `USERDEFINED`. */
+  readonly objectType: string | null;
 }
 
 /**
