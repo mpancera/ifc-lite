@@ -126,6 +126,22 @@ export interface MeshData {
    *  Absent/undefined is treated as 0 (occurrence).
    *  Downstream filter: `if ((mesh.geometryClass ?? 0) === 2) continue;` */
   geometryClass?: number;
+  /**
+   * This occurrence is already on the GPU as an INSTANCE; it is in the mesh
+   * list for the readers, not for the uploader.
+   *
+   * GPU instancing sends one template plus a transform per occurrence. That
+   * suits the renderer and nothing else: the mesh list is what the 2D cut, the
+   * room labels, the device marks, the class tree and the element statistics
+   * read, and an occurrence living only as a transform inside a shard is
+   * invisible to all of them — eighty fire detectors showed in 3D and in no
+   * plan, no class tree and no count.
+   *
+   * So `expandInstancedShard` puts them in the list too, flagged like this, and
+   * the upload path skips them. Everything downstream sees an ordinary placed
+   * occurrence, which is exactly what it is.
+   */
+  instancedOccurrence?: boolean;
   /** Per-element local-frame origin (WebGL Y-up, metres): world position of
    *  vertex i = `origin + positions[3i..3i+3]`. Present when the wasm pipeline
    *  emits a per-element frame (building-scale f32 precision); absent/[0,0,0]

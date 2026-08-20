@@ -1217,6 +1217,24 @@ export function PropertiesPanel() {
   const renderedGeoref = georef;
   const renderedSpatialContainment = spatialContainment;
   const renderedTypeProperties = typeProperties;
+
+  /**
+   * The class of the Type this occurrence is defined by.
+   *
+   * Overlay first. A Type created by placing a catalogue product exists only
+   * in the mutation overlay, and the parsed table answers 'Unknown' for it —
+   * which is what the header showed, verbatim, next to a perfectly good name:
+   * "Unknown: Handfeuermelder".
+   */
+  const renderedTypeClass = useMemo(() => {
+    const typeId = renderedTypeProperties?.typeId;
+    if (typeId === undefined) return 'Type';
+    const modelId = model?.id;
+    const authored = modelId ? getMutationView(modelId)?.getNewEntity(typeId)?.type : undefined;
+    if (authored) return authored;
+    const parsed = activeDataStore?.entities.getTypeName(typeId);
+    return parsed && parsed !== 'Unknown' ? parsed : 'Type';
+  }, [renderedTypeProperties?.typeId, model?.id, getMutationView, activeDataStore]);
   const renderedTypeEditImpact = typeEditImpact;
   const renderedIsTypeEntity = isTypeEntity;
   const renderedProjectUnits = projectUnits;
@@ -1364,9 +1382,9 @@ export function PropertiesPanel() {
             <p className="text-xs font-mono text-zinc-500 dark:text-zinc-400">{entityType}</p>
             {/* Show associated type entity for occurrences */}
             {!renderedIsTypeEntity && renderedTypeProperties && (
-              <p className="text-[11px] font-mono text-indigo-500 dark:text-indigo-400 truncate" title={`${activeDataStore?.entities.getTypeName(renderedTypeProperties.typeId) || 'Type'}: ${renderedTypeProperties.typeName}`}>
+              <p className="text-[11px] font-mono text-indigo-500 dark:text-indigo-400 truncate" title={`${renderedTypeClass}: ${renderedTypeProperties.typeName}`}>
                 <Building2 className="inline h-3 w-3 mr-1 -mt-0.5" />
-                {activeDataStore?.entities.getTypeName(renderedTypeProperties.typeId) || 'Type'}: {renderedTypeProperties.typeName}
+                {renderedTypeClass}: {renderedTypeProperties.typeName}
               </p>
             )}
           </div>

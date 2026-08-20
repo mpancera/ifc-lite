@@ -21,7 +21,8 @@
 import { useEffect, useRef, type MutableRefObject } from 'react';
 import type { Renderer, Scene } from '@ifc-lite/renderer';
 import type { MeshData, CoordinateInfo } from '@ifc-lite/geometry';
-import { decodeInstancedShard } from '@ifc-lite/geometry';
+import { decodeInstancedShard, expandInstancedShard } from '@ifc-lite/geometry';
+import { useViewerStore } from '@/store';
 import { toast } from '../ui/toast.js';
 import { runGpuUpload } from './gpu-upload-guard';
 import { createRobustFitBoundsAccumulator } from './robustFitBoundsAccumulator.js';
@@ -438,6 +439,9 @@ export function useGeometryStreaming(params: UseGeometryStreamingParams): void {
       newMeshes = [];
       for (let i = 0; i < geometry.length; i++) {
         const meshData = geometry[i];
+        // Already on the GPU as an instance — it is in the list for the
+        // readers, not for the uploader. Queuing it would draw it twice.
+        if (meshData.instancedOccurrence) continue;
         const compoundKey = `${meshData.expressId}:${i}`;
         if (!processedMeshIdsRef.current.has(compoundKey)) {
           newMeshes.push(meshData);
@@ -796,6 +800,7 @@ export function useGeometryStreaming(params: UseGeometryStreamingParams): void {
     const scene = renderer.getScene();
     if (!device) return;
 
+    const expanded: MeshData[] = [];
     if (pendingInstancedShards.length > 0) {
       for (const { modelId, bytes } of pendingInstancedShards) {
         // CRITICAL: never let a shard decode/upload throw OUT of this effect.
@@ -816,11 +821,27 @@ export function useGeometryStreaming(params: UseGeometryStreamingParams): void {
           }
           const modelIndex = modelIdToIndex?.get(modelId) ?? 0;
           scene.addInstancedShard(device, shard, modelIndex);
+
+          // The GPU has them now; the MESH LIST does not, and that list is what
+          // the 2D cut, the room labels, the device marks, the class tree and
+          // the element count all read. Expanded here so an instanced element
+          // is an element everywhere — flagged so the upload path below leaves
+          // it alone rather than drawing it a second time.
+          const store = useViewerStore.getState();
+          const dataStore = store.models.get(modelId)?.ifcDataStore ?? store.ifcDataStore;
+          expanded.push(...expandInstancedShard(shard, {
+            modelIndex,
+            // The ids were already offset in place above.
+            ifcTypeOf: (expressId: number) => dataStore?.entities?.getTypeName?.(expressId - idOffset),
+          }));
         } catch (err) {
           console.warn('[useGeometryStreaming] instanced shard upload failed (device lost?), skipping:', err);
         }
       }
       renderer.requestRender();
+    }
+    if (expanded.length > 0) {
+      useViewerStore.getState().appendGeometryBatch(expanded);
     }
     clearInstancedShards();
   }, [pendingInstancedShards, modelIdToIndex, modelIdToOffset, isInitialized, clearInstancedShards]);

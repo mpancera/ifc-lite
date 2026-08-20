@@ -8,6 +8,8 @@
  */
 
 // IFC-Lite components (recommended - faster)
+export { expandInstancedShard, type ExpandInstancedOptions } from './instanced-to-meshes.js';
+
 export { IfcLiteBridge, type SymbolicRepresentationCollection, type SymbolicPolyline, type SymbolicCircle, type ProfileCollection, type ProfileEntryJs } from './ifc-lite-bridge.js';
 import { safeUtf8Decode } from '@ifc-lite/data';
 

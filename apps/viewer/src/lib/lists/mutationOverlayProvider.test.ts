@@ -12,7 +12,7 @@ import {
   type MutationStoreShape,
 } from '@ifc-lite/mutations';
 import { addLibraryElementToStore, addLibraryTypeToStore, emitRelDefinesByType } from '@ifc-lite/create';
-import type { ListDataProvider } from '@ifc-lite/lists';
+import { executeList, type ListDataProvider, type ListDefinition } from '@ifc-lite/lists';
 import { withMutationOverlay } from './mutationOverlayProvider.js';
 
 function makeStore(maxId: number): MutationStoreShape {
@@ -208,4 +208,24 @@ test('withMutationOverlay: an element in no authored room falls through to the f
   const base = { ...baseProvider(), getSpaceName: (id: number) => (id === 100 ? 'Parsed Room' : '') };
   const wrapped = withMutationOverlay(base as typeof base & ListDataProvider, view);
   assert.equal(wrapped.getSpaceName?.(100), 'Parsed Room');
+});
+
+test('withMutationOverlay: the Raum column of the demo list carries the room', () => {
+  // The whole path, in the shape strand 1 exports it: the clip's own column
+  // set, through the real list engine. The three tests above prove the
+  // accessor answers; this one proves the column asks it.
+  const { view, sensorId } = viewWithRoomedSensor();
+  const wrapped = withMutationOverlay(baseProvider(), view, { isRowEntity: (id) => id === sensorId });
+  const definition: ListDefinition = {
+    id: 'devices', name: 'Platzierte Geraete', createdAt: 0, updatedAt: 0,
+    entityTypes: [IfcTypeEnum.IfcSensor], conditions: [],
+    columns: [
+      { id: 'attr-name', source: 'attribute', propertyName: 'Name' },
+      { id: 'spatial-container', source: 'spatial', propertyName: 'Container', label: 'Raum' },
+    ],
+  };
+  const result = executeList(definition, wrapped, 'm1');
+  const row = result.rows.find((candidate) => candidate.entityId === sensorId);
+  // `values` is positional, in column order: Name, then Raum.
+  assert.deepEqual(row?.values, ['Rauchmelder', '03']);
 });
