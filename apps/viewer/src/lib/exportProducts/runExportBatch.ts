@@ -36,9 +36,8 @@
  * module has no opinion about which store is the app's.
  */
 type ViewerStoreApi = typeof import('@/store').useViewerStore;
-import type { PlanProduct } from '@/lib/planProducts/planProducts';
 import { planDrawingState } from '@/lib/plan/planViewport';
-import { batchProducts, productBlocker, type ExportProduct } from './exportProducts';
+import { batchProducts, productBlocker, type ExportProduct, type ProductSources } from './exportProducts';
 
 /**
  * How long one sheet may take to cut, and how long the plan may take to write
@@ -114,12 +113,103 @@ function sheetIsUp(product: ExportProduct): boolean {
 }
 
 /**
+ * Answer one saved list and write it out. Returns why it could not be, or `null`.
+ *
+ * The list has to be ANSWERED first, not merely selected: the export model is
+ * built from the rows, columns, grouping and totals the table is showing, so
+ * an unopened list exports nothing. Both halves go through the list panel for
+ * the same reason the drawing goes through the plan — what is on screen is the
+ * thing being exported, and a second builder would drift from it.
+ */
+async function writeList(
+  store: ViewerStoreApi,
+  product: Extract<ExportProduct, { kind: 'list' }>,
+  sources: ProductSources,
+  timeouts: BatchTimeouts,
+): Promise<string | null> {
+  const definition = sources.lists?.find((candidate) => candidate.id === product.listId);
+  if (!definition) return `Liste "${product.listId}" gibt es nicht mehr`;
+
+  const state = store.getState();
+  state.showWorkspacePanel('lists');
+  // `ListDefinition` is what the panel runs; `ProductSources` only promises an
+  // id and a name, so the definition is taken from the store rather than from
+  // the summary handed in.
+  const full = state.listDefinitions.find((candidate) => candidate.id === product.listId);
+  if (!full) return `Liste "${product.listId}" gibt es nicht mehr`;
+  state.requestListRun(full);
+
+  const answered = await waitUntil(
+    () => {
+      const s = store.getState();
+      return s.activeListId === product.listId && s.listResult !== null && !s.listExecuting;
+    },
+    timeouts.sheetMs,
+  );
+  if (!answered) return 'Die Liste wurde nicht beantwortet — ist das Listen-Panel offen?';
+
+  store.getState().requestListExport(product.format as 'csv' | 'xlsx' | 'pdf');
+  const taken = await waitUntil(
+    () => store.getState().listExportRequested === null,
+    timeouts.writeMs,
+  );
+  if (!taken) {
+    store.getState().requestListExport(null);
+    return 'Die Liste hat die Ausgabe nicht angenommen';
+  }
+  return null;
+}
+
+/**
+ * Draw one chain and write it out. Returns why it could not be, or `null`.
+ *
+ * The panel has to be up: the graph is built there, from the store plus the
+ * session overlay, and the file IS that graph. Waiting for the chain and the
+ * starts to be the product's own is what keeps a batch of two diagrams from
+ * writing the first one twice.
+ */
+async function writeGraph(
+  store: ViewerStoreApi,
+  product: Extract<ExportProduct, { kind: 'graph' }>,
+  timeouts: BatchTimeouts,
+): Promise<string | null> {
+  const state = store.getState();
+  state.setGraphPanelVisible(true);
+  state.setGraphChainId(product.chainId);
+  state.setGraphStartTypes([...product.startTypes]);
+
+  const ready = await waitUntil(
+    () => {
+      const s = store.getState();
+      return s.graphPanelVisible
+        && s.graphChainId === product.chainId
+        && s.graphStartTypes.length === product.startTypes.length;
+    },
+    timeouts.sheetMs,
+  );
+  // The panel clears its start picks when the model it looks at changes, so a
+  // setting that does not stick means the panel is not up yet.
+  if (!ready) return 'Das Graph-Panel hat die Kette nicht übernommen';
+
+  store.getState().requestGraphExport(product.format as 'csv' | 'json');
+  const taken = await waitUntil(
+    () => store.getState().graphExportRequested === null,
+    timeouts.writeMs,
+  );
+  if (!taken) {
+    store.getState().requestGraphExport(null);
+    return 'Das Diagramm hat die Ausgabe nicht angenommen';
+  }
+  return null;
+}
+
+/**
  * Run the batch. Resolves when every product has been written or refused.
  *
  */
 export async function runExportBatch(
   store: ViewerStoreApi,
-  planProducts: readonly PlanProduct[],
+  sources: ProductSources,
   timeouts: BatchTimeouts = DEFAULT_BATCH_TIMEOUTS,
 ): Promise<BatchOutcome> {
   const products = batchProducts(store.getState().exportProducts);
@@ -129,7 +219,7 @@ export async function runExportBatch(
 
   // Every blocker up front — see the note at the top of this file.
   const blocked = products
-    .map((product) => ({ product, why: productBlocker(product, planProducts) }))
+    .map((product) => ({ product, why: productBlocker(product, sources) }))
     .filter((entry): entry is { product: ExportProduct; why: string } => entry.why !== null);
   if (blocked.length > 0) {
     const names = blocked.map((entry) => `${entry.product.name}: ${entry.why}`).join('; ');
@@ -143,6 +233,32 @@ export async function runExportBatch(
   const failures: Record<string, string> = {};
 
   for (const product of products) {
+    if (product.kind === 'list') {
+      const failure = await writeList(store, product, sources, timeouts);
+      if (failure) {
+        failures[product.id] = failure;
+        store.getState().reportExportProduct(product.id, failure);
+      } else {
+        written.push(product.id);
+        store.getState().reportExportProduct(product.id);
+      }
+      await sleep(400);
+      continue;
+    }
+
+    if (product.kind === 'graph') {
+      const failure = await writeGraph(store, product, timeouts);
+      if (failure) {
+        failures[product.id] = failure;
+        store.getState().reportExportProduct(product.id, failure);
+      } else {
+        written.push(product.id);
+        store.getState().reportExportProduct(product.id);
+      }
+      await sleep(400);
+      continue;
+    }
+
     applyProduct(store, product);
 
     if (!await waitUntil(() => sheetIsUp(product), timeouts.sheetMs)) {

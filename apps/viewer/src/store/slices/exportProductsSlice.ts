@@ -18,7 +18,9 @@
 import type { StateCreator } from 'zustand';
 import type { ViewerState } from '../index.js';
 import type { ExportProduct, ExportFormat } from '@/lib/exportProducts/exportProducts';
-import { isFormatValid, newPlan2DProduct } from '@/lib/exportProducts/exportProducts';
+import {
+  isFormatValid, newGraphExportProduct, newListExportProduct, newPlan2DProduct,
+} from '@/lib/exportProducts/exportProducts';
 import {
   loadExportProducts, saveExportProducts, nextProductId,
 } from '@/lib/exportProducts/exportProductsStorage';
@@ -60,6 +62,18 @@ export interface ExportProductsSlice {
   restoreExportProductsForProject: () => void;
   /** Add a drawing product for a plan product. No-op if the plan is unknown. */
   addPlan2DExportProduct: (planProductId: string) => void;
+  /** Add a list product for a saved list. No-op if the list is unknown. */
+  addListExportProduct: (listId: string) => void;
+  /**
+   * Add a diagram product from the chain the graph panel is showing.
+   *
+   * A snapshot rather than a picker over some catalogue of diagrams, because
+   * there is no such catalogue: a diagram IS a chain plus the classes the walk
+   * starts from, and both are things somebody sets up by looking at the
+   * result. This is the same move as adding a plan product that was already
+   * configured.
+   */
+  addGraphExportProduct: (name: string) => void;
   removeExportProduct: (id: string) => void;
   renameExportProduct: (id: string, name: string) => void;
   setExportProductFormat: (id: string, format: ExportFormat) => void;
@@ -115,6 +129,30 @@ export const createExportProductsSlice: StateCreator<
 
       const products = get().exportProducts;
       commit([...products, newPlan2DProduct(plan, nextProductId(products, 'plan'))]);
+    },
+
+    addListExportProduct: (listId) => {
+      const list = get().listDefinitions.find((candidate) => candidate.id === listId);
+      // Same reasoning as above: a row pointing at nothing is a row that can
+      // never be issued, and nothing would say so until the run.
+      if (!list) return;
+
+      const products = get().exportProducts;
+      commit([...products, newListExportProduct(list, nextProductId(products, 'list'))]);
+    },
+
+    addGraphExportProduct: (name) => {
+      const { graphChainId, graphStartTypes } = get();
+      // No starts means an empty diagram, and an empty diagram reads as an
+      // answer. Refused here rather than saved and blocked later.
+      if (!graphChainId || graphStartTypes.length === 0) return;
+
+      const products = get().exportProducts;
+      commit([...products, newGraphExportProduct(
+        { id: graphChainId, name },
+        graphStartTypes,
+        nextProductId(products, 'graph'),
+      )]);
     },
 
     removeExportProduct: (id) => {

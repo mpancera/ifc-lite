@@ -59,6 +59,15 @@ export interface GraphSlice {
   /** Both start sets at once, for a model swap: express ids and type names
    *  both belong to the model they came from. */
   clearGraphStarts: () => void;
+  /**
+   * Write the drawn chain out in this format. Consumed once by the panel.
+   *
+   * The chain and the graph are built in the panel from the store plus the
+   * overlay, and the file is that graph — a caller assembling it elsewhere
+   * would export a different diagram from the one on screen.
+   */
+  graphExportRequested: 'csv' | 'json' | null;
+  requestGraphExport: (format: 'csv' | 'json' | null) => void;
 
   setGraphPanelVisible: (visible: boolean) => void;
   toggleGraphPanel: () => void;
@@ -74,6 +83,8 @@ export const createGraphSlice: StateCreator<GraphSlice, [], [], GraphSlice> = (s
   setGraphStartTypes: (graphStartTypes) => set({ graphStartTypes }),
   setGraphStartSystems: (graphStartSystems) => set({ graphStartSystems }),
   clearGraphStarts: () => set({ graphStartTypes: [], graphStartSystems: [] }),
+  graphExportRequested: null,
+  requestGraphExport: (graphExportRequested) => set({ graphExportRequested }),
 
   graphPanelVisible: false,
   graphHighlight: null,

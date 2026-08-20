@@ -40,12 +40,20 @@ const plan = (over: Partial<ExportProduct> = {}): ExportProduct => ({
 } as ExportProduct);
 
 describe('formats', () => {
-  it('keeps a drawing off the tabular formats', () => {
-    // CSV of a drawing is meaningless, and offering it invites an empty file.
+  it('offers each kind only what its writer can produce', () => {
+    // The boundary is the writer, not a tidy split by medium. A drawing has no
+    // CSV path and a table has no DXF one — but a table printed to PDF is an
+    // ordinary deliverable, and the list writer has always produced it.
     assert.ok(isFormatValid('plan2d', 'pdf'));
     assert.ok(isFormatValid('plan2d', 'dxf'));
     assert.ok(!isFormatValid('plan2d', 'csv'));
-    assert.ok(!isFormatValid('list', 'pdf'));
+    assert.ok(isFormatValid('list', 'pdf'));
+    assert.ok(isFormatValid('list', 'xlsx'));
+    assert.ok(!isFormatValid('list', 'dxf'));
+    // And the chain graph: CSV and JSON, never SVG — `@ifc-lite/graph` writes
+    // a tree, and drawing it is the job of whatever draws it.
+    assert.ok(isFormatValid('graph', 'json'));
+    assert.ok(!isFormatValid('graph', 'svg'));
   });
 
   it('gives every kind a usable starting format', () => {
@@ -90,21 +98,38 @@ describe('productFilename', () => {
 });
 
 describe('productBlocker', () => {
+  const SOURCES = { planProducts: BUILT_IN_PRODUCTS, lists: [{ id: 'l1', name: 'Geräte' }] };
+  const listProduct = (listId: string): ExportProduct =>
+    ({ kind: 'list', id: 'l', name: 'L', inBatch: true, format: 'csv', listId } as ExportProduct);
+
   it('passes a drawing whose plan product still exists', () => {
-    assert.equal(productBlocker(plan(), BUILT_IN_PRODUCTS), null);
+    assert.equal(productBlocker(plan(), SOURCES), null);
   });
 
   it('catches a drawing pointing at a deleted plan product', () => {
     // Caught before the batch starts: a run that stops on the fifth file
     // leaves a half-finished submission nobody can tell apart from a whole one.
-    const blocker = productBlocker(plan({ planProductId: 'weg' }), BUILT_IN_PRODUCTS);
+    const blocker = productBlocker(plan({ planProductId: 'weg' }), SOURCES);
     assert.match(String(blocker), /gibt es nicht mehr/);
   });
 
-  it('says plainly that the unbuilt kinds are unbuilt', () => {
-    // Better than writing an empty file that looks like a successful export.
-    const list = { kind: 'list', id: 'l', name: 'L', inBatch: true, format: 'csv', listId: 'x' } as ExportProduct;
-    assert.match(String(productBlocker(list, BUILT_IN_PRODUCTS)), /noch nicht gebaut/);
+  it('passes a list whose definition still exists', () => {
+    assert.equal(productBlocker(listProduct('l1'), SOURCES), null);
+  });
+
+  it('catches a list pointing at a deleted definition', () => {
+    // Same reasoning as the drawing: better caught before the run than as a
+    // gap in a folder of files nobody re-counts.
+    assert.match(String(productBlocker(listProduct('weg'), SOURCES)), /gibt es nicht mehr/);
+  });
+
+  it('refuses a diagram with nothing to start the walk from', () => {
+    // An empty diagram is worse than a refusal: it looks like an answer.
+    const graph = {
+      kind: 'graph', id: 'g', name: 'G', inBatch: true, format: 'json',
+      chainId: 'storey', startTypes: [],
+    } as ExportProduct;
+    assert.match(String(productBlocker(graph, SOURCES)), /Startklassen/);
   });
 });
 

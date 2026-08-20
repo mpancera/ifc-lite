@@ -32,7 +32,8 @@ import type { PlanProduct } from '@/lib/planProducts/planProducts';
 export type ExportProductKind = 'plan2d' | 'list' | 'graph';
 
 /** The formats a product can be written as. */
-export type ExportFormat = 'pdf' | 'svg' | 'dxf' | 'csv' | 'json';
+/** Every format any kind can be written as. */
+export type ExportFormat = 'pdf' | 'svg' | 'dxf' | 'csv' | 'xlsx' | 'json';
 
 /** Fields every product carries, whatever it produces. */
 interface ExportProductBase {
@@ -67,21 +68,28 @@ export interface Plan2DExportProduct extends ExportProductBase {
   readonly storeyId: number | null;
 }
 
-/**
- * A tabular deliverable. Not built yet — declared so the batch runner and the
- * storage have the shape they will need, and so adding it does not reopen
- * either of them.
- */
+/** A tabular deliverable: one saved list, answered and written out. */
 export interface ListExportProduct extends ExportProductBase {
   readonly kind: 'list';
   /** Which saved list definition supplies the columns and the filter. */
   readonly listId: string;
 }
 
-/** A diagram deliverable. Not built yet — see {@link ListExportProduct}. */
+/**
+ * A diagram deliverable: one chain, read from one set of starting classes.
+ *
+ * Both are needed and the declaration used to carry only the first. A chain
+ * with no starts draws nothing — the graph is walked FROM somewhere — so a
+ * product that named only the chain could never produce a file, and nothing
+ * would have said so until the run. Nothing has ever been stored in the old
+ * shape, because the kind was never creatable.
+ */
 export interface GraphExportProduct extends ExportProductBase {
   readonly kind: 'graph';
-  readonly graphViewId: string;
+  /** Which relationship chain to walk — `storey`, `zone`, and so on. */
+  readonly chainId: string;
+  /** The IFC classes the walk starts from. Empty means an empty diagram. */
+  readonly startTypes: readonly string[];
 }
 
 export type ExportProduct =
@@ -93,8 +101,12 @@ export type ExportProduct =
 export const FORMATS_BY_KIND: Readonly<Record<ExportProductKind, readonly ExportFormat[]>> = {
   // A drawing goes to paper or to CAD. CSV of a drawing is meaningless.
   plan2d: ['pdf', 'svg', 'dxf'],
-  list: ['csv', 'json'],
-  graph: ['svg', 'json'],
+  // What the writers can actually produce. Both of these were guessed before
+  // the writers existed and both guessed wrong: a list has no JSON path and a
+  // chain graph has no SVG one. A product set to a format nothing can write is
+  // a product that can never be issued, and nothing said so until the run.
+  list: ['csv', 'xlsx', 'pdf'],
+  graph: ['csv', 'json'],
 };
 
 /** Whether a format is valid for a kind. */
@@ -165,18 +177,67 @@ export function productFilename(product: ExportProduct): string {
  */
 export function productBlocker(
   product: ExportProduct,
-  planProducts: readonly PlanProduct[],
+  sources: ProductSources,
 ): string | null {
   if (product.kind === 'plan2d') {
-    const plan = planProducts.find((candidate) => candidate.id === product.planProductId);
+    const plan = sources.planProducts.find((candidate) => candidate.id === product.planProductId);
     if (!plan) return `Planprodukt "${product.planProductId}" gibt es nicht mehr`;
     return null;
   }
-  // The two kinds below are declared but not built. Saying so plainly beats
-  // producing an empty file that looks like a successful export.
-  return product.kind === 'list'
-    ? 'Listen-Export ist noch nicht gebaut'
-    : 'Diagramm-Export ist noch nicht gebaut';
+  if (product.kind === 'list') {
+    const list = sources.lists?.find((candidate) => candidate.id === product.listId);
+    if (!list) return `Liste "${product.listId}" gibt es nicht mehr`;
+    return null;
+  }
+  // A chain with nothing to start from draws nothing, and an empty diagram is
+  // worse than a refusal: it looks like an answer.
+  if (product.startTypes.length === 0) return 'Dem Diagramm fehlen die Startklassen';
+  return null;
+}
+
+/**
+ * What a product may point at.
+ *
+ * One bag rather than a growing argument list: every kind resolves against a
+ * different collection, and a positional third and fourth parameter would be
+ * two more things a caller can pass in the wrong order.
+ */
+export interface ProductSources {
+  readonly planProducts: readonly PlanProduct[];
+  /** Saved list definitions, for `list` products. */
+  readonly lists?: readonly { readonly id: string; readonly name: string }[];
+}
+
+/** A new diagram product for a chain, ready to be added. */
+export function newGraphExportProduct(
+  chain: { id: string; name: string },
+  startTypes: readonly string[],
+  id: string,
+): GraphExportProduct {
+  return {
+    kind: 'graph',
+    id,
+    name: chain.name,
+    inBatch: true,
+    format: defaultFormat('graph'),
+    chainId: chain.id,
+    startTypes: [...startTypes],
+  };
+}
+
+/** A new list product for a saved list, ready to be added. */
+export function newListExportProduct(
+  list: { id: string; name: string },
+  id: string,
+): ListExportProduct {
+  return {
+    kind: 'list',
+    id,
+    name: list.name,
+    inBatch: true,
+    format: defaultFormat('list'),
+    listId: list.id,
+  };
 }
 
 /** A new 2D product for a plan product, ready to be added to the list. */

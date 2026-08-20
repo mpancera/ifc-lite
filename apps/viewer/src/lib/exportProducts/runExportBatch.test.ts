@@ -53,6 +53,34 @@ function fakeStore(products: ExportProduct[]) {
     viewMode: '2d',
     planExportRequested: null as string | null,
     activeStorey: null as unknown,
+    // The list and diagram halves of the run touch these.
+    listDefinitions: [{ id: 'l1', name: 'Geräte' }] as unknown[],
+    activeListId: null as string | null,
+    listResult: null as unknown,
+    listExecuting: false,
+    listExportRequested: null as string | null,
+    graphPanelVisible: false,
+    graphChainId: null as string | null,
+    graphStartTypes: [] as string[],
+    graphExportRequested: null as string | null,
+    showWorkspacePanel: (id: string) => { calls.push(`panel:${id}`); },
+    requestListRun: (def: { id: string } | null) => {
+      calls.push(`run:${def?.id ?? 'null'}`);
+      // The panel answers: it sets the active list and lands a result.
+      state.activeListId = def?.id ?? null;
+      state.listResult = def ? { rows: [] } : null;
+    },
+    requestListExport: (f: string | null) => {
+      calls.push(f === null ? 'listclear' : `listexport:${f}`);
+      state.listExportRequested = f;
+    },
+    setGraphPanelVisible: (v: boolean) => { calls.push(`graphpanel:${v}`); state.graphPanelVisible = v; },
+    setGraphChainId: (id: string) => { calls.push(`chain:${id}`); state.graphChainId = id; },
+    setGraphStartTypes: (t: string[]) => { calls.push(`starts:${t.length}`); state.graphStartTypes = t; },
+    requestGraphExport: (f: string | null) => {
+      calls.push(f === null ? 'graphclear' : `graphexport:${f}`);
+      state.graphExportRequested = f;
+    },
     setActivePlanProduct: (id: string) => { calls.push(`plan:${id}`); },
     setActiveStorey: (ref: { expressId: number }) => { calls.push(`storey:${ref.expressId}`); },
     setViewMode: (m: string) => { calls.push(`view:${m}`); state.viewMode = m; },
@@ -70,11 +98,20 @@ function fakeStore(products: ExportProduct[]) {
   return { store, state, calls };
 }
 
-/** The plan answers an export request after `delayMs`, as the real one does. */
-function autoAnswer(state: { planExportRequested: string | null }, delayMs = 0): () => void {
+/**
+ * The panels answer their export requests, as the real ones do.
+ *
+ * All three at once because a batch mixes kinds, and a fake that answered only
+ * the plan would let a list product hang without the test saying why.
+ */
+function autoAnswer(state: {
+  planExportRequested: string | null;
+  listExportRequested: string | null;
+  graphExportRequested: string | null;
+}, delayMs = 0): () => void {
   const timer = setInterval(() => {
-    if (state.planExportRequested !== null) {
-      setTimeout(() => { state.planExportRequested = null; }, delayMs);
+    for (const key of ['planExportRequested', 'listExportRequested', 'graphExportRequested'] as const) {
+      if (state[key] !== null) setTimeout(() => { state[key] = null; }, delayMs);
     }
   }, 20);
   return () => clearInterval(timer);
@@ -85,7 +122,7 @@ afterEach(() => setPlanDrawingState(null));
 describe('runExportBatch', () => {
   it('refuses an empty selection instead of reporting a run of nothing', async () => {
     const { store } = fakeStore([product({ inBatch: false })]);
-    const outcome = await runExportBatch(store, [PLAN], QUICK);
+    const outcome = await runExportBatch(store, { planProducts: [PLAN] }, QUICK);
     assert.match(outcome.refused ?? '', /Kein Produkt/);
     assert.deepEqual(outcome.written, []);
   });
@@ -98,7 +135,7 @@ describe('runExportBatch', () => {
       product({ id: 'gone', planProductId: 'plan-does-not-exist' }),
     ]);
     setPlanDrawingState({ storeyExpressId: null, planProductId: 'plan-a', status: 'ready', hasDrawing: true });
-    const outcome = await runExportBatch(store, [PLAN], QUICK);
+    const outcome = await runExportBatch(store, { planProducts: [PLAN] }, QUICK);
     assert.ok(outcome.refused, 'the run went ahead with a blocked product');
     assert.equal(calls.length, 0, `nothing should have happened, got: ${calls.join(',')}`);
   });
@@ -112,7 +149,7 @@ describe('runExportBatch', () => {
     // The plan lags: it is still showing A when B is asked for, and only
     // catches up later. Without the wait, B would be written from A's sheet.
     setPlanDrawingState({ storeyExpressId: null, planProductId: 'plan-a', status: 'ready', hasDrawing: true });
-    const run = runExportBatch(store, [PLAN, PLAN_B], QUICK);
+    const run = runExportBatch(store, { planProducts: [PLAN, PLAN_B] }, QUICK);
     setTimeout(() => {
       setPlanDrawingState({ storeyExpressId: null, planProductId: 'plan-b', status: 'ready', hasDrawing: true });
     }, 400);
@@ -137,7 +174,7 @@ describe('runExportBatch', () => {
     // Only plan-a ever comes up, so the first product times out. It must not
     // take the second one down with it.
     setPlanDrawingState({ storeyExpressId: null, planProductId: 'plan-a', status: 'ready', hasDrawing: true });
-    const outcome = await runExportBatch(store, [PLAN, PLAN_B], QUICK);
+    const outcome = await runExportBatch(store, { planProducts: [PLAN, PLAN_B] }, QUICK);
     stop();
 
     assert.deepEqual(outcome.written, ['fine']);
@@ -151,7 +188,7 @@ describe('runExportBatch', () => {
     const { store, state } = fakeStore([product({ id: 'p' })]);
     const stop = autoAnswer(state);
     setPlanDrawingState(null);
-    const outcome = await runExportBatch(store, [PLAN], QUICK);
+    const outcome = await runExportBatch(store, { planProducts: [PLAN] }, QUICK);
     stop();
     assert.match(outcome.failures.p ?? '', /nicht offen/);
   });
@@ -162,8 +199,63 @@ describe('runExportBatch', () => {
     // An empty sheet writes a valid, blank file — which is worse than an
     // error, because it looks like a delivered drawing.
     setPlanDrawingState({ storeyExpressId: null, planProductId: 'plan-a', status: 'ready', hasDrawing: false });
-    const outcome = await runExportBatch(store, [PLAN], QUICK);
+    const outcome = await runExportBatch(store, { planProducts: [PLAN] }, QUICK);
     stop();
     assert.match(outcome.failures.p ?? '', /nichts/);
+  });
+});
+
+describe('runExportBatch, the tabular and diagram kinds', () => {
+  const listProduct = (over: Partial<ExportProduct> = {}): ExportProduct => ({
+    kind: 'list', id: 'lp', name: 'Geräte', inBatch: true, format: 'csv', listId: 'l1', ...over,
+  } as ExportProduct);
+  const graphProduct = (over: Partial<ExportProduct> = {}): ExportProduct => ({
+    kind: 'graph', id: 'gp', name: 'Baum', inBatch: true, format: 'json',
+    chainId: 'zone', startTypes: ['IfcSensor'], ...over,
+  } as ExportProduct);
+
+  it('answers a list before exporting it', async () => {
+    // Selecting a list exports nothing: the file is built from the rows the
+    // table is showing, so the run has to make it show them first.
+    const { store, state, calls } = fakeStore([listProduct()]);
+    const stop = autoAnswer(state);
+    const outcome = await runExportBatch(store, { planProducts: [], lists: [{ id: 'l1', name: 'Geräte' }] }, QUICK);
+    stop();
+    assert.deepEqual(outcome.written, ['lp']);
+    assert.deepEqual(
+      calls.filter((c) => c.startsWith('run:') || c.startsWith('listexport:')),
+      ['run:l1', 'listexport:csv'],
+    );
+  });
+
+  it('says which list is gone rather than writing an empty file', async () => {
+    const { store, state } = fakeStore([listProduct({ listId: 'weg' })]);
+    const stop = autoAnswer(state);
+    const outcome = await runExportBatch(store, { planProducts: [], lists: [{ id: 'l1', name: 'Geräte' }] }, QUICK);
+    stop();
+    assert.ok(outcome.refused, 'a product pointing at a deleted list should be refused up front');
+  });
+
+  it('sets the chain and the starts before writing a diagram', async () => {
+    // Both, and in that order: a chain with no starts draws nothing, and a
+    // batch of two diagrams would otherwise write the first one twice.
+    const { store, state, calls } = fakeStore([graphProduct()]);
+    const stop = autoAnswer(state);
+    const outcome = await runExportBatch(store, { planProducts: [] }, QUICK);
+    stop();
+    assert.deepEqual(outcome.written, ['gp']);
+    assert.deepEqual(
+      calls.filter((c) => c.startsWith('chain:') || c.startsWith('starts:') || c.startsWith('graphexport:')),
+      ['chain:zone', 'starts:1', 'graphexport:json'],
+    );
+  });
+
+  it('refuses a diagram with no starting classes before the run', async () => {
+    const { store, state, calls } = fakeStore([graphProduct({ startTypes: [] })]);
+    const stop = autoAnswer(state);
+    const outcome = await runExportBatch(store, { planProducts: [] }, QUICK);
+    stop();
+    assert.match(outcome.refused ?? '', /Startklassen/);
+    assert.equal(calls.length, 0);
   });
 });

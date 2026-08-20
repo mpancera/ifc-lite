@@ -41,11 +41,16 @@ interface ExportProductsPanelProps {
 export function ExportProductsPanel({ onClose }: ExportProductsPanelProps) {
   const products = useViewerStore((s) => s.exportProducts);
   const planProducts = useViewerStore((s) => s.planProducts);
+  const listDefinitions = useViewerStore((s) => s.listDefinitions);
   const run = useViewerStore((s) => s.exportRun);
 
   const restore = useViewerStore((s) => s.restoreExportProductsForProject);
   const restorePlans = useViewerStore((s) => s.restorePlanProductsForProject);
   const addPlan2D = useViewerStore((s) => s.addPlan2DExportProduct);
+  const addList = useViewerStore((s) => s.addListExportProduct);
+  const addGraph = useViewerStore((s) => s.addGraphExportProduct);
+  const graphChainId = useViewerStore((s) => s.graphChainId);
+  const graphStartTypes = useViewerStore((s) => s.graphStartTypes);
   const remove = useViewerStore((s) => s.removeExportProduct);
   const rename = useViewerStore((s) => s.renameExportProduct);
   const setFormat = useViewerStore((s) => s.setExportProductFormat);
@@ -70,7 +75,7 @@ export function ExportProductsPanel({ onClose }: ExportProductsPanelProps) {
    * before it began leaves no row marked at all.
    */
   const startBatch = useCallback(async () => {
-    const outcome = await runExportBatch(useViewerStore, planProducts);
+    const outcome = await runExportBatch(useViewerStore, { planProducts, lists: listDefinitions });
     if (outcome.refused) {
       toast.error(outcome.refused);
       return;
@@ -78,11 +83,15 @@ export function ExportProductsPanel({ onClose }: ExportProductsPanelProps) {
     const failed = Object.keys(outcome.failures).length;
     if (failed === 0) toast.success(`${outcome.written.length} Produkte ausgegeben`);
     else toast.error(`${outcome.written.length} ausgegeben, ${failed} nicht — siehe Liste`);
-  }, [planProducts]);
+  }, [planProducts, listDefinitions]);
 
   const addFromPlan = useCallback((planProductId: string) => {
     addPlan2D(planProductId);
   }, [addPlan2D]);
+
+  const addFromList = useCallback((listId: string) => {
+    if (listId) addList(listId);
+  }, [addList]);
 
   return (
     <div className="flex h-full flex-col">
@@ -99,6 +108,9 @@ export function ExportProductsPanel({ onClose }: ExportProductsPanelProps) {
         )}
       </header>
 
+      {/* Two pickers rather than one merged list: a drawing and a table are
+          different deliverables, and a single dropdown mixing them would make
+          the reader check each entry's icon to know what they were adding. */}
       <div className="flex items-center gap-2 border-b px-3 py-2">
         <Select onValueChange={addFromPlan} value="">
           <SelectTrigger className="h-8 flex-1 text-xs">
@@ -109,6 +121,32 @@ export function ExportProductsPanel({ onClose }: ExportProductsPanelProps) {
               <SelectItem key={plan.id} value={plan.id} className="text-xs">
                 <Plus className="mr-1 inline h-3 w-3" />
                 {plan.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 shrink-0 text-xs"
+          disabled={graphStartTypes.length === 0}
+          title={graphStartTypes.length === 0
+            ? 'Erst im Graph-Panel eine Kette und Startklassen wählen'
+            : 'Das eingestellte Diagramm als Produkt übernehmen'}
+          onClick={() => addGraph(`Diagramm ${graphChainId}`)}
+        >
+          <Plus className="mr-1 h-3 w-3" />
+          Diagramm
+        </Button>
+        <Select onValueChange={addFromList} value="" disabled={listDefinitions.length === 0}>
+          <SelectTrigger className="h-8 flex-1 text-xs">
+            <SelectValue placeholder={listDefinitions.length === 0 ? 'Keine Liste gespeichert' : 'Liste hinzufügen…'} />
+          </SelectTrigger>
+          <SelectContent>
+            {listDefinitions.map((list) => (
+              <SelectItem key={list.id} value={list.id} className="text-xs">
+                <Plus className="mr-1 inline h-3 w-3" />
+                {list.name}
               </SelectItem>
             ))}
           </SelectContent>
@@ -127,7 +165,7 @@ export function ExportProductsPanel({ onClose }: ExportProductsPanelProps) {
               <ProductRow
                 key={product.id}
                 product={product}
-                blocker={productBlocker(product, planProducts)}
+                blocker={productBlocker(product, { planProducts, lists: listDefinitions })}
                 isFirst={index === 0}
                 isLast={index === products.length - 1}
                 disabled={running}

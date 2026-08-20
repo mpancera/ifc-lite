@@ -82,11 +82,14 @@ export function parseExportProducts(payload: unknown): ExportProduct[] {
       continue;
     }
 
-    const graphViewId = typeof record.graphViewId === 'string'
-      ? record.graphViewId.trim()
-      : '';
-    if (!graphViewId) continue;
-    products.push({ kind: 'graph', id, name, inBatch, format, graphViewId });
+    const chainId = typeof record.chainId === 'string' ? record.chainId.trim() : '';
+    // Both halves or nothing: a chain with no starting classes draws an empty
+    // diagram, and an empty diagram reads as an answer.
+    const startTypes = Array.isArray(record.startTypes)
+      ? record.startTypes.filter((t): t is string => typeof t === 'string' && t.length > 0)
+      : [];
+    if (!chainId || startTypes.length === 0) continue;
+    products.push({ kind: 'graph', id, name, inBatch, format, chainId, startTypes });
   }
 
   return products;

@@ -351,6 +351,24 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
 
   const overBudget = (graph?.nodes.length ?? 0) > NODE_BUDGET;
 
+  // Asked for from elsewhere — a batch run, the command palette — through the
+  // same consumed-once handoff the role dialog uses. The file is built here
+  // because it is built from THIS graph: a caller assembling the chain and the
+  // walk somewhere else would write a different diagram.
+  const graphExportRequested = useViewerStore((s) => s.graphExportRequested);
+  const requestGraphExport = useViewerStore((s) => s.requestGraphExport);
+  useEffect(() => {
+    if (!graphExportRequested) return;
+    // Cleared even when there is nothing to write: the request is consumed
+    // either way, and a caller waiting for it must not hang on an empty graph.
+    const format = graphExportRequested;
+    requestGraphExport(null);
+    // `built.spec` and not `chain`: the spec is the resolved chain the graph
+    // was actually walked with, which is what the writers need to name the
+    // ranks. The two buttons below use the same pair.
+    if (built) downloadGraph(built.graph, built.spec, format);
+  }, [graphExportRequested, requestGraphExport, built]);
+
   /**
    * Tell the viewport what the drawing contains.
    *
