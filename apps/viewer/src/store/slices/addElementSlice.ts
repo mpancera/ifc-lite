@@ -180,6 +180,37 @@ export interface AddElementAutoSpaceParams {
  */
 export type AddElementSpaceSource = 'draw' | 'walls' | 'plan';
 
+/**
+ * Which of the two ways to place an installation element the panel is showing.
+ *
+ * `click` is the original: point at the model, drop one device. `space` places
+ * from the ROOMS instead — an installation planner covers an area rather than
+ * clicking fifty-eight times, and the rooms are already in the model by the
+ * time devices go in. Deliberately shaped like the room sources above, because
+ * it is the same idea one floor up: the model decides where, you decide how
+ * much.
+ */
+export type AddElementInstallationSource = 'click' | 'space';
+
+/** The coverage rule for {@link AddElementInstallationSource} `'space'`. */
+export interface AddElementPlaceBySpaceParams {
+  /** m² one device covers; the room needs `ceil(area / this)` of them. */
+  CoverageArea: number;
+  /** Cap per room, however big it is. */
+  MaxPerRoom: number;
+  /** Rooms below this area (m²) get nothing. */
+  MinArea: number;
+  /**
+   * Metres above the storey floor, or `null` for "just under the ceiling".
+   *
+   * `null` is the default because the right height is a property of the
+   * STOREY, not of the tool: a detector belongs at the ceiling, and typing the
+   * clear height of every floor by hand is how it ends up wrong on one of
+   * them. A number entered here overrides that for every room in the run.
+   */
+  MountingHeight: number | null;
+}
+
 /** Live preview from the most recent dry-run detection (cleared on commit). */
 export interface AddElementAutoSpacePreview {
   storeyExpressId: number;
@@ -240,6 +271,8 @@ export interface AddElementSlice {
   addElementLibrarySelection: CatalogEntry | null;
   addElementAutoSpaceParams: AddElementAutoSpaceParams;
   addElementSpaceSource: AddElementSpaceSource;
+  addElementInstallationSource: AddElementInstallationSource;
+  addElementPlaceBySpaceParams: AddElementPlaceBySpaceParams;
   addElementAutoSpacePreview: AddElementAutoSpacePreview | null;
 
   /**
@@ -278,6 +311,8 @@ export interface AddElementSlice {
   setAddElementLibrarySelection: (entry: CatalogEntry | null) => void;
   setAddElementAutoSpaceParams: (p: Partial<AddElementAutoSpaceParams>) => void;
   setAddElementSpaceSource: (source: AddElementSpaceSource) => void;
+  setAddElementInstallationSource: (source: AddElementInstallationSource) => void;
+  setAddElementPlaceBySpaceParams: (p: Partial<AddElementPlaceBySpaceParams>) => void;
   setAddElementAutoSpacePreview: (preview: AddElementAutoSpacePreview | null) => void;
   setAddElementSlabMode: (m: AddElementSlabMode) => void;
   appendAddElementPendingPoint: (p: AddElementVec3) => void;
@@ -300,6 +335,14 @@ const ADD_ELEMENT_DEFAULTS = {
   // Ceiling-puck-sized default (typical smoke/fire detector housing).
   sensor: { Width: 0.1, Depth: 0.1, Height: 0.05, PredefinedType: 'FIRESENSOR' } as AddElementSensorParams,
   library: { Width: 0.1, Depth: 0.1, Height: 0.05 } as AddElementLibraryParams,
+  placeBySpace: {
+    // The rule the Langmatt fire-detection model was built with: 45 m² a
+    // detector, never more than four in one room.
+    CoverageArea: 45,
+    MaxPerRoom: 4,
+    MinArea: 2,
+    MountingHeight: null,
+  } as AddElementPlaceBySpaceParams,
   autoSpace: {
     SnapTolerance: 0.1,
     MinArea: 0.5,
@@ -330,6 +373,8 @@ export const createAddElementSlice: StateCreator<AddElementSlice, [], [], AddEle
   addElementLibrarySelection: null,
   addElementAutoSpaceParams: { ...ADD_ELEMENT_DEFAULTS.autoSpace },
   addElementSpaceSource: 'draw',
+  addElementInstallationSource: 'click',
+  addElementPlaceBySpaceParams: { ...ADD_ELEMENT_DEFAULTS.placeBySpace },
   addElementAutoSpacePreview: null,
   addElementSlabMode: 'rectangle',
   addElementPendingPoints: [],
@@ -388,6 +433,12 @@ export const createAddElementSlice: StateCreator<AddElementSlice, [], [], AddEle
   setAddElementAutoSpaceParams: (p) =>
     set((s) => ({ addElementAutoSpaceParams: { ...s.addElementAutoSpaceParams, ...p } })),
   setAddElementSpaceSource: (addElementSpaceSource) => set({ addElementSpaceSource }),
+  setAddElementInstallationSource: (addElementInstallationSource) =>
+    // Same reset as a type change: half a click sequence means nothing once
+    // the rooms are doing the placing.
+    set({ addElementInstallationSource, addElementPendingPoints: [], addElementHoverPoint: null }),
+  setAddElementPlaceBySpaceParams: (p) =>
+    set((s) => ({ addElementPlaceBySpaceParams: { ...s.addElementPlaceBySpaceParams, ...p } })),
   setAddElementAutoSpacePreview: (preview) =>
     set({ addElementAutoSpacePreview: preview }),
   setAddElementSlabMode: (addElementSlabMode) =>

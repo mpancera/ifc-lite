@@ -29,7 +29,10 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import type { AddElementSpaceSource, AddElementAutoSpaceParams } from '@/store/slices/addElementSlice';
+import type {
+  AddElementSpaceSource, AddElementAutoSpaceParams, AddElementInstallationSource,
+} from '@/store/slices/addElementSlice';
+import type { SensorInStoreParams } from '@ifc-lite/create';
 import type { BoundaryMode } from '@ifc-lite/create';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -39,6 +42,8 @@ import { useCatalogEntries, type CatalogEntry } from '@/lib/catalog';
 import { TOUR_ANCHORS, tourAnchor } from '@/lib/tours/anchors';
 import { CatalogImportControls } from './catalog/CatalogImportControls';
 import { dxfSegments, summariseLayers, suggestWallLayers } from '@/lib/plan/dxfSegments';
+import { usePlaceBySpace } from '@/hooks/usePlaceBySpace';
+import { mountingHeight } from '@/lib/placeBySpace/placeBySpace';
 
 interface ElementOption {
   type: AddElementType;
@@ -65,6 +70,23 @@ const SPACE_SOURCES: ReadonlyArray<{
     hint: 'Traces the rooms off an imported DXF. For a model whose walls are missing or unusable, but whose plan is good.',
   },
 ];
+
+/** The two ways to place an installation element, and what each one is for. */
+const INSTALLATION_SOURCES: ReadonlyArray<{
+  id: AddElementInstallationSource; label: string; hint: string;
+}> = [
+  {
+    id: 'click', label: 'Click',
+    hint: 'You point at the model and drop one device. The way to place the one that belongs somewhere in particular.',
+  },
+  {
+    id: 'space', label: 'By space',
+    hint: "Fills the storey's rooms by area — so many m² per device, capped per room. Wants rooms in the model; a room that already has one is left alone.",
+  },
+];
+
+/** Types the "by space" method applies to — the Installation group. */
+const INSTALLATION_TYPES: ReadonlyArray<AddElementType> = ['library', 'sensor'];
 
 const ELEMENT_OPTIONS: ElementOption[] = [
   { type: 'wall', label: 'Wall', Icon: Minus, hint: 'Click Start, then End. Cross-section = Thickness × Height, profile spans the click-to-click axis.' },
@@ -144,7 +166,16 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
   const slabMode = useViewerStore((s) => s.addElementSlabMode);
   const setSlabMode = useViewerStore((s) => s.setAddElementSlabMode);
   const spaceSource = useViewerStore((s) => s.addElementSpaceSource);
+  const installationSource = useViewerStore((s) => s.addElementInstallationSource);
+  const setInstallationSource = useViewerStore((s) => s.setAddElementInstallationSource);
   const setSpaceSource = useViewerStore((s) => s.setAddElementSpaceSource);
+  // The two tools that place from the model rather than from clicks. They
+  // share one consequence: the click guidance below is an instruction for a
+  // tool the user is not holding.
+  const isInstallation = INSTALLATION_TYPES.includes(addElementType);
+  const placingBySpace = isInstallation && installationSource === 'space';
+  const generatingRooms = addElementType === 'space' && spaceSource !== 'draw';
+  const clickPlaced = !generatingRooms && !placingBySpace;
   const pendingPoints = useViewerStore((s) => s.addElementPendingPoints);
   const hoverPoint = useViewerStore((s) => s.addElementHoverPoint);
   const clearPending = useViewerStore((s) => s.clearAddElementPending);
@@ -283,9 +314,11 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
           <p className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400 leading-snug pt-1">
             {/* The type hint describes the click flow, which is only one of the
                 three ways to make a room — the source below says the rest. */}
-            {addElementType === 'space' && spaceSource !== 'draw'
+            {generatingRooms
               ? SPACE_SOURCES.find((o) => o.id === spaceSource)?.hint
-              : activeOption.hint}
+              : placingBySpace
+                ? INSTALLATION_SOURCES.find((o) => o.id === installationSource)?.hint
+                : activeOption.hint}
           </p>
         </section>
 
@@ -358,6 +391,29 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
                   key={source.id}
                   selected={spaceSource === source.id}
                   onClick={() => setSpaceSource(source.id)}
+                >
+                  {source.label}
+                </ModeChip>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* An installation goes in one device at a time or one storey at a
+            time, and those are two tools rather than one tool with a setting:
+            the second needs rooms in the model and places dozens at once. Same
+            shape as the room sources above, one floor up. */}
+        {isInstallation && (
+          <section className="space-y-1.5">
+            <Label className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+              How the elements are placed
+            </Label>
+            <div className="grid grid-cols-2 gap-1">
+              {INSTALLATION_SOURCES.map((source) => (
+                <ModeChip
+                  key={source.id}
+                  selected={installationSource === source.id}
+                  onClick={() => setInstallationSource(source.id)}
                 >
                   {source.label}
                 </ModeChip>
@@ -517,10 +573,21 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
           />
         )}
 
+        {/* One device per room, from the rooms the model already has. Sits
+            below the dimensions because it uses them: the box a device is
+            drawn as is the same whichever way it was placed. */}
+        {placingBySpace && (
+          <PlaceBySpaceSection
+            type={addElementType === 'sensor' ? 'sensor' : 'library'}
+            modelId={effectiveModelId}
+            storeyId={addElementStoreyId ?? storeyOptions[0]?.expressId ?? null}
+          />
+        )}
+
         {/* Click-state guidance — drives the user through the multi-click flow.
             Silent for the two detectors: "click the first corner" is an
             instruction for a tool the user is not holding. */}
-        {!(addElementType === 'space' && spaceSource !== 'draw') && (
+        {clickPlaced && (
         <DropGuidance
           ready={ready}
           type={addElementType}
@@ -534,7 +601,7 @@ export function AddElementPanel({ onClose }: AddElementPanelProps) {
         />
         )}
 
-        {!(addElementType === 'space' && spaceSource !== 'draw') && (
+        {clickPlaced && (
         <p className="text-[10px] font-mono text-zinc-400 dark:text-zinc-600 leading-snug">
           Snap to vertices, edges, and faces is on by default — toggle with <span className="font-semibold">S</span>.
           Z is fixed to the storey floor; refine via the Raw STEP tab after dropping.
@@ -884,6 +951,205 @@ function RoomsFromDrawingSection({ modelId, storeyId }: RoomsFromDrawingSectionP
           Generate
         </Button>
       </div>
+    </section>
+  );
+}
+
+/**
+ * Place one installation element per room, from the rooms the model has.
+ *
+ * The counting rule and the spread live in `lib/placeBySpace`; this is the
+ * part that talks to the model. It deliberately runs the SAME two actions the
+ * click tool runs — one call per device — rather than a batch writer of its
+ * own: containment in the room, the shared product Type and membership of the
+ * active role's `IfcDistributionSystem` all have to come out identical, and
+ * the only way to be sure of that is to take the same path.
+ */
+interface PlaceBySpaceSectionProps {
+  type: 'sensor' | 'library';
+  modelId: string | null;
+  storeyId: number | null;
+}
+
+function PlaceBySpaceSection({ type, modelId, storeyId }: PlaceBySpaceSectionProps) {
+  const params = useViewerStore((s) => s.addElementPlaceBySpaceParams);
+  const setParams = useViewerStore((s) => s.setAddElementPlaceBySpaceParams);
+  const sensorParams = useViewerStore((s) => s.addElementSensorParams);
+  const libraryParams = useViewerStore((s) => s.addElementLibraryParams);
+  const selection = useViewerStore((s) => s.addElementLibrarySelection);
+  const addSensor = useViewerStore((s) => s.addSensor);
+  const addLibraryElement = useViewerStore((s) => s.addLibraryElement);
+  const [busy, setBusy] = useState(false);
+
+  // A sensor is its own product; a library element is whichever one is picked,
+  // and until one is there is nothing to count rooms against.
+  const ifcEntity = type === 'sensor' ? 'IfcSensor' : selection?.ifc.entity ?? '';
+  const mounting = type === 'sensor' ? 'ceiling' : selection?.mounting ?? 'ceiling';
+
+  const { plan, storeyHeight, ready } = usePlaceBySpace({
+    enabled: modelId !== null && storeyId !== null && ifcEntity !== '',
+    modelId,
+    storeyId,
+    ifcEntity,
+    params,
+  });
+
+  const z = mountingHeight(params.MountingHeight, storeyHeight, mounting);
+  const occupied = plan.skipped.filter((skip) => skip.reason === 'occupied').length;
+  const tooSmall = plan.skipped.filter((skip) => skip.reason === 'too-small').length;
+  const rooms = new Set(plan.placements.map((spot) => spot.spaceId)).size;
+  const canRun = ready && !busy && plan.placements.length > 0
+    && (type === 'sensor' || selection !== null);
+
+  const run = () => {
+    if (!canRun || modelId === null || storeyId === null) return;
+    setBusy(true);
+    try {
+      let placed = 0;
+      let failure: string | null = null;
+      for (const spot of plan.placements) {
+        // Drawing space to the storey's own frame — the same conversion the
+        // click path makes (`rendererPointToIfcStoreyLocal`), plus the height.
+        const Position: [number, number, number] = [spot.at.x, -spot.at.y, z];
+        const result = type === 'sensor'
+          ? addSensor(modelId, storeyId, {
+            Position,
+            Width: sensorParams.Width,
+            Depth: sensorParams.Depth,
+            Height: sensorParams.Height,
+            PredefinedType: sensorParams.PredefinedType as SensorInStoreParams['PredefinedType'],
+          })
+          : addLibraryElement(modelId, storeyId, {
+            IfcEntity: selection!.ifc.entity,
+            PredefinedType: selection!.ifc.predefinedType,
+            ObjectType: selection!.ifc.objectType,
+            Position,
+            Width: libraryParams.Width,
+            Depth: libraryParams.Depth,
+            Height: libraryParams.Height,
+            Discipline: selection!.discipline,
+            Name: selection!.label,
+            CatalogEntryId: selection!.id,
+            TechnicalData: selection!.technicalData,
+          });
+        if ('error' in result) {
+          failure = result.error;
+          break;
+        }
+        placed += 1;
+      }
+      // Stopping at the first refusal and saying how far it got: the usual
+      // cause is a read-only role, and "nothing happened" would send somebody
+      // looking at the rooms instead of at the role.
+      if (failure !== null) {
+        toast.error(placed === 0 ? failure : `Placed ${placed}, then stopped: ${failure}`);
+      } else {
+        toast.success(`Placed ${placed} in ${rooms} room${rooms === 1 ? '' : 's'}.`);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="space-y-2 pt-1">
+      <div className="flex items-center gap-1.5">
+        <Wand2 className="h-3 w-3 text-emerald-600" />
+        <Label className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+          Place by space
+        </Label>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2">
+        <NumberField
+          label="Coverage" suffix="m² each" value={params.CoverageArea} min={1}
+          onChange={(v) => setParams({ CoverageArea: v })}
+        />
+        <NumberField
+          label="Max" suffix="per room" value={params.MaxPerRoom} min={1}
+          onChange={(v) => setParams({ MaxPerRoom: Math.round(v) })}
+        />
+        <NumberField
+          label="Min area" suffix="m²" value={params.MinArea} min={0}
+          onChange={(v) => setParams({ MinArea: v })}
+        />
+      </div>
+
+      <div className="space-y-1">
+        <Label htmlFor="place-by-space-height" className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400">
+          Height <span className="text-zinc-400 dark:text-zinc-600 ml-1">(m above floor)</span>
+        </Label>
+        <Input
+          id="place-by-space-height"
+          type="number"
+          step={0.05}
+          placeholder={z.toFixed(2)}
+          value={params.MountingHeight ?? ''}
+          onChange={(e) => {
+            const raw = e.target.value.trim();
+            const next = Number(raw);
+            // Empty means "let the storey decide" — the placeholder shows what
+            // that works out to, so the automatic answer is never invisible.
+            setParams({ MountingHeight: raw === '' || !Number.isFinite(next) ? null : next });
+          }}
+          className="h-8 font-mono text-xs"
+        />
+        <p className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400 leading-snug">
+          {params.MountingHeight !== null
+            ? `Every device on this storey at ${z.toFixed(2)} m.`
+            : mounting !== 'ceiling'
+              ? `Empty = the catalog's ${mounting} mounting → ${z.toFixed(2)} m.`
+              : storeyHeight === null
+                ? 'Empty = under the ceiling — but this storey states no height, so devices land on the floor. Type one.'
+                : `Empty = under the ceiling of this storey (${storeyHeight.toFixed(2)} m) → ${z.toFixed(2)} m.`}
+        </p>
+      </div>
+
+      {/* What the run will do, before it does it. 58 elements is not something
+          to find out about afterwards. */}
+      <div className="rounded-sm border border-zinc-200 dark:border-zinc-800 px-2 py-1.5 space-y-0.5">
+        {ifcEntity === '' ? (
+          <p className="text-[11px] font-mono text-amber-600 dark:text-amber-400">
+            Pick an element from the library first.
+          </p>
+        ) : !ready ? (
+          <p className="text-[11px] font-mono text-zinc-500 dark:text-zinc-400">
+            Pick a model and a storey.
+          </p>
+        ) : (
+          <>
+            <p className="text-[11px] font-mono text-zinc-700 dark:text-zinc-200">
+              {plan.placements.length} in {rooms} of {plan.roomsConsidered} room
+              {plan.roomsConsidered === 1 ? '' : 's'}
+            </p>
+            {occupied > 0 && (
+              <p className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400">
+                {occupied} already equipped — left alone
+              </p>
+            )}
+            {tooSmall > 0 && (
+              <p className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400">
+                {tooSmall} below {params.MinArea} m² — skipped
+              </p>
+            )}
+            {plan.roomsConsidered === 0 && (
+              <p className="text-[10px] font-mono text-amber-600 dark:text-amber-400">
+                This storey has no IfcSpace. Draw or detect rooms first.
+              </p>
+            )}
+          </>
+        )}
+      </div>
+
+      <Button
+        variant="default"
+        size="sm"
+        onClick={run}
+        disabled={!canRun}
+        className="h-8 w-full text-[11px] font-mono bg-emerald-600 hover:bg-emerald-700"
+      >
+        {busy ? 'Placing…' : `Place ${plan.placements.length}`}
+      </Button>
     </section>
   );
 }

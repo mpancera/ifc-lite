@@ -1265,6 +1265,39 @@ function runGroupRelation<T>(
   }
 }
 
+/**
+ * Join a freshly authored element to the active role's `IfcDistributionSystem`.
+ *
+ * The role is the whole point of authoring in a discipline: a trade planner
+ * builds an installation, not a heap of devices, and the grouping is what a
+ * downstream consumer reads to find the fire-detection system. One system per
+ * role is created and then reused for every later placement
+ * (`findDistributionSystem` matches on the same key).
+ *
+ * Grouping is independent of spatial containment, so this leaves the
+ * element's placement untouched. Every path that creates an installation
+ * element must call it — a detector's membership must not depend on which
+ * button dropped it.
+ */
+function joinActiveDisciplineSystem(
+  get: () => ViewerState,
+  editor: StoreEditor,
+  anchor: ReturnType<typeof resolveSpatialAnchor>,
+  modelId: string,
+  elementId: number,
+): void {
+  const system = findDisciplineSystem(get().activeDisciplineSystemId);
+  if (!system) return;
+  const entities = get().mutationViews.get(modelId)?.getNewEntities() ?? [];
+  const systemId = findDistributionSystem(entities, system.predefinedType, system.objectType)
+    ?? addDistributionSystemToStore(editor, anchor.ownerHistoryId, {
+      PredefinedType: system.predefinedType,
+      ObjectType: system.objectType,
+      Name: disciplineSystemName(system),
+    }, anchor.guidRandom).systemId;
+  emitRelAssignsToGroup(editor, anchor.ownerHistoryId, [elementId], systemId, anchor.guidRandom);
+}
+
 function runInStoreElementBuilder(
   get: () => ViewerState,
   set: (partial: Partial<ViewerState> | ((s: ViewerState) => Partial<ViewerState>)) => void,
@@ -3023,22 +3056,7 @@ export const createMutationSlice: StateCreator<
         }
         emitRelDefinesByType(editor, anchor.ownerHistoryId, [elementId], typeId, anchor.guidRandom);
 
-        // Discipline role: when one is active, the element also joins that
-        // installation's IfcDistributionSystem. Grouping is independent of
-        // spatial containment, so this leaves the placement above untouched.
-        // One system per role is created and then reused for every later
-        // placement (`findDistributionSystem` matches on the same key).
-        const system = findDisciplineSystem(get().activeDisciplineSystemId);
-        if (system) {
-          const entities = get().mutationViews.get(modelId)?.getNewEntities() ?? [];
-          const systemId = findDistributionSystem(entities, system.predefinedType, system.objectType)
-            ?? addDistributionSystemToStore(editor, anchor.ownerHistoryId, {
-              PredefinedType: system.predefinedType,
-              ObjectType: system.objectType,
-              Name: disciplineSystemName(system),
-            }, anchor.guidRandom).systemId;
-          emitRelAssignsToGroup(editor, anchor.ownerHistoryId, [elementId], systemId, anchor.guidRandom);
-        }
+        joinActiveDisciplineSystem(get, editor, anchor, modelId, elementId);
 
         return elementId;
       },
@@ -3064,10 +3082,16 @@ export const createMutationSlice: StateCreator<
         store, storeyExpressId, params.Position,
         get().mutationViews.get(modelId), get().mutationVersion,
       );
-      return addSensorToStore(editor, anchor, {
+      const sensorId = addSensorToStore(editor, anchor, {
         ...params,
         ContainerId: spaceId ?? undefined,
       }).sensorId;
+      // Same rule again: a sensor placed under an active discipline role
+      // belongs to that installation. Without this a detector dropped as
+      // `sensor` sat outside the system that a detector dropped from the
+      // library joined — the same device, two different answers.
+      joinActiveDisciplineSystem(get, editor, anchor, modelId, sensorId);
+      return sensorId;
     },
     {
       type: 'sensor',
