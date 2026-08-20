@@ -69,3 +69,37 @@ export function planPointToViewport(point: { x: number; y: number }): { x: numbe
   const ry = rotation === 0 ? sy : sx * s + sy * c;
   return { x: rect.left + transform.x + rx, y: rect.top + transform.y + ry };
 }
+
+/**
+ * What the plan is currently drawing.
+ *
+ * Separate from the viewport above because it answers a different question:
+ * not "where is a point on screen" but "is the sheet I asked for the sheet
+ * that is up". A batch run needs the second — it walks the plan through one
+ * storey after another and has to know when each has actually arrived, or it
+ * writes the previous sheet under the next one's filename.
+ *
+ * `null` while no plan is mounted, exactly like the viewport.
+ */
+export interface PlanDrawingState {
+  /** The storey the plan is cutting, or `null` when it has none. */
+  readonly storeyExpressId: number | null;
+  /** The plan product supplying selection, symbols and rotation. */
+  readonly planProductId: string | null;
+  /** The generator's own status — `ready` is the only one worth exporting. */
+  readonly status: string;
+  /** Whether the cut actually produced something to draw. */
+  readonly hasDrawing: boolean;
+}
+
+let currentDrawing: PlanDrawingState | null = null;
+
+/** Publish what the plan is drawing. `null` when it is not mounted. */
+export function setPlanDrawingState(state: PlanDrawingState | null): void {
+  currentDrawing = state;
+}
+
+/** What the plan is drawing, or `null` when no plan is on screen. */
+export function planDrawingState(): PlanDrawingState | null {
+  return currentDrawing;
+}

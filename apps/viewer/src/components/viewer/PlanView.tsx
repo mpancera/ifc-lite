@@ -94,7 +94,7 @@ import {
   RAD_TO_DEG, DEG_TO_RAD,
 } from '@/lib/plan/planRotation';
 import { pickInPlan, planScreenToDrawing, planPointToRenderer, planPointToStoreyLocal } from '@/lib/plan/planPick';
-import { setPlanViewport } from '@/lib/plan/planViewport';
+import { setPlanDrawingState, setPlanViewport } from '@/lib/plan/planViewport';
 import { handleAddElementDrop } from './selectionHandlers';
 import { toGlobalIdFromModels, fromGlobalIdFromModels } from '@/store/globalId';
 import { resolveEntityRef } from '@/store/resolveEntityRef';
@@ -594,6 +594,22 @@ export function PlanView({
     () => ({ ...viewTransform, rotation: planRotation }),
     [viewTransform, planRotation],
   );
+
+  // What sheet is up, for a batch run walking the plan through one storey
+  // after another: without it the run writes the previous sheet under the next
+  // one's filename. Published rather than put in the store because `status`
+  // and `drawing` change on every regenerate, and only a runner reads them.
+  const activePlanProductId = useViewerStore((s) => s.activePlanProductId);
+  useEffect(() => {
+    setPlanDrawingState({
+      storeyExpressId: storey?.expressId ?? null,
+      planProductId: activePlanProductId,
+      status,
+      hasDrawing: drawing !== null
+        && (drawing.cutPolygons.length > 0 || (drawing.lines?.length ?? 0) > 0),
+    });
+    return () => setPlanDrawingState(null);
+  }, [storey, activePlanProductId, status, drawing]);
 
   // Published for code outside this tree that has to place a building
   // coordinate on screen — the screenflow overlay, which otherwise projects

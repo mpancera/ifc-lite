@@ -26,7 +26,9 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
+import { toast } from '@/components/ui/toast';
 import { useViewerStore } from '@/store';
+import { runExportBatch } from '@/lib/exportProducts/runExportBatch';
 import {
   FORMATS_BY_KIND, KIND_LABELS, batchProducts, productBlocker, productFilename,
   type ExportFormat, type ExportProduct,
@@ -59,6 +61,24 @@ export function ExportProductsPanel({ onClose }: ExportProductsPanelProps) {
 
   const selected = batchProducts(products);
   const running = run.runningProductId !== null;
+
+  /**
+   * Issue every selected product.
+   *
+   * The outcome is surfaced as a toast rather than only in the rows: a batch is
+   * something somebody starts and then looks away from, and a run that refused
+   * before it began leaves no row marked at all.
+   */
+  const startBatch = useCallback(async () => {
+    const outcome = await runExportBatch(useViewerStore, planProducts);
+    if (outcome.refused) {
+      toast.error(outcome.refused);
+      return;
+    }
+    const failed = Object.keys(outcome.failures).length;
+    if (failed === 0) toast.success(`${outcome.written.length} Produkte ausgegeben`);
+    else toast.error(`${outcome.written.length} ausgegeben, ${failed} nicht — siehe Liste`);
+  }, [planProducts]);
 
   const addFromPlan = useCallback((planProductId: string) => {
     addPlan2D(planProductId);
@@ -132,17 +152,14 @@ export function ExportProductsPanel({ onClose }: ExportProductsPanelProps) {
         <Button
           className="w-full"
           size="sm"
-          // The runner is not built yet. A button that looks ready and does
-          // nothing is worse than one that says so: somebody would press it
-          // before a deadline and believe their submission had been written.
-          disabled
-          title="Der Stapellauf ist noch nicht gebaut"
+          disabled={running || selected.length === 0}
+          onClick={() => { void startBatch(); }}
         >
           <Play className="mr-1 h-3.5 w-3.5" />
           Stapel exportieren ({selected.length})
         </Button>
         <p className="mt-1 text-center text-[10px] text-muted-foreground">
-          Stapellauf noch nicht gebaut — die Liste wird bereits gespeichert.
+          Der Grundriss zeichnet jedes Blatt einzeln — die Ansicht wandert dabei mit.
         </p>
       </footer>
     </div>
