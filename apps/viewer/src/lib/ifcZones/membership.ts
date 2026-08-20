@@ -114,6 +114,51 @@ export function readZones(entities: Iterable<OverlayEntity>): ZoneInfo[] {
   return [...zones.values()];
 }
 
+/** A zone as it stands in the LOADED FILE, before any of this session's edits. */
+export interface ParsedZone {
+  readonly expressId: number;
+  readonly name: string;
+  /** Raw `Description` — the colour token is parsed out here, as for authored ones. */
+  readonly description: string | null;
+  readonly objectType: string | null;
+  readonly memberIds: readonly number[];
+}
+
+/**
+ * Every zone worth DRAWING: the file's and this session's, merged.
+ *
+ * Deliberately not {@link readZones}, which returns only what was authored
+ * here. That restriction exists so the zone brush cannot paint into somebody
+ * else's grouping — a rule about WRITING. Reading is the opposite case: a zone
+ * that came in with the file is exactly the thing a fire plan has to draw, and
+ * a boundary that appeared only for zones painted in the last ten minutes
+ * would be worse than none at all.
+ *
+ * An id present on both sides is one zone the session has edited: the authored
+ * record wins, because it carries the later name, colour and membership.
+ */
+export function readZonesForDisplay(
+  parsed: readonly ParsedZone[],
+  authored: readonly ZoneInfo[],
+): ZoneInfo[] {
+  const byId = new Map<number, ZoneInfo>();
+  for (const zone of parsed) {
+    const described = parseZoneDescription(zone.description);
+    byId.set(zone.expressId, {
+      expressId: zone.expressId,
+      name: zone.name,
+      description: described.text,
+      colour: described.colour,
+      objectType: zone.objectType,
+      // Not ours to rewrite in place; a write would emit its own relationship.
+      relExpressId: null,
+      memberIds: [...zone.memberIds],
+    });
+  }
+  for (const zone of authored) byId.set(zone.expressId, zone);
+  return [...byId.values()];
+}
+
 export type PaintMode = 'add' | 'remove' | 'toggle';
 
 export interface MembershipPlan {

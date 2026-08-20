@@ -51,6 +51,7 @@ import { PlanOpeningSymbols } from './PlanOpeningSymbols';
 import { PlanNorthArrow } from './PlanNorthArrow';
 import { PlanDeviceMarks } from './PlanDeviceMarks';
 import { PlanRoomShape } from './PlanRoomShape';
+import { PlanZoneOutlines } from './PlanZoneOutlines';
 import { snapSegmentsFrom } from '@/lib/roomShape/snap';
 
 /** The line categories a room corner may snap to — see `roomSnapSegments`. */
@@ -91,6 +92,7 @@ import {
 import { pixelsPerMetreForScale, scaleDenominator } from '@/lib/plan/planChrome';
 import { usePlanOpeningSymbols } from '@/hooks/usePlanOpeningSymbols';
 import { usePlanDeviceMarks } from '@/hooks/usePlanDeviceMarks';
+import { usePlanZoneOutlines } from '@/hooks/usePlanZoneOutlines';
 import { useDrawingColorKeys } from '@/hooks/useDrawingColorKeys';
 import { useModelOrigins } from '@/hooks/useModelOrigins';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
@@ -465,6 +467,20 @@ export function PlanView({
     storeyId: storey?.expressId ?? null,
     drawsElement,
     modelId: storeyModelId,
+  });
+
+  // ── The FKS boundary around each Auslösezone ────────────────────────────
+  // Derived whenever the plan is open, like the room labels: the layer menu
+  // says how many zones this storey has, and a count that appeared only once
+  // you had asked to see them would be useless.
+  const planShowZoneOutlines = useViewerStore((s) => s.planShowZoneOutlines);
+  const setPlanShowZoneOutlines = useViewerStore((s) => s.setPlanShowZoneOutlines);
+  const zoneOutlines = usePlanZoneOutlines({
+    enabled: active,
+    geometryResult,
+    dataStore: storeyDataStore,
+    modelId: storeyModelId,
+    storeyId: storey?.expressId ?? null,
   });
 
   // Room text and door tags are two layers, not one. They look alike and they
@@ -1517,6 +1533,13 @@ export function PlanView({
         />
       )}
 
+      {/* The zone boundary goes under the text and over everything else: it is
+          the heaviest line on a fire plan, and a room number sitting on top of
+          it is still readable while the reverse is not. */}
+      {planShowZoneOutlines && (
+        <PlanZoneOutlines outlines={zoneOutlines} transform={planTransform} />
+      )}
+
       {/* Door swings and window sashes go UNDER the room labels: both belong
           to the drawing, but a name is read and an arc is looked at, so where
           they collide the text should win. */}
@@ -1713,6 +1736,9 @@ export function PlanView({
           roomCount={roomLabels.length}
           showDoorLabels={planShowDoorLabels}
           onToggleDoorLabels={() => setPlanShowDoorLabels(!planShowDoorLabels)}
+          showZoneOutlines={planShowZoneOutlines}
+          onToggleZoneOutlines={() => setPlanShowZoneOutlines(!planShowZoneOutlines)}
+          zoneOutlineCount={zoneOutlines.length}
           showSpaceGraph={showSpaceGraph}
           onToggleSpaceGraph={() => setShowSpaceGraph(!showSpaceGraph)}
           graphNodeCount={spaceGraphView.nodes.length}

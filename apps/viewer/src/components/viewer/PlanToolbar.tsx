@@ -61,6 +61,9 @@ export interface PlanToolbarProps {
   /** The space graph as a diagram — what the door numbers are derived from. */
   showSpaceGraph: boolean;
   onToggleSpaceGraph: () => void;
+  showZoneOutlines: boolean;
+  onToggleZoneOutlines: () => void;
+  zoneOutlineCount: number;
   /** How many rooms the graph found, for the tooltip. */
   graphNodeCount: number;
   /** How many rooms this storey actually has, for the tooltip. */
@@ -134,6 +137,7 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
     onToggleConstructionProjection, showRoomLabels, onToggleRoomLabels, roomCount,
     showDoorLabels, onToggleDoorLabels,
     showSpaceGraph, onToggleSpaceGraph, graphNodeCount,
+    showZoneOutlines, onToggleZoneOutlines, zoneOutlineCount,
     showOpeningSymbols, onToggleOpeningSymbols, openingCount, assumedLinings,
     wallMeasuredDepths, doorsWithSymbol,
     showDeviceMarks, onToggleDeviceMarks, deviceCount,
@@ -218,6 +222,16 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
             onToggle: onToggleDeviceMarks,
             unavailable: deviceCount === 0
               ? 'Auf diesem Geschoss liegen keine Geräte'
+              : undefined,
+          },
+          {
+            id: 'zoneOutlines',
+            label: 'Auslösezonen (FKS-Umrandung)',
+            count: zoneOutlineCount,
+            visible: showZoneOutlines,
+            onToggle: onToggleZoneOutlines,
+            unavailable: zoneOutlineCount === 0
+              ? 'Auf diesem Geschoss liegt keine Auslösezone — unter Author → Zones anlegen'
               : undefined,
           },
           {

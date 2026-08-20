@@ -136,6 +136,8 @@ export interface ViewModeSlice {
    * wants the floor bare.
    */
   planShowDeviceMarks: boolean;
+  /** The FKS boundary around each Auslösezone. */
+  planShowZoneOutlines: boolean;
 
   setViewMode: (mode: ViewMode) => void;
   toggleViewMode: () => void;
@@ -145,6 +147,7 @@ export interface ViewModeSlice {
   setPlanShowDoorLabels: (show: boolean) => void;
   setShowSpaceGraph: (show: boolean) => void;
   setPlanShowDeviceMarks: (show: boolean) => void;
+  setPlanShowZoneOutlines: (show: boolean) => void;
   setPlanRotation: (radians: number) => void;
   /**
    * Set the displayed angle WITHOUT deciding where it is remembered.
@@ -177,6 +180,9 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   planShowDoorLabels: true,
   showSpaceGraph: false,
   planShowDeviceMarks: true,
+  // Off by default: it is a fire-plan convention, not part of an
+  // architectural drawing, and it is the heaviest line on the sheet.
+  planShowZoneOutlines: false,
 
   setViewMode: (viewMode) => {
     if (get().viewMode === viewMode) return;
@@ -246,6 +252,7 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   setShowSpaceGraph: (showSpaceGraph) => set({ showSpaceGraph }),
 
   setPlanShowDeviceMarks: (planShowDeviceMarks) => set({ planShowDeviceMarks }),
+  setPlanShowZoneOutlines: (planShowZoneOutlines) => set({ planShowZoneOutlines }),
 
   restorePlanRotationForProject: () => {
     const project = get().currentProjectKey();
