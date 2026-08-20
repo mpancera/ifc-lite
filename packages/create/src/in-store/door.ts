@@ -60,8 +60,19 @@ export interface DoorInStoreParams {
   Position: [number, number, number];
   Width: number;
   Height: number;
-  /** Door leaf depth along storey-local +Y (metres). Defaults to 0.05. */
+  /** Door leaf depth across the wall (metres). Defaults to 0.05. */
   FrameThickness?: number;
+  /**
+   * Which way the leaf runs, as a storey-local direction. Defaults to +X.
+   *
+   * Without this a door could only be placed in a wall running east-west: the
+   * leaf is a rectangle `Width` along the placement's X and `FrameThickness`
+   * across it, so a door in a north-south wall stood square across the wall
+   * rather than in it. Given as a direction rather than an angle because that
+   * is what a caller has — a wall's own `End - Start` — and converting to an
+   * angle and back is where a sign gets lost.
+   */
+  RefDirection?: [number, number, number];
   /** IFC4 PredefinedType enum (without the dots). Defaults to NOTDEFINED. */
   PredefinedType?: 'DOOR' | 'GATE' | 'TRAPDOOR' | 'USERDEFINED' | 'NOTDEFINED';
   /** IFC4 OperationType enum (without the dots). Defaults to SINGLE_SWING_LEFT. */
@@ -107,7 +118,16 @@ export function addDoorToStore(
   };
   const thickness = params.FrameThickness as number;
 
-  const placementId = emitLocalPlacement(editor, anchor.storeyPlacementId, params.Position);
+  // Axis stays implicit (+Z, upright); only the leaf's direction is given, and
+  // only when the caller asked for one — passing an explicit default would put
+  // an IfcDirection into every file that never needed one.
+  const placementId = emitLocalPlacement(
+    editor,
+    anchor.storeyPlacementId,
+    params.Position,
+    params.RefDirection === undefined ? undefined : [0, 0, 1],
+    params.RefDirection,
+  );
   // Profile centred at the placement origin so the leaf is bottom-
   // centred — matches IfcCreator's free-standing door convention.
   const profileId = emitRectangleProfile(editor, params.Width, thickness);

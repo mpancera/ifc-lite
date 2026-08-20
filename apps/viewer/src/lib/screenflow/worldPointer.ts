@@ -25,6 +25,7 @@
  * moving every clip's pointer a few metres sideways.
  */
 
+import { planPointToViewport } from '@/lib/plan/planViewport';
 import type { ViewerState } from '@/store';
 
 export type IfcStoreyLocalPoint = readonly [number, number, number];
@@ -53,15 +54,36 @@ export function storeyFloorY(state: ViewerState, modelId: string, storeyExpressI
 }
 
 /**
+ * The same point as a coordinate on the plan drawing.
+ *
+ * The inverse of `planPointToStoreyLocal`, which is `[x, -y]` — so the
+ * drawing's y is the negated IFC Y. Height plays no part: a plan is a cut
+ * seen from above.
+ */
+export function ifcStoreyLocalToPlan(point: IfcStoreyLocalPoint): { x: number; y: number } {
+  return { x: point[0], y: -point[1] };
+}
+
+/**
  * Where a building coordinate currently sits on screen, in CSS pixels
- * relative to the viewport, or `null` when it is behind the camera or the
- * renderer has not registered its callbacks yet.
+ * relative to the viewport, or `null` when nothing can place it.
+ *
+ * # Whichever view is actually showing
+ * Asked of the plan first. A beat that traces a wall in 2D was projecting
+ * through the 3D camera, because that is the only projection the store
+ * carries — so the drawn cursor sat a few centimetres off the line it was
+ * supposed to be drawing, in every 2D beat of every clip. The plan publishes
+ * its own transform (`lib/plan/planViewport`) and answers `null` when it is
+ * not mounted, which is exactly the signal to fall back to the camera.
  */
 export function projectIfcPoint(
   state: ViewerState,
   point: IfcStoreyLocalPoint,
   floorY: number,
 ): { x: number; y: number } | null {
+  const onPlan = planPointToViewport(ifcStoreyLocalToPlan(point));
+  if (onPlan) return onPlan;
+
   const project = state.cameraCallbacks.projectToScreen;
   if (!project) return null;
   return project(ifcStoreyLocalToRenderer(point, floorY)) ?? null;

@@ -442,6 +442,19 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
     });
   }, [listName, columns, sortedRows, grouping, sortCol, sortDir, numericCols, columnWidths, modelUnits, unitDisplayOverrides]);
 
+  // Asked for from elsewhere — the command palette, a screenflow — through the
+  // same consumed-once handoff the role dialog uses. The model can only be
+  // built here, from what is actually on screen; a second builder somewhere
+  // else would drift from the table it claims to export.
+  const exportRequested = useViewerStore((s) => s.listExportRequested);
+  const requestListExport = useViewerStore((s) => s.requestListExport);
+  useEffect(() => {
+    if (!exportRequested) return;
+    handleExport(exportRequested);
+    requestListExport(null);
+  }, [exportRequested, handleExport, requestListExport]);
+
+
   // Flat, ordered list of the selectable rows (group headers excluded) and a
   // lookup from a row to its position, so Shift+click range-select works over
   // the on-screen order. (#1463)

@@ -50,6 +50,7 @@ import { PlanLabels } from './PlanLabels';
 import { PlanOpeningSymbols } from './PlanOpeningSymbols';
 import { PlanNorthArrow } from './PlanNorthArrow';
 import { PlanDeviceMarks } from './PlanDeviceMarks';
+import { PlanRoomShape } from './PlanRoomShape';
 import { PlanOperationTypeReport } from './PlanOperationTypeReport';
 import { PlanScaleBar } from './PlanScaleBar';
 import { PlanToolbar } from './PlanToolbar';
@@ -94,6 +95,7 @@ import {
   RAD_TO_DEG, DEG_TO_RAD,
 } from '@/lib/plan/planRotation';
 import { pickInPlan, planScreenToDrawing, planPointToRenderer, planPointToStoreyLocal } from '@/lib/plan/planPick';
+import { setPlanViewport } from '@/lib/plan/planViewport';
 import { handleAddElementDrop } from './selectionHandlers';
 import { toGlobalIdFromModels, fromGlobalIdFromModels } from '@/store/globalId';
 import { resolveEntityRef } from '@/store/resolveEntityRef';
@@ -336,6 +338,34 @@ export function PlanView({
     drawsElement,
   });
 
+  // ── The room being reshaped ─────────────────────────────────────────────
+  // Only while the tool is held, and only for a room: the handles hijack the
+  // pointer, so a tool that put them up whenever something was selected would
+  // make the plan unclickable.
+  const selectedEntity = useViewerStore((s) => s.selectedEntity);
+  const readSlabFootprint = useViewerStore((s) => s.readSlabFootprint);
+  const reshapeSpace = useViewerStore((s) => s.reshapeSpace);
+  const mutationVersion = useViewerStore((s) => s.mutationVersion);
+
+  const roomShape = useMemo(() => {
+    if (activeTool !== 'roomShape' || !selectedEntity || !storeyModelId) return null;
+    if (selectedEntity.modelId !== storeyModelId) return null;
+    const type = models.get(storeyModelId)?.ifcDataStore?.entities?.getTypeName?.(
+      selectedEntity.expressId,
+    );
+    if (type !== 'IfcSpace') return null;
+    const fp = readSlabFootprint(storeyModelId, selectedEntity.expressId);
+    if (!fp || fp.footprint.length < 3) return null;
+    // Storey-local IFC XY to drawing space: drawing y is the renderer's z,
+    // which is IFC's y negated. `planPick` pins that mapping. The footprint
+    // arrives as [x, y] tuples, not objects — `slab-edit` has its own Point2D.
+    return {
+      expressId: selectedEntity.expressId,
+      outline: fp.footprint.map(([x, y]) => ({ x, y: -y })),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTool, selectedEntity, storeyModelId, models, readSlabFootprint, mutationVersion]);
+
   // ── The space graph, as a diagram ───────────────────────────────────────
   // The same graph the escape routes are walked on and the door numbers come
   // from — drawn only when asked for, because it is a diagnostic rather than
@@ -567,6 +597,34 @@ export function PlanView({
     () => ({ ...viewTransform, rotation: planRotation }),
     [viewTransform, planRotation],
   );
+
+  // Published for code outside this tree that has to place a building
+  // coordinate on screen — the screenflow overlay, which otherwise projects
+  // through the 3D camera and lands its cursor beside the line it is tracing.
+  // Cleared on unmount so that reader falls back to the camera rather than
+  // pointing at where the plan used to be.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const publish = () => {
+      const r = container.getBoundingClientRect();
+      setPlanViewport({
+        transform: planTransform,
+        rect: { left: r.left, top: r.top, width: r.width, height: r.height },
+      });
+    };
+    publish();
+    const observer = new ResizeObserver(publish);
+    observer.observe(container);
+    window.addEventListener('scroll', publish, true);
+    window.addEventListener('resize', publish);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('scroll', publish, true);
+      window.removeEventListener('resize', publish);
+      setPlanViewport(null);
+    };
+  }, [planTransform]);
 
   // ── Selecting ───────────────────────────────────────────────────────────
   // The drawing carries LOCAL express ids plus the model they came from; the
@@ -1321,6 +1379,25 @@ export function PlanView({
         <PlanDeviceMarks marks={deviceMarks} transform={planTransform} />
       )}
 
+      {/* The reshape handles sit on top of everything: they are the thing
+          being aimed at while the tool is held. */}
+      {roomShape && storeyModelId && (
+        <PlanRoomShape
+          outline={roomShape.outline}
+          transform={planTransform}
+          onCommit={(next) => {
+            const result = reshapeSpace(
+              storeyModelId,
+              roomShape.expressId,
+              // Back to IFC's frame — see the note where the outline is read.
+              next.map((p) => ({ x: p.x, y: -p.y })),
+            );
+            if ('error' in result) toast.error(result.error);
+            else toast.success(`Raum umgeformt — ${result.area.toFixed(2)} m²`);
+          }}
+        />
+      )}
+
       {/* Door swings and window sashes go UNDER the room labels: both belong
           to the drawing, but a name is read and an arc is looked at, so where
           they collide the text should win. */}
@@ -1662,7 +1739,14 @@ export function PlanView({
               : storeys.length === 0
                 ? models.size > 1
                   ? 'Der Grundriss zeigt vorerst ein Modell auf einmal.'
-                  : 'Aus diesem Modell liessen sich keine Geschosse mit Geometrie lesen.'
+                  // A drawing on the paper is not nothing. Saying no geometry
+                  // could be read while an underlay is visibly lying there
+                  // reads as a fault, and sends the reader looking for one --
+                  // this IS the starting state of tracing a plan, not a
+                  // failure of it.
+                  : dxfUnderlays.length > 0
+                    ? 'Noch kein Bauteil im Modell – gezeigt wird die hinterlegte Zeichnung.'
+                    : 'Aus diesem Modell liessen sich keine Geschosse mit Geometrie lesen.'
                 : cut && !cut.ok
                   ? cut.reason === 'above-model'
                     ? `Der Schnitt bei ${planCutHeight.toFixed(2)} m über «${storey?.name}» liegt über dem Modell.`

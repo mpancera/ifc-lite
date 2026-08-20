@@ -60,7 +60,6 @@ import { resolveMobileSheet } from '@/lib/panels/mobileSheet';
 import { usePanelControls } from '@/hooks/usePanelControls';
 
 const BOTTOM_PANEL_MIN_HEIGHT = 120;
-const BOTTOM_PANEL_DEFAULT_HEIGHT = 300;
 const BOTTOM_PANEL_MAX_RATIO = 0.7; // max 70% of container
 
 /** Slim grip atop a bottom-strip panel — drag to lift it into a floating window,
@@ -281,8 +280,20 @@ export function ViewerLayout() {
     else if (!leftPanelCollapsed && panel.isCollapsed()) panel.expand();
   }, [leftPanelCollapsed]);
 
-  // Bottom panel resize state (pixel height, persisted in ref to avoid re-renders during drag)
-  const [bottomHeight, setBottomHeight] = useState(BOTTOM_PANEL_DEFAULT_HEIGHT);
+  // Bottom panel resize state. In the store rather than local: the drag handle
+  // is not the only thing that should be able to set it — a five-row table and
+  // a chain graph both need more than the default before they read, and a
+  // screenflow that opens one has to be able to make room for it. Clamping
+  // stays here, so a caller cannot ask for a strip taller than the window.
+  const requestedBottomHeight = useViewerStore((s) => s.bottomPanelHeight);
+  const setBottomHeight = useViewerStore((s) => s.setBottomPanelHeight);
+  const [containerHeight, setContainerHeight] = useState(0);
+  // The store carries a REQUEST; the strip's real height is clamped here, so a
+  // caller that asks for 900 px in a 600 px window does not push the viewport
+  // off the screen. The drag handler clamps too — this covers everyone else.
+  const bottomHeight = containerHeight > 0
+    ? Math.min(containerHeight * BOTTOM_PANEL_MAX_RATIO, Math.max(BOTTOM_PANEL_MIN_HEIGHT, requestedBottomHeight))
+    : requestedBottomHeight;
   const containerRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
   const cleanupRef = useRef<(() => void) | null>(null);
@@ -290,6 +301,17 @@ export function ViewerLayout() {
   // Cleanup drag listeners on unmount
   useEffect(() => {
     return () => { cleanupRef.current?.(); };
+  }, []);
+
+  // The container's height, so the clamp above has something to clamp against.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const measure = () => setContainerHeight(container.clientHeight);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(container);
+    return () => observer.disconnect();
   }, []);
 
   const handleResizeStart = useCallback((e: React.MouseEvent) => {

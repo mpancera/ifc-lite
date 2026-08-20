@@ -74,6 +74,9 @@ const AUTHORING_TOOLS: ReadonlySet<string> = new Set([
   'split',
   'spaceSketch',
   'zonePaint',
+  // Reshaping a room writes geometry, so it unlocks edit mode like the rest —
+  // otherwise the handles come up and the first drag is refused.
+  'roomShape',
 ]);
 
 /**
@@ -134,6 +137,17 @@ export interface UISlice extends GeometryLoadSettingsState, GeometryLoadSettings
   requestPlanFocus: (globalId: number, point?: { x: number; y: number }) => void;
   leftPanelCollapsed: boolean;
   rightPanelCollapsed: boolean;
+  /**
+   * Height of the bottom strip in pixels — Lists, Graph, Gantt, Script.
+   *
+   * Here rather than in the layout component because the drag handle is not
+   * the only thing that should be able to set it: a table of five rows and a
+   * chain graph both need more than the default before they are readable, and
+   * a screenflow that opens one has to be able to make room for it. The
+   * component still clamps to its own minimum and maximum — this is a request,
+   * not an override.
+   */
+  bottomPanelHeight: number;
   activeTool: string;
   /**
    * Global edit mode. When `true`, all in-place editing affordances
@@ -199,6 +213,7 @@ export interface UISlice extends GeometryLoadSettingsState, GeometryLoadSettings
 
   // Actions
   setLeftPanelCollapsed: (collapsed: boolean) => void;
+  setBottomPanelHeight: (height: number) => void;
   setRightPanelCollapsed: (collapsed: boolean) => void;
   setActiveTool: (tool: string) => void;
   /** Collapse the Space Sketch panel to a reopen pill (or restore it). */
@@ -267,6 +282,7 @@ export const createUISlice: StateCreator<UISlice & UICrossSliceState, [], [], UI
   })),
   leftPanelCollapsed: false,
   rightPanelCollapsed: false,
+  bottomPanelHeight: 300,
   activeTool: UI_DEFAULTS.ACTIVE_TOOL,
   editEnabled: false,
   spaceSketchMinimized: false,
@@ -294,6 +310,7 @@ export const createUISlice: StateCreator<UISlice & UICrossSliceState, [], [], UI
   // Actions
   setLeftPanelCollapsed: (leftPanelCollapsed) => set({ leftPanelCollapsed }),
   setRightPanelCollapsed: (rightPanelCollapsed) => set({ rightPanelCollapsed }),
+  setBottomPanelHeight: (bottomPanelHeight) => set({ bottomPanelHeight }),
   setActiveTool: (activeTool) => {
     // Authoring tools require edit mode. Entering one of them flips
     // the global toggle on so the rest of the UI (Properties panel,

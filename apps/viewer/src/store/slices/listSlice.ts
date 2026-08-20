@@ -20,6 +20,17 @@ export interface ListSlice {
   /** A list definition handed off from elsewhere (e.g. "Create list" in the
    *  search filter) for the ListPanel to open straight into the builder. */
   pendingListDraft: ListDefinition | null;
+  /**
+   * Export the list currently on screen, in this format. Consumed once and
+   * cleared by the table, the same handoff the role dialog uses.
+   *
+   * The export model is built from what the table is showing — configured
+   * columns, the active grouping, the totals — so it can only be assembled
+   * there. This lets a caller ask for it anyway, which is what a demo of
+   * "the list leaves as a file" needs, without a second and inevitably
+   * divergent model builder somewhere else.
+   */
+  listExportRequested: 'csv' | 'xlsx' | 'pdf' | null;
 
   // Actions
   setListDefinitions: (definitions: ListDefinition[]) => void;
@@ -29,6 +40,7 @@ export interface ListSlice {
   setActiveListId: (id: string | null) => void;
   setListResult: (result: ListResult | null) => void;
   setListPanelVisible: (visible: boolean) => void;
+  requestListExport: (format: 'csv' | 'xlsx' | 'pdf' | null) => void;
   toggleListPanel: () => void;
   setListExecuting: (executing: boolean) => void;
   setPendingListDraft: (definition: ListDefinition | null) => void;
@@ -42,6 +54,7 @@ export const createListSlice: StateCreator<ListSlice, [], [], ListSlice> = (set,
   listPanelVisible: false,
   listExecuting: false,
   pendingListDraft: null,
+  listExportRequested: null,
 
   // Actions
   setListDefinitions: (listDefinitions) => {
@@ -74,6 +87,7 @@ export const createListSlice: StateCreator<ListSlice, [], [], ListSlice> = (set,
   setActiveListId: (activeListId) => set({ activeListId }),
   setListResult: (listResult) => set({ listResult }),
   setListPanelVisible: (listPanelVisible) => set({ listPanelVisible }),
+  requestListExport: (listExportRequested) => set({ listExportRequested }),
   toggleListPanel: () => set((state) => ({ listPanelVisible: !state.listPanelVisible })),
   setListExecuting: (listExecuting) => set({ listExecuting }),
   setPendingListDraft: (pendingListDraft) => set({ pendingListDraft }),
