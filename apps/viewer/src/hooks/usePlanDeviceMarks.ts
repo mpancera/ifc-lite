@@ -18,6 +18,7 @@
 
 import { useMemo } from 'react';
 import { useViewerStore } from '@/store';
+import type { MutablePropertyView } from '@ifc-lite/mutations';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import type { GeometryResult, MeshData } from '@ifc-lite/geometry';
 import { deviceSymbolKind, type DeviceMark } from '@/lib/plan/deviceSymbols';
@@ -78,6 +79,35 @@ function overlayPredefinedType(attributes: readonly unknown[]): string | null {
   return null;
 }
 
+/**
+ * The number the numbering rule assigned, or an empty string.
+ *
+ * `MutablePropertyView.getPropertyValue` already resolves in the right order —
+ * a pending mutation, then a property set created this session, then the
+ * parsed file — so this is a thin read rather than a third place that decides
+ * what wins. Without an overlay the parsed store is asked directly, which is
+ * the case for a model nobody has edited.
+ */
+function readAssetIdentifier(
+  overlay: MutablePropertyView | undefined,
+  dataStore: { properties?: { getForEntity(id: number): readonly { name: string; properties: readonly { name: string; value: unknown }[] }[] } },
+  expressId: number,
+): string {
+  const fromOverlay = overlay?.getPropertyValue(expressId, IDENTIFIER_PSET, IDENTIFIER_PROP);
+  if (typeof fromOverlay === 'string' && fromOverlay.trim()) return fromOverlay.trim();
+  if (typeof fromOverlay === 'number') return String(fromOverlay);
+  if (overlay) return '';
+
+  const pset = dataStore.properties?.getForEntity(expressId)
+    ?.find((candidate) => candidate.name === IDENTIFIER_PSET);
+  const value = pset?.properties.find((p) => p.name === IDENTIFIER_PROP)?.value;
+  return typeof value === 'string' ? value.trim() : typeof value === 'number' ? String(value) : '';
+}
+
+/** Where the numbering rule writes. The standard occurrence pset. */
+const IDENTIFIER_PSET = 'Pset_ConstructionOccurence';
+const IDENTIFIER_PROP = 'AssetIdentifier';
+
 export function usePlanDeviceMarks({
   enabled, geometryResult, dataStore, storeyId, drawsElement, modelId,
 }: UsePlanDeviceMarksOptions): DeviceMark[] {
@@ -135,15 +165,22 @@ export function usePlanDeviceMarks({
       // a Meldergruppe has given one it is the thing to print. The product
       // name ("Rauchmelder") is what stands in until then — and stays in the
       // tooltip either way.
-      const mark = overlayAttribute(overlay, expressId, 'Tag')
+      const tag = overlayAttribute(overlay, expressId, 'Tag')
         ?? (typeof authored?.[7] === 'string' ? authored[7] : null)
+        ?? dataStore.entities?.getTag?.(expressId)
         ?? '';
-      const name = mark || overlayAttribute(overlay, expressId, 'Name')
+      const name = tag || overlayAttribute(overlay, expressId, 'Name')
         || (typeof authored?.[2] === 'string' ? authored[2] : null)
         || dataStore.entities?.getName(expressId) || '';
       const objectType = overlayAttribute(overlay, expressId, 'ObjectType')
         ?? (typeof authored?.[4] === 'string' ? authored[4] : null)
         ?? dataStore.entities?.getObjectType?.(expressId) ?? '';
+
+      // Straight off the overlay view, which answers from the session's edits
+      // first and the parsed file second. Both, and in that order: a detector
+      // numbered a moment ago has no row in the parsed store at all, and one
+      // renumbered this session has a stale one.
+      const assetIdentifier = readAssetIdentifier(overlay, dataStore, expressId);
 
       marks.push({
         key,
@@ -151,6 +188,8 @@ export function usePlanDeviceMarks({
         kind,
         position,
         name,
+        tag,
+        assetIdentifier,
         ifcType,
         predefinedType: (authored ? overlayPredefinedType(authored) : null)
           ?? dataStore.entities?.getPredefinedType?.(expressId)

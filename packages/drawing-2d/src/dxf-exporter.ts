@@ -108,6 +108,22 @@ export interface DXFDeviceSymbol {
   readonly half: number;
   /** Its IFC class, for a schedule to group by. */
   readonly ifcType?: string;
+  /**
+   * What the device carries ON THE DRAWING, printed beside the symbol.
+   *
+   * The short one — a Meldergruppe's own designation. Absent until one is
+   * given, and then nothing is drawn: a blank field beside every symbol reads
+   * as data that went missing.
+   */
+  readonly tag?: string;
+  /**
+   * The full assigned identifier, carried and not drawn.
+   *
+   * Unique and long — a path rather than a number. Exactly what a schedule
+   * wants to join on, and exactly what would bury a plan if printed beside
+   * every symbol, which is why it is a separate field from `tag`.
+   */
+  readonly assetIdentifier?: string;
   /** What the model calls it. */
   readonly name?: string;
 }
@@ -267,24 +283,40 @@ export class DXFExporter {
               x: p.x * device.half * 2,
               y: p.y * device.half * 2,
             }))),
-          // Both invisible. A schedule reads an attribute either way, and a
-          // plan with every device's full name printed beside it is a plan
-          // nobody can read — the symbols are what the drawing is for. A
-          // visible number belongs here once a short identifier exists to put
-          // in it; a permanently blank field would read as missing data.
+          // The number is the one thing printed: an installer reads it off the
+          // plan, calls it out and signs against it. Name and class are carried
+          // invisibly — a schedule reads an attribute either way, and a plan
+          // with every device's full name beside it is one nobody can read.
           attributes: [
+            { tag: 'NUMMER', offset: { x: device.half * 1.4, y: device.half * 0.6 }, height: device.half * 1.2 },
+            { tag: 'KENNUNG', offset: { x: 0, y: 0 }, height: device.half, invisible: true },
             { tag: 'NAME', offset: { x: 0, y: 0 }, height: device.half, invisible: true },
             { tag: 'IFCTYP', offset: { x: 0, y: 0 }, height: device.half, invisible: true },
           ],
         });
         writer.addInsert(blockName, device.position, layer, {
-          values: { NAME: device.name ?? '', IFCTYP: device.ifcType ?? '' },
+          values: {
+            NUMMER: device.tag ?? '',
+            KENNUNG: device.assetIdentifier ?? '',
+            NAME: device.name ?? '',
+            IFCTYP: device.ifcType ?? '',
+          },
           // XDATA as well as attributes: attributes are what a CAD schedule
           // reads, XDATA is what survives a round trip through a reader that
           // drops attributes it was not expecting. Cheap, and they disagree
           // about nothing.
-          xdata: device.name || device.ifcType
-            ? { appId: DEVICE_APPID, strings: [device.name ?? '', device.ifcType ?? ''] }
+          // Number first: it is what a reader looks for, and XDATA is an
+          // ordered list rather than named fields.
+          // Identifier first: it is the field a reader joins on, and XDATA is
+          // an ordered list rather than named fields.
+          xdata: device.assetIdentifier || device.tag || device.ifcType
+            ? {
+              appId: DEVICE_APPID,
+              strings: [
+                device.assetIdentifier ?? '', device.tag ?? '',
+                device.name ?? '', device.ifcType ?? '',
+              ],
+            }
             : undefined,
         });
       }

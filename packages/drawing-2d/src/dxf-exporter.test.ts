@@ -301,6 +301,76 @@ describe('plan overlays (#50)', () => {
     expect(dxf).toContain('\nIfcSensor\n');
   });
 
+  it('prints the assigned number beside the symbol', () => {
+    // The one thing an installer reads off a detection plan: it is what gets
+    // called out, checked against the panel and signed against.
+    const dxf = exportToDXF(emptyDrawing(), {
+      plan: {
+        devices: [{
+          position: { x: 2, y: 2 },
+          family: 'smoke',
+          paths: [[{ x: -1, y: -1 }, { x: 1, y: -1 }, { x: 1, y: 1 }]],
+          half: 0.15,
+          tag: 'BM 1.04.002',
+          ifcType: 'IfcSensor',
+          name: 'Rauchmelder',
+        }],
+      },
+    });
+    expect(dxf).toContain('\nBM 1.04.002\n');
+    // Visible, unlike the other two: 70/0 on the NUMMER attribute.
+    const attribs = dxf.slice(dxf.indexOf('\nINSERT\n'));
+    const nummer = attribs.slice(attribs.indexOf('\nNUMMER\n'));
+    expect(nummer.slice(0, 40)).toContain('\n70\n0\n');
+  });
+
+  it('carries the long identifier without printing it', () => {
+    // The rule produces a path — "Building.Level 1.Space 1_fire.smoke-detector.001"
+    // — which is exactly what a schedule joins on and exactly what would bury
+    // a plan if it were printed beside every symbol.
+    const dxf = exportToDXF(emptyDrawing(), {
+      plan: {
+        devices: [{
+          position: { x: 2, y: 2 },
+          family: 'smoke',
+          paths: [[{ x: -1, y: -1 }, { x: 1, y: -1 }]],
+          half: 0.15,
+          tag: 'BM 12',
+          assetIdentifier: 'Building.Level 1.Space 1_fire.smoke-detector.001',
+          ifcType: 'IfcSensor',
+        }],
+      },
+    });
+    const insert = dxf.slice(dxf.indexOf('\nINSERT\n'));
+    expect(insert).toContain('\nBuilding.Level 1.Space 1_fire.smoke-detector.001\n');
+    // Drawn: the short one. Carried: the long one, invisible.
+    const kennung = insert.slice(insert.indexOf('\nKENNUNG\n'));
+    expect(kennung.slice(0, 40)).toContain('\n70\n1\n');
+    const nummer = insert.slice(insert.indexOf('\nNUMMER\n'));
+    expect(nummer.slice(0, 40)).toContain('\n70\n0\n');
+  });
+
+  it('draws no number where no rule has assigned one', () => {
+    // A blank field beside every symbol reads as data that went missing.
+    const dxf = exportToDXF(emptyDrawing(), {
+      plan: {
+        devices: [{
+          position: { x: 2, y: 2 },
+          family: 'smoke',
+          paths: [[{ x: -1, y: -1 }, { x: 1, y: -1 }]],
+          half: 0.15,
+          ifcType: 'IfcSensor',
+          name: 'Rauchmelder',
+        }],
+      },
+    });
+    // The ATTRIB still exists — a schedule wants the column — but it is empty,
+    // and an empty TEXT value draws nothing.
+    const insert = dxf.slice(dxf.indexOf('\nINSERT\n'));
+    expect(insert).toContain('\nNUMMER\n');
+    expect(insert).not.toContain('\nBM ');
+  });
+
   it('gives each device family its own block', () => {
     const at = (family: string, x: number) => ({
       position: { x, y: 0 },

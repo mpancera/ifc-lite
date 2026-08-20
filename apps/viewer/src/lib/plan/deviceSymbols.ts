@@ -115,6 +115,27 @@ export interface DeviceMark {
   readonly predefinedType: string | null;
   /** Refinement, only meaningful where `predefinedType` is `USERDEFINED`. */
   readonly objectType: string | null;
+  /**
+   * What the device carries ON A DRAWING — `Tag` on the IfcElement.
+   *
+   * The short one, and the only one worth printing. Empty until a
+   * Meldergruppe has given one.
+   */
+  readonly tag: string;
+  /**
+   * The number the numbering rule assigned, from
+   * `Pset_ConstructionOccurence.AssetIdentifier`.
+   *
+   * Unique and long — `Building.Level 1.Space 1_fire.smoke-detector.001` is
+   * what the rule actually produces, a path rather than a number. That makes
+   * it exactly right for a schedule and wrong for the drawing: printed beside
+   * every symbol it would bury the plan under its own identifiers. So it
+   * travels as data and `tag` is what gets drawn.
+   *
+   * Empty where no rule has run — never a placeholder, because a made-up
+   * number on a drawing is worse than a blank one.
+   */
+  readonly assetIdentifier: string;
 }
 
 /**

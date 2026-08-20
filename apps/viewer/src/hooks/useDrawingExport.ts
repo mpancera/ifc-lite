@@ -1078,6 +1078,8 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
       family: mark.kind,
       paths: deviceMarkPaths(mark.kind),
       half: markHalf,
+      tag: mark.tag,
+      assetIdentifier: mark.assetIdentifier,
       ifcType: mark.ifcType,
       name: mark.name,
     }));
