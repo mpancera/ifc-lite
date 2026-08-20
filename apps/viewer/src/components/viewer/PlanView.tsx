@@ -50,7 +50,6 @@ import { PlanLabels } from './PlanLabels';
 import { PlanOpeningSymbols } from './PlanOpeningSymbols';
 import { PlanNorthArrow } from './PlanNorthArrow';
 import { PlanDeviceMarks } from './PlanDeviceMarks';
-import { PlanRoomShape } from './PlanRoomShape';
 import { PlanOperationTypeReport } from './PlanOperationTypeReport';
 import { PlanScaleBar } from './PlanScaleBar';
 import { PlanToolbar } from './PlanToolbar';
@@ -343,28 +342,7 @@ export function PlanView({
   // pointer, so a tool that put them up whenever something was selected would
   // make the plan unclickable.
   const selectedEntity = useViewerStore((s) => s.selectedEntity);
-  const readSlabFootprint = useViewerStore((s) => s.readSlabFootprint);
-  const reshapeSpace = useViewerStore((s) => s.reshapeSpace);
   const mutationVersion = useViewerStore((s) => s.mutationVersion);
-
-  const roomShape = useMemo(() => {
-    if (activeTool !== 'roomShape' || !selectedEntity || !storeyModelId) return null;
-    if (selectedEntity.modelId !== storeyModelId) return null;
-    const type = models.get(storeyModelId)?.ifcDataStore?.entities?.getTypeName?.(
-      selectedEntity.expressId,
-    );
-    if (type !== 'IfcSpace') return null;
-    const fp = readSlabFootprint(storeyModelId, selectedEntity.expressId);
-    if (!fp || fp.footprint.length < 3) return null;
-    // Storey-local IFC XY to drawing space: drawing y is the renderer's z,
-    // which is IFC's y negated. `planPick` pins that mapping. The footprint
-    // arrives as [x, y] tuples, not objects — `slab-edit` has its own Point2D.
-    return {
-      expressId: selectedEntity.expressId,
-      outline: fp.footprint.map(([x, y]) => ({ x, y: -y })),
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTool, selectedEntity, storeyModelId, models, readSlabFootprint, mutationVersion]);
 
   // ── The space graph, as a diagram ───────────────────────────────────────
   // The same graph the escape routes are walked on and the door numbers come
@@ -1449,25 +1427,6 @@ export function PlanView({
           looked at, a name is read, and where they collide the text wins. */}
       {planShowDeviceMarks && (
         <PlanDeviceMarks marks={deviceMarks} transform={planTransform} />
-      )}
-
-      {/* The reshape handles sit on top of everything: they are the thing
-          being aimed at while the tool is held. */}
-      {roomShape && storeyModelId && (
-        <PlanRoomShape
-          outline={roomShape.outline}
-          transform={planTransform}
-          onCommit={(next) => {
-            const result = reshapeSpace(
-              storeyModelId,
-              roomShape.expressId,
-              // Back to IFC's frame — see the note where the outline is read.
-              next.map((p) => ({ x: p.x, y: -p.y })),
-            );
-            if ('error' in result) toast.error(result.error);
-            else toast.success(`Raum umgeformt — ${result.area.toFixed(2)} m²`);
-          }}
-        />
       )}
 
       {/* Door swings and window sashes go UNDER the room labels: both belong
