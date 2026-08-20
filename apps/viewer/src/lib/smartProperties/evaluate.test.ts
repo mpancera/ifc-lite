@@ -21,7 +21,8 @@ const COMPLETE = {
   'IfcBuilding.Name': '50266',
   'IfcBuildingStorey.Name': 'E00',
   'IfcSpace.Name': '0.14',
-  'IfcEntityType.Tag': 'smoke-detector',
+  'IfcEntityType.TradeCode': 'FST',
+  'IfcEntityType.Tag': 'RM',
   'IfcEntity.Tag': 'RM-001',
   'IfcEntity.Name': 'Rauchmelder',
 };
@@ -35,7 +36,7 @@ test('applicability matches the element class, case-insensitively', () => {
 test('a complete model yields every segment', () => {
   const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(COMPLETE), counter);
 
-  assert.equal(result.value, '50266.E00.0.14_smoke-detector.RM-001.001');
+  assert.equal(result.value, '50266.E00.0.14_FST.RM.RM-001.001');
   assert.deepEqual(result.warnings, []);
   assert.deepEqual(result.omitted, []);
 });
@@ -47,15 +48,26 @@ test('a missing room drops the segment AND its separator', () => {
   const { 'IfcSpace.Name': _room, ...noRoom } = COMPLETE;
   const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(noRoom), counter);
 
-  assert.equal(result.value, '50266.E00_smoke-detector.RM-001.001');
+  assert.equal(result.value, '50266.E00_FST.RM.RM-001.001');
   assert.deepEqual(result.omitted, ['IfcSpace.Name']);
+});
+
+test('a device with no established trade code keeps its separator', () => {
+  // The `_` marks where the location stops and the equipment starts. Losing it
+  // with the trade would leave `50266.E00.0.14.RM.001`, which reads as one
+  // flat chain and hides the boundary the identifier is built around.
+  const { 'IfcEntityType.TradeCode': _drop, ...noTrade } = COMPLETE;
+  const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(noTrade), counter);
+
+  assert.equal(result.value, '50266.E00.0.14_RM.RM-001.001');
+  assert.deepEqual(result.omitted, ['IfcEntityType.TradeCode']);
 });
 
 test('a missing type tag falls back to the element name', () => {
   const { 'IfcEntityType.Tag': _tag, ...noType } = COMPLETE;
   const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(noType));
 
-  assert.equal(result.value, '50266.E00.0.14_Rauchmelder.RM-001');
+  assert.equal(result.value, '50266.E00.0.14_FST.Rauchmelder.RM-001');
   assert.deepEqual(result.warnings, []);
 });
 
@@ -63,7 +75,7 @@ test('an empty alternative drops the segment rather than emitting a separator', 
   const { 'IfcEntityType.Tag': _t, 'IfcEntity.Name': _n, ...neither } = COMPLETE;
   const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(neither), counter);
 
-  assert.equal(result.value, '50266.E00.0.14.RM-001.001');
+  assert.equal(result.value, '50266.E00.0.14_FST.RM-001.001');
   assert.deepEqual(result.omitted, ['IfcEntityType.Tag']);
 });
 
@@ -74,7 +86,7 @@ test('a missing storey is reported, not silently shortened', () => {
   const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(noStorey));
 
   assert.deepEqual(result.warnings, ['IfcBuildingStorey.Name']);
-  assert.equal(result.value, '50266.0.14_smoke-detector.RM-001');
+  assert.equal(result.value, '50266.0.14_FST.RM.RM-001');
 });
 
 test('when the leading segment falls away the next one loses its separator', () => {
@@ -82,7 +94,7 @@ test('when the leading segment falls away the next one loses its separator', () 
   const { 'IfcBuilding.Name': _b, ...noBuilding } = COMPLETE;
   const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(noBuilding));
 
-  assert.equal(result.value, 'E00.0.14_smoke-detector.RM-001');
+  assert.equal(result.value, 'E00.0.14_FST.RM.RM-001');
   assert.ok(!result.value.startsWith('.'));
 });
 
@@ -96,7 +108,7 @@ test('an empty model yields an empty value rather than a string of separators', 
 test('whitespace-only sources count as missing', () => {
   const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor({ ...COMPLETE, 'IfcSpace.Name': '   ' }));
 
-  assert.equal(result.value, '50266.E00_smoke-detector.RM-001');
+  assert.equal(result.value, '50266.E00_FST.RM.RM-001');
 });
 
 test('without a counter resolver the segment simply drops out', () => {
@@ -104,7 +116,7 @@ test('without a counter resolver the segment simply drops out', () => {
   // a rule being tried out before anything is placed.
   const result = evaluateRule(ASSET_IDENTIFIER_RULE, 1, resolverFor(COMPLETE));
 
-  assert.equal(result.value, '50266.E00.0.14_smoke-detector.RM-001');
+  assert.equal(result.value, '50266.E00.0.14_FST.RM.RM-001');
   assert.deepEqual(result.omitted, ['Counter']);
 });
 

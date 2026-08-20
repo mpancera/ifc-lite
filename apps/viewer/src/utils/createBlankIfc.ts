@@ -17,19 +17,30 @@ import { IfcCreator } from '@ifc-lite/create';
 
 export interface BlankIfcOptions {
   projectName?: string;
+  /** The building's name — the first segment of an asset identifier. */
+  buildingName?: string;
+  /** By convention the storey NUMBER: `01`, `EG`. */
   storeyName?: string;
+  /** The readable designation: `1. Obergeschoss`. */
+  storeyLongName?: string;
   storeyElevation?: number;
 }
 
 export function createBlankIfcFile(options: BlankIfcOptions = {}): File {
   const {
     projectName = 'Untitled Project',
+    buildingName,
     storeyName = 'Level 1',
+    storeyLongName,
     storeyElevation = 0,
   } = options;
 
-  const creator = new IfcCreator({ Name: projectName });
-  creator.addIfcBuildingStorey({ Name: storeyName, Elevation: storeyElevation });
+  const creator = new IfcCreator({ Name: projectName, BuildingName: buildingName });
+  creator.addIfcBuildingStorey({
+    Name: storeyName,
+    LongName: storeyLongName,
+    Elevation: storeyElevation,
+  });
   const { content } = creator.toIfc();
 
   const safeName = projectName.replace(/[^a-z0-9_-]+/gi, '_').replace(/^_+|_+$/g, '') || 'untitled';

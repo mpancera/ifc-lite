@@ -543,6 +543,16 @@ export interface MaterialDef {
 /** Project-level options */
 export interface ProjectParams {
   Name?: string;
+  /**
+   * The building's name. Defaults to `Building`.
+   *
+   * Settable because an asset identifier assembled from the spatial structure
+   * reads it, and a creator that can only ever produce a building called
+   * "Building" makes every identifier from it start with that word.
+   */
+  BuildingName?: string;
+  /** The site's name. Defaults to `Site`. */
+  SiteName?: string;
   Description?: string;
   Schema?: 'IFC2X3' | 'IFC4' | 'IFC4X3';
   /** Length unit: 'METRE' (default), 'MILLIMETRE', 'FOOT' */
@@ -580,7 +590,17 @@ export interface BuildingParams {
 
 /** Building storey (floor) options */
 export interface StoreyParams {
+  /** By convention the storey NUMBER — `01`, `EG`, `UG1`. */
   Name?: string;
+  /**
+   * The readable designation — `1. Obergeschoss`.
+   *
+   * The same split `IfcSpace` makes between `Name` and `LongName`, and for the
+   * same reason: an identifier assembled from the spatial structure wants the
+   * number, a drawing's title block wants the words. A model carrying only one
+   * of them forces every reader to choose which purpose to fail.
+   */
+  LongName?: string;
   Description?: string;
   Elevation: number;
 }

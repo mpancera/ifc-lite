@@ -85,11 +85,34 @@ export function evaluateRule(
   const report = { warnings: [] as string[], omitted: [] as string[] };
   const parts: string[] = [];
 
+  // The separator an omitted segment was going to contribute, held for the
+  // next one that lands.
+  //
+  // A separator introduces a GROUP, not just a value: in
+  // `A.01.03_FST.RM.001` the `_` says "the location stops here and the
+  // equipment starts". Dropping it along with an absent trade code would
+  // leave `A.01.03.RM.001` — one flat chain, with the boundary the identifier
+  // is built around silently gone. So the introduction outlives its first
+  // member and is taken over by whatever leads the group instead.
+  let inherited: string | undefined;
+
   for (const segment of rule.segments) {
     // "First" means first CONTRIBUTING segment, not first in the list: when the
     // root falls away, whatever leads must not inherit its separator.
-    const text = resolveSegment(segment, expressId, resolve, resolveCounter, parts.length === 0, report);
-    if (text !== null) parts.push(text);
+    const effective = inherited === undefined
+      ? segment
+      : { ...segment, separator: inherited };
+    const text = resolveSegment(effective, expressId, resolve, resolveCounter, parts.length === 0, report);
+    if (text === null) {
+      // Only where the rule says so. Which separators open a group is a
+      // property of the scheme, not something to infer: a missing room takes
+      // its `.` with it, a missing trade hands its `_` on. Guessing from the
+      // characters would need a precedence nobody wrote down.
+      if (segment.handOnSeparator) inherited = inherited ?? segment.separator;
+      continue;
+    }
+    inherited = undefined;
+    parts.push(text);
   }
 
   return { value: parts.join(''), warnings: report.warnings, omitted: report.omitted };

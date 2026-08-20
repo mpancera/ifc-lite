@@ -844,6 +844,7 @@ export async function handleAddElementDrop(
       Discipline: entry.discipline,
       Name: entry.label,
       CatalogEntryId: entry.id,
+      CatalogEntryTag: entry.tag,
       TechnicalData: entry.technicalData,
     }), modelId, entry.label);
     return;

@@ -22,6 +22,7 @@ import type { CatalogEntry, CatalogProvider } from './types.js';
 const SEED_ENTRIES: CatalogEntry[] = [
   {
     id: 'fire.smoke-detector',
+    tag: 'RM',
     label: 'Rauchmelder',
     description: 'Sensor zur Detektion von Rauch.',
     discipline: 'fire',
@@ -34,6 +35,7 @@ const SEED_ENTRIES: CatalogEntry[] = [
   },
   {
     id: 'fire.heat-detector',
+    tag: 'WM',
     label: 'Wärmemelder',
     description: 'Sensor zur Detektion einer erhöhten Temperatur oder Temperaturanstiegsrate.',
     discipline: 'fire',
@@ -46,6 +48,7 @@ const SEED_ENTRIES: CatalogEntry[] = [
   },
   {
     id: 'fire.manual-call-point',
+    tag: 'HFM',
     label: 'Handfeuermelder',
     description: 'Handfeuermelder mit Glasscheibe zur manuellen Brandalarmauslösung.',
     discipline: 'fire',
@@ -57,6 +60,7 @@ const SEED_ENTRIES: CatalogEntry[] = [
   },
   {
     id: 'fire.siren',
+    tag: 'Si',
     label: 'Akustischer Signalgeber (Sirene)',
     description: 'Akustischer Alarmgeber in Form einer Sirene.',
     discipline: 'fire',

@@ -50,6 +50,10 @@ export interface GenerateSpacesOptions {
   /**
    * Naming pattern for emitted spaces. `{n}` is replaced with a 1-based
    * index. Default `'Space {n}'`.
+   *
+   * Repeat the `n` to zero-pad: `{nn}` gives `01`, `{nnn}` gives `001`. Room
+   * numbers are written that way on nearly every drawing, and a pattern of
+   * `'0{n}'` only looks right until the tenth room.
    */
   namePattern?: string;
   /** Optional IfcSpacePredefinedType (defaults to INTERNAL). */
@@ -200,7 +204,9 @@ export function generateSpacesFromWalls(
 
   const allOutlines = rooms.map((r) => r.outline);
   rooms.forEach((region, i) => {
-    const name = namePattern.replace('{n}', String(i + 1));
+    // `{n}`, `{nn}`, `{nnn}`, … — the count of `n`s is the padded width.
+    const name = namePattern.replace(/\{(n+)\}/g, (_, ns: string) =>
+      String(i + 1).padStart(ns.length, '0'));
     const others = allOutlines.filter((_, j) => j !== i);
     // Bake the solid at the inner (net) face — IfcSpace should stop at the room
     // side of the walls, not run to their centreline. GrossFloorArea keeps the

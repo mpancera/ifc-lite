@@ -32,6 +32,16 @@ export interface ValueSource {
   scope: ValueScope;
   /** Attribute name, e.g. `Name`, `LongName`, `Tag`, `Description`. */
   field: string;
+  /**
+   * Read a PROPERTY of that name instead of an attribute, out of this pset.
+   *
+   * Some facts an identifier needs are not IFC attributes of anything. The
+   * trade a product belongs to is one: it is a property of the product, it has
+   * no attribute slot on `IfcTypeProduct`, and putting it in one that means
+   * something else (`ElementType`, `Description`) would make the file lie to
+   * every other reader in exchange for one convenience here.
+   */
+  pset?: string;
 }
 
 /**
@@ -79,6 +89,18 @@ export type SegmentFallback =
 export interface RuleSegment {
   /** Text before this segment's value. Absent on the first segment. */
   separator?: string;
+  /**
+   * When this segment falls away, give its separator to the next one that
+   * lands instead of dropping it too.
+   *
+   * For a separator that OPENS something. In `A.01.03_FST.RM.001` the `_` says
+   * "the location stops here and the equipment starts"; if no trade code
+   * exists, that boundary still exists and `A.01.03_RM.001` is what should
+   * come out — not `A.01.03.RM.001`, which is one flat chain with the
+   * structure silently gone. A plain chain separator wants the opposite and
+   * leaves with its segment, which is why this is opt-in.
+   */
+  handOnSeparator?: boolean;
   source: SegmentSource;
   fallback: SegmentFallback;
 }

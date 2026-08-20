@@ -186,6 +186,7 @@ export function placeFromCatalogue(
     Height: entry.geometry?.height,
     Discipline: entry.discipline,
     CatalogEntryId: entry.id,
+    CatalogEntryTag: entry.tag,
     TechnicalData: entry.technicalData,
   });
 }
@@ -214,7 +215,16 @@ function waitFor(store: ScreenflowStoreApi, ready: () => boolean, timeoutMs: num
  * fails its own proof, which is where it should surface.
  */
 export async function buildDemoBuilding(store: ScreenflowStoreApi): Promise<boolean> {
-  window.dispatchEvent(new CustomEvent(EVENT_LOAD_FILE, { detail: createBlankIfcFile() }));
+  // The same names strand 1 traces by hand, so both clips produce identical
+  // asset identifiers and a viewer moving between them sees one building.
+  window.dispatchEvent(new CustomEvent(EVENT_LOAD_FILE, {
+    detail: createBlankIfcFile({
+      projectName: 'Musterbau',
+      buildingName: 'A',
+      storeyName: '01',
+      storeyLongName: '1. Obergeschoss',
+    }),
+  }));
   if (!await waitFor(store, () => modelsSettled(store.getState(), 1), 60_000)) return false;
 
   makeEditable(store);
@@ -238,7 +248,10 @@ export async function buildDemoBuilding(store: ScreenflowStoreApi): Promise<bool
       Name: door.name,
     });
   }
-  store.getState().generateSpacesFromWalls(at.modelId, at.storeyId, { snapTolerance: SNAP_TOLERANCE });
+  store.getState().generateSpacesFromWalls(at.modelId, at.storeyId, {
+    snapTolerance: SNAP_TOLERANCE,
+    namePattern: '{nn}',
+  });
   if (!await waitFor(store, () => authoredCount(store, 'IfcSpace') >= 3, 30_000)) return false;
 
   for (const placement of PLACEMENTS) placeFromCatalogue(store, placement);

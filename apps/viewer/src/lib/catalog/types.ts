@@ -72,6 +72,17 @@ export interface CatalogEntry {
   /** Stable id within the catalog, e.g. `'fire.smoke-detector'`. Not an IFC GlobalId — assigned per placed instance separately. */
   id: string;
   label: string;
+  /**
+   * The short designation the product carries in an identifier and on a
+   * drawing — `RM` for a Rauchmelder, `HFM` for a Handfeuermelder.
+   *
+   * Separate from `id` because they answer to different readers. The id is a
+   * key (`fire.smoke-detector`): stable, unique, never shown. The tag is what a
+   * person writes on a plan and reads back off one, and it has to stay short
+   * enough to sit beside a symbol. Using the id in its place is what produced
+   * identifiers like `..._fire.smoke-detector.001`.
+   */
+  tag?: string;
   description?: string;
   /** Coarse grouping matching the installation disciplines this catalog targets. */
   discipline: 'fire' | 'security' | 'intrusion' | 'other';

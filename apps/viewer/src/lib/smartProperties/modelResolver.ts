@@ -75,6 +75,23 @@ export function makeModelResolver({ store, view }: ModelResolverArgs): ValueReso
     }
   };
 
+  /**
+   * One property of an entity, from this session's edits or from the file.
+   *
+   * `getPropertyValue` already resolves in that order, which is the order that
+   * matters: a type created moments ago has no row in the parsed store at all.
+   */
+  const propertyOf = (expressId: number, pset: string, property: string): string => {
+    const value = view?.getPropertyValue?.(expressId, pset, property);
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number') return String(value);
+    const fromFile = store.properties?.getForEntity?.(expressId)
+      ?.find((candidate) => candidate.name === pset)
+      ?.properties.find((p) => p.name === property)?.value;
+    return typeof fromFile === 'string' ? fromFile
+      : typeof fromFile === 'number' ? String(fromFile) : '';
+  };
+
   /** A spatial container's attribute — `LongName` only exists on the tree node. */
   const spatialField = (containerId: number | undefined, field: string): string => {
     if (containerId === undefined) return '';
@@ -100,12 +117,13 @@ export function makeModelResolver({ store, view }: ModelResolverArgs): ValueReso
     IfcBuilding: (s, id) => (s.field === 'Name' ? ancestry?.buildingOf(id) ?? '' : ''),
     IfcBuildingStorey: (s, id) => spatialField(hierarchy?.elementToStorey.get(id), s.field),
     IfcSpace: (s, id) => spatialField(roomOf(id), s.field),
-    IfcEntity: (s, id) => attributeOf(id, s.field),
+    IfcEntity: (s, id) => (s.pset ? propertyOf(id, s.pset, s.field) : attributeOf(id, s.field)),
     IfcEntityType: (s, id) => {
       // The catalogue links instance to type through a relationship authored
       // this session, which the parsed relationship graph cannot see.
       const typeId = resolveOverlayDefiningTypeId(view, id);
-      return typeId === null ? '' : attributeOf(typeId, s.field);
+      if (typeId === null) return '';
+      return s.pset ? propertyOf(typeId, s.pset, s.field) : attributeOf(typeId, s.field);
     },
   };
 

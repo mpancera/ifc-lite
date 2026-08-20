@@ -196,6 +196,7 @@ export class IfcCreator {
     const globalId = this.newGlobalId();
     const name = params.Name ?? 'Storey';
     const desc = params.Description ? `'${esc(params.Description)}'` : '$';
+    const longName = params.LongName ? `'${esc(params.LongName)}'` : '$';
     const elevation = num(params.Elevation);
 
     // Create a placement at [0, 0, elevation] so child elements are offset to the correct height
@@ -204,7 +205,7 @@ export class IfcCreator {
     });
 
     this.line(id, 'IFCBUILDINGSTOREY',
-      `'${globalId}',#${this.ownerHistoryId},'${esc(name)}',${desc},$,#${storeyPlacementId},$,$,.ELEMENT.,${elevation}`);
+      `'${globalId}',#${this.ownerHistoryId},'${esc(name)}',${desc},$,#${storeyPlacementId},$,${longName},.ELEMENT.,${elevation}`);
 
     this.storeyIds.push(id);
     this.storeyElements.set(id, []);
@@ -1912,16 +1913,24 @@ ENDSEC;
     // IfcSite
     this.siteId = this.id();
     const siteGlobalId = this.newGlobalId();
+    // Names default to what they always were, so an existing caller writes the
+    // same file. They are settable because an asset identifier assembled from
+    // the spatial structure reads the building's name, and a creator that can
+    // only ever produce a building called "Building" makes every identifier
+    // out of it start with the word Building.
+    const siteName = this.projectParams.SiteName ?? 'Site';
+    const buildingName = this.projectParams.BuildingName ?? 'Building';
+
     this.line(this.siteId, 'IFCSITE',
-      `'${siteGlobalId}',#${this.ownerHistoryId},'Site',$,$,#${this.worldPlacementId},$,$,.ELEMENT.,$,$,$,$,$`);
-    this.entities.push({ expressId: this.siteId, type: 'IfcSite', Name: 'Site' });
+      `'${siteGlobalId}',#${this.ownerHistoryId},'${esc(siteName)}',$,$,#${this.worldPlacementId},$,$,.ELEMENT.,$,$,$,$,$`);
+    this.entities.push({ expressId: this.siteId, type: 'IfcSite', Name: siteName });
 
     // IfcBuilding
     this.buildingId = this.id();
     const buildingGlobalId = this.newGlobalId();
     this.line(this.buildingId, 'IFCBUILDING',
-      `'${buildingGlobalId}',#${this.ownerHistoryId},'Building',$,$,#${this.worldPlacementId},$,$,.ELEMENT.,$,$,$`);
-    this.entities.push({ expressId: this.buildingId, type: 'IfcBuilding', Name: 'Building' });
+      `'${buildingGlobalId}',#${this.ownerHistoryId},'${esc(buildingName)}',$,$,#${this.worldPlacementId},$,$,.ELEMENT.,$,$,$`);
+    this.entities.push({ expressId: this.buildingId, type: 'IfcBuilding', Name: buildingName });
   }
 
   private buildUnits(lengthUnit: string): number {

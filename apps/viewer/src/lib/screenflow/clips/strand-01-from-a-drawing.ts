@@ -238,7 +238,19 @@ export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
         // one generating three rooms nobody can see. A clip has to start from
         // a state it set, not from whatever the last one left behind.
         if (!store.getState().typeVisibility.rooms) store.getState().toggleTypeVisibility('rooms');
-        window.dispatchEvent(new CustomEvent(EVENT_LOAD_FILE, { detail: createBlankIfcFile() }));
+        // Named the way a real project is, because the asset identifier is
+        // assembled out of these very names: `A.01.03_FST.RM.001`. A building
+        // called "Building" on a storey called "Level 1" produces an
+        // identifier that reads like placeholder text, which is exactly what
+        // the numbering beat is meant to show working.
+        window.dispatchEvent(new CustomEvent(EVENT_LOAD_FILE, {
+          detail: createBlankIfcFile({
+            projectName: 'Musterbau',
+            buildingName: 'A',
+            storeyName: '01',
+            storeyLongName: '1. Obergeschoss',
+          }),
+        }));
       },
       settled: (s) => modelsSettled(s, 1) && s.typeVisibility.rooms,
       settleTimeoutMs: 60_000,
@@ -451,7 +463,13 @@ export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
       perform: (store) => {
         const at = target(store);
         if (!at) return;
-        store.getState().generateSpacesFromWalls(at.modelId, at.storeyId, { snapTolerance: SNAP_TOLERANCE });
+        // `{nn}` zero-pads: rooms come out `01`, `02`, `03`, which is how a
+        // room number is written and what the identifier's third segment
+        // reads.
+        store.getState().generateSpacesFromWalls(at.modelId, at.storeyId, {
+          snapTolerance: SNAP_TOLERANCE,
+          namePattern: '{nn}',
+        });
         store.getState().setAddElementAutoSpacePreview(null);
       },
       // Three rooms is the whole point of the two dividers; fewer would mean

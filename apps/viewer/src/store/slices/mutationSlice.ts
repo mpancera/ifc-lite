@@ -69,6 +69,7 @@ import {
 import { EntityExtractor, type MapConversion, type ProjectedCRS } from '@ifc-lite/parser';
 import type { MeshData } from '@ifc-lite/geometry';
 import { getEntityBounds, getEntityCenter } from '@/utils/viewportUtils';
+import { TRADE_PROPERTY, TRADE_PSET, tradeCodeFor } from '@/lib/catalog/tradeCode';
 import type { CatalogEntry } from '@/lib/catalog';
 import { disciplineSystemName, findDisciplineSystem, normalizeRoleId } from '@/lib/roles/disciplineRoles';
 import { readZones } from '@/lib/ifcZones/membership';
@@ -908,9 +909,15 @@ export interface MutationSlice {
   /**
    * Add a free-standing element of any catalog-selected IFC entity, anchored
    * to a storey. Also finds-or-creates a shared `IfcXxxType` for the catalog
-   * entry (`CatalogEntryId` is stored as the Type's `Tag` so later placements
-   * of the same product reuse it instead of duplicating attributes per
-   * instance) and links the new element to it via `IfcRelDefinesByType`.
+   * entry and links the new element to it via `IfcRelDefinesByType`.
+   *
+   * The catalogue id lives on the Type's `ElementType`, which is the IFC field
+   * for exactly this — a free-text sub-type label — and is what later
+   * placements match on to reuse the Type instead of duplicating attributes
+   * per instance. `Tag` carries the SHORT designation (`RM`, `HFM`) because
+   * that is what an asset identifier and a drawing want; it used to carry the
+   * id, which is how identifiers ended up reading
+   * `..._fire.smoke-detector.001`.
    */
   addLibraryElement: (
     modelId: string,
@@ -918,6 +925,8 @@ export interface MutationSlice {
     params: LibraryElementInStoreParams & {
       Discipline: CatalogEntry['discipline'];
       CatalogEntryId: string;
+      /** The product's short designation — `RM`, `WM`, `HFM`. */
+      CatalogEntryTag?: string;
       TechnicalData?: CatalogEntry['technicalData'];
     }
   ) => { expressId: number } | { error: string };
@@ -3165,7 +3174,7 @@ export const createMutationSlice: StateCreator<
   ),
 
   addLibraryElement: (modelId, storeyExpressId, params) => {
-    const { Discipline, CatalogEntryId, TechnicalData, ...ifcParams } = params;
+    const { Discipline, CatalogEntryId, CatalogEntryTag, TechnicalData, ...ifcParams } = params;
     return runInStoreElementBuilder(
       get, set, modelId, storeyExpressId, ifcParams.IfcEntity.toUpperCase(), `add ${ifcParams.IfcEntity}`,
       (editor, anchor) => {
@@ -3196,7 +3205,10 @@ export const createMutationSlice: StateCreator<
         let typeId: number | null = null;
         if (view) {
           for (const entity of view.getNewEntities()) {
-            if (entity.type === typeEntity && entity.attributes[7] === CatalogEntryId) {
+            // Matched on ElementType (index 8), which is where the catalogue
+            // id lives. `Tag` used to be the key and now carries the short
+            // designation, which two products may legitimately share.
+            if (entity.type === typeEntity && entity.attributes[8] === CatalogEntryId) {
               typeId = entity.expressId;
               break;
             }
@@ -3206,10 +3218,24 @@ export const createMutationSlice: StateCreator<
           typeId = addLibraryTypeToStore(editor, anchor, {
             IfcEntity: typeEntity,
             Name: ifcParams.Name,
-            Tag: CatalogEntryId,
+            Tag: CatalogEntryTag || CatalogEntryId,
+            ElementType: CatalogEntryId,
             PredefinedType: ifcParams.PredefinedType,
             TechnicalData,
           }).typeId;
+
+          // The trade travels as a PROPERTY because it is one: no attribute on
+          // `IfcTypeProduct` means "which trade", and borrowing one that means
+          // something else would make the file lie to every other reader in
+          // exchange for one convenience in the numbering rule. Written here
+          // rather than through the builder so `@ifc-lite/create` keeps no
+          // opinion about this repository's catalogue.
+          const tradeCode = tradeCodeFor(Discipline);
+          if (tradeCode) {
+            editor.addPropertySet(typeId, TRADE_PSET, [
+              { name: TRADE_PROPERTY, value: tradeCode, type: 'LABEL' },
+            ]);
+          }
         }
         emitRelDefinesByType(editor, anchor.ownerHistoryId, [elementId], typeId, anchor.guidRandom);
 

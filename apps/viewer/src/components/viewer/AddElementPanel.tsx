@@ -1030,6 +1030,7 @@ function PlaceBySpaceSection({ type, modelId, storeyId }: PlaceBySpaceSectionPro
             Discipline: selection!.discipline,
             Name: selection!.label,
             CatalogEntryId: selection!.id,
+            CatalogEntryTag: selection!.tag,
             TechnicalData: selection!.technicalData,
           });
         if ('error' in result) {
