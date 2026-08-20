@@ -17,6 +17,7 @@ import type {
   SelectedAnnotation2D, Measure2DResult, PolygonArea2DResult, CloudAnnotation2D,
 } from '@/store/slices/drawing2DSlice';
 import { computePolygonArea, computePolygonPerimeter, computePolygonCentroid } from '@/components/viewer/tools/computePolygonArea';
+import { cornerCandidates } from '@/lib/roomShape/snap';
 
 // ─── Public interfaces ──────────────────────────────────────────────────────
 
@@ -203,6 +204,20 @@ export function useAnnotation2D({
     const snapThreshold = 10 / scaleRef.current;
     let bestSnap: Point2D | null = null;
     let bestDist = snapThreshold;
+
+    // Wall CORNERS, before anything else. The corner where two walls meet is
+    // the point a plan is drawn around, and it is usually nobody's endpoint —
+    // a section cut hands over wall FACES, which run past each other or stop a
+    // few millimetres short. Without this the cursor snapped to both lines and
+    // to neither's crossing, which is the one place you were aiming at.
+    for (const corner of cornerCandidates(
+      drawingCoord,
+      drawing.lines.map((l) => ({ a: l.line.start, b: l.line.end })),
+      snapThreshold,
+    )) {
+      const dist = Math.hypot(corner.x - drawingCoord.x, corner.y - drawingCoord.y);
+      if (dist < bestDist * 0.7) return { x: corner.x, y: corner.y };
+    }
 
     // Check vertices first (early return on close match)
     for (const polygon of drawing.cutPolygons) {
