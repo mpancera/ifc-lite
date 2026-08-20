@@ -827,13 +827,12 @@ export function useGeometryStreaming(params: UseGeometryStreamingParams): void {
           // the element count all read. Expanded here so an instanced element
           // is an element everywhere — flagged so the upload path below leaves
           // it alone rather than drawing it a second time.
-          const store = useViewerStore.getState();
-          const dataStore = store.models.get(modelId)?.ifcDataStore ?? store.ifcDataStore;
-          expanded.push(...expandInstancedShard(shard, {
-            modelIndex,
-            // The ids were already offset in place above.
-            ifcTypeOf: (expressId: number) => dataStore?.entities?.getTypeName?.(expressId - idOffset),
-          }));
+          // No `ifcTypeOf` here on purpose: the data model parses in PARALLEL
+          // with this stream and is regularly not ready yet, which handed every
+          // occurrence an undefined class and dropped it out of the 2D plan.
+          // `fillMissingIfcTypes` names them at finalize instead, once the
+          // store is a settled fact.
+          expanded.push(...expandInstancedShard(shard, { modelIndex }));
         } catch (err) {
           console.warn('[useGeometryStreaming] instanced shard upload failed (device lost?), skipping:', err);
         }

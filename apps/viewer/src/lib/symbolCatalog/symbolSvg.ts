@@ -131,6 +131,30 @@ export function isSymbolSvgRenderable(check: SymbolSvgCheck): boolean {
   return !check.problems.some((problem) => unsafe.includes(problem));
 }
 
+/**
+ * A drawing made ready to embed, or `null` when it must not be shown.
+ *
+ * Two things stand between a stored symbol and a visible one:
+ *
+ * - It has to be safe. {@link isSymbolSvgRenderable} draws that line; a caller
+ *   that skips the check hands whatever the catalogue holds to the DOM.
+ * - It has to have a SIZE. A missing viewBox is treated as a drawing fault
+ *   rather than a danger — fine when the SVG is inlined, fatal when it is
+ *   embedded as an image, because an SVG with neither viewBox nor dimensions
+ *   has no intrinsic size and renders as nothing at all. Found the hard way:
+ *   detectors that were in the plan's DOM and drew empty space.
+ *
+ * So the expected viewBox is written in where none is stated. A WRONG one is
+ * left alone: it is the author's statement about their own drawing, and the
+ * coverage view already names it.
+ */
+export function svgForEmbedding(svg: string): string | null {
+  const check = checkSymbolSvg(svg);
+  if (!isSymbolSvgRenderable(check)) return null;
+  if (viewBoxOf(svg) !== null) return svg;
+  return svg.replace(/<\s*svg\b/i, `<svg viewBox="${EXPECTED_VIEWBOX}"`);
+}
+
 /** One line naming what is wrong, for a settings list. */
 export function describeSymbolSvgProblems(check: SymbolSvgCheck): string {
   return check.problems.map((problem) => SVG_PROBLEM_MESSAGES[problem]).join(' ');

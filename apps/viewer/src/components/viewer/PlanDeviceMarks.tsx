@@ -35,6 +35,7 @@ import {
   deviceMarkPaths, DEVICE_MARK_SCREEN_PX, type DeviceMark,
 } from '@/lib/plan/deviceSymbols';
 import { symbolDrawingFor } from '@/lib/symbolCatalog/symbolCatalog';
+import { svgForEmbedding } from '@/lib/symbolCatalog/symbolSvg';
 import { useSymbolCatalog } from '@/lib/symbolCatalog/useSymbolCatalog';
 
 export interface PlanDeviceMarksProps {
@@ -71,10 +72,13 @@ export function PlanDeviceMarks({
       const key = `${mark.ifcType}|${mark.predefinedType ?? ''}|${mark.objectType ?? ''}`;
       const hit = cache.get(key);
       if (hit !== undefined) return hit;
-      const svg = symbolDrawingFor(catalog, mark.ifcType, {
+      const raw = symbolDrawingFor(catalog, mark.ifcType, {
         predefinedType: mark.predefinedType,
         objectType: mark.objectType,
       });
+      // Refused or size-less drawings fall back to the family glyph rather
+      // than to an empty patch of plan — see `svgForEmbedding`.
+      const svg = raw ? svgForEmbedding(raw) : null;
       const uri = svg ? `data:image/svg+xml;utf8,${encodeURIComponent(svg)}` : null;
       cache.set(key, uri);
       return uri;

@@ -10,7 +10,7 @@ import {
   DEFAULT_SYMBOL_CATALOG_URL, type SymbolCatalog,
 } from './symbolCatalog.js';
 import {
-  checkSymbolSvg, isSymbolSvgRenderable, viewBoxOf, EXPECTED_VIEWBOX,
+  checkSymbolSvg, isSymbolSvgRenderable, svgForEmbedding, viewBoxOf, EXPECTED_VIEWBOX,
 } from './symbolSvg.js';
 
 /** The shape the data dictionary is asked to publish. */
@@ -285,6 +285,31 @@ describe('checkSymbolSvg — safety', () => {
       `<svg version="1.1" viewBox="${EXPECTED_VIEWBOX}"><circle r="3"/></svg>`,
     );
     assert.ok(!check.problems.includes('event-handler'), check.problems.join(','));
+  });
+});
+
+describe('svgForEmbedding', () => {
+  const good = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${EXPECTED_VIEWBOX}"><circle r="3"/></svg>`;
+
+  it('passes a sound symbol through untouched', () => {
+    assert.equal(svgForEmbedding(good), good);
+  });
+
+  it('withholds one that must not be shown', () => {
+    assert.equal(svgForEmbedding(good.replace('<circle', '<script>alert(1)</script><circle')), null);
+  });
+
+  it('gives a viewBox-less symbol a size, or it draws nothing at all', () => {
+    // The detector bug: embedded as an image, an SVG with neither viewBox nor
+    // width/height has no intrinsic size. It was in the plan's DOM and drew
+    // empty space.
+    const sized = svgForEmbedding('<svg><circle r="3"/></svg>');
+    assert.equal(viewBoxOf(sized ?? ''), EXPECTED_VIEWBOX);
+  });
+
+  it('leaves a wrong viewBox alone — that is the author’s statement', () => {
+    const off = '<svg viewBox="0 0 10 10"><circle r="3"/></svg>';
+    assert.equal(svgForEmbedding(off), off);
   });
 });
 

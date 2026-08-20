@@ -7,6 +7,7 @@
  */
 
 import type { StateCreator } from 'zustand';
+import { fillMissingIfcTypes } from '@/lib/meshIfcTypes';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import type { GeometryResult, CoordinateInfo, MeshData } from '@ifc-lite/geometry';
 import type { FederatedModel } from '../types.js';
@@ -171,6 +172,11 @@ export const createDataSlice: StateCreator<DataSlice & DataCrossSliceState, [], 
 
   // Actions
   setIfcDataStore: (ifcDataStore) => set((state) => {
+    // The data model regularly lands AFTER the geometry — the two parse in
+    // parallel — so every mesh already in the list that nobody could name yet
+    // gets its IFC class here. Without this the plan's device marks skipped
+    // eighty instanced fire detectors: visible in 3D, absent from every plan.
+    fillMissingIfcTypes(state.geometryResult?.meshes, ifcDataStore);
     const modelId = state.activeModelId;
     if (!modelId) {
       return { ifcDataStore };
@@ -257,6 +263,11 @@ export const createDataSlice: StateCreator<DataSlice & DataCrossSliceState, [], 
   },
 
   appendGeometryBatch: (meshes, coordinateInfo) => set((state) => {
+    // ...and the other way round, for a batch arriving after the model was
+    // parsed. Between the two the order stops mattering, which is the point:
+    // whichever fact is second completes the pair.
+    fillMissingIfcTypes(meshes, state.ifcDataStore);
+
     // Incremental totals: O(batch_size) instead of O(total_accumulated) .reduce()
     let batchTriangles = 0;
     let batchVertices = 0;
