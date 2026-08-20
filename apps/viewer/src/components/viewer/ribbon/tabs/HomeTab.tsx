@@ -5,12 +5,18 @@
 /**
  * Ribbon · Home tab — the everyday loop: pick a tool, measure or cut,
  * and get the camera back home.
+ *
+ * Demo sits here rather than on a tab of its own because the person who
+ * reaches for it is showing the product to somebody, and that is the first
+ * tab open. It opens a dialog and gets out of the way: a flow takes the whole
+ * screen, and anything still docked would be in the recording.
  */
 
-import { Select, Walk, Annotate, Measure, Section, Home } from '@/icons';
+import { Select, Walk, Annotate, Measure, Section, Home, DemoFlows } from '@/icons';
 import { useViewerStore } from '@/store';
 import { goHomeFromStore } from '@/store/homeView';
 import { tourAnchor, toolAnchor } from '@/lib/tours/anchors';
+import { openDemoFlows } from '@/components/screenflow/DemoFlowsLauncher';
 import {
   RibbonGroup,
   RibbonGroupDivider,
@@ -69,6 +75,17 @@ export function HomeTab() {
           activeClassName="bg-amber-500/20 text-foreground ring-1 ring-inset ring-amber-500/50"
           onClick={() => setActiveTool('annotate')}
           {...tourAnchor(toolAnchor('annotate'))}
+        />
+      </RibbonGroup>
+
+      <RibbonGroupDivider />
+
+      <RibbonGroup label="Demo">
+        <RibbonLargeButton
+          icon={DemoFlows}
+          label="Flows"
+          tooltip="User Journey — die fünf Flows vorführen oder aufnehmen"
+          onClick={openDemoFlows}
         />
       </RibbonGroup>
 

@@ -47,8 +47,7 @@ import {
   authoredCount, authoredDevices, catalogEntry, DOORS, makeEditable, placeFromCatalogue,
   PLACEMENTS, SNAP_TOLERANCE, target, WALL_HEIGHT, WALL_THICKNESS, WALLS,
 } from './demo-building';
-import type { ScreenflowBeat, ScreenflowClip, ScreenflowStoreApi } from '../types';
-import type { IfcStoreyLocalPoint } from '../worldPointer';
+import type { ScreenflowBeat, ScreenflowClip } from '../types';
 
 /**
  * Where the numbering rule writes: the standard occurrence pset. The clip

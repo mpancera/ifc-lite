@@ -39,6 +39,14 @@ export interface ScreenflowUiState {
   faults: string[];
   /** Files the clip needs that are not in public/demo-local. */
   missingFiles: string[];
+  /**
+   * The demo launcher is open.
+   *
+   * Here rather than in a viewer slice because it belongs to the same
+   * feature and nothing else reads it — and because this store is the one
+   * that survives `resetViewerState`, which a clip's first beat triggers.
+   */
+  launcherOpen: boolean;
 }
 
 const INITIAL: ScreenflowUiState = {
@@ -56,6 +64,7 @@ const INITIAL: ScreenflowUiState = {
   clicking: false,
   faults: [],
   missingFiles: [],
+  launcherOpen: false,
 };
 
 export const useScreenflowStore = create<ScreenflowUiState>()(() => ({ ...INITIAL }));

@@ -34,6 +34,7 @@ import { getClip } from '@/lib/screenflow/registry';
 import { useScreenflowStore, type ScreenflowUiState } from '@/lib/screenflow/screenflow-store';
 import { downloadSubtitles } from '@/lib/screenflow/subtitles';
 import { useScreenflowLauncher } from '@/lib/screenflow/useScreenflowLauncher';
+import { DemoFlowsLauncher } from './DemoFlowsLauncher';
 
 interface TargetBox { x: number; y: number; left: number; top: number; width: number; height: number }
 
@@ -442,9 +443,11 @@ export function ScreenflowStage() {
     return () => window.removeEventListener('keydown', onKey, true);
   }, [status, mode]);
 
-  if (status === 'idle') return null;
-
-  return createPortal(
+  // The launcher is a sibling rather than an alternative: it belongs to the
+  // same feature, this component is already mounted for the whole session, and
+  // each of the two gates itself on `status`. An early return here would gate
+  // it a second time, from outside, and leave the check inside it unreachable.
+  const overlay = status === 'idle' ? null : createPortal(
     <div className="pointer-events-none fixed inset-0 z-40">
       <style>{`@keyframes screenflow-caption-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }`}</style>
       {status === 'done' ? (
@@ -459,4 +462,6 @@ export function ScreenflowStage() {
     </div>,
     document.body,
   );
+
+  return <><DemoFlowsLauncher />{overlay}</>;
 }

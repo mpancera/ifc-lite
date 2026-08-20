@@ -70,3 +70,4 @@ export { default as Class } from '~icons/viewer/class';
 export { default as Type } from '~icons/viewer/type';
 export { default as Group } from '~icons/viewer/group';
 export { default as Material } from '~icons/viewer/material';
+export { default as DemoFlows } from '~icons/viewer/demo-flows';
