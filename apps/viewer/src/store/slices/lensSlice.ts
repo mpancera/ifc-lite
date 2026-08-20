@@ -79,7 +79,8 @@ function saveLenses(lenses: Lens[]): SaveResult {
     // Save non-builtin custom lenses, but never the ephemeral
     // "color from list column" lens — it is intentionally transient and must
     // not be restored as a stray "Color by …" lens on reload.
-    const custom = lenses.filter(l => !l.builtin && l.id !== AUTO_COLOR_FROM_LIST_ID);
+    const custom = lenses.filter(l => !l.builtin
+      && l.id !== AUTO_COLOR_FROM_LIST_ID && l.id !== ZONE_PAINT_LENS_ID);
     // Also save built-in lenses that differ from their defaults (user overrides)
     const builtinOverrides = lenses.filter(l => {
       if (!l.builtin) return false;
@@ -211,7 +212,25 @@ export interface LensSlice {
   exportLenses: () => Lens[];
   /** Create and activate an auto-color lens from a data column spec */
   activateAutoColorFromColumn: (spec: AutoColorSpec, label: string) => void;
+  /**
+   * Colour the rooms by the zone they are painted into, while painting.
+   *
+   * Its own action rather than {@link activateAutoColorFromColumn} for one
+   * reason: that one opens the lens panel, and painting needs the ZONE panel
+   * on screen. Somebody who has to close the tool to see what the tool did is
+   * painting blind.
+   *
+   * `themeId` narrows it to one kind of zone — a room is in one fire
+   * compartment and one trigger zone, and colouring by "any zone" gives a
+   * legend with more entries than the picture can show. `null` = all of them.
+   */
+  activateZoneLens: (themeId: string | null) => void;
+  /** Switch it off again, leaving any other active lens alone. */
+  deactivateZoneLens: () => void;
 }
+
+/** The ephemeral lens the zone panel paints with. */
+export const ZONE_PAINT_LENS_ID = 'zone-paint';
 
 export const createLensSlice: StateCreator<LensSlice, [], [], LensSlice> = (set, get) => ({
   // Initial state — builtins (with user overrides applied) + custom lenses
@@ -318,7 +337,7 @@ export const createLensSlice: StateCreator<LensSlice, [], [], LensSlice> = (set,
     // Skip the ephemeral "color from list column" lens — it is not a saved lens
     // and would re-add itself under its reserved id on a later import.
     return get().savedLenses
-      .filter(l => l.id !== AUTO_COLOR_FROM_LIST_ID)
+      .filter(l => l.id !== AUTO_COLOR_FROM_LIST_ID && l.id !== ZONE_PAINT_LENS_ID)
       .map(({ id, name, rules, autoColor }) => {
         const out: Lens = { id, name, rules };
         if (autoColor) out.autoColor = autoColor;
@@ -351,6 +370,23 @@ export const createLensSlice: StateCreator<LensSlice, [], [], LensSlice> = (set,
     });
     return result;
   },
+
+  activateZoneLens: (themeId) => set((state) => {
+    const lens: Lens = {
+      id: ZONE_PAINT_LENS_ID,
+      name: 'Zonen',
+      rules: [],
+      autoColor: { source: 'group', groupFilter: themeId ?? undefined },
+    };
+    return {
+      savedLenses: [...state.savedLenses.filter((l) => l.id !== ZONE_PAINT_LENS_ID), lens],
+      activeLensId: ZONE_PAINT_LENS_ID,
+    };
+  }),
+
+  deactivateZoneLens: () => set((state) => (
+    state.activeLensId === ZONE_PAINT_LENS_ID ? { activeLensId: null } : {}
+  )),
 
   activateAutoColorFromColumn: (spec, label) => set((state) => {
     const lensId = AUTO_COLOR_FROM_LIST_ID;

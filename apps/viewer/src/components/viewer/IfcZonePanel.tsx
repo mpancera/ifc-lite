@@ -21,7 +21,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Brush, Check, MousePointerSquareDashed, Plus, Trash2, X } from 'lucide-react';
+import { Brush, Check, MousePointerSquareDashed, Palette, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { LENS_PALETTE } from '@ifc-lite/lens';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -29,6 +29,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useViewerStore } from '@/store';
 import { parseIfcZoneKey } from '@/store/slices/ifcZonesSlice';
+import { ZONE_PAINT_LENS_ID } from '@/store/slices/lensSlice';
 import { nextZoneColour } from '@/lib/ifcZones/authoring';
 import { DEFAULT_THEME_ID, ZONE_THEMES, themeOfZone } from '@/lib/ifcZones/themes';
 import {
@@ -56,6 +57,9 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
   const setActiveIfcZone = useViewerStore((s) => s.setActiveIfcZone);
   const brushActive = useViewerStore((s) => s.ifcZoneBrushActive);
   const setBrushActive = useViewerStore((s) => s.setIfcZoneBrushActive);
+  const activeLensId = useViewerStore((s) => s.activeLensId);
+  const activateZoneLens = useViewerStore((s) => s.activateZoneLens);
+  const deactivateZoneLens = useViewerStore((s) => s.deactivateZoneLens);
 
   const createIfcZone = useViewerStore((s) => s.createIfcZone);
   const renameIfcZone = useViewerStore((s) => s.renameIfcZone);
@@ -111,6 +115,23 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
   const activeZone = active && active.modelId === activeModelId
     ? zones.find((z) => z.expressId === active.zoneId) ?? null
     : null;
+
+  /**
+   * Whether the rooms are currently coloured by zone.
+   *
+   * Painting without it is painting blind: the panel says a room joined, and
+   * nothing on the drawing changes. Kept as its own lens rather than the
+   * "colour by column" one so switching it on does not replace the zone panel
+   * with the lens panel.
+   */
+  const colouring = activeLensId === ZONE_PAINT_LENS_ID;
+  /**
+   * Which kind of zone to colour: the open zone's theme, else the theme the
+   * next new zone would get. A room sits in one fire compartment AND one
+   * trigger zone, so colouring by "any zone" would give a legend with more
+   * entries than the picture can show.
+   */
+  const colourTheme = themeOfZone(activeZone?.objectType ?? null)?.id ?? newThemeId;
 
   const typeOf = useCallback((modelId: string, expressId: number): string | null => {
     const store = models.get(modelId)?.ifcDataStore;
@@ -185,6 +206,15 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
     ) ?? 'Nichts geändert.');
   };
 
+  // Following the open zone's theme: switching from a trigger zone to a fire
+  // compartment must recolour, or the picture describes the previous question.
+  useEffect(() => {
+    if (colouring) activateZoneLens(colourTheme);
+    // `colouring` deliberately absent: this re-aims an ACTIVE lens, it does
+    // not switch one on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [colourTheme]);
+
   const handleCreate = () => {
     if (!activeModelId) return;
     const colour = nextZoneColour(zones, [...LENS_PALETTE]);
@@ -238,6 +268,16 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
             <option key={t.id} value={t.id}>{t.label}</option>
           ))}
         </select>
+        <Button
+          variant={colouring ? 'default' : 'outline'}
+          size="sm"
+          className="h-7"
+          title="Räume nach ihrer Zone einfärben — an, solange gemalt wird"
+          onClick={() => (colouring ? deactivateZoneLens() : activateZoneLens(colourTheme))}
+        >
+          <Palette className="mr-1 h-3.5 w-3.5" />
+          Einfärben
+        </Button>
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -319,7 +359,13 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
                         }}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') e.currentTarget.blur();
-                          if (e.key === 'Escape') setRenaming(null);
+                          if (e.key === 'Escape') {
+                            // Esc is the app-wide "put the tool away" key, and
+                            // it closed the whole panel mid-rename. Cancelling
+                            // the edit is what Esc means in a text field.
+                            e.stopPropagation();
+                            setRenaming(null);
+                          }
                         }}
                       />
                     ) : (
@@ -336,6 +382,19 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
                     <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
                       {zone.memberIds.length}
                     </span>
+                    {/* Double-click renames too, and did before this button.
+                        It is not discoverable: a single click selects, so
+                        anybody who tries the obvious thing concludes the name
+                        is fixed once given. */}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 shrink-0"
+                      title="Zone umbenennen"
+                      onClick={() => setRenaming(zone.expressId)}
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
                     {isActive && <Check className="h-3.5 w-3.5 shrink-0 text-emerald-600" />}
                     <Button
                       variant="ghost"
