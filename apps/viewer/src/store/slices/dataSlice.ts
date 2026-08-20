@@ -8,7 +8,7 @@
 
 import type { StateCreator } from 'zustand';
 import type { IfcDataStore } from '@ifc-lite/parser';
-import type { GeometryResult, CoordinateInfo } from '@ifc-lite/geometry';
+import type { GeometryResult, CoordinateInfo, MeshData } from '@ifc-lite/geometry';
 import type { FederatedModel } from '../types.js';
 import { DATA_DEFAULTS } from '../constants.js';
 
@@ -52,6 +52,25 @@ export interface DataSlice {
   /** Signal that mesh positions/normals have been mutated in place — see
    *  `geometryContentVersion` for why this is separate from setGeometryResult. */
   bumpGeometryContentVersion: () => void;
+  /**
+   * Swap an element's meshes for a new shape, in place.
+   *
+   * Not "drop, then append": that is two operations against a list whose
+   * entries are matched by id in several different ways — the 2D cut, the room
+   * labels (which group by `occurrenceKey`), the device marks — and getting any
+   * of them wrong leaves the old outline drawn under the new one, or the room
+   * labelled twice with two different areas.
+   *
+   * So the replacement INHERITS the identity of the mesh it replaces: same
+   * expressId, same occurrenceKey, same model index. Every reader that found
+   * the old one finds exactly one new one in its place, and nothing has to
+   * agree about which id an authoring path stamps.
+   *
+   * Matches on any of `ids`, because a mesh read from the file carries the
+   * model-local express id while one built by the authoring path carries the
+   * federated global id. Returns the meshes it removed, for undo.
+   */
+  replaceMeshesForEntity: (ids: readonly number[], replacement: MeshData) => MeshData[];
   releaseGeometryMemory: () => void;
   /** Persist mesh color changes in geometryResult (used for IFC style/material updates). */
   updateMeshColors: (updates: Map<number, [number, number, number, number]>) => void;
@@ -188,6 +207,54 @@ export const createDataSlice: StateCreator<DataSlice & DataCrossSliceState, [], 
   bumpGeometryContentVersion: () => set((state) => ({
     geometryContentVersion: state.geometryContentVersion + 1,
   })),
+
+  replaceMeshesForEntity: (ids, replacement) => {
+    const state = get();
+    const existing = state.geometryResult;
+    if (!existing) return [];
+
+    const wanted = new Set(ids);
+    const removed = existing.meshes.filter((mesh) => wanted.has(mesh.expressId));
+    const at = existing.meshes.findIndex((mesh) => wanted.has(mesh.expressId));
+
+    // The new mesh takes the old one's identity. Where there was nothing to
+    // replace it keeps its own and goes on the end.
+    const first = removed[0];
+    const stamped: MeshData = first
+      ? {
+        ...replacement,
+        expressId: first.expressId,
+        occurrenceKey: first.occurrenceKey,
+        modelIndex: first.modelIndex,
+      }
+      : replacement;
+
+    const meshes = existing.meshes.filter((mesh) => !wanted.has(mesh.expressId));
+    meshes.splice(at >= 0 ? at : meshes.length, 0, stamped);
+
+    let triangles = 0;
+    let vertices = 0;
+    for (const mesh of meshes) {
+      triangles += mesh.indices.length / 3;
+      vertices += mesh.positions.length / 3;
+    }
+    const geometryResult = {
+      ...existing,
+      meshes,
+      totalTriangles: triangles,
+      totalVertices: vertices,
+    };
+    const modelId = state.activeModelId;
+    const model = modelId ? state.models.get(modelId) : null;
+    if (!modelId || !model) {
+      set({ geometryResult, geometryUpdateTick: state.geometryUpdateTick + 1 });
+      return removed;
+    }
+    const models = new Map(state.models);
+    models.set(modelId, { ...model, geometryResult });
+    set({ geometryResult, models, geometryUpdateTick: state.geometryUpdateTick + 1 });
+    return removed;
+  },
 
   appendGeometryBatch: (meshes, coordinateInfo) => set((state) => {
     // Incremental totals: O(batch_size) instead of O(total_accumulated) .reduce()

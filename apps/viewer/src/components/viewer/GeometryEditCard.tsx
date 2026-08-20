@@ -29,7 +29,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Copy, Move as MoveIcon, RotateCw, Slice as KnifeIcon, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
+import { Check, Copy, Move as MoveIcon, RotateCw, Slice as KnifeIcon, Spline, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { GeometryAxisRow } from './GeometryAxisRow';
@@ -180,6 +180,14 @@ export function GeometryEditCard({ modelId, entityId, entityLabel }: GeometryEdi
   ]);
   const setActiveTool = useViewerStore((s) => s.setActiveTool);
   const setSplitTarget = useViewerStore((s) => s.setSplitTarget);
+  // Reshaping applies to rooms only: the outline IS the room, whereas a wall's
+  // shape is its axis and thickness and wants a different tool.
+  const roomShapeEditKey = useViewerStore((s) => s.roomShapeEditKey);
+  const beginRoomShapeEdit = useViewerStore((s) => s.beginRoomShapeEdit);
+  const endRoomShapeEdit = useViewerStore((s) => s.endRoomShapeEdit);
+  const models = useViewerStore((s) => s.models);
+  const reshapable = models.get(modelId)?.ifcDataStore?.entities?.getTypeName?.(entityId) === 'IfcSpace';
+  const reshaping = roomShapeEditKey === `${modelId}:${entityId}`;
   const onSplit = useCallback(() => {
     // Arm the tool with this entity pre-targeted so the user's next
     // cursor move lights up the guide. setActiveTool('split')
@@ -342,6 +350,29 @@ export function GeometryEditCard({ modelId, entityId, entityLabel }: GeometryEdi
               for resizable walls so the panel stays uncluttered
               for selections where the action doesn't apply. */}
           <div className="flex items-center gap-1 pt-1 border-t border-purple-200/60 dark:border-purple-900/40">
+            {reshapable && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant={reshaping ? 'default' : 'ghost'}
+                    size="sm"
+                    className="h-7 flex-1 text-xs"
+                    onClick={() => (reshaping
+                      ? endRoomShapeEdit()
+                      : beginRoomShapeEdit(modelId, entityId))}
+                  >
+                    {reshaping
+                      ? <><Check className="h-3 w-3 mr-1" /> Fertig</>
+                      : <><Spline className="h-3 w-3 mr-1" /> Edit shape</>}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {reshaping
+                    ? 'Umformen abschliessen (Enter) — Esc verwirft'
+                    : 'Den Umriss im 2D-Plan an seinen Ecken ziehen'}
+                </TooltipContent>
+              </Tooltip>
+            )}
             {splittable && (
               <Tooltip>
                 <TooltipTrigger asChild>

@@ -74,9 +74,6 @@ const AUTHORING_TOOLS: ReadonlySet<string> = new Set([
   'split',
   'spaceSketch',
   'zonePaint',
-  // Reshaping a room writes geometry, so it unlocks edit mode like the rest —
-  // otherwise the handles come up and the first drag is refused.
-  'roomShape',
 ]);
 
 /**
@@ -199,6 +196,16 @@ export interface UISlice extends GeometryLoadSettingsState, GeometryLoadSettings
   planExportRequested: 'pdf' | 'svg' | 'dxf' | null;
   activeTool: string;
   /**
+   * The room whose outline is being dragged, as `modelId:expressId`.
+   *
+   * Its own mode rather than a consequence of "a room is selected in edit
+   * mode": the handles take the pointer and the draft outline is drawn over
+   * the room, so it has to be something entered on purpose and left on
+   * purpose. Started from the element's own geometry section, finished with
+   * Enter or the tick where the button was.
+   */
+  roomShapeEditKey: string | null;
+  /**
    * Global edit mode. When `true`, all in-place editing affordances
    * (inline property/attribute editors, future geometry manipulators,
    * georeference placement, the add-element draw tools) are unlocked.
@@ -268,6 +275,10 @@ export interface UISlice extends GeometryLoadSettingsState, GeometryLoadSettings
   requestPlanExport: (format: 'pdf' | 'svg' | 'dxf' | null) => void;
   setRightPanelCollapsed: (collapsed: boolean) => void;
   setActiveTool: (tool: string) => void;
+  /** Enter the room-outline mode for one room. */
+  beginRoomShapeEdit: (modelId: string, expressId: number) => void;
+  /** Leave it — from the tick, from Enter, or when the selection moves on. */
+  endRoomShapeEdit: () => void;
   /** Collapse the Space Sketch panel to a reopen pill (or restore it). */
   setSpaceSketchMinimized: (minimized: boolean) => void;
   setEditEnabled: (enabled: boolean) => void;
@@ -345,6 +356,7 @@ export const createUISlice: StateCreator<UISlice & UICrossSliceState, [], [], UI
   planFitVersion: 0,
   planExportRequested: null,
   activeTool: UI_DEFAULTS.ACTIVE_TOOL,
+  roomShapeEditKey: null,
   editEnabled: false,
   spaceSketchMinimized: false,
   propertiesActiveTab: 'properties',
@@ -375,6 +387,11 @@ export const createUISlice: StateCreator<UISlice & UICrossSliceState, [], [], UI
   setShowSelectionOrigin: (showSelectionOrigin) => set({ showSelectionOrigin }),
   notePlanFitted: () => set((state) => ({ planFitVersion: state.planFitVersion + 1 })),
   requestPlanExport: (planExportRequested) => set({ planExportRequested }),
+  beginRoomShapeEdit: (modelId, expressId) => set({
+    roomShapeEditKey: `${modelId}:${expressId}`,
+  }),
+  endRoomShapeEdit: () => set({ roomShapeEditKey: null }),
+
   setActiveTool: (activeTool) => {
     // Authoring tools require edit mode. Entering one of them flips
     // the global toggle on so the rest of the UI (Properties panel,

@@ -25,6 +25,9 @@ import {
   addLibraryTypeToStore,
   addDistributionSystemToStore,
   addDistributionCircuitToStore,
+  toNativeArea,
+  toNativeVolume,
+  toNativeLength,
   emitRelAggregates,
   emitRelAssignsToGroup,
   emitRelDefinesByType,
@@ -77,6 +80,8 @@ import {
   type CircuitPlan,
 } from '@/lib/detectorGroups/circuits';
 import { isDeviceType } from '@/lib/plan/deviceSymbols';
+import { reshapeRoomOutline } from '@/lib/roomShape/reshape';
+import { polygonArea } from '@/lib/roomShape/roomShape';
 import { mayCreateEntities, mayEditEntity, type EditPermission } from '@/lib/roles/roleGuard';
 import { typeClassFor } from '@/lib/classTriage/groupAssignment';
 import { preserveZoneColour } from '@/lib/ifcZones/zoneDisplay';
@@ -296,6 +301,27 @@ export interface GeorefMutationData {
   mapConversion?: Partial<MapConversion>;
 }
 
+/** One room's geometry either side of a reshape — see `mutationShapeReplacements`. */
+export interface RoomShapeReplacement {
+  modelId: string;
+  globalId: number;
+  expressId: number;
+  /** The meshes the reshape dropped. */
+  before: MeshData[];
+  /** The meshes it put there instead. */
+  after: MeshData[];
+  /** Qto values to restore on undo, or `null` when the room had none of ours. */
+  beforeQuantities: RoomQuantities | null;
+  afterQuantities: RoomQuantities;
+}
+
+/** The five `Qto_SpaceBaseQuantities` a reshape rewrites, in m²/m/m³. */
+export interface RoomQuantities {
+  area: number;
+  perimeter: number;
+  height: number;
+}
+
 export interface MutationSlice {
   // State
   /** Mutation views per model */
@@ -345,6 +371,30 @@ export interface MutationSlice {
    * the renderer coupling out of the published Mutation interface.
    */
   mutationMeshTranslations: Map<string, { globalId: number; rendererDelta: [number, number, number] }>;
+  /**
+   * What a reshaped room looked like before and after, keyed by BATCH id.
+   *
+   * Reshaping writes two positional attributes, and undoing those alone puts
+   * the IFC back while the drawing keeps the new outline: the mesh was
+   * replaced and the quantities rewritten, and neither is an attribute the
+   * generic handlers know about. So the pair is recorded here and the undo /
+   * redo handlers swap it, exactly as `mutationMeshTranslations` does for a
+   * moved element.
+   *
+   * Keyed by batch rather than by mutation because the two writes are one
+   * gesture: whichever of them the handler reaches first restores the whole
+   * shape, and doing it twice is harmless — dropping and re-appending the same
+   * meshes is idempotent.
+   */
+  mutationShapeReplacements: Map<string, RoomShapeReplacement>;
+  /**
+   * The Qto values a reshape last wrote, per `modelId:expressId`.
+   *
+   * Undo needs to know whether there was one of OURS before: on the first
+   * reshape there was not, and putting the room back means removing the set so
+   * the file's own quantities show through again rather than writing a guess.
+   */
+  mutationShapeQuantities: Map<string, RoomQuantities>;
   /** Models with unsaved changes */
   dirtyModels: Set<string>;
   /** Version counter to trigger re-renders when mutations change */
@@ -818,6 +868,22 @@ export interface MutationSlice {
   buildDetectorCircuits: (
     modelId: string,
   ) => { plan: CircuitPlan; created: number; marked: number } | { error: string };
+  /**
+   * Replace a room's outline, keeping the room.
+   *
+   * A wall comes out and the room behind it should grow into the space. The
+   * alternative — delete and redraw — loses the room's number, the zone it is
+   * painted into and the detectors contained in it, because every one of those
+   * is a relationship pointing at this express id.
+   *
+   * `outline` is in storey-local metres. Quantities are rewritten from the new
+   * polygon, each in the unit its own measure type is declared in.
+   */
+  reshapeSpace: (
+    modelId: string,
+    expressId: number,
+    outline: ReadonlyArray<{ x: number; y: number }>,
+  ) => { area: number; height: number } | { error: string };
   /** Add a free-standing IfcSensor (fire detector, etc.) anchored to a storey. */
   addSensor: (
     modelId: string,
@@ -1491,6 +1557,72 @@ function positionalIndex(attributeName: string | undefined): number | null {
   return Number.isFinite(n) && n >= 0 && Number.isInteger(n) ? n : null;
 }
 
+/**
+ * Put a reshaped room's geometry back the way the record says.
+ *
+ * Undo and redo differ only in which side of the pair they want, so both come
+ * through here. Idempotent on purpose: the two positional writes of one reshape
+ * are undone one after the other, and whichever reaches this first does the
+ * whole job.
+ *
+ * Restores three things, because a reshape changed three: the mesh every 2D
+ * reader cuts from, the renderer's own copy of it, and the quantities. Leaving
+ * any one of them behind is what made the first version of undo look broken —
+ * the file went back and the drawing did not.
+ */
+function restoreRoomShape(
+  get: () => ViewerState,
+  set: (partial: Partial<ViewerState>) => void,
+  record: RoomShapeReplacement,
+  side: 'before' | 'after',
+): void {
+  const meshes = side === 'before' ? record.before : record.after;
+  const quantities = side === 'before' ? record.beforeQuantities : record.afterQuantities;
+
+  if (meshes.length > 0) {
+    get().replaceMeshesForEntity([record.globalId, record.expressId], meshes[0]);
+    get().setPendingMeshRemovals(new Set([record.globalId]));
+  }
+
+  const view = get().mutationViews.get(record.modelId);
+  const dataStore = get().models.get(record.modelId)?.ifcDataStore;
+  const key = `${record.modelId}:${record.expressId}`;
+  const written = new Map(get().mutationShapeQuantities);
+
+  if (!quantities) {
+    // Nothing of ours was there before: take our set away so the file's own
+    // quantities show through again, rather than writing a guess over them.
+    for (const name of ['GrossFloorArea', 'NetFloorArea', 'GrossPerimeter', 'Height', 'GrossVolume']) {
+      view?.removeQuantityMutation(record.expressId, 'Qto_SpaceBaseQuantities', name);
+    }
+    written.delete(key);
+  } else if (view && dataStore) {
+    const storeyId = dataStore.spatialHierarchy?.elementToStorey.get(record.expressId);
+    if (storeyId !== undefined) {
+      try {
+        const anchor = resolveSpatialAnchor(dataStore, storeyId);
+        const editor = getOrCreateStoreEditor(get, set, record.modelId);
+        editor?.addQuantitySet(record.expressId, 'Qto_SpaceBaseQuantities', [
+          { name: 'GrossFloorArea', value: toNativeArea(anchor, quantities.area), quantityType: 'AREA' },
+          { name: 'NetFloorArea', value: toNativeArea(anchor, quantities.area), quantityType: 'AREA' },
+          { name: 'GrossPerimeter', value: toNativeLength(anchor, quantities.perimeter), quantityType: 'LENGTH' },
+          { name: 'Height', value: toNativeLength(anchor, quantities.height), quantityType: 'LENGTH' },
+          {
+            name: 'GrossVolume',
+            value: toNativeVolume(anchor, quantities.area * quantities.height),
+            quantityType: 'VOLUME',
+          },
+        ]);
+        written.set(key, quantities);
+      } catch {
+        // The shape is back either way; a quantity set that would not attach
+        // is not worth failing the undo over.
+      }
+    }
+  }
+  set({ mutationShapeQuantities: written });
+}
+
 export const createMutationSlice: StateCreator<
   ViewerState,
   [],
@@ -1507,6 +1639,8 @@ export const createMutationSlice: StateCreator<
   redoStacks: new Map(),
   mutationBatchTags: new Map(),
   mutationMeshTranslations: new Map(),
+  mutationShapeReplacements: new Map(),
+  mutationShapeQuantities: new Map(),
   dirtyModels: new Set(),
   mutationVersion: 0,
   georefMutations: new Map(),
@@ -3093,6 +3227,135 @@ export const createMutationSlice: StateCreator<
     );
   },
 
+  reshapeSpace: (modelId, expressId, outline) => {
+    const mayCreate = mayCreateEntities(normalizeRoleId(get().activeDisciplineSystemId));
+    if (!mayCreate.allowed) return { error: mayCreate.reason };
+    // A room is REFERENCE-model content, and a discipline role may not touch
+    // it — the same gate every other edit passes through. Checked here, up
+    // front, because the write below goes through `setPositionalAttribute`,
+    // which enforces it by returning null: silently, and after the profile has
+    // already been emitted. That is what made a reshape on the Branddetektion
+    // role look like it had worked and change nothing.
+    const mayEdit = get().canAuthorOn(modelId, expressId);
+    if (!mayEdit.allowed) return { error: mayEdit.reason };
+    if (!get().canCollabEdit()) {
+      return { error: 'Editing is disabled for your role in this shared session' };
+    }
+    const dataStore = get().models.get(modelId)?.ifcDataStore;
+    if (!dataStore) return { error: `No model loaded for id "${modelId}"` };
+    if (!get().ensureMutationView(modelId)) {
+      return { error: 'Model has no editable mutation view yet' };
+    }
+    const view = get().mutationViews.get(modelId);
+    const editor = getOrCreateStoreEditor(get, set, modelId);
+    if (!view || !editor) return { error: 'Failed to create store editor' };
+
+    const storeyId = dataStore.spatialHierarchy?.elementToStorey.get(expressId);
+    if (storeyId === undefined) {
+      return { error: 'Der Raum hängt an keinem Geschoss.' };
+    }
+
+    let result: ReturnType<typeof reshapeRoomOutline>;
+    try {
+      ensureStoreyPlacement(dataStore, editor, storeyId);
+      result = reshapeRoomOutline(
+        dataStore, view, editor, expressId, outline, getModelLengthUnitScale(dataStore),
+      );
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Umformen fehlgeschlagen' };
+    }
+    if ('error' in result) return result;
+
+    // The shape itself goes through the undoable batch path, so one Ctrl+Z
+    // points the solid back at its previous profile — which is still in the
+    // overlay, untouched, and therefore restores the outline exactly.
+    const shapeBatchId = get().setPositionalAttributesBatch(modelId, result.writes);
+
+    // Quantities follow the shape, or the room schedule keeps the area the
+    // room used to have — a number that looks right and is not. Each in the
+    // unit its own measure type is declared in: an imperial file states FOOT
+    // and SQUARE FOOT, and they are independent.
+    let perimeter = 0;
+    for (let i = 0; i < result.outline.length; i += 1) {
+      const a = result.outline[i];
+      const b = result.outline[(i + 1) % result.outline.length];
+      perimeter += Math.hypot(b.x - a.x, b.y - a.y);
+    }
+    // What the room said before, so undo can put it back. `null` when this is
+    // the first reshape: then undo removes our set and the file's own
+    // quantities show through again.
+    const previousQuantities = get().mutationShapeQuantities.get(`${modelId}:${expressId}`) ?? null;
+
+    try {
+      const anchor = resolveSpatialAnchor(dataStore, storeyId);
+      editor.addQuantitySet(expressId, 'Qto_SpaceBaseQuantities', [
+        { name: 'GrossFloorArea', value: toNativeArea(anchor, result.area), quantityType: 'AREA' },
+        { name: 'NetFloorArea', value: toNativeArea(anchor, result.area), quantityType: 'AREA' },
+        { name: 'GrossPerimeter', value: toNativeLength(anchor, perimeter), quantityType: 'LENGTH' },
+        { name: 'Height', value: toNativeLength(anchor, result.height), quantityType: 'LENGTH' },
+        {
+          name: 'GrossVolume',
+          value: toNativeVolume(anchor, result.area * result.height),
+          quantityType: 'VOLUME',
+        },
+      ]);
+      const written = new Map(get().mutationShapeQuantities);
+      written.set(`${modelId}:${expressId}`, {
+        area: result.area, perimeter, height: result.height,
+      });
+      set({ mutationShapeQuantities: written });
+    } catch {
+      // The shape is already written and correct; a quantity set that could
+      // not be attached is worth neither losing the edit nor hiding, so it
+      // rides out in the mutation version and the panel's area readout.
+    }
+
+    const globalId = toGlobalIdFromModels(get().models, modelId, expressId);
+    const storeyElevation =
+      dataStore.spatialHierarchy?.storeyElevations?.get(storeyId) ?? 0;
+    const mesh = buildElementMesh({
+      type: 'space',
+      globalId,
+      storeyElevation,
+      payload: {
+        type: 'space',
+        params: { Width: 0, Depth: 0, Height: result.height },
+        corners: result.outline.map((p) => [p.x, p.y, 0] as [number, number, number]),
+      },
+    });
+    // Swapped in place, keeping the old mesh's identity — see
+    // `replaceMeshesForEntity` for why not drop-then-append.
+    const removedMeshes = mesh ? get().replaceMeshesForEntity([globalId, expressId], mesh) : [];
+    // The renderer keys its own buffers by entity, so it has to be told
+    // separately; it drops everything under that id and picks the replacement
+    // up from the mesh list on the next rebuild.
+    get().setPendingMeshRemovals(new Set([globalId]));
+
+    // Mesh and quantities are not attributes, so the generic undo handlers
+    // know nothing about them. Recorded here for the same reason a moved
+    // element records its mesh translation — see `mutationShapeReplacements`.
+    if (shapeBatchId && mesh) {
+      const replacements = new Map(get().mutationShapeReplacements);
+      replacements.set(shapeBatchId, {
+        modelId,
+        globalId,
+        expressId,
+        before: removedMeshes,
+        after: [mesh],
+        beforeQuantities: previousQuantities,
+        afterQuantities: { area: result.area, perimeter, height: result.height },
+      });
+      set({ mutationShapeReplacements: replacements });
+    }
+
+    set((state) => ({
+      dirtyModels: new Set(state.dirtyModels).add(modelId),
+      mutationVersion: state.mutationVersion + 1,
+    }));
+
+    return { area: result.area, height: result.height };
+  },
+
   buildDetectorCircuits: (modelId) => {
     const state = get();
     const view = state.mutationViews.get(modelId);
@@ -3620,6 +3883,12 @@ export const createMutationSlice: StateCreator<
           view.setPositionalAttribute(mutation.entityId, index, mutation.oldValue as IfcAttributeValue, true);
         }
       }
+      // A reshaped room: put the previous outline, mesh and quantities back.
+      // Keyed by batch, because the reshape's two writes are one gesture.
+      const reshaped = batchId ? get().mutationShapeReplacements.get(batchId) : undefined;
+      if (reshaped) {
+        restoreRoomShape(get, set as (p: Partial<ViewerState>) => void, reshaped, 'before');
+      }
       // If this mutation carried a mesh translation (gizmo / numeric
       // move), reverse it so the rendered mesh follows the undo.
       const meshMove = get().mutationMeshTranslations.get(mutation.id);
@@ -3800,6 +4069,11 @@ export const createMutationSlice: StateCreator<
       const index = positionalIndex(mutation.attributeName);
       if (index !== null && mutation.newValue !== undefined) {
         view.setPositionalAttribute(mutation.entityId, index, mutation.newValue as IfcAttributeValue, true);
+      }
+      // A reshaped room, forward: mirror of the restore in `undo`.
+      const reshaped = batchId ? get().mutationShapeReplacements.get(batchId) : undefined;
+      if (reshaped) {
+        restoreRoomShape(get, set as (p: Partial<ViewerState>) => void, reshaped, 'after');
       }
       // Replay the mesh translation forward so the rendered mesh
       // follows the redo — mirror of the undo reversal above.

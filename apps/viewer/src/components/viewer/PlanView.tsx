@@ -50,6 +50,11 @@ import { PlanLabels } from './PlanLabels';
 import { PlanOpeningSymbols } from './PlanOpeningSymbols';
 import { PlanNorthArrow } from './PlanNorthArrow';
 import { PlanDeviceMarks } from './PlanDeviceMarks';
+import { PlanRoomShape } from './PlanRoomShape';
+import { snapSegmentsFrom } from '@/lib/roomShape/snap';
+
+/** The line categories a room corner may snap to — see `roomSnapSegments`. */
+const SNAP_LINE_CATEGORIES: ReadonlySet<string> = new Set(['cut']);
 import { PlanOperationTypeReport } from './PlanOperationTypeReport';
 import { PlanScaleBar } from './PlanScaleBar';
 import { PlanToolbar } from './PlanToolbar';
@@ -338,11 +343,47 @@ export function PlanView({
   });
 
   // ── The room being reshaped ─────────────────────────────────────────────
-  // Only while the tool is held, and only for a room: the handles hijack the
-  // pointer, so a tool that put them up whenever something was selected would
-  // make the plan unclickable.
+  // A mode of its own, entered from the element's geometry section (Edit
+  // shape) and left with Enter or the tick. NOT "a room is selected in edit
+  // mode": the draft outline is drawn over the room, so a state you can be in
+  // without having asked for it looks exactly like the room having two shapes.
+  const roomShapeEditKey = useViewerStore((s) => s.roomShapeEditKey);
+  const endRoomShapeEdit = useViewerStore((s) => s.endRoomShapeEdit);
+  const snapEnabled = useViewerStore((s) => s.snapEnabled);
   const selectedEntity = useViewerStore((s) => s.selectedEntity);
+  const readSlabFootprint = useViewerStore((s) => s.readSlabFootprint);
+  const reshapeSpace = useViewerStore((s) => s.reshapeSpace);
   const mutationVersion = useViewerStore((s) => s.mutationVersion);
+
+  const roomShape = useMemo(() => {
+    if (!roomShapeEditKey || !selectedEntity || !storeyModelId) return null;
+    if (roomShapeEditKey !== `${selectedEntity.modelId}:${selectedEntity.expressId}`) return null;
+    if (selectedEntity.modelId !== storeyModelId) return null;
+    const type = models.get(storeyModelId)?.ifcDataStore?.entities?.getTypeName?.(
+      selectedEntity.expressId,
+    );
+    if (type !== 'IfcSpace') return null;
+    const fp = readSlabFootprint(storeyModelId, selectedEntity.expressId);
+    if (!fp || fp.footprint.length < 3) return null;
+    // Storey-local IFC XY to drawing space: drawing y is the renderer's z,
+    // which is IFC's y negated. `planPick` pins that mapping. The footprint
+    // arrives as [x, y] tuples, not objects — `slab-edit` has its own Point2D.
+    return {
+      expressId: selectedEntity.expressId,
+      outline: fp.footprint.map(([x, y]) => ({ x, y: -y })),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomShapeEditKey, selectedEntity, storeyModelId, models, readSlabFootprint, mutationVersion]);
+
+  /**
+   * What a dragged corner can land on: the CUT lines, which at plan height are
+   * the walls. Projected and hidden lines describe things above or below the
+   * cut, and a room corner pulled onto a roof overhang is worse than no snap.
+   */
+  const roomSnapSegments = useMemo(() => {
+    if (!roomShape || !drawing) return [];
+    return snapSegmentsFrom(drawing.lines ?? [], SNAP_LINE_CATEGORIES);
+  }, [roomShape, drawing]);
 
   // ── The space graph, as a diagram ───────────────────────────────────────
   // The same graph the escape routes are walked on and the door numbers come
@@ -1201,7 +1242,10 @@ export function PlanView({
     const container = containerRef.current;
     if (!container) return;
     const rect = container.getBoundingClientRect();
-    setCursor(planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, planTransform));
+    // The SAME snap the measure tool, the annotations and the plan rotation
+    // use. A room drawn without it sits a few centimetres off its walls, and
+    // every area derived from it is wrong by that much.
+    setCursor(snapPoint(planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, planTransform)));
   }, [setViewTransform, activeTool, planTransform, annotating, annotation2DActiveTool,
       measureHandlers, annotationHandlers, planRotationPicking, rotationLine, snapPoint]);
 
@@ -1219,12 +1263,17 @@ export function PlanView({
     const container = containerRef.current;
     if (!container || !storey || !storeyModelId || !cut?.ok) return;
     const rect = container.getBoundingClientRect();
-    const point = planScreenToDrawing(clientX - rect.left, clientY - rect.top, planTransform);
+    // Snapped on the way IN, not only in the preview: the point that lands in
+    // the model has to be the point the crosshair showed, or the preview is a
+    // decoration that lies.
+    const point = snapPoint(
+      planScreenToDrawing(clientX - rect.left, clientY - rect.top, planTransform),
+    );
     void handleAddElementDrop(
       planPointToRenderer(point, cut.worldY),
       { modelId: storeyModelId, storeyId: storey.expressId },
     );
-  }, [storey, storeyModelId, cut, planTransform]);
+  }, [storey, storeyModelId, cut, planTransform, snapPoint]);
 
   const handleMouseUp = useCallback((e: React.MouseEvent) => {
     panRef.current = null;
@@ -1443,6 +1492,29 @@ export function PlanView({
           looked at, a name is read, and where they collide the text wins. */}
       {planShowDeviceMarks && (
         <PlanDeviceMarks marks={deviceMarks} transform={planTransform} />
+      )}
+
+      {/* The reshape handles sit on top of everything: they are the thing
+          being aimed at while the tool is held. */}
+      {roomShape && storeyModelId && (
+        <PlanRoomShape
+          outline={roomShape.outline}
+          transform={planTransform}
+          snapSegments={roomSnapSegments}
+          snapEnabled={snapEnabled}
+          onCommit={(next) => {
+            const result = reshapeSpace(
+              storeyModelId,
+              roomShape.expressId,
+              // Back to IFC's frame — see the note where the outline is read.
+              next.map((p) => ({ x: p.x, y: -p.y })),
+            );
+            if ('error' in result) toast.error(result.error);
+            else toast.success(`Raum umgeformt — ${result.area.toFixed(2)} m²`);
+            endRoomShapeEdit();
+          }}
+          onCancel={endRoomShapeEdit}
+        />
       )}
 
       {/* Door swings and window sashes go UNDER the room labels: both belong

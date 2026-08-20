@@ -40,6 +40,18 @@ export { addSensorToStore, type SensorInStoreParams, type SensorBuildResult, typ
 export { addAnnotationToStore, type AnnotationInStoreParams, type AnnotationBuildResult, type AnnotationGeometry, type AnnotationPoint2D } from './in-store/annotation.js';
 export { addLibraryElementToStore, type LibraryElementInStoreParams, type LibraryElementBuildResult } from './in-store/library-element.js';
 export { addLibraryTypeToStore, emitRelDefinesByType, type LibraryTypeInStoreParams, type LibraryTypeBuildResult } from './in-store/library-type.js';
+/**
+ * Profile emit, for surfaces that RESHAPE an element rather than build one.
+ * The room-outline editor rewrites an existing swept area in place — same
+ * STEP shape the builders emit, so an edited room and a drawn one are
+ * indistinguishable in the file.
+ */
+export { emitPolygonProfile } from './in-store/_emit-helpers.js';
+/** Unit conversion for quantities written onto an EXISTING element — an
+ *  area quantity follows the project's AREAUNIT, which is independent of
+ *  its LENGTHUNIT and routinely different. */
+export { toNativeArea, toNativeVolume, toNativeLength } from './in-store/anchor.js';
+
 export {
   addDistributionSystemToStore,
   addDistributionCircuitToStore,
