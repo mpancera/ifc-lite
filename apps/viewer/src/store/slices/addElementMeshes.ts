@@ -65,6 +65,7 @@ const DISCIPLINE_COLORS: Record<CatalogEntry['discipline'], [number, number, num
   fire: [0.90, 0.25, 0.15, 1.0],
   security: [0.15, 0.45, 0.90, 1.0],
   intrusion: [0.90, 0.60, 0.10, 1.0],
+  automation: [0.15, 0.70, 0.45, 1.0],
   other: [0.55, 0.55, 0.55, 1.0],
 };
 

@@ -31,6 +31,12 @@ export const TRADE_PROPERTY = 'TradeCode';
 
 const CODES: Partial<Record<CatalogEntry['discipline'], string>> = {
   fire: 'FST',
+  security: 'SEC',
+  automation: 'AUT',
+  // `intrusion` and `other` are still open. Intrusion detection sits under
+  // security in practice, so `SEC` is the obvious guess — and a guess is
+  // exactly what must not go into an identifier that gets quoted in a
+  // submission. Left absent until somebody says.
 };
 
 /** The trade code for a discipline, or `null` where none is established. */

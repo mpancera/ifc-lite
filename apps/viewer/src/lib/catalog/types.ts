@@ -85,7 +85,7 @@ export interface CatalogEntry {
   tag?: string;
   description?: string;
   /** Coarse grouping matching the installation disciplines this catalog targets. */
-  discipline: 'fire' | 'security' | 'intrusion' | 'other';
+  discipline: 'fire' | 'security' | 'intrusion' | 'automation' | 'other';
   /** Finer-grained grouping for UI filtering, e.g. `'detector'`, `'manual-call-point'`, `'camera'`. Free-form on purpose — no fixed taxonomy yet. */
   category: string;
   ifc: CatalogIfcMapping;

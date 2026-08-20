@@ -1573,6 +1573,7 @@ function DisciplineDot({ discipline }: { discipline: CatalogEntry['discipline'] 
     fire: 'bg-red-500',
     security: 'bg-blue-500',
     intrusion: 'bg-amber-500',
+    automation: 'bg-emerald-500',
     other: 'bg-zinc-400',
   }[discipline];
   return <span className={`inline-block h-2 w-2 rounded-full shrink-0 ${color}`} aria-hidden="true" />;
