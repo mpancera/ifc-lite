@@ -515,6 +515,18 @@ export function IDSPanel({ onClose }: IDSPanelProps) {
     if (!loading) setPendingModelId(null);
   }, [loading]);
 
+  // Asked for from elsewhere — a demo, the command palette — through the same
+  // consumed-once handoff the role dialog uses. Loading a document already
+  // works without this panel (`loadIdsContent`); the run does not, because it
+  // owns a worker, a progress channel and the model it validates against.
+  const runRequested = useViewerStore((s) => s.idsRunRequested);
+  const setRunRequested = useViewerStore((s) => s.setIdsRunRequested);
+  useEffect(() => {
+    if (!runRequested) return;
+    setRunRequested(false);
+    void runValidation();
+  }, [runRequested, setRunRequested, runValidation]);
+
   // Handle file selection
   const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];

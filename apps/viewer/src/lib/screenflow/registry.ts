@@ -25,6 +25,7 @@
 
 import { CLIP_01_FEDERATION } from './clips/clip-01-federation';
 import { STRAND_01_FROM_A_DRAWING } from './clips/strand-01-from-a-drawing';
+import { STRAND_02_MODEL_ALREADY_THERE } from './clips/strand-02-model-already-there';
 import { STRAND_03_RELATIONS } from './clips/strand-03-relations';
 import type { ScreenflowClip } from './types';
 
@@ -38,6 +39,7 @@ import type { ScreenflowClip } from './types';
 export const SCREENFLOW_REGISTRY: readonly ScreenflowClip[] = [
   CLIP_01_FEDERATION,
   STRAND_01_FROM_A_DRAWING,
+  STRAND_02_MODEL_ALREADY_THERE,
   STRAND_03_RELATIONS,
 ];
 
@@ -63,12 +65,6 @@ export interface PlannedClip {
  * full shot list lives outside this repository, with the demo data.
  */
 export const PLANNED_CLIPS: readonly PlannedClip[] = [
-  {
-    number: 2,
-    titleDe: 'Wenn das Modell schon da ist',
-    stepDe: 'Modell öffnen, geforderte Qualität per IDS nachweisen, Planprodukte und Mengen ausgeben',
-    needsDe: 'IDS und Plan-Exporte vorhanden; DXF trägt keine Metadaten am Polygon, und Listen sind noch kein Exportprodukt',
-  },
   {
     number: 4,
     titleDe: 'Lageplan aus dem Modell',

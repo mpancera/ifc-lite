@@ -188,6 +188,15 @@ export interface UISlice extends GeometryLoadSettingsState, GeometryLoadSettings
    * store, so a change it cannot see is a change it never learns about.
    */
   planFitVersion: number;
+  /**
+   * Issue the plan as this format. Consumed once and cleared by the plan.
+   *
+   * The three writers live inside `useDrawingExport`, which is React and reads
+   * a dozen pieces of the plan's own state — what is on screen IS the drawing,
+   * and a second caller assembling that state elsewhere would export something
+   * else. So the request goes in and the plan answers it.
+   */
+  planExportRequested: 'pdf' | 'svg' | 'dxf' | null;
   activeTool: string;
   /**
    * Global edit mode. When `true`, all in-place editing affordances
@@ -256,6 +265,7 @@ export interface UISlice extends GeometryLoadSettingsState, GeometryLoadSettings
   setBottomPanelHeight: (height: number) => void;
   setShowSelectionOrigin: (show: boolean) => void;
   notePlanFitted: () => void;
+  requestPlanExport: (format: 'pdf' | 'svg' | 'dxf' | null) => void;
   setRightPanelCollapsed: (collapsed: boolean) => void;
   setActiveTool: (tool: string) => void;
   /** Collapse the Space Sketch panel to a reopen pill (or restore it). */
@@ -333,6 +343,7 @@ export const createUISlice: StateCreator<UISlice & UICrossSliceState, [], [], UI
   bottomPanelHeight: 300,
   showSelectionOrigin: false,
   planFitVersion: 0,
+  planExportRequested: null,
   activeTool: UI_DEFAULTS.ACTIVE_TOOL,
   editEnabled: false,
   spaceSketchMinimized: false,
@@ -363,6 +374,7 @@ export const createUISlice: StateCreator<UISlice & UICrossSliceState, [], [], UI
   setBottomPanelHeight: (bottomPanelHeight) => set({ bottomPanelHeight }),
   setShowSelectionOrigin: (showSelectionOrigin) => set({ showSelectionOrigin }),
   notePlanFitted: () => set((state) => ({ planFitVersion: state.planFitVersion + 1 })),
+  requestPlanExport: (planExportRequested) => set({ planExportRequested }),
   setActiveTool: (activeTool) => {
     // Authoring tools require edit mode. Entering one of them flips
     // the global toggle on so the rest of the UI (Properties panel,

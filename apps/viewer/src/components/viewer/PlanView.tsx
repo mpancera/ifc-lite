@@ -1032,6 +1032,20 @@ export function PlanView({
     viewRotation: planRotation,
   });
 
+  // Issued from elsewhere — the command palette, a screenflow — through the
+  // same consumed-once handoff the role dialog uses. The writers stay here
+  // because what is on screen IS the drawing: a caller assembling the same
+  // dozen pieces of state somewhere else would export a different plan.
+  const planExportRequested = useViewerStore((s) => s.planExportRequested);
+  const requestPlanExport = useViewerStore((s) => s.requestPlanExport);
+  useEffect(() => {
+    if (!planExportRequested) return;
+    if (planExportRequested === 'svg') handleExportSVG();
+    else if (planExportRequested === 'dxf') handleExportDXF();
+    else handlePrint();
+    requestPlanExport(null);
+  }, [planExportRequested, handleExportSVG, handleExportDXF, handlePrint, requestPlanExport]);
+
   // Fit when the first drawing of this plan session arrives, and then leave the
   // view alone. Re-armed on the way out so reopening the plan frames it again.
   useEffect(() => {

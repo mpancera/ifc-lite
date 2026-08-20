@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ids xmlns="http://standards.buildingsmart.org/IDS" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://standards.buildingsmart.org/IDS http://standards.buildingsmart.org/IDS/1.0/ids.xsd">
+  <info>
+    <title>Übergabe an die Brandmeldeplanung</title>
+    <description>Was ein Architekturmodell mitbringen muss, damit darin eine Brandmeldeanlage geplant werden kann. Bewusst kurz: es sind die vier Angaben, ohne die die Planung stehenbleibt — nicht eine vollständige Modellprüfung. Generisch gehalten, ohne Bezug auf ein bestimmtes Projekt.</description>
+    <author>ifc-lite</author>
+  </info>
+  <specifications>
+    <!-- Ohne Namen am Raum gibt es keine Meldernummer, keine Meldergruppe und
+         keine Zeile in der Liste, die jemand lesen kann. Das ist die Angabe,
+         an der die Brandmeldeplanung als erstes hängenbleibt. -->
+    <specification name="Räume tragen einen Namen" ifcVersion="IFC4">
+      <applicability>
+        <entity>
+          <name><simpleValue>IFCSPACE</simpleValue></name>
+        </entity>
+      </applicability>
+      <requirements>
+        <attribute>
+          <name><simpleValue>Name</simpleValue></name>
+        </attribute>
+      </requirements>
+    </specification>
+
+    <!-- Der Name ist die Nummer ("01"), die lesbare Bezeichnung steht in
+         LongName ("Büro"). Eine Liste ohne LongName ist eine Liste aus
+         Nummern. -->
+    <specification name="Räume tragen eine lesbare Bezeichnung" ifcVersion="IFC4">
+      <applicability>
+        <entity>
+          <name><simpleValue>IFCSPACE</simpleValue></name>
+        </entity>
+      </applicability>
+      <requirements>
+        <attribute>
+          <name><simpleValue>LongName</simpleValue></name>
+        </attribute>
+      </requirements>
+    </specification>
+
+    <!-- Die Melderdichte folgt der Fläche. Ohne sie lässt sich weder die
+         Anzahl bestimmen noch eine Mengenermittlung rechnen. -->
+    <specification name="Räume tragen eine Nettogrundfläche" ifcVersion="IFC4">
+      <applicability>
+        <entity>
+          <name><simpleValue>IFCSPACE</simpleValue></name>
+        </entity>
+      </applicability>
+      <requirements>
+        <property dataType="IFCAREAMEASURE">
+          <propertySet><simpleValue>Qto_SpaceBaseQuantities</simpleValue></propertySet>
+          <baseName><simpleValue>NetFloorArea</simpleValue></baseName>
+        </property>
+      </requirements>
+    </specification>
+
+    <!-- Ein Geschoss ohne Namen macht jede Ausgabe mehrdeutig: Plankopf,
+         Liste und Meldergruppe berufen sich alle darauf. -->
+    <specification name="Geschosse tragen einen Namen" ifcVersion="IFC4">
+      <applicability>
+        <entity>
+          <name><simpleValue>IFCBUILDINGSTOREY</simpleValue></name>
+        </entity>
+      </applicability>
+      <requirements>
+        <attribute>
+          <name><simpleValue>Name</simpleValue></name>
+        </attribute>
+      </requirements>
+    </specification>
+  </specifications>
+</ids>

@@ -118,6 +118,19 @@ export interface IDSSlice extends IDSSliceState {
   setIdsActiveEntity: (ref: { modelId: string; expressId: number } | null) => void;
 
   // UI actions
+  /**
+   * Run the loaded specification against the model. Consumed once and cleared
+   * by the panel.
+   *
+   * The run itself lives in `useIDS`, which owns a worker, a progress channel
+   * and the model it validates against — none of which a caller elsewhere has.
+   * Loading a document already works without the panel (`loadIdsContent`);
+   * this is the other half, so a demo or the command palette can say "and now
+   * check it" instead of leaving the operator to click.
+   */
+  idsRunRequested: boolean;
+  setIdsRunRequested: (run: boolean) => void;
+
   setIdsPanelVisible: (visible: boolean) => void;
   toggleIdsPanel: () => void;
   setIdsLoading: (loading: boolean) => void;
@@ -203,6 +216,7 @@ export const createIdsSlice: StateCreator<IDSSlice, [], [], IDSSlice> = (set, ge
   idsActiveSpecificationId: null,
   idsActiveEntityId: null,
   idsPanelVisible: false,
+  idsRunRequested: false,
   idsLoading: false,
   idsProgress: null,
   idsError: null,
@@ -282,6 +296,7 @@ export const createIdsSlice: StateCreator<IDSSlice, [], [], IDSSlice> = (set, ge
 
   // UI actions
   setIdsPanelVisible: (idsPanelVisible) => set({ idsPanelVisible }),
+  setIdsRunRequested: (idsRunRequested) => set({ idsRunRequested }),
 
   toggleIdsPanel: () => set((state) => ({ idsPanelVisible: !state.idsPanelVisible })),
 
