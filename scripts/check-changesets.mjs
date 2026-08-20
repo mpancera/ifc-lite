@@ -25,8 +25,8 @@
  */
 
 import { readFileSync, readdirSync, existsSync, realpathSync } from 'node:fs';
+import { workspaceDirs } from './lib/workspace-dirs.mjs';
 import parseChangeset from '@changesets/parse';
-import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -42,17 +42,12 @@ const changesetDir = join(repoRoot, '.changeset');
  * name that fails is the repo root, because the root is not a member at all.
  */
 function workspaceNames() {
-  const out = execFileSync(
-    'pnpm',
-    ['-r', 'exec', 'node', '-e', 'console.log(process.cwd())'],
-    { cwd: repoRoot, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 },
-  );
   const names = new Set();
   // `process.cwd()` reports the realpath while `repoRoot` comes from this
   // file's own path, so a symlinked checkout makes a string compare miss — and
   // missing here would admit the repo root, the one name this exists to reject.
   const rootReal = realpathSync(repoRoot);
-  for (const dir of new Set(out.split('\n').map((l) => l.trim()).filter(Boolean))) {
+  for (const dir of workspaceDirs(repoRoot)) {
     const manifest = join(dir, 'package.json');
     if (dir === rootReal || dir === repoRoot || !existsSync(manifest)) continue;
     const pkg = JSON.parse(readFileSync(manifest, 'utf8'));

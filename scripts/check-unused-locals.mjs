@@ -25,9 +25,10 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { writeTestProgram, GENERATED_CONFIG } from './typecheck-tests.mjs';
 import { classifyTscOutput, untrustworthyExitReason } from './lib/unused-locals-classify.mjs';
+import { workspaceDirs } from './lib/workspace-dirs.mjs';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const baselinePath = join(repoRoot, 'scripts', 'unused-locals-baseline.json');
@@ -35,13 +36,14 @@ const update = process.argv.includes('--update');
 
 /** Workspace packages with a tsconfig, discovered rather than hardcoded. */
 function packageDirs() {
-  const out = execFileSync('pnpm', ['-r', 'exec', 'node', '-e', 'console.log(process.cwd())'], {
-    cwd: repoRoot, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024,
-  });
-  return [...new Set(out.split('\n').map((l) => l.trim()).filter(Boolean))]
+  return workspaceDirs(repoRoot)
     .filter((dir) => dir.startsWith(repoRoot) && dir !== repoRoot)
     .filter((dir) => existsSync(join(dir, 'tsconfig.json')))
-    .map((dir) => relative(repoRoot, dir))
+    // Forward slashes, always: these strings are the KEYS of the committed
+    // baseline, and `relative` hands back backslashes on Windows. Every lookup
+    // then missed, so a healthy checkout reported every package as newly
+    // regressed from a baseline of zero -- a wall of red saying nothing.
+    .map((dir) => relative(repoRoot, dir).split(sep).join('/'))
     .sort();
 }
 
@@ -92,6 +94,11 @@ function countViolations(dir) {
   try {
     execFileSync('pnpm', ['exec', 'tsc', '--noEmit', '--noUnusedLocals', '--pretty', 'false', '-p', project], {
       cwd: join(repoRoot, dir), encoding: 'utf8', stdio: 'pipe', maxBuffer: 32 * 1024 * 1024,
+      // Same reason as check-lint-ran.mjs: on Windows `pnpm` is `pnpm.cmd`, which
+      // execFile cannot find and, since Node 20.12, cannot spawn without a shell.
+      // Safe to concatenate here -- every argument is a literal or a config
+      // filename, so there is nothing for cmd.exe to re-split.
+      shell: process.platform === 'win32',
       // `--pretty false` is the primary defense: it is tsc's own supported flag
       // for stable, colour-free, machine-readable diagnostics, verified against
       // the pinned TypeScript 6.0.3 (`--help` lists it; a plain-text run under
