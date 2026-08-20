@@ -160,6 +160,27 @@ interface EntityWrite {
   (): string;
 }
 
+/** One field a block placement fills in — what a CAD schedule groups by. */
+export interface DxfBlockAttribute {
+  /** The tag a schedule groups by. Uppercase by convention; never translated. */
+  readonly tag: string;
+  /** Where the value sits, relative to the block's origin. */
+  readonly offset: Point2D;
+  /** Cap height in drawing units. */
+  readonly height: number;
+  /** Carried for machines rather than for the eye. */
+  readonly invisible?: boolean;
+}
+
+/** A symbol defined once and placed many times. */
+export interface DxfBlockDefinition {
+  /** Straight segments in the block's own coordinates, around its origin. */
+  readonly lines: readonly { readonly start: Point2D; readonly end: Point2D }[];
+  /** Closed polylines in the same coordinates — a detector's circle, sampled. */
+  readonly polylines?: readonly (readonly Point2D[])[];
+  readonly attributes?: readonly DxfBlockAttribute[];
+}
+
 export interface DxfWriterOptions {
   /**
    * `999` comment written at the very top of the file, before the HEADER
@@ -186,6 +207,8 @@ export class DxfWriter {
   private readonly entities: EntityWrite[] = [];
   /** APPIDs referenced by XDATA, declared in TABLES so strict readers accept it. */
   private readonly appIds = new Set<string>();
+  /** Block name to its geometry and attribute definitions, written to BLOCKS. */
+  private readonly blocks = new Map<string, DxfBlockDefinition>();
   private readonly headerComment: string;
   private minX = Infinity;
   private minY = Infinity;
@@ -306,6 +329,87 @@ export class DxfWriter {
         s += '0\nVERTEX\n8\n' + layer + '\n10\n' + fmt(p.x) + '\n20\n' + fmt(p.y) + '\n30\n0.0\n';
       }
       s += '0\nSEQEND\n8\n' + layer + '\n';
+      return s;
+    });
+  }
+
+  /**
+   * Define a symbol, once, for `addInsert` to place many times.
+   *
+   * A symbol placed as a block is a thing CAD can count, swap and schedule; the
+   * same shape written as loose lines is a scribble that happens to look like a
+   * detector. For a fire-detection plan that is the difference between a
+   * drawing somebody can work from and a picture of one.
+   *
+   * Re-defining a name is a no-op — first definition wins — so a caller may
+   * define lazily on every placement without checking.
+   *
+   * Geometry is in the block's own coordinates, around its origin.
+   * `attributes` are the fields each placement fills in: the `tag` is what a
+   * CAD schedule groups by, and the offset is relative to that origin.
+   */
+  defineBlock(name: string, definition: DxfBlockDefinition): string {
+    const safe = sanitizeDxfLayerName(name);
+    if (!this.blocks.has(safe)) this.blocks.set(safe, definition);
+    return safe;
+  }
+
+  /**
+   * Place a defined block, with values for its attributes.
+   *
+   * An `INSERT` naming a block the file does not define is the one thing every
+   * reader rejects, so an unknown name is refused here rather than written —
+   * the alternative is a file that opens as an error dialogue.
+   */
+  addInsert(
+    blockName: string,
+    position: Point2D,
+    layer: string,
+    options: {
+      rotationDeg?: number;
+      scale?: number;
+      /** Attribute tag to value, for the tags the block defines. */
+      values?: Readonly<Record<string, string>>;
+      colorOverride?: string;
+      xdata?: DxfXdata;
+    } = {},
+  ): void {
+    const definition = this.blocks.get(blockName);
+    if (!definition) return;
+    this.extend(position);
+    const rotationDeg = options.rotationDeg ?? 0;
+    const requested = options.scale ?? 1;
+    const scale = Number.isFinite(requested) && requested > 0 ? requested : 1;
+    const colorGroup = this.colorOverrideGroup(options.colorOverride);
+    const xdataGroups = this.xdataGroups(options.xdata);
+    const attributes = definition.attributes ?? [];
+    const values = options.values ?? {};
+    this.entities.push(() => {
+      // 66/1 says attributes follow; without it a reader stops at the INSERT
+      // and the values are lost while the file still looks perfectly valid.
+      const hasAttributes = attributes.length > 0;
+      let s =
+        '0\nINSERT\n8\n' + layer + '\n' + colorGroup +
+        (hasAttributes ? '66\n1\n' : '') +
+        '2\n' + blockName + '\n' +
+        '10\n' + fmt(position.x) + '\n20\n' + fmt(position.y) + '\n30\n0.0\n' +
+        '41\n' + fmt(scale) + '\n42\n' + fmt(scale) + '\n43\n' + fmt(scale) + '\n' +
+        '50\n' + fmt(rotationDeg) + '\n' + xdataGroups;
+      for (const attribute of attributes) {
+        const value = sanitizeDxfText(values[attribute.tag] ?? '').slice(0, 255);
+        s +=
+          '0\nATTRIB\n8\n' + layer + '\n' +
+          '10\n' + fmt(position.x + attribute.offset.x) + '\n' +
+          '20\n' + fmt(position.y + attribute.offset.y) + '\n30\n0.0\n' +
+          '40\n' + fmt(attribute.height) + '\n' +
+          '1\n' + value + '\n' +
+          '2\n' + attribute.tag + '\n' +
+          // 70 flags: 1 = invisible. A tag carried for machines rather than
+          // for the eye is marked invisible instead of being left off — a
+          // schedule reads it either way, and a plan should not print it.
+          '70\n' + (attribute.invisible ? 1 : 0) + '\n';
+      }
+      if (hasAttributes) s += '0\nSEQEND\n8\n' + layer + '\n';
       return s;
     });
   }
@@ -457,6 +561,51 @@ export class DxfWriter {
     );
   }
 
+  /**
+   * The BLOCKS section, or nothing when no block was defined.
+   *
+   * R12 needs no BLOCKS section at all, so an empty one is left out rather than
+   * written as a header with nothing inside it.
+   */
+  private buildBlocks(): string {
+    if (this.blocks.size === 0) return '';
+    let s = '0\nSECTION\n2\nBLOCKS\n';
+    for (const [name, definition] of this.blocks) {
+      s +=
+        '0\nBLOCK\n8\n0\n2\n' + name + '\n70\n0\n' +
+        '10\n0.0\n20\n0.0\n30\n0.0\n3\n' + name + '\n1\n\n';
+      for (const line of definition.lines) {
+        s +=
+          '0\nLINE\n8\n0\n' +
+          '10\n' + fmt(line.start.x) + '\n20\n' + fmt(line.start.y) + '\n30\n0.0\n' +
+          '11\n' + fmt(line.end.x) + '\n21\n' + fmt(line.end.y) + '\n31\n0.0\n';
+      }
+      for (const points of definition.polylines ?? []) {
+        if (points.length < 2) continue;
+        s += '0\nPOLYLINE\n8\n0\n66\n1\n10\n0.0\n20\n0.0\n30\n0.0\n70\n1\n';
+        for (const p of points) {
+          s += '0\nVERTEX\n8\n0\n10\n' + fmt(p.x) + '\n20\n' + fmt(p.y) + '\n30\n0.0\n';
+        }
+        s += '0\nSEQEND\n8\n0\n';
+      }
+      // ATTDEF declares the field; the ATTRIB on each INSERT carries its value.
+      // A block whose fields exist only on the inserts is one a schedule can
+      // read and an editor cannot re-prompt for.
+      for (const attribute of definition.attributes ?? []) {
+        s +=
+          '0\nATTDEF\n8\n0\n' +
+          '10\n' + fmt(attribute.offset.x) + '\n20\n' + fmt(attribute.offset.y) + '\n30\n0.0\n' +
+          '40\n' + fmt(attribute.height) + '\n' +
+          '1\n\n' +
+          '3\n' + attribute.tag + '\n' +
+          '2\n' + attribute.tag + '\n' +
+          '70\n' + (attribute.invisible ? 1 : 0) + '\n';
+      }
+      s += '0\nENDBLK\n8\n0\n';
+    }
+    return s + '0\nENDSEC\n';
+  }
+
   private buildEntities(): string {
     let s = '0\nSECTION\n2\nENTITIES\n';
     for (const write of this.entities) s += write();
@@ -479,7 +628,8 @@ export class DxfWriter {
     }
     return (
       '999\n' + this.headerComment + '\n' +
-      this.buildHeader() + this.buildTables() + this.buildEntities() + '0\nEOF\n'
+      this.buildHeader() + this.buildTables() + this.buildBlocks() +
+      this.buildEntities() + '0\nEOF\n'
     );
   }
 }

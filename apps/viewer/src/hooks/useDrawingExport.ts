@@ -1063,23 +1063,24 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     // it — 3 mm at every scale, because it exists to be seen and not measured.
     const dxfSymbolLines: { start: { x: number; y: number }; end: { x: number; y: number } }[] = [];
     for (const symbol of openingSymbols) dxfSymbolLines.push(...symbol.lines);
+
+    // Devices go over as SYMBOLS, not as the segments they used to be flattened
+    // into. A CAD user receiving this can count the smoke detectors, group a
+    // schedule by class and read the number the rule assigned — none of which a
+    // pile of loose lines allows, however right it looks on paper. Openings
+    // stay segments on purpose: an opening belongs to its wall and is not a
+    // countable thing, so a block would claim more than is true.
     const markHalf = paperToModel(DEVICE_MARK_PAPER_MM) / 2;
-    for (const mark of deviceMarks) {
-      for (const path of deviceMarkPaths(mark.kind)) {
-        for (let i = 1; i < path.length; i += 1) {
-          dxfSymbolLines.push({
-            start: {
-              x: mark.position.x + path[i - 1].x * markHalf * 2,
-              y: mark.position.y + path[i - 1].y * markHalf * 2,
-            },
-            end: {
-              x: mark.position.x + path[i].x * markHalf * 2,
-              y: mark.position.y + path[i].y * markHalf * 2,
-            },
-          });
-        }
-      }
-    }
+    const dxfDevices = deviceMarks.map((mark) => ({
+      position: mark.position,
+      // The family is what one block stands for. `kind` is exactly that: the
+      // symbol family the mark was drawn from, several IFC classes deep.
+      family: mark.kind,
+      paths: deviceMarkPaths(mark.kind),
+      half: markHalf,
+      ifcType: mark.ifcType,
+      name: mark.name,
+    }));
 
     // Room outlines come from the DRAWING, which is the only place a real
     // footprint exists — `RoomLabel` carries an extent and an anchor, not an
@@ -1103,7 +1104,9 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
       showHiddenLines: displayOptions.showHiddenLines,
       coordinateTransform,
       metadataComment,
-      plan: { labels: dxfLabels, symbolLines: dxfSymbolLines, rooms: dxfRooms },
+      plan: {
+        labels: dxfLabels, symbolLines: dxfSymbolLines, rooms: dxfRooms, devices: dxfDevices,
+      },
     });
     const stem = `section-${sectionPlane.axis}-${sectionPlane.position}`;
     downloadFile(dxf, `${stem}.dxf`, 'application/dxf');

@@ -283,3 +283,93 @@ describe('DxfWriter non-finite coordinate handling (PR #1871 review)', () => {
     }
   });
 });
+
+describe('blocks, inserts and attributes', () => {
+  /** A minimal detector: a square, and the two fields a schedule reads. */
+  function detectorBlock(writer: DxfWriter): string {
+    return writer.defineBlock('BM-smoke', {
+      lines: [],
+      polylines: [[{ x: -1, y: -1 }, { x: 1, y: -1 }, { x: 1, y: 1 }, { x: -1, y: 1 }]],
+      attributes: [
+        { tag: 'NAME', offset: { x: 0, y: 0 }, height: 0.2, invisible: true },
+        { tag: 'IFCTYP', offset: { x: 0, y: 0 }, height: 0.2, invisible: true },
+      ],
+    });
+  }
+
+  it('writes a BLOCKS section only once a block exists', () => {
+    const bare = new DxfWriter();
+    bare.addLine({ x: 0, y: 0 }, { x: 1, y: 1 }, bare.layer('L', '#000'));
+    // R12 needs no BLOCKS section, and an empty one is a header around nothing.
+    expect(bare.toString()).not.toContain('\nBLOCKS\n');
+
+    const writer = new DxfWriter();
+    detectorBlock(writer);
+    expect(writer.toString()).toContain('\nBLOCKS\n');
+  });
+
+  it('defines one block per family however many times it is placed', () => {
+    // The whole point of a block: two smoke detectors are one symbol. A file
+    // with a block per occurrence has the storage cost and none of the use.
+    const writer = new DxfWriter();
+    const layer = writer.layer('BM', '#e11d48');
+    for (let i = 0; i < 5; i += 1) {
+      const name = detectorBlock(writer);
+      writer.addInsert(name, { x: i, y: 0 }, layer, { values: { NAME: `D${i}` } });
+    }
+    const dxf = writer.toString();
+    expect(dxf.split('\nBLOCK\n').length - 1).toBe(1);
+    expect(dxf.split('\nINSERT\n').length - 1).toBe(5);
+  });
+
+  it('refuses an INSERT naming a block the file does not define', () => {
+    // The one construct every reader rejects: the file would open as an error
+    // dialogue rather than a drawing.
+    const writer = new DxfWriter();
+    writer.addInsert('BM-nope', { x: 0, y: 0 }, writer.layer('BM', '#000'));
+    expect(writer.toString()).not.toContain('\nINSERT\n');
+  });
+
+  it('carries the attribute values on the placement, closed by SEQEND', () => {
+    const writer = new DxfWriter();
+    const layer = writer.layer('BM', '#e11d48');
+    const name = detectorBlock(writer);
+    writer.addInsert(name, { x: 2, y: 3 }, layer, {
+      values: { NAME: 'Melder 001', IFCTYP: 'IfcSensor' },
+    });
+    const dxf = writer.toString();
+    expect(dxf).toContain('\nATTRIB\n');
+    expect(dxf).toContain('\nMelder 001\n');
+    expect(dxf).toContain('\nIfcSensor\n');
+    // 66/1 announces that attributes follow; without it a reader stops at the
+    // INSERT and the values are silently lost.
+    const insert = dxf.slice(dxf.indexOf('\nINSERT\n'));
+    expect(insert).toContain('\n66\n1\n');
+    expect(insert).toContain('\nSEQEND\n');
+  });
+
+  it('declares every attribute as an ATTDEF in the block', () => {
+    // Values on the inserts alone give a schedule something to read and an
+    // editor nothing to re-prompt for.
+    const writer = new DxfWriter();
+    detectorBlock(writer);
+    const dxf = writer.toString();
+    const blocks = dxf.slice(dxf.indexOf('\nBLOCKS\n'), dxf.indexOf('\nENTITIES\n'));
+    expect(blocks.split('\nATTDEF\n').length - 1).toBe(2);
+    expect(blocks).toContain('\nNAME\n');
+    expect(blocks).toContain('\nIFCTYP\n');
+  });
+
+  it('grows the drawing extents to include placed symbols', () => {
+    // A block sitting outside $EXTMIN/$EXTMAX opens with the view somewhere
+    // else, and the devices look missing until somebody zooms out.
+    const writer = new DxfWriter();
+    const layer = writer.layer('BM', '#e11d48');
+    const name = detectorBlock(writer);
+    writer.addInsert(name, { x: 40, y: 25 }, layer);
+    const dxf = writer.toString();
+    const max = dxf.slice(dxf.indexOf('$EXTMAX'));
+    expect(max).toContain('40.0');
+    expect(max).toContain('25.0');
+  });
+});

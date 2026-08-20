@@ -279,6 +279,45 @@ describe('plan overlays (#50)', () => {
     expect(table).toBeLessThan(dxf.indexOf('1001\nIFCLITE'));
   });
 
+  it('writes devices as blocks a schedule can count, not as loose lines', () => {
+    // The request behind this: an installer receiving the plan has to be able
+    // to count the smoke detectors and tell them from the call points. Loose
+    // segments look right on paper and answer neither question.
+    const device = {
+      position: { x: 2, y: 2 },
+      family: 'smoke',
+      paths: [[{ x: -1, y: -1 }, { x: 1, y: -1 }, { x: 1, y: 1 }, { x: -1, y: 1 }]],
+      half: 0.15,
+      ifcType: 'IfcSensor',
+      name: 'Rauchmelder 001',
+    };
+    const dxf = exportToDXF(emptyDrawing(), { plan: { devices: [device, { ...device, position: { x: 5, y: 2 } }] } });
+
+    expect(dxf).toContain('BM-GERAETE');
+    // One definition, two placements — two detectors are one symbol.
+    expect(dxf.split('\nBLOCK\n').length - 1).toBe(1);
+    expect(dxf.split('\nINSERT\n').length - 1).toBe(2);
+    expect(dxf).toContain('\nRauchmelder 001\n');
+    expect(dxf).toContain('\nIfcSensor\n');
+  });
+
+  it('gives each device family its own block', () => {
+    const at = (family: string, x: number) => ({
+      position: { x, y: 0 },
+      family,
+      paths: [[{ x: -1, y: 0 }, { x: 1, y: 0 }]],
+      half: 0.15,
+      ifcType: 'IfcSensor',
+      name: family,
+    });
+    const dxf = exportToDXF(emptyDrawing(), {
+      plan: { devices: [at('smoke', 0), at('heat', 1), at('smoke', 2)] },
+    });
+    // Two families, three placements.
+    expect(dxf.split('\nBLOCK\n').length - 1).toBe(2);
+    expect(dxf.split('\nINSERT\n').length - 1).toBe(3);
+  });
+
   it('leaves a drawing without plan overlays byte-identical', () => {
     const plain = exportToDXF(emptyDrawing());
     expect(exportToDXF(emptyDrawing(), { plan: {} })).toBe(plain);

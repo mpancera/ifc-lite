@@ -83,13 +83,45 @@ export interface DXFPlanText {
   readonly height: number;
 }
 
+/**
+ * One placed device: a symbol CAD can count, not a shape that looks like one.
+ *
+ * Written as a BLOCK defined once per family and an INSERT per occurrence,
+ * carrying its number and class as attributes. That is what makes a
+ * fire-detection plan workable on the other side: a schedule can count the
+ * smoke detectors, a replacement can be swapped in every placement at once,
+ * and the number on the drawing is the number in the model. The same shapes as
+ * loose segments are a picture of a plan.
+ */
+export interface DXFDeviceSymbol {
+  readonly position: Point2D;
+  /**
+   * The symbol family — one block is defined per distinct value.
+   *
+   * Not per occurrence: two smoke detectors are the same symbol, and a file
+   * with one block per device defeats the point of having blocks.
+   */
+  readonly family: string;
+  /** Unit-square geometry, scaled and placed by the writer. */
+  readonly paths: readonly (readonly Point2D[])[];
+  /** Half the drawn size in drawing units — a mark is sized in paper mm. */
+  readonly half: number;
+  /** Its IFC class, for a schedule to group by. */
+  readonly ifcType?: string;
+  /** What the model calls it. */
+  readonly name?: string;
+}
+
 export interface DXFPlanOverlays {
   /** Room and door labels, one entry per LINE of text. */
   readonly labels?: readonly DXFPlanText[];
-  /** Opening symbols and device marks, as loose segments. */
+  /** Opening symbols, as loose segments — they belong to the wall, not to a
+   *  countable thing, so a block would claim more than is true. */
   readonly symbolLines?: readonly { readonly start: Point2D; readonly end: Point2D }[];
   /** Room outlines, carrying number and name as XDATA. */
   readonly rooms?: readonly DXFRoomPolygon[];
+  /** Placed devices, as blocks with attributes. */
+  readonly devices?: readonly DXFDeviceSymbol[];
 }
 
 /** One DXF reference underlay to embed (mirrors `SVGUnderlayOptions`). */
@@ -128,6 +160,11 @@ const LABEL_COLOR = '#000000';
  * (number, then designation) under it.
  */
 const ROOM_APPID = 'IFCLITE';
+/** Devices get their own layer: it is the first thing an installer turns on. */
+const DEVICE_LAYER = 'BM-GERAETE';
+const DEVICE_COLOR = '#e11d48';
+/** Registered application for the device XDATA — see DXFDeviceSymbol. */
+const DEVICE_APPID = 'IFCLITE_DEVICE';
 
 export class DXFExporter {
   export(drawing: Drawing2D, options: DXFExportOptions = {}): string {
@@ -210,6 +247,46 @@ export class DXFExporter {
       const layer = writer.layer(SYMBOL_LAYER, SYMBOL_COLOR);
       for (const line of symbolLines) {
         writer.addLine(map(line.start), map(line.end), layer);
+      }
+    }
+
+    const devices = plan.devices ?? [];
+    if (devices.length > 0) {
+      const layer = writer.layer(DEVICE_LAYER, DEVICE_COLOR);
+      for (const device of devices) {
+        // One block per family, defined on first sight. `defineBlock` keeps
+        // the first definition, so this needs no bookkeeping here.
+        const blockName = writer.defineBlock(`BM-${device.family}`, {
+          lines: [],
+          // The mark's own unit shape, scaled to the drawn size. The INSERT
+          // then places it at scale 1 rather than carrying the size, so a
+          // reader that ignores INSERT scaling still gets the right symbol.
+          polylines: device.paths
+            .filter((path) => path.length >= 2)
+            .map((path) => path.map((p) => ({
+              x: p.x * device.half * 2,
+              y: p.y * device.half * 2,
+            }))),
+          // Both invisible. A schedule reads an attribute either way, and a
+          // plan with every device's full name printed beside it is a plan
+          // nobody can read — the symbols are what the drawing is for. A
+          // visible number belongs here once a short identifier exists to put
+          // in it; a permanently blank field would read as missing data.
+          attributes: [
+            { tag: 'NAME', offset: { x: 0, y: 0 }, height: device.half, invisible: true },
+            { tag: 'IFCTYP', offset: { x: 0, y: 0 }, height: device.half, invisible: true },
+          ],
+        });
+        writer.addInsert(blockName, device.position, layer, {
+          values: { NAME: device.name ?? '', IFCTYP: device.ifcType ?? '' },
+          // XDATA as well as attributes: attributes are what a CAD schedule
+          // reads, XDATA is what survives a round trip through a reader that
+          // drops attributes it was not expecting. Cheap, and they disagree
+          // about nothing.
+          xdata: device.name || device.ifcType
+            ? { appId: DEVICE_APPID, strings: [device.name ?? '', device.ifcType ?? ''] }
+            : undefined,
+        });
       }
     }
 
