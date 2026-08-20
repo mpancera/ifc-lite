@@ -33,6 +33,7 @@
 
 import type { MeshData } from '@ifc-lite/geometry';
 import type { SpaceGraphView, GraphNodeKind } from './graphView.js';
+import { SYNTHETIC_ID_BASE } from '@/lib/mutations/syntheticIds';
 
 /**
  * Where the diagram's synthetic ids start.
@@ -41,7 +42,7 @@ import type { SpaceGraphView, GraphNodeKind } from './graphView.js';
  * diagram can never claim the same id, and far above any real express id so
  * the overlay's clear-up can actually remove them.
  */
-export const GRAPH_ID_BASE = 0x71000000;
+export const GRAPH_ID_BASE = SYNTHETIC_ID_BASE + 0x01000000;
 
 /** Metres. A node is a cube of this size, an edge a bar of this thickness. */
 export const NODE_SIZE = 0.6;

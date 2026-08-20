@@ -36,6 +36,7 @@
 import { useCallback } from 'react';
 import { MutablePropertyView, StoreEditor } from '@ifc-lite/mutations';
 import type { IfcDataStore } from '@ifc-lite/parser';
+import { isSyntheticId } from '@/lib/mutations/syntheticIds';
 import { useViewerStore } from '@/store';
 import type { FederatedModel } from '@/store/types';
 import type { RenderFrameOffsets } from '@/components/viewer/tools/measure-modes/coordinates';
@@ -156,6 +157,10 @@ function membersByModel(zoneSet: ZoneSet): Map<string, ZoneMembership[]> {
     const assignment = record[zoneSet.id];
     if (!assignment || assignment.touchedZoneIds.length === 0) continue;
     const ref = resolveEntityRef(globalId);
+    // Scene decoration is not model content. A sketch ghost or a diagram left
+    // switched on while the boxes were assigned would otherwise be written
+    // into the file as a member that resolves to nothing — see `syntheticIds`.
+    if (isSyntheticId(ref.expressId)) continue;
     const list = byModel.get(ref.modelId);
     const member: ZoneMembership = { expressId: ref.expressId, touchedZoneIds: assignment.touchedZoneIds };
     if (list) list.push(member);

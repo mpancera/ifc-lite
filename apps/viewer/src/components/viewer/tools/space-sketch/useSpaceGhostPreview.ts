@@ -23,6 +23,7 @@
  * per-edit churn can't reset the camera or break picking.
  */
 
+import { SYNTHETIC_ID_BASE } from '@/lib/mutations/syntheticIds';
 import { useCallback, useEffect, useRef } from 'react';
 import { useViewerStore } from '@/store';
 import { buildElementMesh } from '@/store/slices/addElementMeshes';
@@ -48,7 +49,7 @@ const GHOST_COLOR: [number, number, number, number] = [0.25, 0.62, 0.95, 0.4];
  *  allocation restarts at the band base on each rebuild. A module-level
  *  counter would instead walk upward forever across mounts and long sessions,
  *  creeping toward real federated ids. */
-const GHOST_ID_BASE = 0x70000000;
+const GHOST_ID_BASE = SYNTHETIC_ID_BASE;
 
 /** First id safely above every real entity: the band base, or one past the
  *  highest federated global id (idOffset + maxExpressId) should offsets ever
