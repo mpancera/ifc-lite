@@ -25,6 +25,7 @@ import {
   mergeInheritedPropertySets,
 } from '@ifc-lite/parser';
 import { resolveEntityPredefinedType } from '@/lib/entity-predefined-type';
+import { buildOverlayRelationIndex } from '@/lib/mutations/overlayRelationIndex';
 import { readZones } from '@/lib/ifcZones/membership';
 import { themeOfZone } from '@/lib/ifcZones/themes';
 import { authoredEntities } from '@/lib/mutations/authoredEntities';
@@ -121,11 +122,29 @@ export function createLensDataProvider(
       if (!view) continue;
       const toGlobal = (expressId: number) => toGlobalIdFromModels(offsets, entry.id, expressId);
       // Authoring an element also creates its placement/profile/solid entities.
-      // Only the product is registered against a storey, and only products may
-      // reach the colour map — otherwise auto-colour legend counts are inflated
-      // by geometry plumbing that never renders.
+      // Only the product is registered in the spatial structure, and only
+      // products may reach the colour map — otherwise auto-colour legend counts
+      // are inflated by geometry plumbing that never renders.
+      //
+      // Asked of the OVERLAY as well as the parse. The parsed hierarchy knows
+      // only what came out of the file, so a building authored in this session
+      // — every element of it — answered "not a product" and reached nothing:
+      // the by-zone lens went active over freshly painted zones and coloured
+      // nothing at all. Measured on a model built entirely in one session.
+      const overlayContained = new Set<number>();
+      const relIndex = buildOverlayRelationIndex([...view.getNewEntities()]);
+      if (relIndex.size > 0) {
+        for (const entity of view.getNewEntities()) {
+          // Contained in a storey, or aggregated into one — a space arrives by
+          // the second route and a wall by the first.
+          const containers = relIndex.related(entity.expressId, 'IfcRelContainedInSpatialStructure', 'inverse');
+          const parents = relIndex.related(entity.expressId, 'IfcRelAggregates', 'inverse');
+          if (containers.length > 0 || parents.length > 0) overlayContained.add(entity.expressId);
+        }
+      }
       const isProduct = (expressId: number) =>
-        entry.ifcDataStore.spatialHierarchy?.elementToStorey.has(expressId) ?? false;
+        (entry.ifcDataStore.spatialHierarchy?.elementToStorey.has(expressId) ?? false)
+        || overlayContained.has(expressId);
       for (const entity of view.getNewEntities()) {
         if (!isProduct(entity.expressId)) continue;
         overlayById.set(toGlobal(entity.expressId), {

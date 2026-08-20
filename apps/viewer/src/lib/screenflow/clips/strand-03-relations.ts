@@ -250,12 +250,20 @@ export const STRAND_03_RELATIONS: ScreenflowClip = {
       panel: 'graph',
       captionDe: 'Daraus fällt das Blockschema: Geräte unter Räumen, Räume unter dem Geschoss.',
       captionEn: 'The block schema falls out: devices under rooms, rooms under the storey.',
+      // Panel first, chain and starts second — and in separate phases, not one
+      // call. The panel clears its start picks when the model it is looking at
+      // changes, and on the frame it first appears that value is still
+      // settling; picks made before it were wiped out again a beat later.
+      // `schema-again` below has always been split this way and has never
+      // failed. Measured: starts went 0 -> 2 on this beat, then 2 -> 0 from
+      // GraphPanel on the next.
       prepare: (store) => {
         // At the default 300 px a chain graph shows a row of boxes and the
         // top of the next -- the shape it exists to make visible is cut off.
         store.getState().setBottomPanelHeight(560);
-        showBlockSchema(store);
+        store.getState().setGraphPanelVisible(true);
       },
+      perform: showBlockSchema,
       settled: (s) => s.graphPanelVisible && s.graphChainId === 'storey' && s.graphStartTypes.length > 0,
       settleTimeoutMs: 8000,
       holdMs: 5200,
@@ -288,9 +296,16 @@ export const STRAND_03_RELATIONS: ScreenflowClip = {
         // Rooms back on: they are what gets painted. Strand 1 turned them off
         // so the devices could be seen, and this clip starts from its result.
         if (!state.typeVisibility.rooms) state.toggleTypeVisibility('rooms');
+        // And let go of the detector the sample beats left selected. The brush
+        // paints whatever is selected, so an armed brush over a device puts a
+        // refusal on screen -- "IFC lässt nur Räume zu" -- in the middle of a
+        // take. A person picking up a brush is not still holding the last
+        // thing they clicked either.
+        state.setSelectedEntityId(null);
+        state.setSelectedEntity(null);
         state.setActiveTool('zonePaint');
       },
-      settled: (s) => s.activeTool === 'zonePaint' && s.typeVisibility.rooms,
+      settled: (s) => s.activeTool === 'zonePaint' && s.typeVisibility.rooms && s.selectedEntityId === null,
       settleTimeoutMs: 8000,
       holdMs: 4200,
     },

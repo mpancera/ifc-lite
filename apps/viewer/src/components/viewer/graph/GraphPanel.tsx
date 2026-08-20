@@ -26,7 +26,7 @@
  * One model at a time, on purpose — see `graphSourceFor`.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   Controls,
@@ -293,10 +293,19 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
     [store, overlay, mutationVersion],
   );
 
-  // A model swap invalidates both selections: express ids and the type list
+  // A model SWAP invalidates both selections: express ids and the type list
   // belong to the model they came from. Picked systems are express ids, so
   // carrying them over would point at whatever happens to share the number.
+  //
+  // A swap, though — not the first mount. Clearing on mount throws away picks
+  // that were made before this panel opened, which is the normal order for
+  // anything that sets the graph up and then reveals it: the caller's chain
+  // and start types were simply gone by the time the panel appeared.
+  const clearedForModelRef = useRef<string | null | undefined>(undefined);
   useEffect(() => {
+    const first = clearedForModelRef.current === undefined;
+    clearedForModelRef.current = effectiveModelId;
+    if (first) return;
     clearGraphStarts();
     setPositioned(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the setter is stable; re-running on it would clear the picks the effect just allowed.

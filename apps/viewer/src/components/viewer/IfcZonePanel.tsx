@@ -51,6 +51,7 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
   // Every zone write bumps this; without it the list would show the state the
   // panel opened with.
   const mutationVersion = useViewerStore((s) => s.mutationVersion);
+  const mutationViews = useViewerStore((s) => s.mutationViews);
   const ifcZonesOf = useViewerStore((s) => s.ifcZonesOf);
 
   const activeIfcZoneKey = useViewerStore((s) => s.activeIfcZoneKey);
@@ -133,10 +134,29 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
    */
   const colourTheme = themeOfZone(activeZone?.objectType ?? null)?.id ?? newThemeId;
 
+  /**
+   * The IFC class of an entity, from the parse or from this session's edits.
+   *
+   * The overlay is consulted first and is not optional: a room drawn in this
+   * session is not in the parsed store at all, so asking only the parse
+   * answered `Unknown` for it — and the brush then refused every freshly drawn
+   * room with "Unknown kann nicht Mitglied einer Zone sein". Draw rooms, then
+   * try to group them, and the tool said no; that is the ordinary order of
+   * work, not an edge case.
+   */
   const typeOf = useCallback((modelId: string, expressId: number): string | null => {
+    const view = mutationViews.get(modelId);
+    if (view) {
+      for (const entity of view.getNewEntities()) {
+        if (entity.expressId === expressId) return entity.type;
+      }
+    }
     const store = models.get(modelId)?.ifcDataStore;
     return store?.entities?.getTypeName?.(expressId) ?? null;
-  }, [models]);
+    // `mutationVersion` is in the list because the overlay object is mutated in
+    // place: the map identity does not change when an element is added to it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [models, mutationViews, mutationVersion]);
 
   /**
    * The brush: every room the user selects joins (or leaves) the active zone.
