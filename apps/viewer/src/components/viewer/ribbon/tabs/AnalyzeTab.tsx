@@ -87,12 +87,18 @@ export function AnalyzeTab() {
           active={activeWorkspacePanels.has('layers')}
           onClick={() => useViewerStore.getState().toggleWorkspacePanel('layers')}
         />
-        {/* Location zones (#1810), reachable from a toolbar for the first time
-            (#2508): the ActivityBar rail was its only entry point. */}
+        {/* The SAME panel Author → Compartments opens, and it said so nowhere:
+            one button called it "Zones" and the other "Compartments", which
+            reads as two tools that do different things. The panel's own title
+            has been Compartments all along — this follows it.
+
+            Both entries stay: this tab is where a compartment gets looked at,
+            the Author tab is where one gets drawn. Zones over ROOMS are a
+            different thing again and live on Author → Zones (IfcZone). */}
         <RibbonLargeButton
           icon={ZoneBox}
-          label="Zones"
-          tooltip="Location zones (sections / takt areas)"
+          label="Compartments"
+          tooltip="Abschnitte (Bereiche mit eigenem Körper) ansehen und auswerten — dieselben, die unter Author gezeichnet werden"
           active={activeWorkspacePanels.has('zones')}
           onClick={() => useViewerStore.getState().toggleWorkspacePanel('zones')}
         />
