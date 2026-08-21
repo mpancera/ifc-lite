@@ -57,6 +57,7 @@ import { getInheritanceChainForEntity } from '@ifc-lite/parser';
 import { useViewerStore } from '@/store';
 import { expressTypeCounts, graphSourceFor, systemsIn, type GraphStore } from '@/lib/graph/storeSource';
 import { layoutGraph, LayoutSuperseded, NODE_SIZE } from '@/lib/graph/layout';
+import { describeLayoutFailure, type LayoutFailure } from '@/lib/graph/layoutFailure';
 import { RELATION_STYLE } from '@/lib/graph/relationStyle';
 import { GRAPH_NODE_TYPES, type GraphNodeData } from './GraphNodes';
 import { useGraphOverlay } from '@/hooks/useGraphOverlay';
@@ -263,6 +264,10 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
   const clearGraphStarts = useViewerStore((s) => s.clearGraphStarts);
   const [positioned, setPositioned] = useState<{ nodes: Node[]; edges: Edge[] } | null>(null);
   const [laying, setLaying] = useState(false);
+  // Why the area is empty. The layout runs in a worker, and a worker is what
+  // a managed laptop's policy or a stale chunk stops first — silently, until
+  // this said so.
+  const [layoutFailure, setLayoutFailure] = useState<LayoutFailure | null>(null);
 
   const chain = CHAINS.find((c) => c.id === chainId) ?? CHAINS[0];
 
@@ -410,6 +415,7 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
         const dangling = new Set(
           ranks.slice(0, -1).flatMap((kind) => danglingNodes(graph, kind).map((n) => n.id)),
         );
+        setLayoutFailure(null);
         setPositioned({
           nodes: graph.nodes.map((n) => ({
             id: n.id,
@@ -473,6 +479,7 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
         if (cancelled || err instanceof LayoutSuperseded) return;
         console.error('[GraphPanel] layout failed', err);
         setPositioned(null);
+        setLayoutFailure(describeLayoutFailure(err));
       })
       .finally(() => {
         if (!cancelled) setLaying(false);
@@ -725,6 +732,23 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
           <div className="absolute right-3 top-3 z-10 flex items-center gap-1.5 text-xs text-zinc-500">
             <Loader2 className="h-3 w-3 animate-spin" />
             Layout …
+          </div>
+        )}
+
+        {layoutFailure && !laying && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-8 text-center">
+            <p className="text-xs font-medium text-red-600 dark:text-red-400">
+              {layoutFailure.message}
+            </p>
+            {layoutFailure.hint && (
+              <p className="max-w-md text-xs text-zinc-500 dark:text-zinc-400">{layoutFailure.hint}</p>
+            )}
+            {/* The raw text verbatim: it is the one line a bug report needs,
+                and reading it off the screen beats asking somebody to open
+                the developer console. */}
+            <code className="max-w-md break-words text-[10px] text-zinc-400 dark:text-zinc-500">
+              {layoutFailure.detail}
+            </code>
           </div>
         )}
 
