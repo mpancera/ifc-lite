@@ -51,6 +51,8 @@ import { PlanOpeningSymbols } from './PlanOpeningSymbols';
 import { PlanNorthArrow } from './PlanNorthArrow';
 import { PlanDeviceMarks } from './PlanDeviceMarks';
 import { PlanRoomShape } from './PlanRoomShape';
+import { PlanMoveGizmo } from './PlanMoveGizmo';
+import { getEntityCenter } from '@/utils/viewportUtils';
 import { PlanZoneOutlines } from './PlanZoneOutlines';
 import { snapSegmentsFrom } from '@/lib/roomShape/snap';
 
@@ -355,6 +357,9 @@ export function PlanView({
   const selectedEntity = useViewerStore((s) => s.selectedEntity);
   const readSlabFootprint = useViewerStore((s) => s.readSlabFootprint);
   const reshapeSpace = useViewerStore((s) => s.reshapeSpace);
+  const editEnabled = useViewerStore((s) => s.editEnabled);
+  const translateEntity = useViewerStore((s) => s.translateEntity);
+  const readEntityPosition = useViewerStore((s) => s.readEntityPosition);
   const mutationVersion = useViewerStore((s) => s.mutationVersion);
 
   const roomShape = useMemo(() => {
@@ -376,6 +381,40 @@ export function PlanView({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomShapeEditKey, selectedEntity, storeyModelId, models, readSlabFootprint, mutationVersion]);
+
+  /**
+   * Where the move gizmo sits: the selected object's centre, in drawing space.
+   *
+   * Taken from the MESHES rather than from the placement origin, for the same
+   * reason the 3D gizmo does it — a wall's origin is at one end, and a gizmo
+   * hanging off the corner of the thing it moves is hard to aim at. The
+   * drawing's frame and the renderer's agree on the plan axes: drawing x is
+   * renderer x, drawing y is renderer z.
+   *
+   * `null` whenever the gizmo should not be there at all: no edit mode, another
+   * tool in hand, nothing selected, a selection from a different model, or an
+   * element whose placement cannot be translated. The element editor takes
+   * precedence too — while a room's outline is being reshaped, its handles own
+   * the pointer and a gizmo on top of them would only be in the way.
+   */
+  const gizmoAnchor = useMemo(() => {
+    if (!editEnabled || activeTool !== 'select') return null;
+    if (roomShapeEditKey) return null;
+    if (!selectedEntity || !storeyModelId) return null;
+    if (selectedEntity.modelId !== storeyModelId) return null;
+    if (!readEntityPosition(storeyModelId, selectedEntity.expressId)) return null;
+    const meshes = (models.get(storeyModelId)?.geometryResult ?? geometryResult)?.meshes ?? null;
+    const centre = getEntityCenter(meshes, selectedEntity.expressId);
+    if (!centre) return null;
+    return { x: centre.x, y: centre.z };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    editEnabled, activeTool, roomShapeEditKey, selectedEntity, storeyModelId,
+    models, geometryResult, readEntityPosition, mutationVersion,
+  ]);
+
+  /** One undo batch per drag, and one complaint per refusal. */
+  const gizmoDrag = useRef<{ batchId: string; complained: boolean } | null>(null);
 
   /**
    * What a dragged corner can land on: the CUT lines, which at plan height are
@@ -1508,6 +1547,43 @@ export function PlanView({
           looked at, a name is read, and where they collide the text wins. */}
       {planShowDeviceMarks && (
         <PlanDeviceMarks marks={deviceMarks} transform={planTransform} />
+      )}
+
+      {/* Moving the whole object. Below the reshape handles in the source and
+          mutually exclusive with them by `gizmoAnchor`: only one of the two
+          answers the pointer at a time. */}
+      {gizmoAnchor && storeyModelId && selectedEntity && (
+        <PlanMoveGizmo
+          anchor={gizmoAnchor}
+          transform={planTransform}
+          onDragStart={() => {
+            gizmoDrag.current = {
+              batchId: `plan-move-${Date.now()}`,
+              complained: false,
+            };
+          }}
+          onDragEnd={() => { gizmoDrag.current = null; }}
+          onMove={(step) => {
+            const result = translateEntity(
+              storeyModelId,
+              selectedEntity.expressId,
+              // Drawing space to IFC: y runs the other way. Metres either way —
+              // the store normalises a foot-unit file itself (measured).
+              [step.x, -step.y, 0],
+              gizmoDrag.current?.batchId,
+            );
+            if (result.ok) return true;
+            // Said once per drag, not once per frame: a refused move is a
+            // standing condition (a read-only role, an unresolvable placement),
+            // and sixty toasts a second would bury it. Saying nothing at all is
+            // worse — that is how the room reshape looked broken for a week.
+            if (gizmoDrag.current && !gizmoDrag.current.complained) {
+              gizmoDrag.current.complained = true;
+              toast.error(result.reason);
+            }
+            return false;
+          }}
+        />
       )}
 
       {/* The reshape handles sit on top of everything: they are the thing
