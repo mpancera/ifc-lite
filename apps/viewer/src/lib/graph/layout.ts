@@ -17,6 +17,9 @@
  */
 
 import ELK, { type ElkNode } from 'elkjs/lib/elk-api.js';
+// `?url` on purpose: it hands back the file's ADDRESS and copies it to the
+// build untouched, instead of putting it through the bundler. See `engine()`.
+import elkWorkerUrl from 'elkjs/lib/elk-worker.min.js?url';
 import type { Graph, GraphNodeKind } from '@ifc-lite/graph';
 
 /**
@@ -52,9 +55,21 @@ function engine(): InstanceType<typeof ELK> {
   if (elk) return elk;
   elk = new ELK({
     // A classic worker, not a module one: `elk-worker.min.js` is a compiled
-    // bundle with no import/export in it, and asking Vite for `type: 'module'`
-    // here fails at runtime rather than at build time.
-    workerFactory: () => new Worker(new URL('elkjs/lib/elk-worker.min.js', import.meta.url)),
+    // GWT bundle with no import/export in it, and asking Vite for
+    // `type: 'module'` here fails at runtime rather than at build time.
+    //
+    // Which is why the address comes from `?url` rather than from
+    // `new URL(…, import.meta.url)`. The latter asks Vite to BUNDLE the file
+    // as a worker, and this app sets `worker.format: 'es'` (the geometry and
+    // wasm workers need it) — so the built asset came out as an ES module and
+    // died on its own first line the moment a classic worker ran it:
+    //
+    //   Uncaught SyntaxError: Unexpected token 'export'
+    //
+    // Invisible in dev, where the original file is served as it is, and broken
+    // in every deployed build: the graph simply never appeared. `?url` copies
+    // the file verbatim and leaves the format question unasked.
+    workerFactory: () => new Worker(elkWorkerUrl),
   });
   return elk;
 }
