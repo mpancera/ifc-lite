@@ -187,7 +187,16 @@ export function GeometryEditCard({ modelId, entityId, entityLabel }: GeometryEdi
   const endRoomShapeEdit = useViewerStore((s) => s.endRoomShapeEdit);
   const requestRoomShapeCommit = useViewerStore((s) => s.requestRoomShapeCommit);
   const models = useViewerStore((s) => s.models);
-  const reshapable = models.get(modelId)?.ifcDataStore?.entities?.getTypeName?.(entityId) === 'IfcSpace';
+  // Which elements have an outline editor in the plan. A room is edited as a
+  // polygon, a wall as its two ends; both are "Edit shape" to the user, and
+  // both are refused for a wall whose profile the resize cannot express —
+  // `readWallEndpoints` returning null is that answer.
+  const editedType = models.get(modelId)?.ifcDataStore?.entities?.getTypeName?.(entityId);
+  // A room is asked by class; a wall is asked by whether its ends can be read
+  // at all, which is the real precondition and also covers a wall authored in
+  // this session — the parsed store has never heard of that one.
+  const wallEnds = readWallEndpoints(modelId, entityId);
+  const reshapable = editedType === 'IfcSpace' || wallEnds !== null;
   const reshaping = roomShapeEditKey === `${modelId}:${entityId}`;
   const onSplit = useCallback(() => {
     // Arm the tool with this entity pre-targeted so the user's next
@@ -373,7 +382,9 @@ export function GeometryEditCard({ modelId, entityId, entityLabel }: GeometryEdi
                 <TooltipContent>
                   {reshaping
                     ? 'Umformen abschliessen (Enter) — Esc verwirft'
-                    : 'Den Umriss im 2D-Plan an seinen Ecken ziehen'}
+                    : editedType === 'IfcSpace'
+                      ? 'Den Umriss im 2D-Plan an seinen Ecken ziehen'
+                      : 'Die Wandenden im 2D-Plan ziehen'}
                 </TooltipContent>
               </Tooltip>
             )}

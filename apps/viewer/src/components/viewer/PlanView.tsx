@@ -51,6 +51,7 @@ import { PlanOpeningSymbols } from './PlanOpeningSymbols';
 import { PlanNorthArrow } from './PlanNorthArrow';
 import { PlanDeviceMarks } from './PlanDeviceMarks';
 import { PlanRoomShape } from './PlanRoomShape';
+import { PlanWallEnds } from './PlanWallEnds';
 import { PlanMoveGizmo } from './PlanMoveGizmo';
 import { getEntityCenter } from '@/utils/viewportUtils';
 import { PlanZoneOutlines } from './PlanZoneOutlines';
@@ -359,6 +360,8 @@ export function PlanView({
   const selectedEntity = useViewerStore((s) => s.selectedEntity);
   const readSlabFootprint = useViewerStore((s) => s.readSlabFootprint);
   const reshapeSpace = useViewerStore((s) => s.reshapeSpace);
+  const readWallEndpoints = useViewerStore((s) => s.readWallEndpoints);
+  const resizeWall = useViewerStore((s) => s.resizeWall);
   const editEnabled = useViewerStore((s) => s.editEnabled);
   const translateEntity = useViewerStore((s) => s.translateEntity);
   const readEntityPosition = useViewerStore((s) => s.readEntityPosition);
@@ -419,14 +422,52 @@ export function PlanView({
   const gizmoDrag = useRef<{ batchId: string; complained: boolean } | null>(null);
 
   /**
+   * The selected WALL's ends, in drawing space — the same mode, a different
+   * shape. `roomShapeEditKey` names the element being reshaped whatever it is;
+   * which editor appears is decided by its IFC class, here and nowhere else.
+   * (The key keeps its room-era name until the element-edit rework renames it
+   * in one pass.)
+   */
+  const wallEnds = useMemo(() => {
+    if (!roomShapeEditKey || !selectedEntity || !storeyModelId) return null;
+    if (roomShapeEditKey !== `${selectedEntity.modelId}:${selectedEntity.expressId}`) return null;
+    if (selectedEntity.modelId !== storeyModelId) return null;
+    // No type check: the endpoint read IS the precondition — it answers null
+    // for anything that is not a rectangle-profile wall — and asking the parsed
+    // store for a class would exclude a wall authored in THIS session, which is
+    // not in that store at all. That is exactly the wall somebody is most
+    // likely to want to adjust.
+    const ends = readWallEndpoints(storeyModelId, selectedEntity.expressId);
+    if (!ends) return null;
+    // Two conversions, not one. Storey-local IFC to drawing space: drawing y is
+    // IFC y negated, the mapping `planPick` pins. And the wall chain speaks the
+    // FILE's length unit — unlike `readEntityPosition`, which normalises to
+    // metres — so a foot file arrives at 3.28× its size unless it is scaled
+    // here. Measured, not assumed: a wall drawn 2 m from the origin reads back
+    // as 6.56.
+    const unit = models.get(storeyModelId)?.ifcDataStore?.lengthUnitScale ?? 1;
+    return {
+      expressId: selectedEntity.expressId,
+      unit,
+      start: { x: ends.start[0] * unit, y: -ends.start[1] * unit },
+      end: { x: ends.end[0] * unit, y: -ends.end[1] * unit },
+      // The HEIGHT is carried through untouched, in the file's own unit — a
+      // plan has nothing to say about it.
+      startZ: ends.start[2],
+      endZ: ends.end[2],
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomShapeEditKey, selectedEntity, storeyModelId, models, readWallEndpoints, mutationVersion]);
+
+  /**
    * What a dragged corner can land on: the CUT lines, which at plan height are
    * the walls. Projected and hidden lines describe things above or below the
    * cut, and a room corner pulled onto a roof overhang is worse than no snap.
    */
   const roomSnapSegments = useMemo(() => {
-    if (!roomShape || !drawing) return [];
+    if ((!roomShape && !wallEnds) || !drawing) return [];
     return snapSegmentsFrom(drawing.lines ?? [], SNAP_LINE_CATEGORIES);
-  }, [roomShape, drawing]);
+  }, [roomShape, wallEnds, drawing]);
 
   // ── The space graph, as a diagram ───────────────────────────────────────
   // The same graph the escape routes are walked on and the door numbers come
@@ -1588,6 +1629,33 @@ export function PlanView({
             }
             return false;
           }}
+        />
+      )}
+
+      {/* A wall being reshaped: its two ends. Mutually exclusive with the room
+          outline by construction — an element is one class or the other. */}
+      {wallEnds && storeyModelId && (
+        <PlanWallEnds
+          start={wallEnds.start}
+          end={wallEnds.end}
+          transform={planTransform}
+          snapSegments={roomSnapSegments}
+          snapEnabled={snapEnabled}
+          commitSignal={roomShapeCommitTick}
+          onCommit={(a, b) => {
+            const result = resizeWall(
+              storeyModelId,
+              wallEnds.expressId,
+              // Back to IFC's frame AND the file's unit, with each end's own
+              // height preserved.
+              [a.x / wallEnds.unit, -a.y / wallEnds.unit, wallEnds.startZ],
+              [b.x / wallEnds.unit, -b.y / wallEnds.unit, wallEnds.endZ],
+            );
+            if (result.ok) toast.success(`Wand geändert — ${result.newLength.toFixed(2)} m`);
+            else toast.error(result.reason);
+            endRoomShapeEdit();
+          }}
+          onCancel={endRoomShapeEdit}
         />
       )}
 

@@ -2413,27 +2413,43 @@ export const createMutationSlice: StateCreator<
       { entityId: chain.profileOriginPointId, index: 0, value: [length / 2, 0] },
     ]);
 
-    // Mirror the resize to peers as a geometry replace: regenerate the wall mesh
-    // at the new dimensions (built at its current world position) and swap the
-    // entity's room blob. The owner's own mesh is unchanged here (resize is
-    // data-only locally today); peers re-hydrate the new blob. No-op off-collab.
+    // Rebuild the wall's mesh at its new dimensions, and swap it in HERE —
+    // not only for collab peers, which is all this did before. A resize wrote
+    // the file and left the mesh list describing the old wall, so the plan cut
+    // (which is derived from that list) went on drawing the old one: the same
+    // "the file went back and the drawing did not" the room reshape names.
+    //
+    // # Units
+    // The edit chain speaks the FILE's length unit — feet in a foot file —
+    // while meshes are metres, so the dimensions are scaled on the way into the
+    // builder. Mixing the two put a wall a third of its size on a foot model,
+    // which is invisible on the metre models this was written against.
     if (Number.isFinite(chain.height) && chain.height > 0) {
       const globalId = toGlobalIdFromModels(get().models, modelId, expressId);
       const meshes =
         get().models.get(modelId)?.geometryResult?.meshes ?? get().geometryResult?.meshes ?? null;
       const bounds = getEntityBounds(meshes, globalId);
+      const unit = get().models.get(modelId)?.ifcDataStore?.lengthUnitScale ?? 1;
+      const toMetres = (p: [number, number, number]): [number, number, number] =>
+        [p[0] * unit, p[1] * unit, p[2] * unit];
       const newMesh = buildElementMesh({
         type: 'wall',
         globalId,
         storeyElevation: bounds?.min.y ?? 0, // renderer Y base = IFC Z storey elevation
         payload: {
           type: 'wall',
-          params: { Thickness: chain.thickness, Height: chain.height },
-          start: newStart,
-          end: newEnd,
+          params: { Thickness: chain.thickness * unit, Height: chain.height * unit },
+          start: toMetres(newStart),
+          end: toMetres(newEnd),
         },
       });
-      if (newMesh) get().mirrorEntityGeometry(modelId, expressId, newMesh);
+      if (newMesh) {
+        // The same three things a reshape restores: the mesh every 2D reader
+        // cuts from, the renderer's own copy of it, and the peers'.
+        get().replaceMeshesForEntity([globalId, expressId], newMesh);
+        get().setPendingMeshRemovals(new Set([globalId]));
+        get().mirrorEntityGeometry(modelId, expressId, newMesh);
+      }
     }
 
     return { ok: true, newLength: length };
