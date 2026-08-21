@@ -103,6 +103,7 @@ import {
   RAD_TO_DEG, DEG_TO_RAD,
 } from '@/lib/plan/planRotation';
 import { pickInPlan, planScreenToDrawing, planPointToRenderer, planPointToStoreyLocal } from '@/lib/plan/planPick';
+import { isPlanControlTarget } from '@/lib/plan/planControlTarget';
 import { setPlanDrawingState, setPlanViewport } from '@/lib/plan/planViewport';
 import { handleAddElementDrop } from './selectionHandlers';
 import { toGlobalIdFromModels, fromGlobalIdFromModels } from '@/store/globalId';
@@ -1225,6 +1226,8 @@ export function PlanView({
   const annotating = annotation2DActiveTool !== 'none';
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    // Not ours: leave the press unrecorded so the release cannot select.
+    if (isPlanControlTarget(e.target)) { pressRef.current = null; return; }
     if (e.button === 2) { panRef.current = { x: e.clientX, y: e.clientY }; return; }
     if (e.button !== 0) return;
 
@@ -1342,6 +1345,7 @@ export function PlanView({
     }
     const press = pressRef.current;
     pressRef.current = null;
+    if (isPlanControlTarget(e.target)) return;
     if (e.button !== 0 || !press) return;
     if (Math.abs(e.clientX - press.x) > CLICK_SLOP_PX) return;
     if (Math.abs(e.clientY - press.y) > CLICK_SLOP_PX) return;

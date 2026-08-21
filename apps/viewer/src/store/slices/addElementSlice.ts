@@ -21,6 +21,7 @@
 import { type StateCreator } from 'zustand';
 import type { CatalogEntry } from '@/lib/catalog';
 import { VIEWER_ROLE_ID, normalizeRoleId } from '@/lib/roles/disciplineRoles';
+import { mayCreateEntities } from '@/lib/roles/roleGuard';
 import type { BoundaryMode } from '@ifc-lite/create';
 
 const ROLE_STORAGE_KEY = 'ifclite.authoring.discipline-role';
@@ -404,7 +405,16 @@ export const createAddElementSlice: StateCreator<AddElementSlice, [], [], AddEle
     } catch {
       // Storage blocked — the choice still applies for this session.
     }
-    set({ activeDisciplineSystemId });
+    // Leaving edit mode ON under a role that may not write would put the
+    // handles and the gizmo back on screen with every drag ending in a
+    // refusal — the exact confusion the greyed-out toggle exists to prevent.
+    const mayAuthor = mayCreateEntities(normalizeRoleId(activeDisciplineSystemId)).allowed;
+    // `editEnabled` belongs to the ui slice; the store is one object, so the
+    // cast is about the slice's local type, not about reaching somewhere it
+    // should not.
+    set((mayAuthor
+      ? { activeDisciplineSystemId }
+      : { activeDisciplineSystemId, editEnabled: false }) as Partial<AddElementSlice>);
   },
   setRoleDialogOpen: (roleDialogOpen) => set({ roleDialogOpen }),
   setAddElementType: (addElementType) =>

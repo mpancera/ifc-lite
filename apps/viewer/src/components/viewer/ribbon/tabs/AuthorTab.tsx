@@ -13,6 +13,7 @@ import { Blocks, Box, Boxes, Brush, DoorClosed,
   Radio, DoorOpen, FileDiff, Library, ListChecks, Wand2 } from 'lucide-react';
 import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, List, Select, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
+import { useMayAuthor } from '@/hooks/useMayAuthor';
 import { useIfc } from '@/hooks/useIfc';
 import { tourAnchor, toolAnchor } from '@/lib/tours/anchors';
 import { BulkPropertyEditor } from '../../BulkPropertyEditor';
@@ -40,6 +41,7 @@ export function AuthorTab() {
   const activeTool = useViewerStore((state) => state.activeTool);
   const setActiveTool = useViewerStore((state) => state.setActiveTool);
   const editEnabled = useViewerStore((state) => state.editEnabled);
+  const mayAuthor = useMayAuthor();
   const toggleEditEnabled = useViewerStore((state) => state.toggleEditEnabled);
   // Collab role: editing is reserved for editor/admin. Derive from the
   // reactive role so the Edit switch enables/disables live when the role
@@ -78,13 +80,15 @@ export function AuthorTab() {
         <RibbonLargeButton
           icon={EditElement}
           label="Edit mode"
-          tooltip={canEditInSession
-            ? (editEnabled ? 'Exit edit mode' : 'Enter edit mode')
-            : 'Editing requires editor access in this shared session'}
+          tooltip={!canEditInSession
+            ? 'Editing requires editor access in this shared session'
+            : !mayAuthor.allowed
+              ? mayAuthor.reason
+              : (editEnabled ? 'Exit edit mode' : 'Enter edit mode')}
           shortcut="E"
           active={editEnabled}
           activeClassName={EDIT_ACTIVE_CLASS}
-          disabled={!canEditInSession}
+          disabled={!canEditInSession || !mayAuthor.allowed}
           onClick={toggleEditEnabled}
         />
         <RibbonSmallStack>

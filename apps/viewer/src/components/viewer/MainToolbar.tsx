@@ -77,6 +77,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Progress } from '@/components/ui/progress';
 import { useViewerStore } from '@/store';
+import { useMayAuthor } from '@/hooks/useMayAuthor';
 import { goHomeFromStore, resetVisibilityForHomeFromStore } from '@/store/homeView';
 import { executeBasketIsolate } from '@/store/basket/basketCommands';
 import { useIfc } from '@/hooks/useIfc';
@@ -328,6 +329,9 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
   const collabEditRole = useViewerStore((state) => state.collabRole);
   const canEditInSession =
     collabEditRole === null || collabEditRole === 'editor' || collabEditRole === 'admin';
+  // The ROLE's answer, separate from the session's: a shared session can grant
+  // editor access to somebody whose role is still read-only, and the reverse.
+  const mayAuthor = useMayAuthor();
   const selectedEntityId = useViewerStore((state) => state.selectedEntityId);
   const selectedEntityIds = useViewerStore((state) => state.selectedEntityIds);
   const hideEntities = useViewerStore((state) => state.hideEntities);
@@ -836,7 +840,7 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
           <Button
             variant={editEnabled ? 'default' : 'ghost'}
             size="icon-sm"
-            disabled={!canEditInSession}
+            disabled={!canEditInSession || !mayAuthor.allowed}
             aria-label={editEnabled ? 'Exit edit mode' : 'Enter edit mode'}
             aria-pressed={editEnabled}
             onClick={(e) => {
@@ -849,13 +853,15 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
           </Button>
         </TooltipTrigger>
         <TooltipContent>
-          {canEditInSession ? (
-            <>
-              {editEnabled ? 'Exit Edit Mode' : 'Edit Mode'} <span className="opacity-50">E</span>
-            </>
-          ) : (
-            'Editing requires editor access in this shared session'
-          )}
+          {!canEditInSession
+            ? 'Editing requires editor access in this shared session'
+            // The role's own words, so the tooltip says which role to pick
+            // rather than just that this one cannot.
+            : !mayAuthor.allowed ? mayAuthor.reason : (
+              <>
+                {editEnabled ? 'Exit Edit Mode' : 'Edit Mode'} <span className="opacity-50">E</span>
+              </>
+            )}
         </TooltipContent>
       </Tooltip>
 
