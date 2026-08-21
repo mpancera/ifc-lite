@@ -15,6 +15,7 @@
  *   - exactly one entity is selected
  *   - the selection has a placement chain that can be translated
  *     (`resolvePlacementChain` returns non-null)
+ *   - the 2D plan is NOT covering the viewport
  *
  * Coordinate spaces:
  *   The renderer is Y-up. IFC is Z-up. We project two world points
@@ -24,6 +25,16 @@
  *   reduces to a single dot product against the cursor's screen
  *   delta. No camera matrix inversion required; we lean entirely on
  *   the existing `projectToScreen` callback.
+ *
+ * # Why plan mode is excluded
+ * Plan mode COVERS the 3D viewport rather than replacing it (see
+ * `ViewportContainer`), so this overlay went on drawing over a plan whose
+ * transform it knows nothing about. Every position here comes from the 3D
+ * camera's projection, so the axis cross ended up floating somewhere beside
+ * the building while the selected element sat elsewhere entirely — reported,
+ * accurately, as "in 2D völlig falsch, eher ein Relikt". There is nothing to
+ * fall back to and nothing lost: a 3D-projected gizmo cannot move anything in
+ * a plan, and the plan carries its own edit handles.
  *
  * The drag commits a single `translateEntity` call per frame (no
  * batching). Each call lands as one mutation on the undo stack,
@@ -65,6 +76,7 @@ function pickViewerOrigin(meshes: import('@ifc-lite/geometry').MeshData[] | null
 export function GizmoOverlay() {
   const editEnabled = useViewerStore((s) => s.editEnabled);
   const activeTool = useViewerStore((s) => s.activeTool);
+  const viewMode = useViewerStore((s) => s.viewMode);
   const selectedEntity = useViewerStore((s) => s.selectedEntity);
   const selectedEntityId = useViewerStore((s) => s.selectedEntityId);
   const projectToScreen = useViewerStore((s) => s.cameraCallbacks.projectToScreen);
@@ -92,6 +104,8 @@ export function GizmoOverlay() {
   const ready = useMemo(() => {
     if (!editEnabled) return null;
     if (activeTool !== 'select') return null;
+    // The plan covers this viewport; see "Why plan mode is excluded" above.
+    if (viewMode === '2d') return null;
     if (!selectedEntity || selectedEntityId === null) return null;
     if (!projectToScreen) return null;
 
@@ -111,6 +125,7 @@ export function GizmoOverlay() {
   }, [
     editEnabled,
     activeTool,
+    viewMode,
     selectedEntity,
     selectedEntityId,
     models,

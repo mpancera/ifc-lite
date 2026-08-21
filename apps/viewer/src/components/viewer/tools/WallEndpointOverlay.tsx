@@ -11,6 +11,10 @@
  * Gating:
  *   - `editEnabled` is on
  *   - `activeTool === 'select'`
+ *   - the 2D plan is NOT covering the viewport — these handles are placed by
+ *     the 3D camera's projection, and plan mode covers that viewport instead
+ *     of replacing it, so they would sit somewhere unrelated to the wall.
+ *     Same reason the move gizmo stays out; see `GizmoOverlay`.
  *   - selected entity is a wall (`IfcWall`) with a resolvable wall
  *     edit chain — `readWallEndpoints` returning non-null is the gate
  *
@@ -76,6 +80,7 @@ interface ActiveDrag {
 export function WallEndpointOverlay() {
   const editEnabled = useViewerStore((s) => s.editEnabled);
   const activeTool = useViewerStore((s) => s.activeTool);
+  const viewMode = useViewerStore((s) => s.viewMode);
   const selectedEntity = useViewerStore((s) => s.selectedEntity);
   const projectToScreen = useViewerStore((s) => s.cameraCallbacks.projectToScreen);
   const getViewpoint = useViewerStore((s) => s.cameraCallbacks.getViewpoint);
@@ -91,6 +96,7 @@ export function WallEndpointOverlay() {
   // the handles. Returns null when the entity isn't a resizable wall.
   const endpoints = useMemo(() => {
     if (!editEnabled || activeTool !== 'select') return null;
+    if (viewMode === '2d') return null;
     if (!selectedEntity) return null;
     const wall = readWallEndpoints(selectedEntity.modelId, selectedEntity.expressId);
     if (!wall) return null;
@@ -116,6 +122,7 @@ export function WallEndpointOverlay() {
     // JSX projection refreshes without re-running this memo.
   }, [
     editEnabled,
+    viewMode,
     activeTool,
     selectedEntity,
     models,
