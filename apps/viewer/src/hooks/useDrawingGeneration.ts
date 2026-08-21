@@ -17,6 +17,7 @@ import type { IfcSourceBytes } from '@ifc-lite/parser';
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useViewerStore } from '@/store';
 import {
   Drawing2DGenerator,
   createSectionConfig,
@@ -984,6 +985,21 @@ export function useDrawingGeneration({
   const displayKey = `${displayOptions.showHiddenLines}|${displayOptions.useSymbolicRepresentations}`
     + `|${displayOptions.showConstructionProjection}|${displayOptions.scale}`;
 
+  /**
+   * What the MODEL has been through: every mutation bumps this.
+   *
+   * Third instance of the same omission the two comments above describe, and
+   * the most expensive one, because it does not look like a stale drawing — it
+   * looks like the edit did not happen. Moving a room in the plan moved its
+   * label (drawn from the mesh list) and left the room itself where it was,
+   * until a switch to 3D and back rebuilt the cut. Reshaping one looked like it
+   * wrote nothing at all.
+   *
+   * The cut is derived from the geometry, so anything that changes the geometry
+   * has to be able to ask for it again.
+   */
+  const modelKey = useViewerStore((s) => s.mutationVersion);
+
   const sectionRef = useRef({
     axis: sectionPlane.axis,
     position: sectionPlane.position,
@@ -991,6 +1007,7 @@ export function useDrawingGeneration({
     customKey: customKey(sectionPlane),
     visibilityKey,
     displayKey,
+    modelKey,
   });
   const isGeneratingRef = useRef(false);
   const latestSectionRef = useRef({
@@ -1000,6 +1017,7 @@ export function useDrawingGeneration({
     customKey: customKey(sectionPlane),
     visibilityKey,
     displayKey,
+    modelKey,
   });
   const [isRegenerating, setIsRegenerating] = useState(false);
 
@@ -1068,6 +1086,7 @@ export function useDrawingGeneration({
       customKey: customKeyValue,
       visibilityKey,
       displayKey,
+      modelKey,
     };
 
     // Check if anything that changes the drawing actually changed
@@ -1078,7 +1097,8 @@ export function useDrawingGeneration({
       prev.flipped === sectionPlane.flipped &&
       prev.customKey === customKeyValue &&
       prev.visibilityKey === visibilityKey &&
-      prev.displayKey === displayKey
+      prev.displayKey === displayKey &&
+      prev.modelKey === modelKey
     ) {
       return;
     }
@@ -1091,6 +1111,7 @@ export function useDrawingGeneration({
       customKey: customKeyValue,
       visibilityKey,
       displayKey,
+      modelKey,
     };
 
     // If panel is visible OR 3D overlay is enabled, and we have geometry, regenerate INSTANTLY
@@ -1099,7 +1120,7 @@ export function useDrawingGeneration({
       // doRegenerate handles preventing overlaps and will auto-regenerate with latest when done
       doRegenerate();
     }
-  }, [panelVisible, displayOptions.show3DOverlay, sectionPlane.axis, sectionPlane.position, sectionPlane.flipped, customKeyValue, visibilityKey, displayKey, geometryResult, combinedHiddenIds, combinedIsolatedIds, computedIsolatedIds, doRegenerate]);
+  }, [panelVisible, displayOptions.show3DOverlay, sectionPlane.axis, sectionPlane.position, sectionPlane.flipped, customKeyValue, visibilityKey, displayKey, modelKey, geometryResult, combinedHiddenIds, combinedIsolatedIds, computedIsolatedIds, doRegenerate]);
 
   return {
     generateDrawing,

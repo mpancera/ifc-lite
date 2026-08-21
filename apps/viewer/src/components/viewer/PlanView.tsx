@@ -353,6 +353,7 @@ export function PlanView({
   // without having asked for it looks exactly like the room having two shapes.
   const roomShapeEditKey = useViewerStore((s) => s.roomShapeEditKey);
   const endRoomShapeEdit = useViewerStore((s) => s.endRoomShapeEdit);
+  const roomShapeCommitTick = useViewerStore((s) => s.roomShapeCommitTick);
   const snapEnabled = useViewerStore((s) => s.snapEnabled);
   const selectedEntity = useViewerStore((s) => s.selectedEntity);
   const readSlabFootprint = useViewerStore((s) => s.readSlabFootprint);
@@ -1594,6 +1595,7 @@ export function PlanView({
           transform={planTransform}
           snapSegments={roomSnapSegments}
           snapEnabled={snapEnabled}
+          commitSignal={roomShapeCommitTick}
           onCommit={(next) => {
             const result = reshapeSpace(
               storeyModelId,

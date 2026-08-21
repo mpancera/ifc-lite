@@ -2176,6 +2176,9 @@ export const createMutationSlice: StateCreator<
     const globalId = toGlobalIdFromModels(get().models, modelId, expressId);
     const rendererDelta: [number, number, number] = [delta[0], delta[2], -delta[1]];
     get().setPendingMeshTranslations(new Map([[globalId, rendererDelta]]));
+    // ...and the same delta into the mesh list, or every reader derived from it
+    // keeps the old position. See `translateMeshesForEntity`.
+    get().translateMeshesForEntity([globalId], rendererDelta);
 
     // Record the mesh translation against the mutation id so undo /
     // redo can move the rendered mesh back / forward — the mutation
@@ -2246,6 +2249,9 @@ export const createMutationSlice: StateCreator<
       const globalId = toGlobalIdFromModels(get().models, modelId, expressId);
       const rendererDelta: [number, number, number] = [dx, dz, -dy];
       get().setPendingMeshTranslations(new Map([[globalId, rendererDelta]]));
+      // ...and the same delta into the mesh list, or every reader derived from
+      // it keeps the old position. See `translateMeshesForEntity`.
+      get().translateMeshesForEntity([globalId], rendererDelta);
       // Record so undo / redo can move the rendered mesh — see the
       // matching note in `translateEntity`.
       if (mutation) {
@@ -3919,13 +3925,15 @@ export const createMutationSlice: StateCreator<
       // move), reverse it so the rendered mesh follows the undo.
       const meshMove = get().mutationMeshTranslations.get(mutation.id);
       if (meshMove) {
-        get().setPendingMeshTranslations(
-          new Map([[meshMove.globalId, [
-            -meshMove.rendererDelta[0],
-            -meshMove.rendererDelta[1],
-            -meshMove.rendererDelta[2],
-          ]]]),
-        );
+        const reverse: [number, number, number] = [
+          -meshMove.rendererDelta[0],
+          -meshMove.rendererDelta[1],
+          -meshMove.rendererDelta[2],
+        ];
+        get().setPendingMeshTranslations(new Map([[meshMove.globalId, reverse]]));
+        // The mesh list has to come back too, or an undone move stays undone
+        // only on screen and the plan keeps drawing the moved position.
+        get().translateMeshesForEntity([meshMove.globalId], reverse);
       }
     } else if (mutation.type === 'CREATE_ENTITY') {
       // Undo of a create: stash the NewEntity payload so a subsequent redo
@@ -4108,6 +4116,7 @@ export const createMutationSlice: StateCreator<
         get().setPendingMeshTranslations(
           new Map([[meshMove.globalId, meshMove.rendererDelta]]),
         );
+        get().translateMeshesForEntity([meshMove.globalId], meshMove.rendererDelta);
       }
     } else if (mutation.type === 'CREATE_ENTITY') {
       // Redo of a create: replay from the stashed NewEntity. Symmetrical to

@@ -50,6 +50,12 @@ export interface PlanRoomShapeProps {
   snapSegments?: readonly SnapSegment[];
   /** Whether snapping is on at all — the same toggle the measure tool uses. */
   snapEnabled?: boolean;
+  /**
+   * Rises when somebody asks, from outside, that the draft be written — the
+   * "Fertig" button in the properties panel. Enter does the same thing from
+   * here; this is the same act arriving from the other side of the tree.
+   */
+  commitSignal?: number;
 }
 
 /** Screen pixels. A corner handle's radius; the edge handle is smaller. */
@@ -73,6 +79,7 @@ function project(
 
 export function PlanRoomShape({
   outline, transform, onCommit, onCancel, snapSegments = [], snapEnabled = true,
+  commitSignal = 0,
 }: PlanRoomShapeProps): React.ReactElement | null {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [draft, setDraft] = useState<Point2D[] | null>(null);
@@ -145,6 +152,16 @@ export function PlanRoomShape({
     // once, when the mode is finished.
     setSnapped(null);
   };
+
+  // The button in the properties panel, arriving as a signal. Skipped on the
+  // first render — a mode that committed the moment it opened would write the
+  // unchanged outline and close again.
+  const seenCommitSignal = React.useRef(commitSignal);
+  React.useEffect(() => {
+    if (commitSignal === seenCommitSignal.current) return;
+    seenCommitSignal.current = commitSignal;
+    onCommit(draft ?? [...outline]);
+  }, [commitSignal, draft, outline, onCommit]);
 
   // Enter finishes, Escape leaves it alone. Bound while the mode is open, on
   // the window, because the handles are not focusable and the pointer is

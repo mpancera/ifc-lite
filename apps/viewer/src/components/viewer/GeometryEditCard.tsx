@@ -185,6 +185,7 @@ export function GeometryEditCard({ modelId, entityId, entityLabel }: GeometryEdi
   const roomShapeEditKey = useViewerStore((s) => s.roomShapeEditKey);
   const beginRoomShapeEdit = useViewerStore((s) => s.beginRoomShapeEdit);
   const endRoomShapeEdit = useViewerStore((s) => s.endRoomShapeEdit);
+  const requestRoomShapeCommit = useViewerStore((s) => s.requestRoomShapeCommit);
   const models = useViewerStore((s) => s.models);
   const reshapable = models.get(modelId)?.ifcDataStore?.entities?.getTypeName?.(entityId) === 'IfcSpace';
   const reshaping = roomShapeEditKey === `${modelId}:${entityId}`;
@@ -358,7 +359,10 @@ export function GeometryEditCard({ modelId, entityId, entityLabel }: GeometryEdi
                     size="sm"
                     className="h-7 flex-1 text-xs"
                     onClick={() => (reshaping
-                      ? endRoomShapeEdit()
+                      // Finishing means WRITING. It used to mean closing the
+                      // mode, which threw the reshape away and looked exactly
+                      // like a tool that does nothing.
+                      ? requestRoomShapeCommit()
                       : beginRoomShapeEdit(modelId, entityId))}
                   >
                     {reshaping

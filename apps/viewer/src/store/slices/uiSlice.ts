@@ -206,6 +206,16 @@ export interface UISlice extends GeometryLoadSettingsState, GeometryLoadSettings
    */
   roomShapeEditKey: string | null;
   /**
+   * Bumped to ask the open outline editor to WRITE what it has.
+   *
+   * The draft lives in the editor component, because that is where the pointer
+   * is. The button that finishes the mode lives in the properties panel, on the
+   * other side of the tree — so it asks, rather than reaching in. Without this
+   * the button could only END the mode, which is exactly what it did: it looked
+   * like a commit and silently threw the reshape away.
+   */
+  roomShapeCommitTick: number;
+  /**
    * Global edit mode. When `true`, all in-place editing affordances
    * (inline property/attribute editors, future geometry manipulators,
    * georeference placement, the add-element draw tools) are unlocked.
@@ -279,6 +289,8 @@ export interface UISlice extends GeometryLoadSettingsState, GeometryLoadSettings
   beginRoomShapeEdit: (modelId: string, expressId: number) => void;
   /** Leave it — from the tick, from Enter, or when the selection moves on. */
   endRoomShapeEdit: () => void;
+  /** Ask the open editor to commit. It ends the mode itself once written. */
+  requestRoomShapeCommit: () => void;
   /** Collapse the Space Sketch panel to a reopen pill (or restore it). */
   setSpaceSketchMinimized: (minimized: boolean) => void;
   setEditEnabled: (enabled: boolean) => void;
@@ -357,6 +369,7 @@ export const createUISlice: StateCreator<UISlice & UICrossSliceState, [], [], UI
   planExportRequested: null,
   activeTool: UI_DEFAULTS.ACTIVE_TOOL,
   roomShapeEditKey: null,
+  roomShapeCommitTick: 0,
   editEnabled: false,
   spaceSketchMinimized: false,
   propertiesActiveTab: 'properties',
@@ -391,6 +404,9 @@ export const createUISlice: StateCreator<UISlice & UICrossSliceState, [], [], UI
     roomShapeEditKey: `${modelId}:${expressId}`,
   }),
   endRoomShapeEdit: () => set({ roomShapeEditKey: null }),
+  requestRoomShapeCommit: () => set((state) => ({
+    roomShapeCommitTick: state.roomShapeCommitTick + 1,
+  })),
 
   setActiveTool: (activeTool) => {
     // Authoring tools require edit mode. Entering one of them flips

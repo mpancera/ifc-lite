@@ -72,6 +72,21 @@ export interface DataSlice {
    * federated global id. Returns the meshes it removed, for undo.
    */
   replaceMeshesForEntity: (ids: readonly number[], replacement: MeshData) => MeshData[];
+  /**
+   * Shift an entity's meshes by a renderer-frame delta.
+   *
+   * A move used to reach the GPU and stop there: `setPendingMeshTranslations`
+   * hands the delta to the scene, which owns its own copy of the geometry, and
+   * the MESH LIST — what the 2D cut, the labels, the bounds and every other
+   * reader are derived from — kept describing the old position. Moving a room
+   * in the plan moved its label and left the room, and regenerating the cut
+   * faithfully reproduced the drawing from before the move.
+   *
+   * Only MODEL mutations may call this. The exploded-storey display pushes
+   * translations down the same pipe for presentation, and baking those into the
+   * geometry would put the offset into the plan and into every export.
+   */
+  translateMeshesForEntity: (ids: readonly number[], rendererDelta: readonly [number, number, number]) => void;
   releaseGeometryMemory: () => void;
   /** Persist mesh color changes in geometryResult (used for IFC style/material updates). */
   updateMeshColors: (updates: Map<number, [number, number, number, number]>) => void;
@@ -213,6 +228,43 @@ export const createDataSlice: StateCreator<DataSlice & DataCrossSliceState, [], 
   bumpGeometryContentVersion: () => set((state) => ({
     geometryContentVersion: state.geometryContentVersion + 1,
   })),
+
+  translateMeshesForEntity: (ids, rendererDelta) => {
+    const state = get();
+    const existing = state.geometryResult;
+    if (!existing) return;
+    const wanted = new Set(ids);
+    let touched = false;
+    // The ORIGIN carries it, not the vertices: the split exists so a building
+    // three kilometres from the project origin keeps its f32 precision, and
+    // rewriting every vertex per drag frame would spend that precision and the
+    // time for nothing.
+    const meshes = existing.meshes.map((mesh) => {
+      if (!wanted.has(mesh.expressId)) return mesh;
+      touched = true;
+      const [ox, oy, oz] = mesh.origin ?? [0, 0, 0];
+      return {
+        ...mesh,
+        origin: [
+          ox + rendererDelta[0],
+          oy + rendererDelta[1],
+          oz + rendererDelta[2],
+        ] as [number, number, number],
+      };
+    });
+    if (!touched) return;
+
+    const geometryResult = { ...existing, meshes };
+    const modelId = state.activeModelId;
+    const model = modelId ? state.models.get(modelId) : null;
+    if (!modelId || !model) {
+      set({ geometryResult, geometryUpdateTick: state.geometryUpdateTick + 1 });
+      return;
+    }
+    const models = new Map(state.models);
+    models.set(modelId, { ...model, geometryResult });
+    set({ geometryResult, models, geometryUpdateTick: state.geometryUpdateTick + 1 });
+  },
 
   replaceMeshesForEntity: (ids, replacement) => {
     const state = get();
