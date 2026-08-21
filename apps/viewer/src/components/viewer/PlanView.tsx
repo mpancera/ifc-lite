@@ -1610,12 +1610,14 @@ export function PlanView({
           }}
           onDragEnd={() => { gizmoDrag.current = null; }}
           onMove={(step) => {
+            const unit = models.get(storeyModelId)?.ifcDataStore?.lengthUnitScale ?? 1;
             const result = translateEntity(
               storeyModelId,
               selectedEntity.expressId,
-              // Drawing space to IFC: y runs the other way. Metres either way —
-              // the store normalises a foot-unit file itself (measured).
-              [step.x, -step.y, 0],
+              // Drawing space to IFC: y runs the other way, and the drawing's
+              // metres become the FILE's unit — `translateEntity` writes the
+              // number it is given straight into the placement.
+              [step.x / unit, -step.y / unit, 0],
               gizmoDrag.current?.batchId,
             );
             if (result.ok) return true;

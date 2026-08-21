@@ -233,11 +233,16 @@ export function GizmoOverlay() {
     const denom = ax.x * ax.x + ax.y * ax.y;
     if (denom < 1e-6) return;
     const metres = (cursorDelta.x * ax.x + cursorDelta.y * ax.y) / denom;
+    // `translateEntity` speaks the FILE's length unit, and the screen speaks
+    // metres. On a foot model the two are a factor of 3.28 apart, so the drag
+    // has to convert or the element outruns the cursor.
+    const unit = models.get(ready.modelId)?.ifcDataStore?.lengthUnitScale ?? 1;
+    const inFileUnits = metres / unit;
     // Delta since the LAST frame of this drag.
     const previous = drag.accumulatedDelta;
     const delta: [number, number, number] = [0, 0, 0];
     const idx = drag.axis === 'x' ? 0 : drag.axis === 'y' ? 1 : 2;
-    delta[idx] = metres - (drag.axis === 'x' ? previous.x : drag.axis === 'y' ? previous.y : previous.z);
+    delta[idx] = inFileUnits - (drag.axis === 'x' ? previous.x : drag.axis === 'y' ? previous.y : previous.z);
     if (Math.abs(delta[idx]) < 1e-6) return;
     // Only advance the per-axis accumulator if the mutation actually
     // landed. If `translateEntity` rejects (placement chain doesn't
@@ -247,9 +252,9 @@ export function GizmoOverlay() {
     // silently dropping it. Keeps drag state and model state in sync.
     const result = translateEntity(ready.modelId, ready.expressId, delta, drag.batchId);
     if (!result.ok) return;
-    if (drag.axis === 'x') previous.x = metres;
-    else if (drag.axis === 'y') previous.y = metres;
-    else previous.z = metres;
+    if (drag.axis === 'x') previous.x = inFileUnits;
+    else if (drag.axis === 'y') previous.y = inFileUnits;
+    else previous.z = inFileUnits;
   };
 
   const onDragEnd = (e: React.PointerEvent<SVGElement>) => {

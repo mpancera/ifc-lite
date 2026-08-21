@@ -780,6 +780,25 @@ export function useGeometryStreaming(params: UseGeometryStreamingParams): void {
         // this rebuild instead of dropping it.
         if (!rebuilt) return;
       }
+
+      // A removal is usually one half of a REPLACEMENT: a reshaped room and a
+      // resized wall both swap their mesh in the list and ask for the old one
+      // to be dropped here. The upload pass above will not bring the new one
+      // back on its own — it remembers each mesh by `expressId:index`, and a
+      // swap in place keeps both — so the entity vanished from 3D while the
+      // plan, which reads the list rather than the GPU, showed it correctly.
+      // Whatever the list holds for these entities now goes back up.
+      const current = useViewerStore.getState().geometryResult?.meshes ?? [];
+      const replacements = current.filter(
+        (mesh) => !mesh.instancedOccurrence && pendingMeshRemovals.has(mesh.expressId),
+      );
+      if (replacements.length > 0) {
+        const uploaded = runGpuUpload('appendToBatches:after-removal', () => {
+          scene.appendToBatches(replacements, device, pipeline, false);
+          return true;
+        }) ?? false;
+        if (uploaded) renderer.clearCaches();
+      }
       renderer.requestRender();
     }
     clearPendingMeshRemovals();

@@ -86,6 +86,17 @@ export function useKeyboardControls(params: UseKeyboardControlsParams): void {
         return;
       }
 
+      // Every shortcut below is a BARE key, so a held modifier means the stroke
+      // belongs to somebody else. Without this, Ctrl+Z reached the undo and
+      // then this handler read the plain "z" and zoomed to extents on top of
+      // it: the edit came back and the camera jumped to fit the model, which
+      // is what it looked like from the outside — "undo resets my zoom".
+      // Ctrl+F, Ctrl+H and Ctrl+1..6 were the same trap waiting.
+      //
+      // Shift is deliberately NOT excluded: it modifies movement here (and
+      // nothing else), so a shifted W is still a W.
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+
       // Browsers may dispatch a key event with no `key` (autofill, synthetic
       // events) — see lib/keyboard-event.ts. Nothing below could match such an
       // event, so skipping it is behaviour-preserving.

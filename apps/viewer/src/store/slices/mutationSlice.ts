@@ -2174,7 +2174,15 @@ export const createMutationSlice: StateCreator<
     //   renderer.y =  ifc.z
     //   renderer.z = -ifc.y
     const globalId = toGlobalIdFromModels(get().models, modelId, expressId);
-    const rendererDelta: [number, number, number] = [delta[0], delta[2], -delta[1]];
+    // ...and into METRES on the way, because `delta` is in the FILE's unit.
+    // A foot model moved 3.28 times too far on screen while the file moved the
+    // right amount: the handles and the picture disagreed, which is how it was
+    // found — a room dragged in the plan left its edit handles behind, halfway
+    // between where it had been and where it was drawn.
+    const unit = get().models.get(modelId)?.ifcDataStore?.lengthUnitScale ?? 1;
+    const rendererDelta: [number, number, number] = [
+      delta[0] * unit, delta[2] * unit, -delta[1] * unit,
+    ];
     get().setPendingMeshTranslations(new Map([[globalId, rendererDelta]]));
     // ...and the same delta into the mesh list, or every reader derived from it
     // keeps the old position. See `translateMeshesForEntity`.
@@ -2247,7 +2255,9 @@ export const createMutationSlice: StateCreator<
     const mutation = get().setPositionalAttribute(modelId, chain.cartesianPointId, 0, position);
     if (dx !== 0 || dy !== 0 || dz !== 0) {
       const globalId = toGlobalIdFromModels(get().models, modelId, expressId);
-      const rendererDelta: [number, number, number] = [dx, dz, -dy];
+      // Metres for the renderer; `position` and the chain are in file units.
+      const unit = get().models.get(modelId)?.ifcDataStore?.lengthUnitScale ?? 1;
+      const rendererDelta: [number, number, number] = [dx * unit, dz * unit, -dy * unit];
       get().setPendingMeshTranslations(new Map([[globalId, rendererDelta]]));
       // ...and the same delta into the mesh list, or every reader derived from
       // it keeps the old position. See `translateMeshesForEntity`.
