@@ -46,6 +46,14 @@ export interface GraphTreeNode {
   name: string;
   /** The occurrence's asset identifier, or `''` when it has none. */
   assetIdentifier: string;
+  /** `Tag` — the mark on the drawing, e.g. a position on a wired run. */
+  tag: string;
+  /** `PredefinedType`, or `''`. What separates a fire sensor from a thermostat. */
+  predefinedType: string;
+  /** A port's `FlowDirection`, or `''`. */
+  flowDirection: string;
+  /** A port's `SystemType`, or `''`. */
+  systemType: string;
   children: GraphTreeNode[];
 }
 
@@ -131,6 +139,10 @@ export function graphTreeOf(graph: Graph, chain: RelationChain): GraphTreeNode[]
       ifcType: node.ifcType,
       name: node.name,
       assetIdentifier: node.assetIdentifier,
+      tag: node.tag,
+      predefinedType: node.predefinedType,
+      flowDirection: node.flowDirection,
+      systemType: node.systemType,
       children,
     };
   };
@@ -153,6 +165,10 @@ export function graphTreeOf(graph: Graph, chain: RelationChain): GraphTreeNode[]
       ifcType: node.ifcType,
       name: node.name,
       assetIdentifier: node.assetIdentifier,
+      tag: node.tag,
+      predefinedType: node.predefinedType,
+      flowDirection: node.flowDirection,
+      systemType: node.systemType,
       children: [],
     });
   }
@@ -190,13 +206,29 @@ export function graphToCsv(graph: Graph, chain: RelationChain): string {
   // The identifier goes next to the leaf, not into the ancestor columns: it
   // belongs to the occurrence, and a row whose Space column said `A.01.03` and
   // whose identifier column said the same would be one fact printed twice.
-  const leafExtra = ['AssetIdentifier', 'IfcType', 'ExpressId'];
+  // `PredefinedType` sits beside `IfcType` because together they are the class:
+  // a list of 300 rows all reading `IfcSensor` is not a device schedule, and it
+  // is the pair that a schematic tool's article number can be matched against.
+  // The two port columns stay empty for every rank that is not a port, which is
+  // most rows in most chains — an empty column that is sometimes the whole
+  // answer is worth more than a column that has to be asked for separately.
+  const leafExtra = [
+    'AssetIdentifier',
+    'IfcType',
+    'PredefinedType',
+    'FlowDirection',
+    'SystemType',
+    'ExpressId',
+  ];
   const body = rows.map((cells, i) => {
     const leaf = leaves[i];
     return [
       ...cells,
       csvCell(leaf.assetIdentifier),
       csvCell(leaf.ifcType),
+      csvCell(leaf.predefinedType),
+      csvCell(leaf.flowDirection),
+      csvCell(leaf.systemType),
       String(leaf.expressId),
     ].join(';');
   });

@@ -9,7 +9,7 @@
  * toolbar (viewer/commenter roles cannot unlock authoring).
  */
 
-import { Blocks, Box, Boxes, Brush, DoorClosed,
+import { Cable, Blocks, Box, Boxes, Brush, DoorClosed,
   Radio, DoorOpen, FileDiff, Library, ListChecks, Wand2 } from 'lucide-react';
 import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, List, Select, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
@@ -289,6 +289,17 @@ export function AuthorTab() {
         {/* Last in the group because it is last in the sequence: rooms named,
             devices placed, zones painted — only then is there a group to
             derive. */}
+        {/* Before Meldergruppen because it comes first in the work: the
+            cable decides the numbers, and the groups are a reading of the
+            zones on top of devices that are already placed and wired. */}
+        <RibbonLargeButton
+          icon={Cable}
+          label="Verkabeln"
+          tooltip="Melder der Reihe nach anklicken, wie das Kabel läuft — legt Anschlüsse, Verbindungen und den Melderkreis an"
+          disabled={!ifcDataStore}
+          active={activeWorkspacePanels.has('wiring')}
+          onClick={() => toggleWorkspacePanel('wiring')}
+        />
         <RibbonLargeButton
           icon={Radio}
           label="Meldergruppen"

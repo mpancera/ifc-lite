@@ -27,9 +27,30 @@ export interface GraphNodeData extends Record<string, unknown> {
   name: string;
   /** The occurrence's asset identifier, or `''` when it has none. */
   assetIdentifier: string;
+  /** `PredefinedType`, or `''`. What separates one `IfcSensor` from another. */
+  predefinedType: string;
+  /** `Tag` — on a wired device, its position on the cable. `''` when unset. */
+  tag: string;
+  /** A port's `FlowDirection` — `SOURCE`, `SINK`, `SOURCEANDSINK` — or `''`. */
+  flowDirection: string;
   /** True when nothing leaves this node — the chain could not place it. */
   dangling: boolean;
 }
+
+/**
+ * The flow direction as one character, read from the port's own point of view.
+ *
+ * A port is a hole in a device: `SINK` means the device takes something in,
+ * `SOURCE` means it puts something out. Arrows rather than words because a port
+ * box is forty-odd pixels wide — and an unset direction gets nothing at all,
+ * because an empty corner reads as "the file does not say" where a neutral
+ * symbol would read as a third kind of port.
+ */
+const FLOW_MARK: Record<string, string> = {
+  SOURCE: '→',
+  SINK: '←',
+  SOURCEANDSINK: '↔',
+};
 
 /**
  * One palette entry per rank.
@@ -54,8 +75,21 @@ const KIND_STYLE: Record<GraphNodeKind, string> = {
 };
 
 export function GraphBoxNode({ data, selected }: NodeProps) {
-  const { kind, ifcType, name, assetIdentifier, dangling } = data as GraphNodeData;
+  const { kind, ifcType, name, assetIdentifier, tag, predefinedType, flowDirection, dangling } =
+    data as GraphNodeData;
   const size = NODE_SIZE[kind];
+  // Only a port has a flow direction to show; everything else would be
+  // asserting something the slot does not mean.
+  const flowMark = kind === 'port' ? FLOW_MARK[flowDirection] : undefined;
+  // `IfcSensor.FIRESENSOR` beside `IfcSensor.TEMPERATURESENSOR` is the whole
+  // difference between a drawing and a wall of identical rectangles.
+  const refinedType = predefinedType ? `${ifcType}.${predefinedType}` : ifcType;
+  // The tag wins over the asset identifier where there is one, because it is
+  // the more specific of the two: the identifier says where the device stands
+  // in the building, the tag says where it sits on the run being drawn. A
+  // drawing of a run whose boxes showed only room numbers would be a drawing
+  // of a run with no order in it. Both stay in the tooltip.
+  const designation = tag || assetIdentifier;
 
   return (
     <div
@@ -69,10 +103,13 @@ export function GraphBoxNode({ data, selected }: NodeProps) {
         selected && 'ring-2 ring-sky-500 ring-offset-1 dark:ring-offset-zinc-950',
       )}
       style={{ width: size.width, height: size.height }}
-      title={[assetIdentifier, ifcType, name].filter(Boolean).join(' — ')}
+      title={[tag, assetIdentifier, refinedType, name, flowDirection].filter(Boolean).join(' — ')}
     >
       <Handle type="target" position={Position.Left} className="!h-1.5 !w-1.5 !border-0 !bg-zinc-400" />
-      <span className="truncate font-medium">{name || '(ohne Name)'}</span>
+      <span className="truncate font-medium">
+        {flowMark && <span className="mr-0.5 font-normal opacity-70">{flowMark}</span>}
+        {name || '(ohne Name)'}
+      </span>
       {/* The identifier displaces the class where there is one. Ten devices in
           a row all reading `IfcSensor` distinguish nothing, and the number is
           what the drawing, the list and the export all say — a node that
@@ -80,8 +117,8 @@ export function GraphBoxNode({ data, selected }: NodeProps) {
           A port box is a third the width and carries a two-character name, so
           it gets neither; both are in the tooltip, one hover away. */}
       {kind !== 'port' && (
-        <span className={cn('truncate text-[10px]', assetIdentifier ? 'font-mono opacity-80' : 'opacity-60')}>
-          {assetIdentifier || ifcType}
+        <span className={cn('truncate text-[10px]', designation ? 'font-mono opacity-80' : 'opacity-60')}>
+          {designation || refinedType}
         </span>
       )}
       <Handle type="source" position={Position.Right} className="!h-1.5 !w-1.5 !border-0 !bg-zinc-400" />

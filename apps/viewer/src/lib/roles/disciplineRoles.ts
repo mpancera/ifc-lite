@@ -138,3 +138,49 @@ export function disciplineSystemName(system: DisciplineSystem): string {
   const role = roleOfSystem(system.id);
   return role ? `${role.label} - ${system.label}` : system.label;
 }
+
+
+/** What a store must offer for {@link parsedDisciplineSystemOf} to read it. */
+export interface SystemReadableStore {
+  entityIndex?: { byType?: { get(type: string): number[] | undefined } };
+  entities?: {
+    getObjectType?(expressId: number): string | null;
+  };
+}
+
+/**
+ * The installation for `system` that the LOADED FILE already carries, or `null`.
+ *
+ * # Why this exists, and why it reverses a rule
+ * `findDistributionSystem` in `@ifc-lite/create` deliberately scans only what
+ * the session authored, on the grounds that reusing a system from the file
+ * would write into a grouping the user did not make here. That rule is right
+ * for a ZONE, where membership is a judgement somebody made. It is wrong for a
+ * discipline installation, and the reason is the key: an
+ * `IfcDistributionSystem` with `ObjectType = 'FireDetection'` IS the fire
+ * detection installation of the building. There is one. Creating a second one
+ * because the first arrived with the file does not protect anything — it
+ * splits the installation in two, and every consumer downstream then sees two,
+ * one of them empty.
+ *
+ * Measured on a real model: building the detector circuits on a file that
+ * already held `Fire - Branddetektion` produced a second system of the same
+ * name, and the eighteen circuits were aggregated under the empty one.
+ *
+ * Matching is on `ObjectType` alone, which is the discipline key — the name is
+ * not consulted, because it is a label a user may translate or shorten and the
+ * key is not.
+ */
+export function parsedDisciplineSystemOf(
+  store: SystemReadableStore | null | undefined,
+  system: DisciplineSystem,
+): number | null {
+  // `IFCDISTRIBUTIONSYSTEM` only. A circuit is a subtype of a system and can
+  // carry the same ObjectType, but it is a PARTITION of the installation,
+  // never the installation itself — aggregating the circuits under one of
+  // their own would make a cycle.
+  for (const expressId of store?.entityIndex?.byType?.get('IFCDISTRIBUTIONSYSTEM') ?? []) {
+    if (store?.entities?.getObjectType?.(expressId) === system.objectType) return expressId;
+  }
+  return null;
+}

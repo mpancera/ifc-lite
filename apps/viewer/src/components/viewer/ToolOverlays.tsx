@@ -15,12 +15,17 @@ import { WallEndpointOverlay } from './tools/WallEndpointOverlay';
 import { SplitOverlay } from './tools/SplitOverlay';
 import { SplitNumericInput } from './tools/SplitNumericInput';
 import { SpaceSketchOverlay } from './tools/SpaceSketchOverlay';
+import { WiringOverlay } from './tools/WiringOverlay';
 
 export function ToolOverlays() {
   const activeTool = useViewerStore((s) => s.activeTool);
 
   if (activeTool === 'spaceSketch') {
     return <SpaceSketchOverlay />;
+  }
+
+  if (activeTool === 'wiring') {
+    return <WiringOverlay />;
   }
 
   if (activeTool === 'measure') {

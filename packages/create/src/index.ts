@@ -55,11 +55,29 @@ export { toNativeArea, toNativeVolume, toNativeLength } from './in-store/anchor.
 export {
   addDistributionSystemToStore,
   addDistributionCircuitToStore,
+  addGroupToStore,
   emitRelAggregates,
   emitRelAssignsToGroup,
   findDistributionSystem,
   type DistributionSystemInStoreParams,
 } from './in-store/distribution-system.js';
+
+export {
+  addDistributionPortToStore,
+  addRunPortsToStore,
+  emitRelConnectsPorts,
+  emitRelNests,
+  type DistributionPortInStoreParams,
+  type PortFlowDirection,
+} from './in-store/ports.js';
+export {
+  addAlarmPanelToStore,
+  addControllerToStore,
+  type AlarmPanelInStoreParams,
+  type ControllerInStoreParams,
+  type ControllerPredefinedType,
+  type ControlElementBuildResult,
+} from './in-store/control-elements.js';
 export { addZoneToStore, findZone, type ZoneInStoreParams } from './in-store/zone.js';
 export {
   addAnchoredSpatialZoneToStore,

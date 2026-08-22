@@ -11,6 +11,7 @@ import {
   elementInSpaceInZone,
   plantTopology,
   systemMembers,
+  systemMembersInCircuit,
   systemMembersInSpace,
 } from './chain.js';
 import type { GraphSource } from './source.js';
@@ -80,6 +81,7 @@ const RELATIONS: Record<GraphRelation, ReadonlyArray<readonly [number, number]>>
   // is "this fixture has none".
   IfcRelConnectsPortToElement: [],
   IfcRelConnectsPorts: [],
+  IfcRelNests: [],
 };
 
 const source: GraphSource = {
@@ -255,6 +257,196 @@ describe('buildRelationGraph', () => {
     // from both ends — the whole point of the symmetric hop.
     expect(graph.edges.filter((e) => e.relation === 'IfcRelConnectsPortToElement')).toHaveLength(2);
     expect(graph.edges.filter((e) => e.relation === 'IfcRelConnectsPorts')).toHaveLength(1);
+  });
+
+  /**
+   * The same plant as above, modelled the way IFC4 says to: the ports NEST
+   * under their element instead of pointing at it with
+   * `IfcRelConnectsPortToElement`, which IFC4 deprecated.
+   *
+   * Before the nesting carrier existed this drew two boxes and no lines — and
+   * drew them without an error, which is what made it worth a test of its own.
+   */
+  it('finds ports that nest under their element (IFC4)', () => {
+    const nested: GraphSource = {
+      idsOfType: (t) => (t === 'IfcPump' ? [700] : t === 'IfcFlowSegment' ? [701] : []),
+      typeOf: (id) =>
+        id === 700 ? 'IfcPump'
+          : id === 701 ? 'IfcFlowSegment'
+            : id === 600 || id === 601 ? 'IfcDistributionPort'
+              : id === 800 ? 'IfcPumpType'
+                : null,
+      nameOf: (id) => `#${id}`,
+      related: (id, relation, direction) => {
+        if (relation === 'IfcRelNests') {
+          // Element nests its port — element is the RelatingObject, so the
+          // element to port reading is FORWARD, the opposite of the
+          // port-to-element relation.
+          const nests: ReadonlyArray<readonly [number, number]> = [
+            [700, 600],
+            [701, 601],
+            // A nested part that is NOT a port. Without the carrier's own
+            // keepTypes this would be ranked as a connection point.
+            [700, 800],
+          ];
+          return nests
+            .filter(([host, part]) => (direction === 'forward' ? host : part) === id)
+            .map(([host, part]) => (direction === 'forward' ? part : host));
+        }
+        if (relation === 'IfcRelConnectsPorts') {
+          if (direction === 'forward' && id === 600) return [601];
+          if (direction === 'inverse' && id === 601) return [600];
+        }
+        return [];
+      },
+    };
+
+    const graph = buildRelationGraph(nested, plantTopology(['IfcPump', 'IfcFlowSegment']));
+
+    // Two ports, and the pump type is not one of them.
+    expect(graph.nodes.filter((n) => n.kind === 'port').map((n) => n.expressId).sort()).toEqual([
+      600, 601,
+    ]);
+    expect(graph.nodes.some((n) => n.expressId === 800)).toBe(false);
+    expect(graph.edges.filter((e) => e.relation === 'IfcRelNests')).toHaveLength(2);
+    expect(graph.edges.filter((e) => e.relation === 'IfcRelConnectsPorts')).toHaveLength(1);
+  });
+
+  describe('systemMembersInCircuit', () => {
+    /**
+     * One installation, three detectors, two loops — and a zone over the same
+     * detectors, because that overlap is the whole reason the hop filters.
+     *
+     * Detectors 300 and 301 hang on loop 600; 302 hangs on loop 601. All three
+     * are in Ausloesezone 700, which is a grouping over the SAME devices
+     * through the SAME relationship. A hop that did not filter would rank the
+     * zone as a circuit and report three loops where there are two.
+     */
+    const plant: GraphSource = {
+      idsOfType: () => [],
+      typeOf: (id) =>
+        id === 500 ? 'IfcDistributionSystem'
+          : id === 600 || id === 601 ? 'IfcDistributionCircuit'
+            : id === 700 ? 'IfcZone'
+              : 'IfcSensor',
+      nameOf: (id) => `#${id}`,
+      related: (id, relation, direction) => {
+        if (relation !== 'IfcRelAssignsToGroup') return [];
+        const membership: ReadonlyArray<readonly [number, number]> = [
+          [500, 300], [500, 301], [500, 302],
+          [600, 300], [600, 301],
+          [601, 302],
+          [700, 300], [700, 301], [700, 302],
+        ];
+        return membership
+          .filter(([group, member]) => (direction === 'forward' ? group : member) === id)
+          .map(([group, member]) => (direction === 'forward' ? member : group));
+      },
+    };
+
+    it('ranks the wiring, not every group the device is in', () => {
+      const graph = buildRelationGraph(plant, systemMembersInCircuit([500]));
+
+      // Two circuits reached, and the zone is NOT among them.
+      const circuits = graph.nodes.filter((n) => n.ifcType === 'IfcDistributionCircuit');
+      expect(circuits.map((n) => n.expressId).sort()).toEqual([600, 601]);
+      expect(graph.nodes.some((n) => n.ifcType === 'IfcZone')).toBe(false);
+    });
+
+    it('lets one loop carry several devices and one device sit on one loop', () => {
+      const graph = buildRelationGraph(plant, systemMembersInCircuit([500]));
+      const toLoop = graph.edges.filter((e) => e.target === '600');
+      expect(toLoop.map((e) => e.source).sort()).toEqual(['300', '301']);
+    });
+
+    it('leaves every device a dead end when no wiring is recorded', () => {
+      // The state a model is in when it has the trigger logic and not the
+      // loops. Saying so is the point; a chain that hid it would read as a
+      // plant with no cables in it.
+      const unwired: GraphSource = {
+        ...plant,
+        related: (id, relation, direction) =>
+          relation === 'IfcRelAssignsToGroup' && direction === 'forward' && id === 500
+            ? [300, 301, 302]
+            : [],
+      };
+      const graph = buildRelationGraph(unwired, systemMembersInCircuit([500]));
+      expect(graph.nodes.filter((n) => n.kind === 'element')).toHaveLength(3);
+      expect(danglingNodes(graph, 'element')).toHaveLength(3);
+    });
+
+    it('draws one line for a membership the chain crosses from both ends', () => {
+      // Start at a CIRCUIT rather than at the installation and both hops cross
+      // the same membership: circuit to device, then device back to circuit.
+      // The id carries the direction, so both used to be kept and the drawing
+      // grew a second line on top of the first — with its label stacked on the
+      // first label, which is exactly what a real model looked like.
+      const oneCircuit: GraphSource = {
+        idsOfType: () => [],
+        typeOf: (id) => (id === 600 ? 'IfcDistributionCircuit' : 'IfcSensor'),
+        nameOf: (id) => `#${id}`,
+        related: (id, relation, direction) => {
+          if (relation !== 'IfcRelAssignsToGroup') return [];
+          if (direction === 'forward' && id === 600) return [300, 301];
+          if (direction === 'inverse' && (id === 300 || id === 301)) return [600];
+          return [];
+        },
+      };
+      const graph = buildRelationGraph(oneCircuit, systemMembersInCircuit([600]));
+
+      expect(graph.nodes).toHaveLength(3);
+      expect(graph.edges).toHaveLength(2);
+    });
+
+    it('names three ranks, the last of them the circuit', () => {
+      expect(chainRanks(systemMembersInCircuit([500]))).toEqual(['system', 'element', 'system']);
+    });
+  });
+
+  it('carries the enum slots and the connection payload onto the graph', () => {
+    const wired: GraphSource = {
+      idsOfType: (t) => (t === 'IfcSensor' ? [700] : []),
+      typeOf: (id) => (id === 700 ? 'IfcSensor' : id === 600 || id === 601 ? 'IfcDistributionPort' : null),
+      nameOf: () => null,
+      related: (id, relation, direction) => {
+        if (relation === 'IfcRelConnectsPortToElement' && direction === 'inverse' && id === 700) {
+          return [600];
+        }
+        if (relation === 'IfcRelConnectsPorts' && direction === 'forward' && id === 600) return [601];
+        return [];
+      },
+      traitsOf: (id) =>
+        id === 700
+          ? { predefinedType: 'FIRESENSOR' }
+          : { predefinedType: 'CABLE', flowDirection: 'SINK', systemType: 'ELECTRICAL' },
+      edgeInfoOf: (from, to, relation) =>
+        relation === 'IfcRelConnectsPorts' && from === 600 && to === 601
+          ? { name: 'MG01', realizedBy: 900 }
+          : null,
+    };
+
+    const graph = buildRelationGraph(wired, plantTopology(['IfcSensor']));
+
+    const detector = graph.nodes.find((n) => n.expressId === 700);
+    expect(detector?.predefinedType).toBe('FIRESENSOR');
+    // Not a port, so the port-only slots stay empty rather than absent.
+    expect(detector?.flowDirection).toBe('');
+
+    const port = graph.nodes.find((n) => n.expressId === 601);
+    expect(port?.flowDirection).toBe('SINK');
+    expect(port?.systemType).toBe('ELECTRICAL');
+
+    const connection = graph.edges.find((e) => e.relation === 'IfcRelConnectsPorts');
+    expect(connection?.name).toBe('MG01');
+    expect(connection?.realizedBy).toBe(900);
+  });
+
+  it('defaults the enum slots to empty when the source cannot answer them', () => {
+    // The fixture at the top of this file has no `traitsOf` at all — the
+    // shape a source over a bare relationship table takes.
+    const graph = buildRelationGraph(source, elementInSpaceInZone(['IfcSensor']));
+    expect(graph.nodes.every((n) => n.predefinedType === '')).toBe(true);
+    expect(graph.nodes.every((n) => n.systemType === '')).toBe(true);
   });
 
   it('finds the connection from the end the file did NOT list first', () => {

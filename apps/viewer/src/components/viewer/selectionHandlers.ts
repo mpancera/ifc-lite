@@ -39,6 +39,33 @@ export async function handleSelectionClick(ctx: MouseHandlerContext, e: MouseEve
     return;
   }
 
+  // Wiring tool: a click appends the device under the cursor to the run
+  // being drawn. Intercepted BEFORE the generic select path, because a click
+  // here means "next on the cable" and must not also move the selection —
+  // the two would fight over what the highlight shows.
+  //
+  // Nothing is written to the model: the sequence is a draft until the panel
+  // commits it. See `wiringSlice.ts`.
+  if (tool === 'wiring') {
+    // The same pick options the select path uses, so the wiring tool can only
+    // reach what a person can see and click.
+    const hit = renderer.raycastScene(x, y, ctx.getPickOptions());
+    const picked = hit?.intersection?.expressId;
+    if (picked !== undefined && picked !== null) {
+      const state = useViewerStore.getState();
+      // Back to the model's own express id: the raycast answers in the
+      // federated global space, and everything the wiring writes is scoped to
+      // one model. A hit in a DIFFERENT model is ignored rather than mapped —
+      // a run that crossed a file boundary would write relationships whose
+      // ends do not exist in the file they are written to.
+      const ref = fromGlobalIdFromModels(state.models, picked);
+      if (ref && (ref.modelId === state.activeModelId || ref.modelId === 'legacy')) {
+        state.pushWiringPick(ref.expressId);
+      }
+    }
+    return;
+  }
+
   // Measure tool: drag mode uses mousedown/mousemove/mouseup (see
   // measureHandlers.ts) and never reaches here. Polyline mode (#2199) is the
   // opposite — it does nothing on mousedown/drag, so a click is the ONLY
@@ -846,6 +873,7 @@ export async function handleAddElementDrop(
       CatalogEntryId: entry.id,
       CatalogEntryTag: entry.tag,
       TechnicalData: entry.technicalData,
+      Aas: entry.aas,
     }), modelId, entry.label);
     return;
   }

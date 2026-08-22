@@ -125,6 +125,51 @@ export interface ParsedZone {
 }
 
 /**
+ * What a store must offer for {@link parsedZonesOf} to read it.
+ *
+ * Structural rather than `IfcDataStore`, so a test can hand over four zones
+ * without building a parse — the same reason `GraphStore` is shaped this way.
+ */
+export interface ZoneReadableStore {
+  entityIndex?: { byType?: { get(type: string): number[] | undefined } };
+  entities?: {
+    getName?(expressId: number): string;
+    getDescription?(expressId: number): string | null;
+    getObjectType?(expressId: number): string | null;
+  };
+  relationships?: {
+    getRelated(expressId: number, relType: number, direction: 'forward' | 'inverse'): number[];
+  };
+}
+
+/**
+ * The zones the LOADED FILE carries, with their rooms.
+ *
+ * Here rather than in the one hook that first needed it, because two callers
+ * now depend on it and they must not disagree: the plan draws a zone boundary
+ * and the detector groups derive a circuit from the same zone. If one of them
+ * read the file and the other only the session, a reloaded model would show
+ * eighteen painted zones and report that there are none — which is precisely
+ * the state this fixes.
+ *
+ * `relType` is passed as a number so this module does not have to depend on
+ * the store's enum; the caller names it.
+ */
+export function parsedZonesOf(
+  store: ZoneReadableStore | null | undefined,
+  assignsToGroup: number,
+): ParsedZone[] {
+  const ids = store?.entityIndex?.byType?.get('IFCZONE') ?? [];
+  return ids.map((expressId) => ({
+    expressId,
+    name: store?.entities?.getName?.(expressId) ?? '',
+    description: store?.entities?.getDescription?.(expressId) ?? null,
+    objectType: store?.entities?.getObjectType?.(expressId) ?? null,
+    memberIds: store?.relationships?.getRelated(expressId, assignsToGroup, 'forward') ?? [],
+  }));
+}
+
+/**
  * Every zone worth DRAWING: the file's and this session's, merged.
  *
  * Deliberately not {@link readZones}, which returns only what was authored

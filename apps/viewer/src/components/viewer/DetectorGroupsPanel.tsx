@@ -25,7 +25,7 @@ import { useViewerStore } from '@/store';
 import { readZones } from '@/lib/ifcZones/membership';
 import { themeOfZone } from '@/lib/ifcZones/themes';
 import { authoredEntities } from '@/lib/mutations/authoredEntities';
-import { readCircuits } from '@/lib/detectorGroups/circuits';
+import { CIRCUIT_OBJECT_TYPE, readCircuits } from '@/lib/detectorGroups/circuits';
 import { findDisciplineSystem } from '@/lib/roles/disciplineRoles';
 
 interface DetectorGroupsPanelProps {
@@ -48,7 +48,9 @@ export function DetectorGroupsPanel({ onClose }: DetectorGroupsPanelProps) {
     const entities = view ? authoredEntities(view) : [];
     return {
       zones: readZones(entities).filter((z) => themeOfZone(z.objectType)?.id === theme),
-      circuits: readCircuits(entities),
+      // Meldergruppen only — a Melderkreis is the same IFC class and a
+      // different thing; see `readCircuits`.
+      circuits: readCircuits(entities, CIRCUIT_OBJECT_TYPE),
     };
     // `mutationVersion` is the dependency that matters — both read the overlay.
     // eslint-disable-next-line react-hooks/exhaustive-deps

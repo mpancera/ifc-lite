@@ -17,7 +17,7 @@
  * which keeps this module free of heavy imports.
  */
 
-import {
+import { Cable,
   Info,
   GitCompareArrows,
   MessageSquare,
@@ -74,7 +74,8 @@ export type WorkspacePanelId =
   | 'classTriage'
   | 'roomTriage'
   | 'doorNumbers'
-  | 'detectorGroups';
+  | 'detectorGroups'
+  | 'wiring';
 
 /** Activity-bar clustering — a divider is drawn whenever the group changes. */
 export type PanelGroup = 'navigate' | 'inspect' | 'review' | 'author' | 'work';
@@ -185,6 +186,7 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   // Meldergruppen: derived from the Auslösezonen, so it belongs beside the
   // other derivations rather than in the zone tool that feeds it.
   // APPENDED, for the reason above it.
+  { id: 'wiring', title: 'Verkabeln', short: 'Kabel', Icon: Cable, group: 'author', region: 'side' },
   { id: 'detectorGroups', title: 'Meldergruppen', short: 'Melder', Icon: Radio, group: 'author', region: 'side' },
 ];
 

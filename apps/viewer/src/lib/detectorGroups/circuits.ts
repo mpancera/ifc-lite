@@ -39,8 +39,21 @@ export interface OverlayEntity {
   attributes: readonly unknown[];
 }
 
-/** The entity a Meldergruppe is. */
-export const CIRCUIT_ENTITY = 'IfcDistributionCircuit';
+/**
+ * The entity a Meldergruppe is — a plain `IfcGroup`.
+ *
+ * It was an `IfcDistributionCircuit`, and that was wrong. IFC defines a
+ * distribution circuit as a partition of a distribution system that is
+ * *conditionally switched*, which is the WIRING — one cable, these devices, in
+ * this order. A Meldergruppe is a different statement: these detectors trigger
+ * together, derived from the rooms they stand in. The two are independent, one
+ * cable can serve several zones and one zone can be wired as two cables, so
+ * neither can be read off the other. Using the same class for both meant a
+ * file that claimed cabling nobody had drawn.
+ *
+ * `IfcDistributionCircuit` is now what `lib/wiring` writes, and nothing else.
+ */
+export const CIRCUIT_ENTITY = 'IfcGroup';
 /** `ObjectType`, so a reader can tell these from any other circuit. */
 export const CIRCUIT_OBJECT_TYPE = 'Meldergruppe';
 /** Between the group's name and the detector's counter: `MZ01.03`. */
@@ -74,12 +87,31 @@ function asString(value: unknown): string {
  * into a grouping somebody else owns would edit the reference model without
  * saying so — the line `findDistributionSystem` and `readZones` both draw.
  */
-export function readCircuits(entities: Iterable<OverlayEntity>): CircuitInfo[] {
+export function readCircuits(
+  entities: Iterable<OverlayEntity>,
+  objectType?: string,
+  /**
+   * Which IFC class to read. A Meldergruppe is an `IfcGroup`, a Melderkreis an
+   * `IfcDistributionCircuit` — different classes since the two were told
+   * apart, and a caller that means one of them says so.
+   *
+   * Getting this wrong is silent and expensive: the wiring tool read with the
+   * default and therefore never saw the runs it had just written, so every new
+   * run believed it was the first and three of them came out called `MK01`.
+   */
+  entityType: string = CIRCUIT_ENTITY,
+): CircuitInfo[] {
   const circuits = new Map<number, CircuitInfo>();
   const rels: OverlayEntity[] = [];
 
   for (const entity of entities) {
-    if (entity.type === CIRCUIT_ENTITY) {
+    // Two kinds of circuit now live in one file: the Meldergruppe derived from
+    // an Ausloesezone, and the Melderkreis that is the actual wiring. They are
+    // the same IFC class and must never be read as one another, so a caller
+    // that means one of them says which. Omitting it still answers with every
+    // circuit, which is what a plain inventory wants.
+    if (objectType !== undefined && asString(entity.attributes[4]) !== objectType) continue;
+    if (entity.type === entityType) {
       circuits.set(entity.expressId, {
         expressId: entity.expressId,
         name: asString(entity.attributes[2]),
@@ -228,4 +260,80 @@ export function planCircuits({ zones, devices, circuits }: PlanCircuitsInput): C
     emptyZones,
     ungrouped: devices.filter((d) => !grouped.has(d.id)).length,
   };
+}
+
+/** What a store must offer for {@link parsedCircuitsOf} to read it. */
+export interface CircuitReadableStore {
+  entityIndex?: { byType?: { get(type: string): number[] | undefined } };
+  entities?: {
+    getName?(expressId: number): string;
+    getObjectType?(expressId: number): string | null;
+  };
+  relationships?: {
+    getRelated(expressId: number, relType: number, direction: 'forward' | 'inverse'): number[];
+  };
+}
+
+/**
+ * Meldergruppen the LOADED FILE already carries — and only those.
+ *
+ * The ownership test is `ObjectType`, not the class. `IfcDistributionCircuit`
+ * is a perfectly ordinary thing for another trade to have written; the marker
+ * this tool stamps on its own is {@link CIRCUIT_OBJECT_TYPE}, so a circuit
+ * without it is somebody else's partition and is left alone. That is the same
+ * line `readCircuits` draws by ignoring the parse entirely — this widens it by
+ * exactly one well-defined step rather than removing it.
+ *
+ * Why the widening is needed at all: the normal way of working is to build the
+ * groups, export, and reopen the file. From then on they are parsed. A reader
+ * that saw only the session would report zero groups on a model that has
+ * eighteen, and the next run would build a duplicate for every zone.
+ *
+ * `relExpressId` is `null` for every parsed circuit: the relationship carrying
+ * its membership is not addressable through the store, so a write emits a
+ * fresh one. `readCircuits` already merges several relationships for one
+ * circuit and consolidates on the next write, so this heals rather than
+ * accumulates.
+ */
+export function parsedCircuitsOf(
+  store: CircuitReadableStore | null | undefined,
+  assignsToGroup: number,
+  objectType: string = CIRCUIT_OBJECT_TYPE,
+  /**
+   * Raw STEP token of the class to read. `IFCGROUP` for a Meldergruppe,
+   * `IFCDISTRIBUTIONCIRCUIT` for a wired run — the two are different classes
+   * now, and a caller says which it means for the same reason it says which
+   * `ObjectType`.
+   */
+  stepType: string = 'IFCGROUP',
+): CircuitInfo[] {
+  const ids = store?.entityIndex?.byType?.get(stepType) ?? [];
+  const out: CircuitInfo[] = [];
+  for (const expressId of ids) {
+    if (store?.entities?.getObjectType?.(expressId) !== objectType) continue;
+    out.push({
+      expressId,
+      name: store?.entities?.getName?.(expressId) ?? '',
+      relExpressId: null,
+      memberIds: [...(store?.relationships?.getRelated(expressId, assignsToGroup, 'forward') ?? [])],
+    });
+  }
+  return out;
+}
+
+/**
+ * The file's groups and the session's as one list, keyed by NAME.
+ *
+ * By name and not by express id, because that is what `planCircuits` matches a
+ * zone against — a group is "the one called MZ01", and a session that renamed
+ * or rebuilt it must win over what the file still says.
+ */
+export function mergeOwnCircuits(
+  parsed: readonly CircuitInfo[],
+  authored: readonly CircuitInfo[],
+): CircuitInfo[] {
+  const byName = new Map<string, CircuitInfo>();
+  for (const circuit of parsed) byName.set(circuit.name, circuit);
+  for (const circuit of authored) byName.set(circuit.name, circuit);
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }

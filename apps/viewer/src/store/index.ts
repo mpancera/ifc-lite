@@ -22,6 +22,7 @@ import { createSectionSlice, type SectionSlice } from './slices/sectionSlice.js'
 export { customPlaneCenter, loadLastSectionMode } from './slices/sectionSlice.js';
 export type { LastSectionMode } from './slices/sectionSlice.js';
 import { createMeasurementSlice, type MeasurementSlice } from './slices/measurementSlice.js';
+import { createWiringSlice, type WiringSlice } from './slices/wiringSlice.js';
 import { createDataSlice, type DataSlice } from './slices/dataSlice.js';
 import { createModelSlice, type ModelSlice } from './slices/modelSlice.js';
 import { createMutationSlice, type MutationSlice } from './slices/mutationSlice.js';
@@ -158,6 +159,7 @@ export type ViewerState = LoadingSlice &
   CameraSlice &
   SectionSlice &
   MeasurementSlice &
+  WiringSlice &
   DataSlice &
   ModelSlice &
   MutationSlice &
@@ -257,6 +259,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
   ...createCameraSlice(...args),
   ...createSectionSlice(...args),
   ...createMeasurementSlice(...args),
+  ...createWiringSlice(...args),
   ...createDataSlice(...args),
   ...createModelSlice(...args),
   ...createMutationSlice(...args),
@@ -652,6 +655,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
       roomTriagePanelVisible: panel === 'roomTriage',
       doorNumbersPanelVisible: panel === 'doorNumbers',
       detectorGroupsPanelVisible: panel === 'detectorGroups',
+      wiringPanelVisible: panel === 'wiring',
       rightPanelCollapsed: false,
     });
     // A side panel with NO visibility flag of its own (Location zones, #1869)
@@ -712,6 +716,7 @@ const createViewerStore = () => create<ViewerState>()((...args) => ({
         roomTriagePanelVisible: false,
         doorNumbersPanelVisible: false,
         detectorGroupsPanelVisible: false,
+        wiringPanelVisible: false,
         rightPanelCollapsed: false,
       });
       get().setSidebarActivePanel('properties');
@@ -818,6 +823,7 @@ export const SIDEBAR_PANEL_FLAGS: ReadonlyArray<readonly [keyof ViewerState, Wor
   ['roomTriagePanelVisible', 'roomTriage'],
   ['doorNumbersPanelVisible', 'doorNumbers'],
   ['detectorGroupsPanelVisible', 'detectorGroups'],
+  ['wiringPanelVisible', 'wiring'],
 ];
 
 /**

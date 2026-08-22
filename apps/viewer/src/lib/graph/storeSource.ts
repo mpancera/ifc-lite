@@ -26,13 +26,28 @@
 
 import { RelationshipType } from '@ifc-lite/data';
 import { getInheritanceChainForEntity } from '@ifc-lite/parser';
-import type { GraphRelation, GraphSource, RelationDirection } from '@ifc-lite/graph';
+import type {
+  GraphEdgeInfo,
+  GraphNodeTraits,
+  GraphRelation,
+  GraphSource,
+  RelationDirection,
+} from '@ifc-lite/graph';
 import type { MutablePropertyView, NewEntity } from '@ifc-lite/mutations';
+import { overlayAttribute } from '@/lib/mutations/overlayAttribute';
 import {
   buildOverlayRelationIndex,
   EMPTY_OVERLAY_RELATION_INDEX,
   type OverlayRelationIndex,
 } from '@/lib/mutations/overlayRelationIndex';
+import {
+  buildNestsIndex,
+  buildPortConnectionInfo,
+  pairKey,
+  readAuthoredTraits,
+  readParsedTraits,
+  type NestsIndex,
+} from './rawIfcReaders';
 
 /** What this adapter needs of a store — the same structural shape
  *  `utils/aggregation.ts` uses, so cache-rebuilt graphs satisfy it too. */
@@ -40,8 +55,24 @@ export interface GraphStore {
   entities?: {
     getName(expressId: number): string;
     getTypeName(expressId: number): string;
+    /**
+     * Optional because the structural shape `utils/aggregation.ts` shares with
+     * this one does not promise it. A store without it exports rows with an
+     * empty GlobalId column, which is visibly incomplete rather than silently
+     * wrong.
+     */
+    getGlobalId?(expressId: number): string;
+    getTag?(expressId: number): string;
   };
   entityIndex: { byType: Iterable<[string, number[]]> };
+  /**
+   * The STEP buffer, present only for a store parsed from a file.
+   *
+   * Optional because a store rebuilt from the geometry cache carries no source
+   * text. Everything below that needs it degrades to a documented fallback
+   * instead of throwing — a cached model still has to draw.
+   */
+  source?: unknown;
   relationships?: {
     getRelated(entityId: number, relType: RelationshipType, direction: RelationDirection): number[];
   };
@@ -53,10 +84,26 @@ export interface GraphStore {
   };
 }
 
+/**
+ * IFC relationship names to the store's buckets.
+ *
+ * `IfcRelNests` and `IfcRelAggregates` share one, because the parser maps both
+ * onto `RelationshipType.Aggregates` deliberately: an IDS `partOf` check has to
+ * traverse either without knowing which the file used
+ * (see `columnar-parser-indexes.ts`).
+ *
+ * For a schematic that merge is not good enough. Nesting is how an IFC4 element
+ * holds its ports, and an element→port edge drawn under the label "Zerlegung",
+ * beside a storey's real decomposition, puts two different statements on the
+ * drawing under one name. So this table is the FALLBACK; {@link buildNestsIndex}
+ * separates the two exactly whenever the source text is at hand, which is every
+ * freshly loaded model.
+ */
 const RELATION_TO_STORE: Record<GraphRelation, RelationshipType> = {
   IfcRelContainedInSpatialStructure: RelationshipType.ContainsElements,
   IfcRelReferencedInSpatialStructure: RelationshipType.ReferencedInSpatialStructure,
   IfcRelAggregates: RelationshipType.Aggregates,
+  IfcRelNests: RelationshipType.Aggregates,
   IfcRelAssignsToGroup: RelationshipType.AssignsToGroup,
   IfcRelConnectsPortToElement: RelationshipType.ConnectsPortToElement,
   IfcRelConnectsPorts: RelationshipType.ConnectsPorts,
@@ -102,6 +149,10 @@ interface OverlaySide {
   isDeleted(expressId: number): boolean;
   typeOf(expressId: number): string | null;
   nameOf(expressId: number): string | null;
+  globalIdOf(expressId: number): string | null;
+  tagOf(expressId: number): string | null;
+  /** The authored entity itself, for readers that need its attribute list. */
+  entityById(expressId: number): NewEntity | null;
 }
 
 function overlaySideFor(view: MutablePropertyView | null | undefined): OverlaySide | undefined {
@@ -122,6 +173,23 @@ function overlaySideFor(view: MutablePropertyView | null | undefined): OverlaySi
       const name = entity.attributes[2];
       return typeof name === 'string' ? name : null;
     },
+    // Attribute 0 is `GlobalId` on every IfcRoot subtype. An entity created
+    // this session already carries one — the builders mint it — so the export
+    // can name it the same way after a save as before.
+    globalIdOf: (expressId) => {
+      const value = byId.get(expressId)?.attributes[0];
+      return typeof value === 'string' && value ? value : null;
+    },
+    // Attribute 7 is `Tag` on every IfcElement. `overlayAttribute` is asked
+    // first because the wiring tool writes the mark by NAME, and a positional
+    // read alone would answer with the value the entity was created with.
+    tagOf: (expressId) => {
+      const edited = overlayAttribute(view, expressId, 'Tag');
+      if (edited !== null) return edited;
+      const value = byId.get(expressId)?.attributes[7];
+      return typeof value === 'string' ? value : null;
+    },
+    entityById: (expressId) => byId.get(expressId) ?? null,
   };
 }
 
@@ -156,6 +224,42 @@ function readIdentifier(
 }
 
 /**
+ * The parsed side of one relation, with nesting told apart from aggregation.
+ *
+ * Three cases, and the first is the one that keeps a cached model drawing:
+ *
+ *  - **no index** — the store has no source text, so the two relationships
+ *    cannot be separated. Both answer from the merged bucket. `IfcRelNests`
+ *    then over-reports (it also returns real aggregation) and the plant chain's
+ *    `keepTypes: ['IfcDistributionPort']` is what keeps that harmless;
+ *  - **`IfcRelNests` with an index** — answered from the exact index alone. The
+ *    bucket is not consulted, so no aggregation edge can leak in;
+ *  - **`IfcRelAggregates` with an index** — the bucket MINUS every nesting pair,
+ *    which is what makes it mean aggregation again.
+ */
+function parsedRelated(
+  store: GraphStore,
+  nests: NestsIndex | null,
+  expressId: number,
+  relation: GraphRelation,
+  direction: RelationDirection,
+): readonly number[] {
+  const bucket =
+    store.relationships?.getRelated(expressId, RELATION_TO_STORE[relation], direction) ?? [];
+  if (!nests) return bucket;
+  if (relation === 'IfcRelNests') {
+    return (direction === 'forward' ? nests.forward : nests.inverse).get(expressId) ?? [];
+  }
+  if (relation !== 'IfcRelAggregates') return bucket;
+  return bucket.filter((other) => {
+    // Nesting is keyed relating>related; which of the pair is which depends on
+    // the direction the caller walked.
+    const key = direction === 'forward' ? pairKey(expressId, other) : pairKey(other, expressId);
+    return !nests.excluded.has(key);
+  });
+}
+
+/**
  * A `GraphSource` over one loaded model.
  *
  * Scoped to a single model on purpose: a federated schematic would have to
@@ -172,6 +276,28 @@ export function graphSourceFor(
   const byType = indexByExpressType(store, overlay);
   const index = overlay?.index ?? EMPTY_OVERLAY_RELATION_INDEX;
   const alive = (expressId: number) => !overlay?.isDeleted(expressId);
+  // Both are one pass over a slice of the file, and both are built ON FIRST USE
+  // rather than here.
+  //
+  // Once, because a schematic asks about ports once per node and re-scanning
+  // for each would turn a linear build into a quadratic one. Lazily, because
+  // most chains never ask at all: `Element -> Raum -> Zone` touches neither
+  // nesting nor port connections, and a plant model can hold tens of thousands
+  // of ports — a pass over all of them to draw a location tree is a delay with
+  // nothing to show for it.
+  let nestsIndex: NestsIndex | null | undefined;
+  const nests = (): NestsIndex | null => {
+    // `undefined` means not built yet; `null` is a real answer meaning the
+    // store has no source text. Collapsing the two would rebuild the index on
+    // every question for exactly the stores that cannot answer it.
+    if (nestsIndex === undefined) nestsIndex = buildNestsIndex(store);
+    return nestsIndex;
+  };
+  let portInfoIndex: Map<string, GraphEdgeInfo> | undefined;
+  const portInfo = (): Map<string, GraphEdgeInfo> => {
+    portInfoIndex ??= buildPortConnectionInfo(store);
+    return portInfoIndex;
+  };
 
   return {
     idsOfType: (ifcType) => byType.get(ifcType) ?? [],
@@ -185,9 +311,37 @@ export function graphSourceFor(
       return name && name !== 'Unknown' ? name : null;
     },
     nameOf: (expressId) => overlay?.nameOf(expressId) ?? store.entities?.getName(expressId) ?? null,
+    globalIdOf: (expressId) =>
+      overlay?.globalIdOf(expressId) ?? store.entities?.getGlobalId?.(expressId) ?? null,
     identifierOf: (expressId) => readIdentifier(view, store, expressId),
+    // `Tag` is attribute 7 on every IfcElement, and the session's edits win:
+    // a device numbered by the wiring tool a moment ago must read with its new
+    // position, not the one the file still remembers.
+    tagOf: (expressId) => {
+      const authored = overlay?.tagOf(expressId);
+      if (authored !== null && authored !== undefined) return authored;
+      return store.entities?.getTag?.(expressId) ?? null;
+    },
+    traitsOf: (expressId) => {
+      // An entity created this session is not in the file, so the parsed
+      // reader would answer nothing for it — which reads as `no
+      // PredefinedType` for exactly the devices the user just placed.
+      const authored = overlay?.entityById(expressId);
+      return authored ? readAuthoredTraits(authored) : readParsedTraits(store, expressId);
+    },
+    edgeInfoOf: (fromExpressId, toExpressId, relation) => {
+      // Only port connections carry payload worth drawing. Containment and
+      // grouping relationships have a `Name` slot too, and it is empty in every
+      // model seen so far; answering from it would put noise on the edges that
+      // make up the bulk of a location tree.
+      if (relation !== 'IfcRelConnectsPorts') return null;
+      return portInfo().get(pairKey(fromExpressId, toExpressId)) ?? null;
+    },
     related: (expressId, relation, direction) => {
-      const parsed = store.relationships?.getRelated(expressId, RELATION_TO_STORE[relation], direction) ?? [];
+      // Only the two decomposition relations need the index; asking for it on
+      // every containment edge would build it for chains that never nest.
+      const decomposition = relation === 'IfcRelNests' || relation === 'IfcRelAggregates';
+      const parsed = parsedRelated(store, decomposition ? nests() : null, expressId, relation, direction);
       const authored = index.related(expressId, relation, direction);
       if (authored.length === 0) return parsed.filter(alive);
       // A session can re-state an edge the file already has (re-placing an

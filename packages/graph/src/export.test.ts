@@ -19,8 +19,24 @@ function node(
   ifcType: string,
   name: string,
   assetIdentifier = '',
+  predefinedType = '',
 ): GraphNode {
-  return { id: String(expressId), expressId, kind, ifcType, name, assetIdentifier };
+  return {
+    id: String(expressId),
+    expressId,
+    kind,
+    ifcType,
+    globalId: `guid-${expressId}`,
+    tag: '',
+    name,
+    assetIdentifier,
+    predefinedType,
+    // Port slots stay empty here: this fixture is a location tree, and the two
+    // columns being blank for every row is exactly what a location tree should
+    // export.
+    flowDirection: '',
+    systemType: '',
+  };
 }
 
 /** Storey 1 holds rooms 10 and 11; room 10 holds two detectors, 11 holds one. */
@@ -105,9 +121,11 @@ describe('graphToCsv', () => {
   it('puts the outermost rank first and the element last', () => {
     const csv = graphToCsv(floorGraph(), CHAIN);
     const [header, ...rows] = csv.split('\r\n');
-    expect(header).toBe('Storey;Space;Element;AssetIdentifier;IfcType;ExpressId');
-    expect(rows).toContain('00;0.01;RM 001;A.01.01_FST.RM.001;IfcSensor;100');
-    expect(rows).toContain('00;0.02;Sirene;A.01.02_FST.Si.001;IfcAlarm;102');
+    expect(header).toBe(
+      'Storey;Space;Element;AssetIdentifier;IfcType;PredefinedType;FlowDirection;SystemType;ExpressId',
+    );
+    expect(rows).toContain('00;0.01;RM 001;A.01.01_FST.RM.001;IfcSensor;;;;100');
+    expect(rows).toContain('00;0.02;Sirene;A.01.02_FST.Si.001;IfcAlarm;;;;102');
   });
 
   it('writes one row per element and no more', () => {
@@ -119,19 +137,19 @@ describe('graphToCsv', () => {
     const graph = floorGraph();
     graph.nodes.push(node(103, 'element', 'IfcSensor', 'RM 999'));
     const rows = graphToCsv(graph, CHAIN).split('\r\n').slice(1);
-    expect(rows).toContain(';;RM 999;;IfcSensor;103');
+    expect(rows).toContain(';;RM 999;;IfcSensor;;;;103');
   });
 
   it('neutralises a name a spreadsheet would execute', () => {
     const graph = floorGraph();
     graph.nodes.push(node(104, 'element', 'IfcSensor', '=1+1'));
-    expect(graphToCsv(graph, CHAIN)).toContain(";;'=1+1;;IfcSensor;104");
+    expect(graphToCsv(graph, CHAIN)).toContain(";;'=1+1;;IfcSensor;;;;104");
   });
 
   it('quotes a name carrying the separator', () => {
     const graph = floorGraph();
     graph.nodes.push(node(105, 'element', 'IfcSensor', 'A;B'));
-    expect(graphToCsv(graph, CHAIN)).toContain(';;"A;B";;IfcSensor;105');
+    expect(graphToCsv(graph, CHAIN)).toContain(';;"A;B";;IfcSensor;;;;105');
   });
 });
 
@@ -142,7 +160,15 @@ describe('graphToCsv', () => {
     // separator silently shifts every cell after it one to the left.
     const graph = floorGraph();
     graph.nodes.push(node(106, 'element', 'IfcSensor', 'RM 003', 'A;B'));
-    expect(graphToCsv(graph, CHAIN)).toContain(';;RM 003;"A;B";IfcSensor;106');
+    expect(graphToCsv(graph, CHAIN)).toContain(';;RM 003;"A;B";IfcSensor;;;;106');
+  });
+
+  it('writes the PredefinedType beside the class', () => {
+    // The pair is the point: a schedule of 300 rows all reading `IfcSensor` is
+    // not a device list, and it is the pair a schematic tool matches on.
+    const graph = floorGraph();
+    graph.nodes.push(node(107, 'element', 'IfcSensor', 'RM 004', '', 'FIRESENSOR'));
+    expect(graphToCsv(graph, CHAIN)).toContain(';;RM 004;;IfcSensor;FIRESENSOR;;;107');
   });
 
   it('carries the identifier into the JSON tree', () => {

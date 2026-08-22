@@ -54,6 +54,17 @@ export type GraphRelation =
   | 'IfcRelContainedInSpatialStructure'
   | 'IfcRelReferencedInSpatialStructure'
   | 'IfcRelAggregates'
+  /**
+   * Decomposition into PARTS rather than into a spatial breakdown — and, from
+   * IFC4 on, the relationship that carries an element's ports.
+   *
+   * Its own entry rather than folded into `IfcRelAggregates` because the two
+   * answer different questions of the same model: a pump aggregated out of a
+   * skid is a different statement from a pump nesting the two ports it is
+   * wired through. A source that cannot tell them apart is free to answer both
+   * from one index, and says so.
+   */
+  | 'IfcRelNests'
   | 'IfcRelAssignsToGroup'
   | 'IfcRelConnectsPortToElement'
   | 'IfcRelConnectsPorts';
@@ -76,6 +87,16 @@ export interface GraphNode {
   kind: GraphNodeKind;
   /** Exact EXPRESS name in IfcPascalCase, e.g. `IfcSensor`. */
   ifcType: string;
+  /**
+   * The IFC `GlobalId` — a 22-character GUID — or `''` when unknown.
+   *
+   * The only identity in the model that survives a re-export. The express id
+   * does not: it is a position in one file, and the next save renumbers it.
+   * A drawing does not need this; anything that hands rows to another system
+   * and expects to hand them back does, because without it the round trip has
+   * to match on names, and a renamed room becomes a new object.
+   */
+  globalId: string;
   /** The entity's `Name`, or an empty string when it carries none. */
   name: string;
   /**
@@ -87,6 +108,48 @@ export interface GraphNode {
    * are not numbered this way.
    */
   assetIdentifier: string;
+  /**
+   * The `PredefinedType` enum token — `FIRESENSOR`, `CABLE`, `NOTDEFINED` — or
+   * `''`.
+   *
+   * The class alone under-describes a device: every fire detector, every
+   * smoke damper and every thermostat in a model is an `IfcSensor` or an
+   * `IfcActuator`, and what separates them is exactly this slot. A drawing
+   * that shows only the class shows a plant of identical boxes, and a list
+   * exported from it cannot be matched against a schematic that names the
+   * function.
+   */
+  predefinedType: string;
+  /**
+   * `IfcElement.Tag` — the mark the element carries on the drawing, or `''`.
+   *
+   * Distinct from `assetIdentifier` and both are worth having: the identifier
+   * is the occurrence's number in the building (`LM.01.1.04_FST.RM.001`), the
+   * tag is its number in whatever it is part of — on a wired run, its position
+   * on the cable (`MK03.01`). A drawing of a run that showed only the first
+   * would be a drawing of a run with no order in it.
+   */
+  tag: string;
+  /**
+   * `IfcDistributionPort.FlowDirection` — `SOURCE`, `SINK`, `SOURCEANDSINK` —
+   * or `''` for everything that is not a distribution port.
+   *
+   * This is what turns a connection graph into a CIRCUIT. Without it every
+   * edge is a bare adjacency and there is no answer to "which end feeds which"
+   * — no supply, no load, no direction to follow from a distribution board
+   * outward. Empty on every non-port node, and empty on ports whose file
+   * leaves the slot unset, which is itself worth seeing.
+   */
+  flowDirection: string;
+  /**
+   * `IfcDistributionPort.SystemType` — `ELECTRICAL`, `LIGHTING`,
+   * `FIREPROTECTION` — or `''`.
+   *
+   * The trade a port belongs to, stated on the port itself. A device carrying
+   * both a power port and a bus port is one element in two systems, and only
+   * this slot says which port is which.
+   */
+  systemType: string;
 }
 
 export interface GraphEdge {
@@ -105,6 +168,24 @@ export interface GraphEdge {
    * every port is connected reports half of them as loose.
    */
   symmetric?: boolean;
+  /**
+   * The relationship's own `Name`, when it carries one.
+   *
+   * On `IfcRelConnectsPorts` this is where a producer writes the circuit or
+   * cable designation, which is the one piece of schematic identity the edge
+   * has. Absent rather than `''` when unset, so a reader can tell "no name in
+   * the file" from "named with an empty string".
+   */
+  name?: string;
+  /**
+   * Express id of `IfcRelConnectsPorts.RealizingElement` — the cable, the duct,
+   * the pipe that MAKES this connection — when the file names one.
+   *
+   * An id and not a node: the realizing element is usually not part of the
+   * chain being drawn, and pulling it in would silently add a rank nobody
+   * asked for. A caller that wants to resolve it has the source.
+   */
+  realizedBy?: number;
 }
 
 export interface Graph {

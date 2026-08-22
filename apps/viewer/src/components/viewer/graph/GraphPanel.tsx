@@ -42,12 +42,14 @@ import {
   buildRelationGraph,
   graphToCsv,
   graphToJson,
+  preplanningToCsv,
   chainRanks,
   danglingNodes,
   elementInSpaceInStorey,
   elementInSpaceInZone,
   plantTopology,
   systemMembers,
+  systemMembersInCircuit,
   systemMembersInSpace,
   type Graph,
   type GraphNodeKind,
@@ -102,6 +104,15 @@ const CHAINS: readonly ChainDef[] = [
   { id: 'storey', label: 'Element → Raum → Geschoss', pick: 'types', build: elementInSpaceInStorey },
   { id: 'system', label: 'Anlage → Elemente', pick: 'systems', build: systemMembers },
   { id: 'systemSpace', label: 'Anlage → Elemente → Raum', pick: 'systems', build: systemMembersInSpace },
+  // The wiring, not the trigger logic — see `systemMembersInCircuit`. Kept
+  // next to its sibling so the two readings of one installation sit together
+  // in the list: where a device STANDS, and what it hangs on.
+  {
+    id: 'systemCircuit',
+    label: 'Anlage → Elemente → Schaltkreis',
+    pick: 'systems',
+    build: systemMembersInCircuit,
+  },
   {
     id: 'plant',
     label: 'Anlagentopologie (Gerät → Anschluss → Anschluss)',
@@ -205,15 +216,84 @@ function RelationLegendRow({
  * The name says what it is and what it was read as, because a folder of
  * `graph.csv` files is unusable: `detektionsbaum-zone-2026-08-19.csv`.
  */
-function downloadGraph(graph: Graph, chain: RelationChain, format: 'csv' | 'json'): void {
+/**
+ * The three shapes a drawing can leave in.
+ *
+ * `preplanning` is a third format rather than a flag on the CSV, because it is
+ * a different SHAPE: one row per object naming its parent, where `csv` writes
+ * one row per leaf with its ancestors as columns. See `preplanning.ts` for why
+ * the leaf-per-row shape cannot carry a group nobody has filled yet.
+ */
+type GraphExportFormat = 'csv' | 'json' | 'preplanning';
+
+const EXPORT_FILE: Record<GraphExportFormat, { extension: string; mime: string }> = {
+  csv: { extension: 'csv', mime: 'text/csv;charset=utf-8' },
+  json: { extension: 'json', mime: 'application/json;charset=utf-8' },
+  // Also a `.csv`, and named apart from one on purpose: the two files have the
+  // same extension and different columns, and a folder holding both wants to
+  // say which is which without being opened.
+  preplanning: { extension: 'csv', mime: 'text/csv;charset=utf-8' },
+};
+
+function downloadGraph(graph: Graph, chain: RelationChain, format: GraphExportFormat): void {
   const ranks = chainRanks(chain).join('-');
   const stamp = new Date().toISOString().slice(0, 10);
-  const name = sanitizeFilename(`graph-${ranks}-${stamp}.${format}`);
-  const body = format === 'csv'
-    ? graphToCsv(graph, chain)
-    : JSON.stringify(graphToJson(graph, chain), null, 2);
-  const mime = format === 'csv' ? 'text/csv;charset=utf-8' : 'application/json;charset=utf-8';
-  downloadBlob(new Blob([body], { type: mime }), name);
+  const { extension, mime } = EXPORT_FILE[format];
+  const prefix = format === 'preplanning' ? 'vorplanung' : 'graph';
+  const name = sanitizeFilename(`${prefix}-${ranks}-${stamp}.${extension}`);
+  const body =
+    format === 'csv' ? graphToCsv(graph, chain)
+      : format === 'preplanning' ? preplanningToCsv(graph)
+        : JSON.stringify(graphToJson(graph, chain), null, 2);
+  // A BOM, and only here. The receiving tool reads this file on a machine
+  // whose text import assumes the system code page, and without it every
+  // umlaut in a room name arrives broken — `Möbeldepot` as `MÃ¶beldepot`.
+  // The other two exports are read by tools that know UTF-8 and would show
+  // the BOM as a stray character in the first cell.
+  const payload = format === 'preplanning' ? `\ufeff${body}` : body;
+  downloadBlob(new Blob([payload], { type: mime }), name);
+}
+
+/**
+ * The order the boxes are handed to the layout in — which is the order they
+ * come out in, because ELK is told to respect it
+ * (`considerModelOrder.strategy`).
+ *
+ * Two rules, and the second is the one that was asked for:
+ *
+ *  - the head of a run first. A `IfcController` is the line module every
+ *    device hangs off, and a drawing that put it in the middle of its own
+ *    detectors would hide the one box that says where the cable starts;
+ *  - then by TAG, read as a run and a position (`MK03.02`), numerically. Plain
+ *    string order gets that wrong the moment a run passes ten — `MK03.10`
+ *    sorts before `MK03.2` — which is precisely where a stack of detectors
+ *    stops matching the cable.
+ *
+ * Everything without a tag keeps the order the walk produced. Sorting those by
+ * name would look tidier and would be a lie: nothing in the model says a room
+ * comes before another one.
+ */
+function tagOrder(tag: string): [string, number] {
+  const at = tag.lastIndexOf('.');
+  if (at < 0) return [tag, Number.POSITIVE_INFINITY];
+  const index = Number(tag.slice(at + 1));
+  return [tag.slice(0, at), Number.isFinite(index) ? index : Number.POSITIVE_INFINITY];
+}
+
+function orderedForLayout(nodes: Graph['nodes']): Graph['nodes'] {
+  return [...nodes]
+    .map((node, at) => ({ node, at }))
+    .sort((a, b) => {
+      const headA = a.node.ifcType === 'IfcController' ? 0 : 1;
+      const headB = b.node.ifcType === 'IfcController' ? 0 : 1;
+      if (headA !== headB) return headA - headB;
+      const [runA, indexA] = tagOrder(a.node.tag);
+      const [runB, indexB] = tagOrder(b.node.tag);
+      if (runA !== runB) return runA.localeCompare(runB);
+      if (indexA !== indexB) return indexA - indexB;
+      return a.at - b.at;
+    })
+    .map((entry) => entry.node);
 }
 
 function gapsFor(graph: Graph, chain: RelationChain): string[] {
@@ -336,16 +416,23 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
    */
   const drawn: { graph: Graph; hiddenIsolated: number } | null = useMemo(() => {
     if (!built) return null;
-    if (chain.isolatedStart !== 'drop') return { graph: built.graph, hiddenIsolated: 0 };
+    if (chain.isolatedStart !== 'drop') {
+      return { graph: { ...built.graph, nodes: orderedForLayout(built.graph.nodes) }, hiddenIsolated: 0 };
+    }
     const startKind = chainRanks(built.spec)[0];
     const isolated = new Set(danglingNodes(built.graph, startKind).map((n) => n.id));
     // Only start-rank nodes that touch NOTHING. A node with an incoming edge
     // is part of the picture even if nothing leaves it.
     for (const e of built.graph.edges) isolated.delete(e.target);
-    if (isolated.size === 0) return { graph: built.graph, hiddenIsolated: 0 };
+    if (isolated.size === 0) {
+      return { graph: { ...built.graph, nodes: orderedForLayout(built.graph.nodes) }, hiddenIsolated: 0 };
+    }
     return {
       graph: {
-        nodes: built.graph.nodes.filter((n) => !isolated.has(n.id)),
+        // Ordered here rather than at the layout call, because this is the
+        // graph React Flow renders too — and the two disagreeing about which
+        // box is which is the bug that ordering exists to avoid.
+        nodes: orderedForLayout(built.graph.nodes.filter((n) => !isolated.has(n.id))),
         edges: built.graph.edges,
       },
       hiddenIsolated: isolated.size,
@@ -438,6 +525,9 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
               ifcType: n.ifcType,
               name: n.name,
               assetIdentifier: n.assetIdentifier,
+              tag: n.tag,
+              predefinedType: n.predefinedType,
+              flowDirection: n.flowDirection,
               dangling: dangling.has(n.id),
             } satisfies GraphNodeData,
           })),
@@ -613,6 +703,18 @@ export function GraphPanel({ onClose }: GraphPanelProps) {
               JSON
             </Button>
           </div>
+        )}
+
+        {graph && built && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 w-full text-[11px]"
+            title="Eine Liste je Objekt mit Verweis auf das übergeordnete — für den Vorplanungs-Import eines Schemaplanwerkzeugs. Identifizierendes Feld dort: IfcGlobalId."
+            onClick={() => downloadGraph(built.graph, built.spec, 'preplanning')}
+          >
+            Vorplanungsliste
+          </Button>
         )}
 
         {graph && (

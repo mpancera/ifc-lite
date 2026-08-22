@@ -29,7 +29,7 @@ import type { IfcDataStore } from '@ifc-lite/parser';
 import type { GeometryResult } from '@ifc-lite/geometry';
 import { useViewerStore } from '@/store';
 import { useSpaceGraph } from './useSpaceGraph';
-import { readZones, readZonesForDisplay, type ParsedZone } from '@/lib/ifcZones/membership';
+import { parsedZonesOf, readZones, readZonesForDisplay } from '@/lib/ifcZones/membership';
 import { RelationshipType } from '@ifc-lite/data';
 import { themeOfZone } from '@/lib/ifcZones/themes';
 import { authoredEntities } from '@/lib/mutations/authoredEntities';
@@ -71,22 +71,9 @@ export function usePlanZoneOutlines({
     // own zones are drawn either way.
     const view = mutationViews.get(modelId === 'legacy' ? '__legacy__' : modelId);
 
-    // The file's own zones, read through the parsed index and the relationship
-    // table — the same two sources `storeSource.systemsIn` reads a system's
-    // members from.
-    const parsed: ParsedZone[] = [];
-    const byType = dataStore?.entityIndex?.byType;
-    for (const id of byType?.get('IFCZONE') ?? []) {
-      parsed.push({
-        expressId: id,
-        name: dataStore?.entities?.getName?.(id) ?? '',
-        description: dataStore?.entities?.getDescription?.(id) ?? null,
-        objectType: dataStore?.entities?.getObjectType?.(id) ?? null,
-        memberIds: dataStore?.relationships?.getRelated(
-          id, RelationshipType.AssignsToGroup, 'forward',
-        ) ?? [],
-      });
-    }
+    // The file's own zones. Shared with the detector-group derivation, which
+    // has to see exactly the zones this draws — see `parsedZonesOf`.
+    const parsed = parsedZonesOf(dataStore, RelationshipType.AssignsToGroup);
 
     const system = findDisciplineSystem(roleId);
     const theme = system?.objectType === 'GasDetection' ? 'gas-trigger' : 'fire-trigger';

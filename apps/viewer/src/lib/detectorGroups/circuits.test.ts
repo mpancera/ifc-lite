@@ -12,7 +12,7 @@ import {
 function circuit(expressId: number, name: string): OverlayEntity {
   return {
     expressId,
-    type: 'IfcDistributionCircuit',
+    type: 'IfcGroup',
     attributes: ['guid', '#1', name, null, 'Meldergruppe', null, '.FIREPROTECTION.'],
   };
 }

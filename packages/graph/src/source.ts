@@ -18,6 +18,34 @@
 
 import type { GraphRelation, RelationDirection } from './types.js';
 
+/**
+ * The enum slots that decide what a node IS, beyond its class.
+ *
+ * One object rather than three questions because a source answers them from
+ * one read of the entity — asking separately would re-parse it three times,
+ * and on a plant model that is three passes over every port in the building.
+ *
+ * Every field optional: a source over a bare relationship table has nowhere to
+ * read any of them from, and a missing field and an empty one mean the same
+ * thing to the caller.
+ */
+export interface GraphNodeTraits {
+  /** `IfcSensor.PredefinedType` = `FIRESENSOR`, `IfcDistributionPort` = `CABLE`. */
+  predefinedType?: string | null;
+  /** `IfcDistributionPort.FlowDirection` — `SOURCE`, `SINK`, `SOURCEANDSINK`. */
+  flowDirection?: string | null;
+  /** `IfcDistributionPort.SystemType` — `ELECTRICAL`, `LIGHTING`, … */
+  systemType?: string | null;
+}
+
+/** What a relationship carries beyond the pair of ends it joins. */
+export interface GraphEdgeInfo {
+  /** The relationship's `Name`. */
+  name?: string | null;
+  /** `IfcRelConnectsPorts.RealizingElement` — the cable that makes the joint. */
+  realizedBy?: number | null;
+}
+
 export interface GraphSource {
   /**
    * Express ids of every entity whose type is `ifcType` — exact EXPRESS name,
@@ -33,6 +61,22 @@ export interface GraphSource {
 
   /** The entity's `Name`, or `null` when it carries none. */
   nameOf(expressId: number): string | null;
+
+  /**
+   * The entity's IFC `GlobalId`, or `null` when the source cannot answer it.
+   *
+   * Optional like the rest: a hand-written model of ids and edges has no
+   * GUIDs, and requiring them would make every such source invent some.
+   */
+  globalIdOf?(expressId: number): string | null;
+
+  /**
+   * The element's `Tag`, or `null`. The mark it carries on the drawing.
+   *
+   * Optional like the rest: a source over a bare relationship table has
+   * nowhere to read it from.
+   */
+  tagOf?(expressId: number): string | null;
 
   /**
    * The entity's asset identifier, or `null` when it carries none.
@@ -53,4 +97,28 @@ export interface GraphSource {
     relation: GraphRelation,
     direction: RelationDirection,
   ): readonly number[];
+
+  /**
+   * The enum slots of one entity, or `null` when the source cannot read them.
+   *
+   * Optional for the same reason `identifierOf` is: a hand-written test model
+   * of ids and edges has no attributes at all, and requiring this would make
+   * every such source invent them.
+   */
+  traitsOf?(expressId: number): GraphNodeTraits | null;
+
+  /**
+   * What the relationship between two entities carries, beyond the two ends.
+   *
+   * Asked per edge rather than handed back with `related`, because `related`
+   * answers a set of ids and there is no room in it for per-pair payload
+   * without changing what every caller of it gets. A source is expected to
+   * have indexed this once — `buildRelationGraph` calls it for every edge it
+   * creates.
+   */
+  edgeInfoOf?(
+    fromExpressId: number,
+    toExpressId: number,
+    relation: GraphRelation,
+  ): GraphEdgeInfo | null;
 }

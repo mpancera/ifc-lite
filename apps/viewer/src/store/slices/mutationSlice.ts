@@ -14,7 +14,7 @@ import { configureMutationView } from '@/utils/configureMutationView';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import { StoreEditor } from '@ifc-lite/mutations';
 import type { Mutation, ChangeSet, PropertyValue } from '@ifc-lite/mutations';
-import { PropertyValueType, QuantityType } from '@ifc-lite/data';
+import { PropertyValueType, QuantityType, RelationshipType } from '@ifc-lite/data';
 import {
   addBeamToStore,
   addColumnToStore,
@@ -25,6 +25,7 @@ import {
   addLibraryTypeToStore,
   addDistributionSystemToStore,
   addDistributionCircuitToStore,
+  addGroupToStore,
   toNativeArea,
   toNativeVolume,
   toNativeLength,
@@ -32,6 +33,10 @@ import {
   emitRelAssignsToGroup,
   emitRelDefinesByType,
   findDistributionSystem,
+  addRunPortsToStore,
+  emitRelConnectsPorts,
+  addControllerToStore,
+  addAlarmPanelToStore,
   addRoofToStore,
   addSensorToStore,
   addAnnotationToStore,
@@ -71,22 +76,29 @@ import type { MeshData } from '@ifc-lite/geometry';
 import { getEntityBounds, getEntityCenter } from '@/utils/viewportUtils';
 import { TRADE_PROPERTY, TRADE_PSET, tradeCodeFor } from '@/lib/catalog/tradeCode';
 import type { CatalogEntry } from '@/lib/catalog';
-import { disciplineSystemName, findDisciplineSystem, normalizeRoleId } from '@/lib/roles/disciplineRoles';
-import { readZones } from '@/lib/ifcZones/membership';
+import {
+  disciplineSystemName, findDisciplineSystem, normalizeRoleId, parsedDisciplineSystemOf,
+} from '@/lib/roles/disciplineRoles';
+import { parsedZonesOf, readZones, readZonesForDisplay } from '@/lib/ifcZones/membership';
 import { themeOfZone } from '@/lib/ifcZones/themes';
 import { authoredEntities } from '@/lib/mutations/authoredEntities';
 import { overlayAttribute } from '@/lib/mutations/overlayAttribute';
 import {
-  CIRCUIT_OBJECT_TYPE, detectorMark, nextMarks, planCircuits, readCircuits,
+  CIRCUIT_OBJECT_TYPE, mergeOwnCircuits, parsedCircuitsOf, planCircuits, readCircuits,
   type CircuitPlan,
 } from '@/lib/detectorGroups/circuits';
+import {
+  nextRunName, planWiring, RUN_OBJECT_TYPE, type WirePlan,
+} from '@/lib/wiring/wirePlan';
+import { findAlarmPanelSite } from '@/lib/wiring/alarmPanelSite';
+import { resolveEntityLongName } from '@/lib/entity-predefined-type';
 import { isDeviceType } from '@/lib/plan/deviceSymbols';
 import { reshapeRoomOutline } from '@/lib/roomShape/reshape';
 import { polygonArea } from '@/lib/roomShape/roomShape';
 import { mayCreateEntities, mayEditEntity, type EditPermission } from '@/lib/roles/roleGuard';
 import { typeClassFor } from '@/lib/classTriage/groupAssignment';
 import { preserveZoneColour } from '@/lib/ifcZones/zoneDisplay';
-import { resolveSpaceForPlacement } from '@/lib/relationships/spaceLookup';
+import { resolveSpaceForPlacement, spacesByStorey } from '@/lib/relationships/spaceLookup';
 import { overlayContainerOf } from '@/lib/persistence/storeAdapter';
 import { applySmartPropertyRules } from '@/lib/smartProperties/applyRules';
 import { toGlobalIdFromModels } from '../globalId.js';
@@ -870,6 +882,52 @@ export interface MutationSlice {
     modelId: string,
   ) => { plan: CircuitPlan; created: number; marked: number } | { error: string };
   /**
+   * Wire a run: ports, connections, the circuit, and the marks.
+   *
+   * The order is the input and cannot be derived — which detector hangs where
+   * on the cable is a decision, not a consequence. Everything else follows
+   * from it: each device gets an IN and an OUT port nested under it
+   * (`IfcRelNests`, the IFC4 way), consecutive devices are joined with
+   * `IfcRelConnectsPorts`, and the whole run is asserted as one
+   * `IfcDistributionCircuit` so "which run is this on" stays one lookup rather
+   * than a traversal that breaks on the first missing hop.
+   *
+   * The mark's counter IS the position on the cable, so re-wiring renumbers.
+   */
+  wireCircuit: (
+    modelId: string,
+    input: {
+      /** Devices in wiring order. Without the controller. */
+      readonly deviceIds: readonly number[];
+      /** The controller the run hangs on, or `null` to have one created. */
+      readonly controllerId?: number | null;
+      /** Storey-local metres. Used only when a controller has to be created. */
+      readonly controllerPosition?: readonly [number, number, number];
+      /** Close the run back to its controller. */
+      readonly ring?: boolean;
+      /** Run name. Defaults to the next free `MK<nn>`. */
+      readonly name?: string;
+    },
+  ) => {
+    plan: WirePlan;
+    circuitId: number;
+    controllerId: number;
+    controllerCreated: boolean;
+    portsCreated: number;
+    connections: number;
+  } | { error: string };
+  /**
+   * Place the installation's alarm panel when the model has none.
+   *
+   * A detection installation without its panel is a set of detectors reporting
+   * to nothing, and the omission is invisible — every device looks right. The
+   * spot is a guess by room name (ground floor, by the entrance) and says so;
+   * the existence is the part that must not be forgotten.
+   */
+  ensureAlarmPanel: (
+    modelId: string,
+  ) => { panelId: number; created: boolean; reason: string } | { error: string };
+  /**
    * Replace a room's outline, keeping the room.
    *
    * A wall comes out and the room behind it should grow into the space. The
@@ -1319,6 +1377,15 @@ function applySmartProperties(
  * the file's schema and owner history from one. Any storey will do; a type and
  * a system are not placed, so nothing about the choice reaches the output.
  */
+/**
+ * How high above its storey an alarm panel is mounted, in metres.
+ *
+ * A panel is wall-mounted at reading height, not lying on the floor. The
+ * number is not precision — it is the difference between a box a person walks
+ * up to and a box in the screed — and it is a starting point somebody drags.
+ */
+const PANEL_MOUNTING_HEIGHT_M = 1.4;
+
 function runGroupRelation<T>(
   get: () => ViewerState,
   set: (partial: Partial<ViewerState> | ((s: ViewerState) => Partial<ViewerState>)) => void,
@@ -1387,7 +1454,10 @@ function joinActiveDisciplineSystem(
   const system = findDisciplineSystem(get().activeDisciplineSystemId);
   if (!system) return;
   const entities = get().mutationViews.get(modelId)?.getNewEntities() ?? [];
+  // Same three-step lookup as the circuit builder: session, then file, then
+  // create. A placement must join the installation that is already there.
   const systemId = findDistributionSystem(entities, system.predefinedType, system.objectType)
+    ?? parsedDisciplineSystemOf(get().models.get(modelId)?.ifcDataStore, system)
     ?? addDistributionSystemToStore(editor, anchor.ownerHistoryId, {
       PredefinedType: system.predefinedType,
       ObjectType: system.objectType,
@@ -1416,7 +1486,16 @@ function runInStoreElementBuilder(
   const dataStore = model?.ifcDataStore;
   if (!dataStore) return { error: `No model loaded for id "${modelId}"` };
 
-  const view = state.mutationViews.get(modelId);
+  // Create the overlay rather than refusing for the want of one — the same
+  // fix `runGroupRelation` already carries, and for the same symptom: a
+  // freshly opened model has no view until some surface edits, so the FIRST
+  // authoring action here failed with a message that reads as a defect, and
+  // the next click after touching anything else succeeded. Hit again the day
+  // `ensureAlarmPanel` moved onto this path.
+  if (!get().ensureMutationView(modelId)) {
+    return { error: 'Model has no editable mutation view yet' };
+  }
+  const view = get().mutationViews.get(modelId);
   if (!view) return { error: 'Model has no editable mutation view yet' };
 
   const editor = getOrCreateStoreEditor(get, set, modelId);
@@ -3268,6 +3347,7 @@ export const createMutationSlice: StateCreator<
               { name: TRADE_PROPERTY, value: tradeCode, type: 'LABEL' },
             ]);
           }
+
         }
         emitRelDefinesByType(editor, anchor.ownerHistoryId, [elementId], typeId, anchor.guidRandom);
 
@@ -3430,47 +3510,70 @@ export const createMutationSlice: StateCreator<
     // one fire compartment AND one Auslösezone, and building groups from both
     // would put every detector in two.
     const theme = system.objectType === 'GasDetection' ? 'gas-trigger' : 'fire-trigger';
-    const zones = readZones(entities)
+    // The file's zones AND this session's. Reading only the session was a real
+    // defect, and an invisible one: zones painted, exported and reloaded are
+    // parsed from then on, so the panel reported "keine Auslösezone gefunden"
+    // on a model that visibly had eighteen of them. Writing stays restricted
+    // to the session — see `readZonesForDisplay`; only READING is widened.
+    const zones = readZonesForDisplay(
+      parsedZonesOf(dataStore, RelationshipType.AssignsToGroup),
+      readZones(entities),
+    )
       .filter((zone) => themeOfZone(zone.objectType)?.id === theme)
       .map((zone) => ({ expressId: zone.expressId, name: zone.name, memberIds: zone.memberIds }));
     if (zones.length === 0) {
       return { error: 'Keine Auslösezone gefunden — zuerst Zonen anlegen und Räume hineinmalen.' };
     }
 
-    // The detectors, with the room each stands in. `bySpace` is what the
-    // placement wrote and what `registerAuthoredElement` keeps current, so a
-    // device set a minute ago counts.
+    // The detectors, with the room each stands in — EVERY device in the model,
+    // not only the ones a room contains.
+    //
+    // `bySpace` was the only source here, and it made the number that matters
+    // wrong in the one direction that hurts. A device hung on the storey
+    // instead of a room is absent from `bySpace` entirely, so it was neither
+    // grouped nor counted as ungrouped: it simply did not exist. Measured on a
+    // real model — the panel reported one detector without a zone where there
+    // were two, and the missing one was the one with no room at all, which is
+    // exactly the case somebody needs to be told about before handover. Its
+    // asset identifier even shows the hole (`LM.._FST.RM.001`).
+    //
+    // `roomId: null` is a case `planCircuits` already handles: such a device
+    // joins no group and lands in `ungrouped`.
     const bySpace = dataStore.spatialHierarchy?.bySpace;
+    const roomOf = new Map<number, number>();
+    for (const [roomId, elementIds] of bySpace ?? []) {
+      for (const id of elementIds) if (!roomOf.has(id)) roomOf.set(id, roomId);
+    }
     const overlayTypes = new Map<number, string>();
     for (const entity of entities) overlayTypes.set(entity.expressId, entity.type);
     const devices: Array<{ id: number; roomId: number | null }> = [];
     const seen = new Set<number>();
-    for (const [roomId, elementIds] of bySpace ?? []) {
-      for (const id of elementIds) {
-        if (seen.has(id)) continue;
-        const typeName = overlayTypes.get(id) ?? dataStore.entities?.getTypeName?.(id) ?? '';
-        if (!isDeviceType(typeName)) continue;
-        seen.add(id);
-        devices.push({ id, roomId });
+    const consider = (id: number, typeName: string) => {
+      if (seen.has(id) || !isDeviceType(typeName)) return;
+      seen.add(id);
+      devices.push({ id, roomId: roomOf.get(id) ?? null });
+    };
+    for (const [stepType, ids] of dataStore.entityIndex?.byType ?? []) {
+      // `byType` is keyed by the file's raw STEP token; `getTypeName` gives the
+      // EXPRESS spelling `isDeviceType` knows. Resolving per entity is what the
+      // overlay path needs anyway, and the device classes are a small slice.
+      for (const id of ids) {
+        if (view?.isDeleted?.(id)) continue;
+        consider(id, dataStore.entities?.getTypeName?.(id) || stepType);
       }
     }
+    for (const entity of entities) consider(entity.expressId, entity.type);
 
-    const circuits = readCircuits(entities);
+    // Same widening, same reason — but the ownership test is stricter. A
+    // circuit is only "ours" if it carries the ObjectType this tool writes;
+    // any other IfcDistributionCircuit in the file belongs to somebody else
+    // and must not be extended. Without this, the second run after a reload
+    // built a duplicate group for every zone.
+    const circuits = mergeOwnCircuits(
+      parsedCircuitsOf(dataStore, RelationshipType.AssignsToGroup, CIRCUIT_OBJECT_TYPE, 'IFCGROUP'),
+      readCircuits(entities, CIRCUIT_OBJECT_TYPE),
+    );
     const plan = planCircuits({ zones, devices, circuits });
-
-    // The mark lives in `Tag`, which is IfcElement's own word for "the mark
-    // this element carries on the drawing". NOT in `Name`: a detector placed
-    // from the catalogue is called "Rauchmelder" there, and overwriting that
-    // would trade the product for its number — the plan can show both.
-    const markOf = (expressId: number): string => {
-      const overlaid = overlayAttribute(view, expressId, 'Tag');
-      if (overlaid !== null) return overlaid;
-      const authored = view?.getNewEntities
-        ? [...view.getNewEntities()].find((e) => e.expressId === expressId)
-        : undefined;
-      const value = authored?.attributes?.[7];
-      return typeof value === 'string' ? value.trim() : '';
-    };
 
     const touched = plan.entries.flatMap((entry) => entry.deviceIds);
     if (touched.length === 0) {
@@ -3480,47 +3583,41 @@ export const createMutationSlice: StateCreator<
     const result = runGroupRelation(
       get, set, modelId, touched, 'build detector circuits',
       (editor, anchor) => {
+        // The session's system, then the file's, then a new one. Skipping the
+        // middle step is what produced a second `Fire - Branddetektion` on
+        // every reopened model — see `parsedDisciplineSystemOf`.
         const systemId = findDistributionSystem(
           get().mutationViews.get(modelId)?.getNewEntities() ?? [],
           system.predefinedType, system.objectType,
-        ) ?? addDistributionSystemToStore(editor, anchor.ownerHistoryId, {
+        ) ?? parsedDisciplineSystemOf(dataStore, system)
+        ?? addDistributionSystemToStore(editor, anchor.ownerHistoryId, {
           PredefinedType: system.predefinedType,
           ObjectType: system.objectType,
           Name: disciplineSystemName(system),
         }, anchor.guidRandom).systemId;
 
         let created = 0;
-        let marked = 0;
         for (const entry of plan.entries) {
           let circuitId: number;
           if (entry.circuitId !== null) {
             circuitId = entry.circuitId;
           } else {
-            circuitId = addDistributionCircuitToStore(editor, anchor.ownerHistoryId, {
+            // A plain `IfcGroup`, and no aggregation under the installation.
+            // Both changes say the same thing: a Meldergruppe states that
+            // these detectors trigger together, and nothing at all about how
+            // they are wired. As an `IfcDistributionCircuit` aggregated under
+            // the system it claimed to be a switched partition of the
+            // installation — a cabling statement nobody had drawn. The wiring
+            // now lives in `lib/wiring`, where somebody actually draws it.
+            circuitId = addGroupToStore(editor, anchor.ownerHistoryId, {
               Name: entry.name,
               ObjectType: CIRCUIT_OBJECT_TYPE,
-              PredefinedType: system.predefinedType,
-            }, anchor.guidRandom).circuitId;
-            // The aggregation is what makes it a partition OF that system
-            // rather than a group with a suggestive name.
-            emitRelAggregates(editor, anchor.ownerHistoryId, systemId, [circuitId]);
+            }, anchor.guidRandom).groupId;
             created += 1;
           }
 
-          // Marks continue past the ones the group already carries, so a
-          // second run over two new detectors does not renumber seventeen.
-          const staying = entry.deviceIds.filter((id) => !entry.joining.includes(id));
-          const fresh = nextMarks(entry.name, staying.map(markOf), entry.joining.length);
-          entry.joining.forEach((id, i) => {
-            editor.setAttribute(id, 'Tag', fresh[i] ?? detectorMark(entry.name, i + 1));
-            marked += 1;
-          });
-          // A detector whose room left the zone keeps nothing: a mark naming a
-          // group it is not in reads as correct and is worse than none.
-          for (const id of entry.leaving) editor.setAttribute(id, 'Tag', '');
-
           const existing = readCircuits(
-            authoredEntities(get().mutationViews.get(modelId)!),
+            authoredEntities(get().mutationViews.get(modelId)!), CIRCUIT_OBJECT_TYPE,
           ).find((c) => c.expressId === circuitId);
           const members = entry.deviceIds.map((id) => `#${id}`);
           if (existing?.relExpressId != null) {
@@ -3529,12 +3626,325 @@ export const createMutationSlice: StateCreator<
             emitRelAssignsToGroup(editor, anchor.ownerHistoryId, entry.deviceIds, circuitId, anchor.guidRandom);
           }
         }
-        return { created, marked };
+        // Nothing is marked here any more. The counter in a device's mark is
+        // its POSITION ON THE CABLE, and only the wiring knows that — a second
+        // counter derived from a zone would put two different numbers on one
+        // detector and let whichever ran last win.
+        return { created, marked: 0 };
       },
     );
 
     if ('error' in result) return result;
     return { plan, created: result.created, marked: result.marked };
+  },
+
+  wireCircuit: (modelId, input) => {
+    const state = get();
+    const dataStore = state.models.get(modelId)?.ifcDataStore;
+    if (!dataStore) return { error: `No model loaded for id "${modelId}"` };
+
+    const system = findDisciplineSystem(state.activeDisciplineSystemId);
+    if (!system) {
+      return { error: 'Keine Anlage aktiv — auf die Rolle der Installation wechseln (z.B. Branddetektion).' };
+    }
+    if (input.deviceIds.length === 0) return { error: 'Kein Gerät im Kreis.' };
+
+    const view = state.mutationViews.get(modelId);
+    const entities = view ? authoredEntities(view) : [];
+
+    // Runs this tool already wrote, from the file and from the session. The
+    // name decides the next free one, the members decide what is already
+    // spoken for — a detector on two lines is a fault at the panel.
+    const runs = mergeOwnCircuits(
+      parsedCircuitsOf(
+        dataStore, RelationshipType.AssignsToGroup, RUN_OBJECT_TYPE, 'IFCDISTRIBUTIONCIRCUIT',
+      ),
+      readCircuits(entities, RUN_OBJECT_TYPE, 'IfcDistributionCircuit'),
+    );
+    const name = input.name ?? nextRunName(runs.map((r) => r.name));
+    const existing = runs.find((r) => r.name === name) ?? null;
+    const alreadyWired = new Set<number>();
+    for (const run of runs) {
+      if (run.name === name) continue;
+      for (const id of run.memberIds) alreadyWired.add(id);
+    }
+
+    // A controller may have to be made, and it must exist before the plan is
+    // built — the plan numbers from it. Deferred into the editor callback
+    // because that is the only place an express id can be minted.
+    let plan: WirePlan | null = null;
+    let controllerCreated = false;
+    let portsCreated = 0;
+
+    const result = runGroupRelation(
+      get, set, modelId, input.deviceIds, 'wire circuit',
+      (editor, controllerAnchor) => {
+        let controllerId = input.controllerId ?? null;
+        if (controllerId == null) {
+          // Where a created line module goes: with the first device on the
+          // run, in the room that device stands in.
+          //
+          // Not the model origin, which is where it landed first and where
+          // nobody would ever look for it. The footprint centroid comes from
+          // `spacesByStorey`, the same reader `resolveSpaceForPlacement` and
+          // the panel placement use — so all three agree on the frame, and a
+          // module dropped here is in the same coordinate space as the
+          // detectors it feeds.
+          const firstDevice = input.deviceIds[0];
+          const roomOfFirst = firstDevice !== undefined
+            ? [...(dataStore.spatialHierarchy?.bySpace ?? [])]
+              .find(([, ids]) => ids.includes(firstDevice))?.[0]
+            : undefined;
+          const roomFootprint = roomOfFirst !== undefined
+            ? [...spacesByStorey(dataStore, view, get().mutationVersion).values()]
+              .flat().find((entry) => entry.spaceExpressId === roomOfFirst)?.polygon
+            : undefined;
+          const site = roomFootprint && roomFootprint.length > 0
+            ? roomFootprint.reduce(
+              (acc, point) => ({
+                x: acc.x + point[0] / roomFootprint.length,
+                y: acc.y + point[1] / roomFootprint.length,
+              }),
+              { x: 0, y: 0 },
+            )
+            : null;
+          const position = input.controllerPosition
+            ? ([...input.controllerPosition] as [number, number, number])
+            : site
+              ? ([site.x, site.y, PANEL_MOUNTING_HEIGHT_M] as [number, number, number])
+              : ([0, 0, PANEL_MOUNTING_HEIGHT_M] as [number, number, number]);
+          controllerId = addControllerToStore(editor, controllerAnchor, {
+            Position: position,
+            Name: `Linienmodul ${name}`,
+            // The trade, on the same attribute the installation carries it
+            // on — a controller reads as fire detection or intrusion the
+            // same way its system does.
+            ObjectType: system.objectType,
+            PredefinedType: 'PROGRAMMABLE',
+            Tag: name,
+          }).elementId;
+          controllerCreated = true;
+        }
+
+        const sequence = [
+          controllerId,
+          ...input.deviceIds,
+          ...(input.ring ? [controllerId] : []),
+        ];
+        plan = planWiring({ sequence, circuitName: name, alreadyWired });
+
+        // Ports: one IN and one OUT per participant, nested under it. Made for
+        // every device on the run including the controller, because a hop
+        // needs an end at both sides.
+        const portsOf = new Map<number, { inPortId: number; outPortId: number }>();
+        const ensurePorts = (expressId: number, role: 'head' | 'passThrough') => {
+          const held = portsOf.get(expressId);
+          if (held) return held;
+          const made = addRunPortsToStore(
+            editor, controllerAnchor.ownerHistoryId, expressId,
+            {
+              systemType: system.predefinedType,
+              role,
+              schema: controllerAnchor.schema ?? 'IFC4',
+            },
+            controllerAnchor.guidRandom,
+          );
+          portsCreated += 2;
+          portsOf.set(expressId, made);
+          return made;
+        };
+        // The controller feeds the line; everything on it passes through.
+        ensurePorts(controllerId, 'head');
+        for (const stop of plan.stops) ensurePorts(stop.expressId, 'passThrough');
+
+        let connections = 0;
+        for (const hop of plan.hops) {
+          const from = portsOf.get(hop.fromExpressId);
+          const to = portsOf.get(hop.toExpressId);
+          if (!from || !to) continue;
+          // OUT of the one, IN of the next — that ordering is what makes the
+          // run walkable in the direction the cable was pulled.
+          emitRelConnectsPorts(
+            editor, controllerAnchor.ownerHistoryId, from.outPortId, to.inPortId,
+            { name },
+            controllerAnchor.guidRandom,
+          );
+          connections += 1;
+        }
+
+        // The circuit: asserted, so "which run is this on" stays one lookup.
+        const systemId = findDistributionSystem(
+          get().mutationViews.get(modelId)?.getNewEntities() ?? [],
+          system.predefinedType, system.objectType,
+        ) ?? parsedDisciplineSystemOf(dataStore, system)
+        ?? addDistributionSystemToStore(editor, controllerAnchor.ownerHistoryId, {
+          PredefinedType: system.predefinedType,
+          ObjectType: system.objectType,
+          Name: disciplineSystemName(system),
+        }, controllerAnchor.guidRandom).systemId;
+
+        let circuitId: number;
+        if (existing) {
+          circuitId = existing.expressId;
+        } else {
+          circuitId = addDistributionCircuitToStore(editor, controllerAnchor.ownerHistoryId, {
+            Name: name,
+            ObjectType: RUN_OBJECT_TYPE,
+            PredefinedType: system.predefinedType,
+          }, controllerAnchor.guidRandom).circuitId;
+          emitRelAggregates(editor, controllerAnchor.ownerHistoryId, systemId, [circuitId]);
+        }
+
+        // The controller belongs to its own run — it is the head of the line,
+        // not something outside it — AND to the installation. Only the first
+        // was written at one point, and the omission was invisible until the
+        // installation chain was drawn: the run was there and its controller
+        // was not, because nothing said the controller was part of the system.
+        const members = [controllerId, ...plan.stops.map((stop) => stop.expressId)];
+        if (controllerCreated) {
+          emitRelAssignsToGroup(
+            editor, controllerAnchor.ownerHistoryId, [controllerId], systemId, controllerAnchor.guidRandom,
+          );
+        }
+        if (existing?.relExpressId != null) {
+          editor.setPositionalAttribute(existing.relExpressId, 4, members.map((id) => `#${id}`));
+        } else {
+          emitRelAssignsToGroup(
+            editor, controllerAnchor.ownerHistoryId, members, circuitId, controllerAnchor.guidRandom,
+          );
+        }
+
+        // The mark IS the position on the cable, so this overwrites rather
+        // than continues. Re-wiring renumbers; that is the point.
+        for (const stop of plan.stops) editor.setAttribute(stop.expressId, 'Tag', stop.mark);
+
+        return { circuitId, controllerId, connections };
+      },
+    );
+
+    if ('error' in result) return result;
+    if (!plan) return { error: 'Verkabelung konnte nicht geplant werden' };
+    return {
+      plan,
+      circuitId: result.circuitId,
+      controllerId: result.controllerId,
+      controllerCreated,
+      portsCreated,
+      connections: result.connections,
+    };
+  },
+
+  ensureAlarmPanel: (modelId) => {
+    const state = get();
+    const dataStore = state.models.get(modelId)?.ifcDataStore;
+    if (!dataStore) return { error: `No model loaded for id "${modelId}"` };
+
+    const system = findDisciplineSystem(state.activeDisciplineSystemId);
+    if (!system) {
+      return { error: 'Keine Anlage aktiv — auf die Rolle der Installation wechseln.' };
+    }
+
+    const view = state.mutationViews.get(modelId);
+    const entities = view ? authoredEntities(view) : [];
+
+    // Already there? The file first, then this session. A second panel is
+    // worse than none — two boxes each claiming to be THE panel.
+    const parsedPanels = dataStore.entityIndex?.byType?.get('IFCUNITARYCONTROLELEMENT') ?? [];
+    const existingParsed = parsedPanels.find((id) => !view?.isDeleted?.(id));
+    if (existingParsed !== undefined) {
+      return { panelId: existingParsed, created: false, reason: 'Zentrale bereits im Modell' };
+    }
+    const authored = entities.find((e) => e.type === 'IfcUnitaryControlElement');
+    if (authored) {
+      return { panelId: authored.expressId, created: false, reason: 'Zentrale in dieser Sitzung angelegt' };
+    }
+
+    const storeys = (dataStore.entityIndex?.byType?.get('IFCBUILDINGSTOREY') ?? []).map((id) => ({
+      expressId: id,
+      name: dataStore.entities?.getName?.(id) ?? '',
+    }));
+    const rooms = (dataStore.entityIndex?.byType?.get('IFCSPACE') ?? []).map((id) => ({
+      expressId: id,
+      name: dataStore.entities?.getName?.(id) ?? '',
+      // No columnar LongName accessor exists; this re-parses the entity, the
+      // same path `resolveEntityPredefinedType` takes. Charged once per room
+      // in a one-off action. It matters: in a real model the room is NAMED
+      // `0.01` and only its LongName says `Vorhalle`.
+      longName: resolveEntityLongName(dataStore, id) ?? '',
+      storeyId: dataStore.relationships?.getRelated(
+        id, RelationshipType.Aggregates, 'inverse',
+      )?.[0] ?? -1,
+    }));
+    const site = findAlarmPanelSite(rooms, storeys);
+    if (!site) return { error: 'Das Modell hat kein Geschoss, in dem eine Zentrale stehen könnte' };
+
+    // The room's footprint centroid, read through the SAME reader every
+    // placement path uses (`spacesByStorey`), so the panel lands in the frame
+    // `addSensor` and `resolveSpaceForPlacement` already agree on.
+    //
+    // Not the mesh centre. That is what this did first, and it put the panel
+    // twenty metres off: `getEntityCenter` answers in the renderer's Y-up
+    // metres, where the plan Y is `-z` and `y` is the HEIGHT. Measured on a
+    // real model — X landed within 30 cm and Y was the room's mid-height.
+    const footprint = site.roomId !== null
+      ? spacesByStorey(dataStore, view, get().mutationVersion)
+        .get(site.storeyId)?.find((entry) => entry.spaceExpressId === site.roomId)?.polygon
+      : undefined;
+    // `Vec2` is a tuple, not an object — the footprint is a polygon of
+    // `[x, y]` pairs.
+    const centre = footprint && footprint.length > 0
+      ? footprint.reduce(
+        (acc, point) => ({ x: acc.x + point[0] / footprint.length, y: acc.y + point[1] / footprint.length }),
+        { x: 0, y: 0 },
+      )
+      : { x: 0, y: 0 };
+
+    const result = runInStoreElementBuilder(
+      get, set, modelId,
+      // The storey the SITE names, not the file's first. `runGroupRelation`
+      // anchors on the first storey it finds and says so — "any storey will
+      // do" is true for a group and false for something placed. Using it here
+      // chained the panel to the basement while its containment named a room
+      // on the ground floor: a box below the building, exactly what it looked
+      // like.
+      site.storeyId,
+      'IFCUNITARYCONTROLELEMENT', 'place alarm panel',
+      (editor, anchor) => {
+        const panelId = addAlarmPanelToStore(editor, anchor, {
+          Position: [centre.x, centre.y, PANEL_MOUNTING_HEIGHT_M],
+          Name: `Zentrale ${disciplineSystemName(system)}`,
+          ObjectType: system.objectType,
+          Tag: 'BMZ',
+          ContainerId: site.roomId ?? undefined,
+        }).elementId;
+
+        const systemId = findDistributionSystem(
+          get().mutationViews.get(modelId)?.getNewEntities() ?? [],
+          system.predefinedType, system.objectType,
+        ) ?? parsedDisciplineSystemOf(dataStore, system)
+        ?? addDistributionSystemToStore(editor, anchor.ownerHistoryId, {
+          PredefinedType: system.predefinedType,
+          ObjectType: system.objectType,
+          Name: disciplineSystemName(system),
+        }, anchor.guidRandom).systemId;
+        emitRelAssignsToGroup(
+          editor, anchor.ownerHistoryId, [panelId], systemId, anchor.guidRandom,
+        );
+        return panelId;
+      },
+      {
+        type: 'sensor',
+        params: { Width: 0.5, Depth: 0.15, Height: 0.7, PredefinedType: 'NOTDEFINED' },
+        position: [centre.x, centre.y, PANEL_MOUNTING_HEIGHT_M],
+      },
+    );
+
+    if (typeof result === 'object' && result !== null && 'error' in result) return result;
+    return {
+      panelId: typeof result === 'number' ? result : (result as { expressId: number }).expressId,
+      created: true,
+      reason: site.reason,
+    };
   },
 
   addSensor: (modelId, storeyExpressId, params) => runInStoreElementBuilder(

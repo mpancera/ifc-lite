@@ -74,6 +74,7 @@ const AUTHORING_TOOLS: ReadonlySet<string> = new Set([
   'split',
   'spaceSketch',
   'zonePaint',
+  'wiring',
 ]);
 
 /**

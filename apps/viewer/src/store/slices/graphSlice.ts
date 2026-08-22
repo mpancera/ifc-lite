@@ -66,8 +66,12 @@ export interface GraphSlice {
    * overlay, and the file is that graph — a caller assembling it elsewhere
    * would export a different diagram from the one on screen.
    */
-  graphExportRequested: 'csv' | 'json' | null;
-  requestGraphExport: (format: 'csv' | 'json' | null) => void;
+  /**
+   * A pending export request, or `null`. `preplanning` is the object-per-row
+   * list a schematic tool imports; see `packages/graph/src/preplanning.ts`.
+   */
+  graphExportRequested: 'csv' | 'json' | 'preplanning' | null;
+  requestGraphExport: (format: 'csv' | 'json' | 'preplanning' | null) => void;
 
   setGraphPanelVisible: (visible: boolean) => void;
   toggleGraphPanel: () => void;

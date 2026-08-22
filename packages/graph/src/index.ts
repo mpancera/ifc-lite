@@ -12,7 +12,7 @@ export type {
   RelationDirection,
 } from './types.js';
 
-export type { GraphSource } from './source.js';
+export type { GraphEdgeInfo, GraphNodeTraits, GraphSource } from './source.js';
 
 export {
   buildRelationGraph,
@@ -22,9 +22,13 @@ export {
   elementInSpaceInZone,
   plantTopology,
   systemMembers,
+  systemMembersInCircuit,
   systemMembersInSpace,
 } from './chain.js';
-export type { ChainStart, HopDirection, RelationChain, RelationHop } from './chain.js';
+export type { ChainStart, HopCarrier, HopDirection, RelationChain, RelationHop } from './chain.js';
 
 export { graphToCsv, graphToJson, graphTreeOf } from './export.js';
 export type { GraphJsonExport, GraphTreeNode } from './export.js';
+
+export { graphToPreplanning, preplanningToCsv, PREPLANNING_COLUMNS } from './preplanning.js';
+export type { PreplanningKind, PreplanningRow } from './preplanning.js';

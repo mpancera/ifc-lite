@@ -97,6 +97,37 @@ export function addDistributionCircuitToStore(
 }
 
 /**
+ * Create a plain `IfcGroup` — a set of objects that is not an installation.
+ *
+ * The distinction from {@link addDistributionCircuitToStore} is the whole
+ * point and it is easy to get wrong, because both end up holding a set of
+ * devices. A circuit is a partition of a distribution system that is
+ * *conditionally switched* — IFC's words — which makes it the wiring: this
+ * run, this cable, these devices in this order. A grouping that says "these
+ * detectors trigger together" is not that. It shares no cable, it switches
+ * nothing, and calling it a circuit puts a wiring statement in a file where
+ * none was made.
+ *
+ * Attribute order: IfcRoot (GlobalId, OwnerHistory, Name, Description) +
+ * IfcObject (ObjectType). An `IfcGroup` adds none of its own.
+ */
+export function addGroupToStore(
+  editor: StoreEditor,
+  ownerHistoryId: number | null,
+  params: { Name?: string; Description?: string; ObjectType?: string },
+  random?: RandomSource,
+): { groupId: number } {
+  const groupId = editor.addEntity('IfcGroup', [
+    generateIfcGuid(random),
+    ownerHistoryRef(ownerHistoryId),
+    params.Name ?? null,
+    params.Description ?? null,
+    params.ObjectType ?? null,
+  ]).expressId;
+  return { groupId };
+}
+
+/**
  * Aggregate objects under a parent — here, circuits under their system.
  *
  * Attribute order: IfcRoot (GlobalId, OwnerHistory, Name, Description) +

@@ -39,6 +39,29 @@ import {
  */
 export type HopDirection = RelationDirection | 'both';
 
+/**
+ * One way a hop's step is recorded in the file.
+ *
+ * Exists because a single modelling FACT has more than one legal carrier in
+ * IFC, and which one a file uses is the exporter's choice, not the modeller's.
+ * The port case is the one that bites: "these are the element's connection
+ * points" is `IfcRelConnectsPortToElement` in an IFC2X3-era file and
+ * `IfcRelNests` in an IFC4 one. A hop that knows only the first draws an empty
+ * schematic from a perfectly good IFC4 model — and draws it without
+ * complaining, which is the worst version of that bug.
+ *
+ * `keepTypes` may differ per carrier and usually must. `IfcRelConnectsPortToElement`
+ * reaches nothing but ports, so it needs no filter; `IfcRelNests` reaches every
+ * nested part there is, so without `['IfcDistributionPort']` it would rank an
+ * assembly's bolts as connection points.
+ */
+export interface HopCarrier {
+  relation: GraphRelation;
+  direction: HopDirection;
+  /** Defaults to the hop's own `keepTypes` when omitted. */
+  keepTypes?: readonly string[];
+}
+
 export interface RelationHop {
   relation: GraphRelation;
   direction: HopDirection;
@@ -55,6 +78,17 @@ export interface RelationHop {
   keepTypes: readonly string[];
   /** The kind assigned to every node this hop produces. */
   kind: GraphNodeKind;
+  /**
+   * Further carriers for the SAME step, walked from the same frontier.
+   *
+   * Alternatives, not a sequence: each one starts where the hop started and
+   * every target any of them reaches lands in the same rank. Two carriers that
+   * reach the same pair produce one edge, because the id is derived from the
+   * pair and the relation — the relation differs, so both edges are drawn, and
+   * that is right: a file that states the same fact twice under two
+   * relationships has stated it twice.
+   */
+  alsoVia?: readonly HopCarrier[];
 }
 
 /**
@@ -104,13 +138,19 @@ export function buildRelationGraph(source: GraphSource, chain: RelationChain): G
     // An id the source cannot type is not an entity we can draw. It is also the
     // shape a dangling STEP reference takes, so silently skipping it is right.
     if (!ifcType) return null;
+    const traits = source.traitsOf?.(expressId);
     const node: GraphNode = {
       id,
       expressId,
       kind,
       ifcType,
+      globalId: source.globalIdOf?.(expressId) ?? '',
       name: source.nameOf(expressId) ?? '',
       assetIdentifier: source.identifierOf?.(expressId) ?? '',
+      tag: source.tagOf?.(expressId) ?? '',
+      predefinedType: traits?.predefinedType ?? '',
+      flowDirection: traits?.flowDirection ?? '',
+      systemType: traits?.systemType ?? '',
     };
     nodes.set(id, node);
     return node;
@@ -129,39 +169,63 @@ export function buildRelationGraph(source: GraphSource, chain: RelationChain): G
 
   for (const hop of chain.hops) {
     const next: GraphNode[] = [];
-    const keep = new Set(hop.keepTypes);
-    const symmetric = hop.direction === 'both';
-    for (const from of frontier) {
-      const targets =
-        hop.direction === 'both'
-          ? [
-              ...source.related(from.expressId, hop.relation, 'forward'),
-              ...source.related(from.expressId, hop.relation, 'inverse'),
-            ]
-          : source.related(from.expressId, hop.relation, hop.direction);
-      for (const targetId of targets) {
-        // A symmetric hop can reach the node it started from when a file
-        // records something as connected to itself. Drawing that as an edge
-        // from a box to the same box says nothing.
-        if (symmetric && targetId === from.expressId) continue;
-        const targetType = source.typeOf(targetId);
-        if (!targetType) continue;
-        if (keep.size > 0 && !keep.has(targetType)) continue;
-        const to = addNode(targetId, hop.kind);
-        if (!to) continue;
-        const id = symmetric
-          ? symmetricEdgeId(from.id, to.id, hop.relation)
-          : edgeId(from.id, to.id, hop.relation);
-        if (!edges.has(id)) {
-          edges.set(id, {
-            id,
-            source: from.id,
-            target: to.id,
-            relation: hop.relation,
-            ...(symmetric ? { symmetric: true } : {}),
-          });
+    // The hop's own carrier first, then its alternatives. All of them walk the
+    // SAME frontier: they are different spellings of one step, not steps of
+    // their own, so none of them may consume what a previous one produced.
+    const carriers: readonly HopCarrier[] = [
+      { relation: hop.relation, direction: hop.direction, keepTypes: hop.keepTypes },
+      ...(hop.alsoVia ?? []),
+    ];
+    for (const carrier of carriers) {
+      const keep = new Set(carrier.keepTypes ?? hop.keepTypes);
+      const symmetric = carrier.direction === 'both';
+      for (const from of frontier) {
+        const targets =
+          carrier.direction === 'both'
+            ? [
+                ...source.related(from.expressId, carrier.relation, 'forward'),
+                ...source.related(from.expressId, carrier.relation, 'inverse'),
+              ]
+            : source.related(from.expressId, carrier.relation, carrier.direction);
+        for (const targetId of targets) {
+          // A symmetric hop can reach the node it started from when a file
+          // records something as connected to itself. Drawing that as an edge
+          // from a box to the same box says nothing.
+          if (symmetric && targetId === from.expressId) continue;
+          const targetType = source.typeOf(targetId);
+          if (!targetType) continue;
+          if (keep.size > 0 && !keep.has(targetType)) continue;
+          const to = addNode(targetId, hop.kind);
+          if (!to) continue;
+          const id = symmetric
+            ? symmetricEdgeId(from.id, to.id, carrier.relation)
+            : edgeId(from.id, to.id, carrier.relation);
+          // One relationship, one line — even when the chain arrives at it
+          // from both ends.
+          //
+          // `systemMembersInCircuit` walks `IfcRelAssignsToGroup` forward and
+          // then inverse. Start it at a circuit rather than at the whole
+          // installation and both hops cross the SAME membership: circuit to
+          // device, then device back to circuit. Those get different ids
+          // because the id carries the direction, so the drawing grew a second
+          // line on top of the first, with its label stacked on the first
+          // label. Measured on a real model: six nodes, ten edges, five of
+          // them saying what the other five already said.
+          const mirrored = edgeId(to.id, from.id, carrier.relation);
+          if (!edges.has(id) && !edges.has(mirrored)) {
+            const info = source.edgeInfoOf?.(from.expressId, to.expressId, carrier.relation);
+            edges.set(id, {
+              id,
+              source: from.id,
+              target: to.id,
+              relation: carrier.relation,
+              ...(symmetric ? { symmetric: true } : {}),
+              ...(info?.name ? { name: info.name } : {}),
+              ...(info?.realizedBy != null ? { realizedBy: info.realizedBy } : {}),
+            });
+          }
+          next.push(to);
         }
-        next.push(to);
       }
     }
     // Two elements in the same room put that room in the frontier twice; the
@@ -296,6 +360,59 @@ export function systemMembersInSpace(systemIds: readonly number[]): RelationChai
 }
 
 /**
+ * An installation, its devices, and the CIRCUIT each device is wired into.
+ *
+ * # The distinction this chain exists to make visible
+ * Two different questions get asked of a fire detection installation and they
+ * have different answers:
+ *
+ *  - *which detectors trigger together* — the Auslösezone. That is a grouping
+ *    of ROOMS, and the drawing for it is `elementInSpaceInZone`: detector →
+ *    room → zone.
+ *  - *which detectors sit on one cable, in what order* — the Melderkreis. That
+ *    is a partition of the wiring, and it is what IFC means by
+ *    `IfcDistributionCircuit`: "a partition of a distribution system that is
+ *    conditionally switched, such as an electrical circuit". IFC4 introduced it
+ *    precisely to replace IFC2X3's `IfcElectricalCircuit`.
+ *
+ * The two are independent. One loop can serve several zones, and one zone can
+ * be wired as two loops — so neither can be derived from the other, and a
+ * model that carries only one of them is missing half the installation.
+ *
+ * # A circuit is a subtype of a system, which is why the filter is here
+ * Walking `IfcRelAssignsToGroup` inverse from a device reaches EVERY grouping
+ * it belongs to: the installation it is a member of, any zone, and the circuit.
+ * `keepTypes` picks out the circuits, which is what makes the third rank mean
+ * "wiring" rather than "every group this device is in".
+ *
+ * # An empty third rank is the answer, not a failure
+ * Until somebody records which detector hangs on which loop, every device is a
+ * dead end here. That is the honest picture of a model that has the trigger
+ * logic and not the wiring — and it is the reason to draw it rather than to
+ * hide it behind a chain that had no circuits to show.
+ */
+export function systemMembersInCircuit(systemIds: readonly number[]): RelationChain {
+  return {
+    start: { kind: 'system', ids: systemIds },
+    hops: [
+      {
+        relation: 'IfcRelAssignsToGroup',
+        direction: 'forward',
+        keepTypes: [],
+        kind: 'element',
+      },
+      {
+        // Inverse: from the device to the groupings that contain it.
+        relation: 'IfcRelAssignsToGroup',
+        direction: 'inverse',
+        keepTypes: ['IfcDistributionCircuit'],
+        kind: 'system',
+      },
+    ],
+  };
+}
+
+/**
  * Plant topology: element → its ports → the ports those are joined to.
  *
  * The first chain that draws a real plant rather than a location tree. It
@@ -318,6 +435,23 @@ export function systemMembersInSpace(systemIds: readonly number[]): RelationChai
  * # Both directions, on purpose
  * `IfcRelConnectsPorts` has no inherent direction; which port a file lists
  * first is an authoring artifact. Walking one way would find half the plant.
+ *
+ * # Two ways to reach a port, and a model uses exactly one
+ * `IfcRelConnectsPortToElement` is how IFC2X3 says "this port sits on that
+ * element". IFC4 deprecated it and puts the ports UNDER the element with
+ * `IfcRelNests` instead. Both are in the wild — the schema a model was
+ * exported in decides which — so the first hop follows both and lets the file
+ * answer. Before this, a clean IFC4 plant model drew as a row of unconnected
+ * boxes: every device found, not one connection between them, and no error to
+ * explain it.
+ *
+ * The nesting carrier is filtered to `IfcDistributionPort` and the
+ * port-to-element one is not, on purpose. Nesting is the general
+ * whole-and-parts relationship — an assembly nests its components — so
+ * unfiltered it would rank a pump's impeller as a connection point.
+ * `IfcRelConnectsPortToElement` reaches nothing but ports by definition, and
+ * filtering it would drop a port modelled as something other than
+ * `IfcDistributionPort`, which some 2X3 exporters do.
  */
 export function plantTopology(elementTypes: readonly string[]): RelationChain {
   return {
@@ -330,6 +464,16 @@ export function plantTopology(elementTypes: readonly string[]): RelationChain {
         direction: 'inverse',
         keepTypes: [],
         kind: 'port',
+        alsoVia: [
+          {
+            // Forward: the element is the RelatingObject, its ports the
+            // RelatedObjects — the opposite reading from the relation above,
+            // which is exactly why direction belongs to the carrier.
+            relation: 'IfcRelNests',
+            direction: 'forward',
+            keepTypes: ['IfcDistributionPort'],
+          },
+        ],
       },
       {
         relation: 'IfcRelConnectsPorts',

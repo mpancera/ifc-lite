@@ -115,6 +115,15 @@ export const RELATION_CATALOGUE: readonly RelationCatalogueEntry[] = [
     drawable: true,
   },
   {
+    ifcEntity: 'IfcRelNests',
+    label: 'Verschachtelung',
+    dash: '4 2',
+    width: 1.2,
+    hinweis:
+      'Ein Ganzes hält seine Teile — und ab IFC4 hängen die Anschlüsse eines Geräts hier, nicht mehr an IfcRelConnectsPortToElement. Nicht im Objektkatalog, aus demselben Grund wie die Zerlegung.',
+    drawable: true,
+  },
+  {
     ifcEntity: 'IfcRelConnectsPortToElement',
     label: 'Anschlusspunkt',
     dash: '1 3',
@@ -156,6 +165,13 @@ export const RELATION_STYLE: Record<GraphRelation, RelationStyle> = {
   // like Verortung because it is structural too, but visibly lighter: the two
   // are near neighbours in meaning and must not be near neighbours on paper.
   IfcRelAggregates: { label: 'Zerlegung', width: 1.1 },
+
+  // Verschachtelung — the same weight class as Anschlusspunkt, because in a
+  // plant drawing it does the same job: it is the stub from a device to its
+  // own port, just spelled the IFC4 way. Dashed rather than dotted so the two
+  // spellings stay distinguishable in a federated model that holds both, which
+  // is the case worth being able to see.
+  IfcRelNests: { label: 'Verschachtelung', dash: '4 2', width: 1.2 },
 
   // Anschlusspunkt — the stub from a device to its own port. Finely dotted
   // and thin: it is plumbing about the drawing rather than part of the run,
