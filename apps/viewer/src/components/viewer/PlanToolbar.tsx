@@ -24,10 +24,10 @@
 
 import React from 'react';
 import {
-  Box, Shapes, Tag, Layers, PenTool, FileText, ZoomIn, ZoomOut,
+  Box, Shapes, PenTool, FileText, ZoomIn, ZoomOut,
   Maximize2, Download, FileDown, Printer, RefreshCw, Ruler,
   Hexagon,
-  LogOut, Type, Cloud, Trash2, FilePlus2, DoorOpen, Radio, Stamp,
+  LogOut, Type, Cloud, Trash2, FilePlus2, Stamp,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -38,6 +38,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import type { Annotation2DTool } from '@/store';
 import { ViewModeToggle } from './ViewportOverlays';
 import { PlanLayersMenu } from './PlanLayersMenu';
+import { PlanProductMenu } from './PlanProductMenu';
 import { ViewportToolStrip, ToolStripDivider, ToolStripButton } from './ViewportToolStrip';
 import { ASSUMED_LINING_THICKNESS } from '@/lib/plan/doorQuantities';
 import { scaleDenominator, formatScaleRatio, STANDARD_SCALES } from '@/lib/plan/planChrome';
@@ -171,6 +172,14 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
           absence strands you, and it sits at the same end of the building's
           strip so switching does not move the switch. */}
       <ViewModeToggle />
+      <Divider />
+
+      {/* Which drawing this is. First after the way out, because it settles
+          what the rest of the strip is even about: the switches below adjust a
+          drawing, and this says WHICH drawing. It was reachable only from the
+          export batch until now, so the sheet that came out and the plan on
+          screen could disagree. */}
+      <PlanProductMenu />
       <Divider />
 
       {children}

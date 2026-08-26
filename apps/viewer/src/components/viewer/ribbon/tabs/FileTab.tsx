@@ -10,13 +10,6 @@
 import React from 'react';
 import { BookMarked, FolderOpen, HardHat, Palette, Ruler, Shapes, ShieldCheck, Spline } from 'lucide-react';
 import { AddFile, CloudSources, Loading, OpenFile, Refresh, Share, CollabsRoom } from '@/icons';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
 import { isCollabEnabled } from '@/lib/collab/config';
@@ -143,10 +136,18 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
       {/* Application-wide preferences. Deliberately here rather than in View:
           these outlive a viewing session and are not about what is on screen.
           Further settings topics are meant to join this group. */}
-      {/* Laid out like Export: the one setting that is changed constantly gets
-          the large button, the occasional ones sit small beside it. Five equal
-          small buttons read as five equally important things, which they are
-          not — the discipline role governs what may be written at all. */}
+      {/* TWO LARGE BUTTONS, AND THEY ARE THE TWO GATES
+
+          Disziplin decides what may be WRITTEN into the model; Data privacy
+          decides what may LEAVE the application. Everything else in this group
+          adjusts how things are named or drawn, which is undone by adjusting it
+          again. These two are not: an element written under the wrong
+          discipline is in the file, and a request that went out has gone out.
+          Their size says so before anybody reads a tooltip.
+
+          The small buttons then fall into two honest stacks - the project and
+          its reference views, and the lists that decide how things are called
+          and drawn. */}
       <RibbonGroup label="Settings">
         <DisciplineRolePanel
           trigger={
@@ -154,6 +155,15 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
               icon={HardHat}
               label="Disziplin"
               tooltip="Welcher Anlage neue Bauteile beitreten, und ob das Referenzmodell geändert werden darf"
+            />
+          }
+        />
+        <DataPrivacyPanel
+          trigger={
+            <RibbonLargeButton
+              icon={ShieldCheck}
+              label="Data privacy"
+              tooltip="Control whether the app may contact third-party services"
             />
           }
         />
@@ -180,8 +190,25 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
             tooltip="Geschosskoten, Stockwerkshöhen und die geltenden Einheiten dieses Projekts"
             onClick={() => handleToggleBottomPanel('heights')}
           />
+          {/* Also a reference and not a setting - the line styles are read-only
+              for now. It answers what the schematic's lines mean, which is a
+              question one has once, away from the drawing. */}
+          <RelationKindsPanel
+            trigger={
+              <RibbonSmallButton
+                icon={Spline}
+                label="Beziehungsarten"
+                tooltip="Welche Beziehungsarten der Graph kennt, und mit welcher Linienart jede gezeichnet wird"
+              />
+            }
+          />
         </RibbonSmallStack>
         <RibbonSmallStack>
+          {/* What things are called and how they look. The palette colours the
+              model, the two catalogues decide the Fachklasse an element gets
+              and the symbol that Fachklasse is drawn with - one list keyed on
+              the other, which is why they stand together. Both reach outside
+              the app and go through the gate above. */}
           <ColorPalettePanel
             trigger={
               <RibbonSmallButton
@@ -191,18 +218,6 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
               />
             }
           />
-          <DataPrivacyPanel
-            trigger={
-              <RibbonSmallButton
-                icon={ShieldCheck}
-                label="Data privacy"
-                tooltip="Control whether the app may contact third-party services"
-              />
-            }
-          />
-          {/* The list an element's Fachklasse is chosen FROM. Beside data
-              privacy on purpose: it is the other setting in this group that
-              reaches outside the app, and it goes through the same gate. */}
           <ClassCatalogPanel
             trigger={
               <RibbonSmallButton
@@ -212,29 +227,12 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
               />
             }
           />
-          {/* Beside the object catalogue because it is keyed on it: a symbol
-              is looked up by the same Fachklasse an element is classified as.
-              Same gate, same "only when asked" rule. */}
           <SymbolCatalogPanel
             trigger={
               <RibbonSmallButton
                 icon={Shapes}
                 label="Symbolkatalog"
                 tooltip="Die Plansymbole abgleichen, die eine Fachklasse auf der Zeichnung bekommt"
-              />
-            }
-          />
-        </RibbonSmallStack>
-        <RibbonSmallStack>
-          {/* A reference, not a setting — the line styles are read-only for
-              now. It sits here because it answers what the schematic's lines
-              mean, which is a question one has once, away from the drawing. */}
-          <RelationKindsPanel
-            trigger={
-              <RibbonSmallButton
-                icon={Spline}
-                label="Beziehungsarten"
-                tooltip="Welche Beziehungsarten der Graph kennt, und mit welcher Linienart jede gezeichnet wird"
               />
             }
           />
