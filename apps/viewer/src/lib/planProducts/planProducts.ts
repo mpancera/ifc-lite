@@ -100,6 +100,7 @@ export interface PlanProduct {
 /** Product ids the viewer ships. Referenced by the symbol catalogue too. */
 export const BRANDSCHUTZKONZEPT_ID = 'brandschutzkonzept';
 export const FEUERWEHRLAGEPLAN_ID = 'feuerwehrlageplan';
+export const WERKPLAN_BMA_ID = 'werkplan-bma';
 
 /**
  * Building fabric every fire drawing needs to be readable as a plan.
@@ -119,7 +120,7 @@ const FABRIC: readonly string[] = [
 ];
 
 /**
- * The two products the viewer ships.
+ * The products the viewer ships.
  *
  * Deliberately a short list of long entries rather than a clever composition:
  * somebody reading this file should be able to see what each drawing shows
@@ -189,6 +190,45 @@ export const BUILT_IN_PRODUCTS: readonly PlanProduct[] = [
     // project — see the module note.
     rotation: null,
     sheet: LAGEPLAN_SHEET,
+  },
+  {
+    id: WERKPLAN_BMA_ID,
+    name: 'Werkplan Brandmeldeanlage',
+    purpose: 'Die Anlage, wie sie gebaut wird — Melder, Melderkreise, Zentrale.',
+    builtIn: true,
+    // WHY THIS IS A THIRD PRODUCT AND NOT A VIEW OF THE FIRST
+    //
+    // The two above are documents for other people: an authority reads the
+    // concept plan, a fire brigade reads the Lageplan. This one is the
+    // installer's own working drawing, and it is the only one where the
+    // ASSOCIATION's symbols are the correct ones — see `sesCatalog.ts`. Drawing
+    // it as a setting of the concept plan would mean one document with two
+    // symbol sets, which is exactly the mistake the symbol catalogue's product
+    // field exists to prevent.
+    //
+    // Only the trigger zones. Escape routes and compartments belong to the
+    // building and are somebody else's drawing; on a Werkplan they crowd out
+    // the wiring, which is what this plan is read for.
+    zoneThemes: ['fire-trigger'],
+    classes: [
+      ...FABRIC,
+      'ifcsensor',
+      'ifcalarm',
+      // The equipment that makes a detection loop a loop: the line module each
+      // circuit hangs on, and the panel it reports to.
+      'ifccontroller',
+      'ifcunitarycontrolelement',
+      'ifcdistributionboard',
+      // Reflectors, key boxes — accessories the association draws and the
+      // authority plans leave out.
+      'ifcdiscreteaccessory',
+      'ifcannotation',
+    ],
+    symbolSet: WERKPLAN_BMA_ID,
+    // North up, like the concept plan: a Werkplan is set out against the
+    // architect's drawing on site.
+    rotation: null,
+    sheet: BRANDSCHUTZ_SHEET,
   },
 ];
 

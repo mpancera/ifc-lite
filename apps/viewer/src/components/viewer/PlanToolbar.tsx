@@ -86,6 +86,20 @@ export interface PlanToolbarProps {
   onToggleDeviceMarks: () => void;
   /** How many devices this storey has, for the tooltip. */
   deviceCount: number;
+  /**
+   * What the symbol catalogue could NOT supply for the marks on this storey.
+   *
+   * `null` when there is nothing to say. Otherwise the plan is drawing generic
+   * family glyphs where a normative symbol exists or would — and that is a
+   * caveat about the drawing, not a switch, which is why it goes in the strip
+   * beside the lining assumption rather than into a tooltip nobody opens.
+   */
+  deviceSymbolGap: {
+    catalogSynced: boolean;
+    withoutSymbol: number;
+    /** Who to name, when a symbol on this sheet is used by permission. */
+    attribution?: string | null;
+  } | null;
 
   settingsOpen: boolean;
   onToggleSettings: () => void;
@@ -140,7 +154,7 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
     showZoneOutlines, onToggleZoneOutlines, zoneOutlineCount,
     showOpeningSymbols, onToggleOpeningSymbols, openingCount, assumedLinings,
     wallMeasuredDepths, doorsWithSymbol,
-    showDeviceMarks, onToggleDeviceMarks, deviceCount,
+    showDeviceMarks, onToggleDeviceMarks, deviceCount, deviceSymbolGap,
     settingsOpen, onToggleSettings, dxfOpen, onToggleDxf,
     activeTool, onSetTool, hasAnnotations, onClearAnnotations,
     canCommitAnnotation, onCommitAnnotation, doorLabelCount, onCommitPlanAnnotations,
@@ -260,6 +274,41 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
           },
         ]}
       />
+
+      {showDeviceMarks && deviceCount > 0 && deviceSymbolGap
+        && (!deviceSymbolGap.catalogSynced || deviceSymbolGap.withoutSymbol > 0) && (
+        // Same rule as the lining assumption below: a plan that silently draws
+        // a plain circle where a normative symbol exists is not saying so, and
+        // nothing else on screen would ever tell you the catalogue is one
+        // click away. Measured: a fully drawable storey showed eighty
+        // identical circles for days, with no hint anywhere.
+        //
+        // Only while the marks are actually shown — a caveat about a layer
+        // that is switched off is noise.
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="ml-0.5 rounded-sm border border-amber-500/40 bg-amber-500/10 px-1 text-[10px] leading-4 text-amber-700 dark:text-amber-300 tabular-nums">
+              {deviceSymbolGap.catalogSynced
+                ? `${deviceSymbolGap.withoutSymbol} ohne Symbol`
+                : 'Symbole nicht abgeglichen'}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-xs text-xs">
+            {deviceSymbolGap.catalogSynced
+              ? `${deviceSymbolGap.withoutSymbol} von ${deviceCount} Geräten auf diesem Geschoss haben im Symbolkatalog keinen Eintrag für ihre Fachklasse und werden als Familienzeichen gezeichnet (Kreis, Dreieck). Der Eintrag fehlt im Katalog, nicht im Modell.`
+              : 'Der Symbolkatalog ist in diesem Browser noch nicht abgeglichen — die Geräte werden als Familienzeichen gezeichnet statt mit ihrem Plansymbol. Unter File → Symbolkatalog abgleichen; dafür müssen externe Anfragen unter File → Datenschutz freigegeben sein.'}
+          </TooltipContent>
+        </Tooltip>
+      )}
+
+      {showDeviceMarks && deviceSymbolGap?.attribution && (
+        // Not a warning and not a tooltip: this is the condition the symbols
+        // are used under, and a condition nobody sees is not being met. It
+        // shows only while such a symbol is actually on the sheet.
+        <span className="ml-0.5 text-[10px] leading-4 text-muted-foreground">
+          Symbole: {deviceSymbolGap.attribution}
+        </span>
+      )}
 
       {showOpeningSymbols && assumedLinings > 0 && (
         // Declared, not hidden in a tooltip. On every model met so far this is

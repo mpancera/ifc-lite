@@ -8,6 +8,10 @@ import { rotatedBounds } from '@/lib/plan/planRotation';
 import { labelVisible, type PlanLabel } from '@/lib/plan/roomLabels';
 import type { SymbolLine } from '@/lib/plan/openingSymbols';
 import { deviceMarkPaths, DEVICE_MARK_PAPER_MM, type DeviceMark } from '@/lib/plan/deviceSymbols';
+import { symbolDrawingFor, symbolEntryFor } from '@/lib/symbolCatalog/symbolCatalog';
+import { symbolFit, symbolGeometryOf } from '@/lib/symbolCatalog/symbolGeometry';
+import { useSymbolCatalog } from '@/lib/symbolCatalog/useSymbolCatalog';
+import { useActiveSymbolSet } from '@/hooks/useActiveSymbolSet';
 import { downloadFile, sanitizeFilename } from '@/lib/export/download';
 import { pdfLineStyleFor } from '@/lib/export/pdf-line-style';
 import {
@@ -257,6 +261,11 @@ function useDrawingExport({
   // Georef edits replace the map, but subscribe to mutationVersion too so the
   // dependency is explicit (matches ViewportContainer / useAnchorGeoreference).
   const mutationVersion = useViewerStore((s) => s.mutationVersion);
+  // The plan symbols. Read here rather than passed in: the export must draw
+  // the SAME symbols the screen does, and threading the catalogue through the
+  // caller is one more place for the two to drift apart.
+  const symbolCatalog = useSymbolCatalog();
+  const symbolSet = useActiveSymbolSet();
 
   // Generate SVG that matches the canvas rendering exactly
   const generateExportSVG = useCallback((): string | null => {
@@ -526,6 +535,12 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     // 100 mm across, so at 1:100 its own outline is a millimetre and at 1:200
     // it is nothing. The mark is 3 mm at every scale, because it exists to be
     // seen rather than to be measured.
+    // Set while the marks are drawn, read once the sheet is finished: a sheet
+    // that carries symbols used by permission has to name their source, and
+    // THIS is the sheet that leaves the building. Collected rather than
+    // assumed, so the line appears only when such a symbol is really on it.
+    let symbolAttribution: string | null = null;
+
     if (deviceMarks.length > 0) {
       const half = mmToModel(DEVICE_MARK_PAPER_MM) / 2;
       const weight = mmToModel(0.25);
@@ -533,6 +548,73 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
       for (const mark of deviceMarks) {
         const cx = flipX ? -mark.position.x : mark.position.x;
         const cy = flipY ? -mark.position.y : mark.position.y;
+
+        // The catalogue's own drawing first — the normative symbol, the one
+        // the screen shows. Until now this export drew the family glyph in
+        // every case, so a plan looked one way on screen and another way in
+        // the file that was handed over. That is the whole reason a symbol
+        // catalogue exists: it is FOR the drawing that leaves the building.
+        //
+        // Re-emitted as geometry rather than embedded as an image, because
+        // this SVG becomes a PDF and a print: a vector symbol stays sharp and
+        // keeps the same colours the plan already uses for everything else.
+        const drawing = symbolDrawingFor(symbolCatalog, mark.ifcType, {
+          predefinedType: mark.predefinedType,
+          objectType: mark.objectType,
+          // The exported sheet must carry the same symbols the screen showed,
+          // which means the same product decides both.
+          productId: symbolSet,
+        });
+        const entry = symbolEntryFor(symbolCatalog, mark.ifcType, {
+          predefinedType: mark.predefinedType,
+          objectType: mark.objectType,
+          productId: symbolSet,
+        });
+        if (drawing && entry?.attributionRequired) {
+          symbolAttribution = symbolCatalog?.attribution ?? null;
+        }
+        const geometry = drawing ? symbolGeometryOf(drawing) : null;
+        if (geometry) {
+          const fit = symbolFit(geometry.viewBox, half * 2);
+          // The drawing's y grows downward, and so does the paper axis here —
+          // the same carry-over the family glyph relies on below.
+          const px = (x: number) => cx + fit.offsetX + x * fit.scale;
+          const py = (y: number) => cy + fit.offsetY + y * fit.scale;
+          // The drawing's OWN colours, not this exporter's idea of them.
+          // Two sources now reach here: the authority's symbols are red plates
+          // with white strokes, the association's are black line art. Painting
+          // both in the first palette would put out a symbol that is not the
+          // one the source published - and the association's are used by
+          // permission, unchanged.
+          const paint = (shape: { fill: string | null; stroke: string | null }) =>
+            `fill="${shape.fill ?? 'none'}" stroke="${shape.stroke ?? 'none'}" `
+            + `stroke-width="${weight.toFixed(4)}"`;
+
+          svg += '    <g>\n';
+          for (const line of geometry.polylines) {
+            let d = '';
+            line.points.forEach((point, i) => {
+              d += `${i === 0 ? 'M' : 'L'} ${px(point.x).toFixed(4)} ${py(point.y).toFixed(4)} `;
+            });
+            if (line.closed) d += 'Z';
+            svg += `      <path d="${d.trim()}" ${paint(line)}/>\n`;
+          }
+          for (const circle of geometry.circles) {
+            svg += `      <circle cx="${px(circle.cx).toFixed(4)}" cy="${py(circle.cy).toFixed(4)}"`
+              + ` r="${(circle.r * fit.scale).toFixed(4)}" ${paint(circle)}/>\n`;
+          }
+          for (const ellipse of geometry.ellipses) {
+            svg += `      <ellipse cx="${px(ellipse.cx).toFixed(4)}" cy="${py(ellipse.cy).toFixed(4)}"`
+              + ` rx="${(ellipse.rx * fit.scale).toFixed(4)}" ry="${(ellipse.ry * fit.scale).toFixed(4)}"`
+              + ` ${paint(ellipse)}/>\n`;
+          }
+          svg += '    </g>\n';
+          continue;
+        }
+
+        // No catalogue entry, or a drawing the rules do not allow: the family
+        // glyph, exactly as before. A generic circle is honest about being
+        // generic; half a symbol would not be.
         let d = '';
         for (const path of deviceMarkPaths(mark.kind)) {
           path.forEach((p, i) => {
@@ -706,9 +788,23 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     }
 
     if (rotDeg !== 0) svg += '  </g>\n';
+
+    // OUTSIDE the rotation group on purpose. A credit line belongs to the
+    // sheet, not to the drawing on it: turned with the plan it would end up
+    // sideways or off the paper on any product with its own angle.
+    if (symbolAttribution) {
+      const size = mmToModel(2);
+      const margin = mmToModel(4);
+      const x = viewBoxMinX + margin;
+      const y = viewBoxMinY + viewHeight - margin;
+      svg += `  <text id="symbol-attribution" x="${x.toFixed(4)}" y="${y.toFixed(4)}"`
+        + ` font-family="Arial, sans-serif" font-size="${size.toFixed(4)}" fill="#000000">`
+        + `${escapeXml(`Symbole: ${symbolAttribution}`)}</text>\n`;
+    }
+
     svg += '</svg>';
     return svg;
-  }, [drawing, displayOptions, activePresetId, entityColorMap, overridesEnabled, overrideEngine, measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D, planLabels, openingSymbols, deviceMarks, sectionPlane.axis, dxfUnderlays, scanSection, viewRotation]);
+  }, [drawing, displayOptions, activePresetId, entityColorMap, overridesEnabled, overrideEngine, measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D, planLabels, openingSymbols, deviceMarks, symbolCatalog, symbolSet, sectionPlane.axis, dxfUnderlays, scanSection, viewRotation]);
 
   // Generate SVG with drawing sheet (frame, title block, scale bar)
   // This generates coordinates directly in paper mm space (like the canvas rendering)

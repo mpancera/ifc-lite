@@ -26,7 +26,7 @@
  */
 
 /** Where the catalogue lives. One address, in one place, so it changes once. */
-export const DEFAULT_SYMBOL_CATALOG_URL = 'https://ifc.admp.ch/data/local-symbols.json';
+export const DEFAULT_SYMBOL_CATALOG_URL = 'https://data-dictionary.ch/data/local-symbols.json';
 
 /** Where a single drawing lives, given its `symbol` name. */
 export function symbolDrawingUrl(
@@ -62,6 +62,16 @@ export interface SymbolCatalogEntry {
    * symbol nobody restricted is not a symbol nobody uses.
    */
   readonly products: readonly string[];
+  /**
+   * This drawing is used by permission and its source has to be named
+   * wherever it is shown.
+   *
+   * On the ENTRY rather than only on the catalogue, because a catalogue may
+   * hold drawings from two sources and only one of them may carry terms. A
+   * plan that draws none of them owes nobody a credit line, and a credit for
+   * a source that is not on the sheet is just noise.
+   */
+  readonly attributionRequired?: boolean;
 }
 
 export interface SymbolCatalog {
@@ -78,6 +88,17 @@ export interface SymbolCatalog {
    * is not a thing that can be made fast enough.
    */
   readonly drawings: Readonly<Record<string, string>>;
+  /**
+   * Who has to be named wherever these symbols are shown, or `null`.
+   *
+   * Set when a catalogue carries drawings used by permission rather than
+   * owned. It rides WITH the drawings on purpose: an attribution kept
+   * somewhere else is one a later refactor can drop without anything failing,
+   * and the terms would be broken silently.
+   */
+  readonly attribution?: string | null;
+  /** What that permission covers, in the issuer's own words. */
+  readonly permission?: string | null;
 }
 
 function text(value: unknown): string {
@@ -123,8 +144,12 @@ export function parseSymbolCatalog(
     const id = text(record.id) || (key ?? '');
     // Without a Fachklasse the entry cannot be joined to anything.
     if (!id) continue;
-    // A duplicate would make the lookup depend on iteration order.
-    if (seen.has(id)) continue;
+    // A repeated id is NOT dropped. It used to be, because a duplicate made
+    // the lookup depend on iteration order — and now that order is the
+    // precedence between two sources for one Fachklasse, deliberately set by
+    // whoever assembled the entries. Dropping the second row here would undo
+    // that merge the first time a catalogue came back from storage, leaving
+    // one source to answer for every plan product.
     seen.add(id);
 
     const symbol = text(record.symbol);
@@ -135,13 +160,26 @@ export function parseSymbolCatalog(
       products: Array.isArray(record.products)
         ? record.products.map(text).filter((value) => value.length > 0)
         : [],
+      // Survives a round trip through storage. A licensed drawing that comes
+      // back without its obligation is the one outcome worth guarding: the
+      // symbol would still be drawn, and nobody would be named for it.
+      attributionRequired: record.attributionRequired === true ? true : undefined,
     });
   }
 
   // An empty catalogue is a real answer — somebody started the list and it has
   // no usable rows yet — but `null` means "this was not a catalogue at all",
   // and a caller must be able to tell those apart to report the right thing.
-  return { entries, fetchedAt, source, drawings };
+  return {
+    entries,
+    fetchedAt,
+    source,
+    drawings,
+    // Only from a document that carries them — a plain catalogue export has
+    // no terms attached, and inventing `null` here would be the same thing.
+    attribution: text((payload as Record<string, unknown>).attribution) || null,
+    permission: text((payload as Record<string, unknown>).permission) || null,
+  };
 }
 
 /**
@@ -176,17 +214,34 @@ export function classKeyCandidates(
   return candidates;
 }
 
-/** Entries by id, lower-cased — exporters disagree about case. */
-function indexOf(catalog: SymbolCatalog): Map<string, SymbolCatalogEntry> {
-  const index = new Map<string, SymbolCatalogEntry>();
-  for (const entry of catalog.entries) index.set(entry.id.toLowerCase(), entry);
+/**
+ * Entries by id, lower-cased — exporters disagree about case.
+ *
+ * A LIST per id, not one entry. One Fachklasse can legitimately carry two
+ * different symbols: the authorities prescribe one drawing for a smoke
+ * detector on a Brandschutzplan and the installers' association another on a
+ * Werkplan. Which applies is decided by the plan product, so both have to be
+ * reachable — with one entry per id the second source would overwrite the
+ * first and quietly put association symbols on an authority plan.
+ *
+ * Insertion order is the precedence, so the caller that assembles the entries
+ * decides which source wins where both apply. See `mergeSesCatalog`.
+ */
+function indexOf(catalog: SymbolCatalog): Map<string, SymbolCatalogEntry[]> {
+  const index = new Map<string, SymbolCatalogEntry[]>();
+  for (const entry of catalog.entries) {
+    const key = entry.id.toLowerCase();
+    const existing = index.get(key);
+    if (existing) existing.push(entry);
+    else index.set(key, [entry]);
+  }
   return index;
 }
 
 /** Cached per catalogue object, which is replaced whole on every sync. */
-const indexCache = new WeakMap<SymbolCatalog, Map<string, SymbolCatalogEntry>>();
+const indexCache = new WeakMap<SymbolCatalog, Map<string, SymbolCatalogEntry[]>>();
 
-function cachedIndex(catalog: SymbolCatalog): Map<string, SymbolCatalogEntry> {
+function cachedIndex(catalog: SymbolCatalog): Map<string, SymbolCatalogEntry[]> {
   const existing = indexCache.get(catalog);
   if (existing) return existing;
   const built = indexOf(catalog);
@@ -222,10 +277,29 @@ export function symbolEntryFor(
   const productId = options.productId ?? null;
 
   for (const candidate of classKeyCandidates(entity, options.predefinedType, options.objectType)) {
-    const entry = index.get(candidate.toLowerCase());
     // A more specific entry that belongs to a DIFFERENT product must not stop
-    // the search: the general one may still apply here.
-    if (entry && entryAppliesTo(entry, productId)) return entry;
+    // the search: the general one may still apply here. Same within one id —
+    // the first entry that belongs to this product wins, later ones are the
+    // other sources' answers for other products.
+    const applying = (index.get(candidate.toLowerCase()) ?? [])
+      .filter((entry) => entryAppliesTo(entry, productId));
+    if (applying.length === 0) continue;
+
+    // WITH NO PRODUCT CHOSEN, A LICENSED SYMBOL IS NOT THE DEFAULT
+    //
+    // `null` means "no product asked", and every entry applies — which put the
+    // association's symbols in front of the authority's on a plan that had not
+    // said which document it was. That is the wrong drawing by default, and
+    // invisible, because both look plausible.
+    //
+    // A symbol used by permission is correct on ITS products and nowhere else,
+    // so with nothing to go on the unrestricted source wins. Ask for a product
+    // and the order decides again, as it should.
+    if (productId === null) {
+      const unrestricted = applying.find((entry) => !entry.attributionRequired);
+      if (unrestricted) return unrestricted;
+    }
+    return applying[0];
   }
   return null;
 }
@@ -270,19 +344,25 @@ export interface SymbolCatalogCoverage {
 }
 
 export function symbolCatalogCoverage(catalog: SymbolCatalog): SymbolCatalogCoverage {
-  let withSymbol = 0;
   const missing = new Set<string>();
+  // Counted by Fachklasse rather than by row. Since a second source may add a
+  // row for a class the first already covers, counting rows would report more
+  // classes than the model has and turn "how much is covered" into a number
+  // that grows by adding no coverage at all.
+  const withSymbol = new Set<string>();
+  const all = new Set<string>();
 
   for (const entry of catalog.entries) {
+    all.add(entry.id.toLowerCase());
     if (!entry.symbol) continue;
-    withSymbol += 1;
+    withSymbol.add(entry.id.toLowerCase());
     if (typeof catalog.drawings[entry.symbol] !== 'string') missing.add(entry.symbol);
   }
 
   return {
-    entries: catalog.entries.length,
-    withSymbol,
-    withoutSymbol: catalog.entries.length - withSymbol,
+    entries: all.size,
+    withSymbol: withSymbol.size,
+    withoutSymbol: all.size - withSymbol.size,
     missingDrawings: [...missing],
   };
 }

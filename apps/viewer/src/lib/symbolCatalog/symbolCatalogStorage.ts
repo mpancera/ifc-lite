@@ -52,7 +52,10 @@ export async function loadStoredSymbolCatalog(): Promise<SymbolCatalog | null> {
       request.onerror = () => reject(request.error);
       request.onsuccess = () => {
         const stored = request.result as
-          | { symbols?: unknown; fetchedAt?: string; source?: string; drawings?: unknown }
+          | {
+            symbols?: unknown; fetchedAt?: string; source?: string; drawings?: unknown;
+            attribution?: string | null; permission?: string | null;
+          }
           | undefined;
         if (!stored) { resolve(null); return; }
         // Re-parsed rather than trusted: what an older version of this app
@@ -83,6 +86,11 @@ export async function storeSymbolCatalog(catalog: SymbolCatalog): Promise<void> 
       fetchedAt: catalog.fetchedAt,
       source: catalog.source,
       drawings: catalog.drawings,
+      // Stored WITH the drawings. A catalogue that came back from here without
+      // them would keep showing symbols used by permission and stop naming
+      // their source — the terms broken by a page reload, silently.
+      attribution: catalog.attribution ?? null,
+      permission: catalog.permission ?? null,
     }, KEY);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);

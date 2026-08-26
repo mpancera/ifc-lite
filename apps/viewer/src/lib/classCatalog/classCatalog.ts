@@ -19,7 +19,8 @@
  * the list of them.
  *
  * # Where it comes from
- * Marc's own dictionary, published at `ifc.admp.ch` (1330 classes at the time
+ * The dictionary this repository's author publishes, at `data-dictionary.ch`
+ * (1330 classes at the time
  * of writing), fetched ON DEMAND from a settings action and kept locally. Not
  * on every start: it changes on the scale of weeks, and a viewer that reaches
  * out to the network to open a file is a viewer that fails to open a file when
@@ -58,7 +59,7 @@ export interface ClassCatalog {
 }
 
 /** Marc's dictionary. One address, in one place, so it is changed once. */
-export const DEFAULT_CLASS_CATALOG_URL = 'https://ifc.admp.ch/data/local-classes.json';
+export const DEFAULT_CLASS_CATALOG_URL = 'https://data-dictionary.ch/data/local-classes.json';
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';

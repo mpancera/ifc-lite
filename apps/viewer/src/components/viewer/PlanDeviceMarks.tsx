@@ -37,6 +37,7 @@ import {
 import { symbolDrawingFor } from '@/lib/symbolCatalog/symbolCatalog';
 import { svgForEmbedding } from '@/lib/symbolCatalog/symbolSvg';
 import { useSymbolCatalog } from '@/lib/symbolCatalog/useSymbolCatalog';
+import { useActiveSymbolSet } from '@/hooks/useActiveSymbolSet';
 
 export interface PlanDeviceMarksProps {
   marks: readonly DeviceMark[];
@@ -49,15 +50,34 @@ export interface PlanDeviceMarksProps {
    * a symbol without it cannot be matched to the row on the panel.
    */
   showNames?: boolean;
+  /**
+   * Called with the device's express id when its mark is clicked.
+   *
+   * Omitted, the layer stays what it was: a drawing that a click passes
+   * straight through. That was the whole behaviour until now, and it made the
+   * devices unreachable in the plan — a detector IS its symbol there, so a
+   * symbol that cannot be clicked is a detector that cannot be picked.
+   */
+  onMarkClick?: (expressId: number) => void;
+  /** Called with the id under the cursor, or `null` on leaving one. */
+  onMarkHover?: (expressId: number | null) => void;
+  /**
+   * Devices to mark as picked, in order — the run being drawn.
+   *
+   * The index in this list is drawn on the symbol, so the plan shows the same
+   * numbering the 3D view does while a cable is being laid.
+   */
+  picked?: readonly number[];
 }
 
 /** The catalogue's drawings are `-5 -5 10 10`; a mark spans twice its px size. */
 const SYMBOL_VIEWBOX_SPAN = 10;
 
 export function PlanDeviceMarks({
-  marks, transform, showNames = true,
+  marks, transform, showNames = true, onMarkClick, onMarkHover, picked,
 }: PlanDeviceMarksProps): React.ReactElement | null {
   const catalog = useSymbolCatalog();
+  const symbolSet = useActiveSymbolSet();
 
   /**
    * One data URI per distinct Fachklasse on this storey.
@@ -75,6 +95,10 @@ export function PlanDeviceMarks({
       const raw = symbolDrawingFor(catalog, mark.ifcType, {
         predefinedType: mark.predefinedType,
         objectType: mark.objectType,
+        // Which of the two prescribed drawings this document uses. Without it
+        // a Werkplan and a Brandschutzplan would show the same symbol, and one
+        // of the two would be wrong.
+        productId: symbolSet,
       });
       // Refused or size-less drawings fall back to the family glyph rather
       // than to an empty patch of plan — see `svgForEmbedding`.
@@ -83,7 +107,15 @@ export function PlanDeviceMarks({
       cache.set(key, uri);
       return uri;
     };
-  }, [catalog]);
+  }, [catalog, symbolSet]);
+
+  const pickedAt = useMemo(() => {
+    const at = new Map<number, number>();
+    (picked ?? []).forEach((expressId, index) => {
+      if (!at.has(expressId)) at.set(expressId, index);
+    });
+    return at;
+  }, [picked]);
 
   if (marks.length === 0) return null;
 
@@ -93,6 +125,9 @@ export function PlanDeviceMarks({
   const size = DEVICE_MARK_SCREEN_PX;
 
   return (
+    // The LAYER stays transparent to the pointer and each mark opts in. A
+    // whole-layer hit area would swallow every click that missed a device,
+    // and the plan under it is where rooms, walls and the rubber band live.
     <svg className="absolute inset-0 h-full w-full pointer-events-none" data-plan-device-marks>
       {marks.map((mark) => {
         const sx = mark.position.x * scale;
@@ -137,14 +172,48 @@ export function PlanDeviceMarks({
           );
         }
 
+        const at = pickedAt.get(mark.expressId);
+
         return (
           <g
             key={mark.key}
             data-plan-device-mark={mark.expressId}
             data-device-kind={mark.kind}
+            className={onMarkClick ? 'pointer-events-auto cursor-pointer' : undefined}
+            onClick={onMarkClick ? (event) => {
+              // The plan's own pointer handlers sit on the canvas below and
+              // would read this as a click on empty drawing — starting a
+              // rubber band under the device that was just picked.
+              event.stopPropagation();
+              onMarkClick(mark.expressId);
+            } : undefined}
+            onPointerEnter={onMarkHover ? () => onMarkHover(mark.expressId) : undefined}
+            onPointerLeave={onMarkHover ? () => onMarkHover(null) : undefined}
           >
             <title>{title}</title>
+            {/* A hit target, because the glyph is line work: a 1.2px stroke is
+                not something anybody hits twice in a row. Transparent rather
+                than invisible — `fill="none"` takes no clicks at all. */}
+            {onMarkClick && (
+              <circle cx={x} cy={y} r={size * 1.2} fill="transparent" />
+            )}
             {symbol}
+            {at !== undefined && (
+              <>
+                <circle
+                  cx={x} cy={y} r={size * 0.95}
+                  fill="none" stroke="#f59e0b" strokeWidth={1.75}
+                />
+                <text
+                  x={x} y={y + 3.5}
+                  textAnchor="middle" fontSize={9} fontWeight={700}
+                  className="stroke-white dark:stroke-zinc-950"
+                  strokeWidth={2.5} paintOrder="stroke" fill="#f59e0b"
+                >
+                  {at === 0 ? '\u2302' : at}
+                </text>
+              </>
+            )}
             {showNames && mark.name && (
               <text
                 x={x + size + 3}

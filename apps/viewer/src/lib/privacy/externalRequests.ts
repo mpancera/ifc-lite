@@ -56,5 +56,5 @@ export const EXTERNAL_ENDPOINTS: ReadonlyArray<{ host: string; purpose: string }
   { host: 'epsg.io', purpose: 'CRS-Definition für exotische EPSG-Codes (Fallback)' },
   { host: 'api.bsdd.buildingsmart.org', purpose: 'bSDD-Klassifikationssuche' },
   { host: 'api3.geo.admin.ch', purpose: 'Amtliche Parzellengrenze zur E-GRID (Schweiz)' },
-  { host: 'ifc.admp.ch', purpose: 'Objektkatalog: die Liste der Fachklassen (nur auf Anforderung)' },
+  { host: 'data-dictionary.ch', purpose: 'Objektkatalog und Symbolkatalog: Fachklassen, Plansymbole und deren Zeichnungen (nur auf Anforderung)' },
 ];

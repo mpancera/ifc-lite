@@ -5,7 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  BUILT_IN_PRODUCTS, BRANDSCHUTZKONZEPT_ID, FEUERWEHRLAGEPLAN_ID,
+  BUILT_IN_PRODUCTS, BRANDSCHUTZKONZEPT_ID, FEUERWEHRLAGEPLAN_ID, WERKPLAN_BMA_ID,
   findProduct, productDrawsClass, productDrawsTheme, copyProduct,
 } from './planProducts.js';
 import {
@@ -14,8 +14,9 @@ import {
 
 const brandschutz = BUILT_IN_PRODUCTS.find((p) => p.id === BRANDSCHUTZKONZEPT_ID)!;
 const lageplan = BUILT_IN_PRODUCTS.find((p) => p.id === FEUERWEHRLAGEPLAN_ID)!;
+const werkplan = BUILT_IN_PRODUCTS.find((p) => p.id === WERKPLAN_BMA_ID)!;
 
-describe('the two shipped products', () => {
+describe('the shipped products', () => {
   it('are actually two different drawings, not one with a toggle', () => {
     // The premise of the whole feature. If these ever converge, somebody has
     // turned the Lageplan back into a view option of the concept plan.
@@ -45,6 +46,23 @@ describe('the two shipped products', () => {
     // drawing. A concept plan showing them would be drawing the wrong thing.
     assert.ok(productDrawsClass(lageplan, 'IfcGeographicElement'));
     assert.ok(!productDrawsClass(brandschutz, 'IfcGeographicElement'));
+  });
+
+  it('gives the Werkplan the wiring equipment the other two leave out', () => {
+    // A Werkplan is read to build the loop. Without the line module and the
+    // panel it is a scatter of detectors with nothing joining them.
+    assert.ok(productDrawsClass(werkplan, 'IfcController'));
+    assert.ok(productDrawsClass(werkplan, 'IfcUnitaryControlElement'));
+    assert.ok(!productDrawsClass(lageplan, 'IfcController'));
+  });
+
+  it('gives every product its own symbol set', () => {
+    // The symbol set IS the product for this purpose: it decides whether a
+    // detector is drawn with the authority's symbol or the association's.
+    // Two products sharing one would silently draw the wrong document.
+    const sets = BUILT_IN_PRODUCTS.map((product) => product.symbolSet);
+    assert.equal(new Set(sets).size, sets.length);
+    assert.equal(werkplan.symbolSet, WERKPLAN_BMA_ID);
   });
 
   it('names zone themes that actually exist in themes.ts', async () => {

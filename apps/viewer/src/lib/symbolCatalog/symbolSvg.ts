@@ -26,8 +26,40 @@
  * — visible, but easy to mistake for a placement bug elsewhere.
  */
 
-/** The viewBox every symbol is expected to declare. */
+/**
+ * The viewBox a square symbol declares — the ordinary case and the one the
+ * catalogue's own drawings use.
+ *
+ * Kept as the reference for authors, NOT as the test. See {@link isCentredViewBox}.
+ */
 export const EXPECTED_VIEWBOX = '-5 -5 10 10';
+
+/**
+ * Whether a viewBox puts the drawing's origin in the MIDDLE.
+ *
+ * That — and only that — is what the rule above was ever protecting: a symbol
+ * is placed ON a point, so a drawing whose origin sits in a corner lands half
+ * a symbol away from the thing it marks. Height and width do not have to
+ * match, and demanding they do was a mistake with real victims: the
+ * catalogue's seven plate symbols (`-6 -3 12 6`, a wide red plate with
+ * lettering — Brandmelderzentrale and its siblings) are perfectly centred and
+ * were reported as "would sit offset", which is simply untrue of them. They
+ * render correctly, letterboxed into the square mark box by
+ * `preserveAspectRatio`.
+ *
+ * A plate IS wider than it is tall; forcing it square would shrink its
+ * lettering to keep a rule that was never about proportion.
+ */
+export function isCentredViewBox(viewBox: string): boolean {
+  const parts = viewBox.trim().split(/[\s,]+/).map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return false;
+  const [minX, minY, width, height] = parts;
+  if (width <= 0 || height <= 0) return false;
+  // A hair of tolerance: a drawing tool may write -2.9999999 for -3, and a
+  // symbol is not misplaced by a millionth of a millimetre.
+  const off = 1e-6;
+  return Math.abs(minX + width / 2) <= off && Math.abs(minY + height / 2) <= off;
+}
 
 /** Why a drawing was rejected. */
 export type SymbolSvgProblem =
@@ -50,7 +82,7 @@ export const SVG_PROBLEM_MESSAGES: Readonly<Record<SymbolSvgProblem, string>> = 
   'event-handler': 'Das SVG enthält einen Event-Handler (onload o.ä.) — abgelehnt.',
   'external-reference': 'Das SVG lädt etwas nach (Bild, Schrift, externe Referenz) — abgelehnt.',
   'no-viewbox': 'Das SVG hat keine viewBox.',
-  'wrong-viewbox': `Die viewBox ist nicht "${EXPECTED_VIEWBOX}" — das Symbol säße versetzt.`,
+  'wrong-viewbox': 'Die viewBox ist nicht auf den Ursprung zentriert — das Symbol säße versetzt.',
 };
 
 /** `<script …>` anywhere, however it is cased or spaced. */
@@ -111,7 +143,7 @@ export function checkSymbolSvg(svg: string): SymbolSvgCheck {
 
   const viewBox = viewBoxOf(svg);
   if (viewBox === null) problems.push('no-viewbox');
-  else if (viewBox !== EXPECTED_VIEWBOX) problems.push('wrong-viewbox');
+  else if (!isCentredViewBox(viewBox)) problems.push('wrong-viewbox');
 
   return { ok: problems.length === 0, problems };
 }

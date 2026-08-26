@@ -22,6 +22,7 @@ import type { MutablePropertyView } from '@ifc-lite/mutations';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import type { GeometryResult, MeshData } from '@ifc-lite/geometry';
 import { deviceSymbolKind, type DeviceMark } from '@/lib/plan/deviceSymbols';
+import { resolveEntityPredefinedType } from '@/lib/entity-predefined-type';
 import type { PlanElementTest } from '@/lib/plan/planVisibility';
 import { overlayAttribute } from '@/lib/mutations/overlayAttribute';
 
@@ -195,8 +196,22 @@ export function usePlanDeviceMarks({
         tag,
         assetIdentifier,
         ifcType,
+        // The session's value first, then the FILE — read off the STEP text,
+        // not off the entity table.
+        //
+        // `entities.getPredefinedType` is optional in the type and simply not
+        // there on a parsed store, so this silently answered `null` for every
+        // element in the file. The symbol lookup then fell back from
+        // `IfcSensor.SMOKESENSOR` to a bare `IfcSensor`, which no catalogue
+        // entry carries, and a plan of eighty detectors drew eighty identical
+        // circles with a fully synced catalogue sitting behind it.
+        //
+        // `resolveEntityPredefinedType` re-parses the entity, the cost class
+        // this repository already pays for `Tag` and the auto-colour sources.
+        // It is charged once per mark on one storey, not per element in the
+        // model.
         predefinedType: (authored ? overlayPredefinedType(authored) : null)
-          ?? dataStore.entities?.getPredefinedType?.(expressId)
+          ?? resolveEntityPredefinedType(dataStore, expressId)
           ?? null,
         objectType: objectType || null,
       });

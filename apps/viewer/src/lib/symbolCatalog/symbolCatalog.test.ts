@@ -9,7 +9,7 @@ import {
   entryAppliesTo, referencedSymbols, symbolCatalogCoverage, symbolDrawingUrl,
   DEFAULT_SYMBOL_CATALOG_URL, type SymbolCatalog,
 } from './symbolCatalog.js';
-import {
+import { isCentredViewBox,
   checkSymbolSvg, isSymbolSvgRenderable, svgForEmbedding, viewBoxOf, EXPECTED_VIEWBOX,
 } from './symbolSvg.js';
 
@@ -79,15 +79,32 @@ describe('parseSymbolCatalog', () => {
     assert.deepEqual(parsed?.entries, []);
   });
 
-  it('drops a duplicate id, which would make lookup order-dependent', () => {
+  it('keeps a repeated id, because order is now the precedence', () => {
+    // It used to drop the second row: a duplicate made the lookup depend on
+    // iteration order. That order is now deliberate — two sources answer for
+    // one Fachklasse on two different plan products, and whoever assembled the
+    // entries decided which comes first. Dropping the second here would undo
+    // that merge the first time a catalogue came back from storage.
     const parsed = parseSymbolCatalog({
       symbols: [
-        { id: 'A.B', label: 'Erst', symbol: 'a' },
-        { id: 'A.B', label: 'Zweit', symbol: 'b' },
+        { id: 'A.B', label: 'Erst', symbol: 'a', products: ['p1'] },
+        { id: 'A.B', label: 'Zweit', symbol: 'b', products: ['p2'] },
       ],
     });
-    assert.equal(parsed?.entries.length, 1);
-    assert.equal(parsed?.entries[0].label, 'Erst');
+    assert.equal(parsed?.entries.length, 2);
+    assert.equal(symbolEntryFor(parsed, 'A', { predefinedType: 'B', productId: 'p1' })?.symbol, 'a');
+    assert.equal(symbolEntryFor(parsed, 'A', { predefinedType: 'B', productId: 'p2' })?.symbol, 'b');
+  });
+
+  it('carries an entry-level attribution flag through a round trip', () => {
+    // A licensed drawing that comes back from storage without its obligation
+    // would still be drawn, and nobody would be named for it.
+    const parsed = parseSymbolCatalog({
+      attribution: 'Ein Verband',
+      symbols: [{ id: 'A.B', symbol: 'a', products: ['p1'], attributionRequired: true }],
+    });
+    assert.equal(parsed?.entries[0].attributionRequired, true);
+    assert.equal(parsed?.attribution, 'Ein Verband');
   });
 
   it('tells "empty catalogue" apart from "not a catalogue"', () => {
@@ -310,6 +327,42 @@ describe('svgForEmbedding', () => {
   it('leaves a wrong viewBox alone — that is the author’s statement', () => {
     const off = '<svg viewBox="0 0 10 10"><circle r="3"/></svg>';
     assert.equal(svgForEmbedding(off), off);
+  });
+});
+
+describe('isCentredViewBox', () => {
+  it('accepts the square the catalogue mostly uses', () => {
+    assert.equal(isCentredViewBox('-5 -5 10 10'), true);
+  });
+
+  it('accepts a centred PLATE, which is not square', () => {
+    // The seven Zentrale symbols. A plate is wider than it is tall and sits on
+    // its point exactly like a round detector does — the rule was never about
+    // proportion. Rejecting these said "would sit offset" about drawings that
+    // do not.
+    assert.equal(isCentredViewBox('-6 -3 12 6'), true);
+  });
+
+  it('rejects an origin in the corner, which is the real fault', () => {
+    assert.equal(isCentredViewBox('0 0 10 10'), false);
+  });
+
+  it('rejects a box centred on one axis only', () => {
+    assert.equal(isCentredViewBox('-5 0 10 10'), false);
+  });
+
+  it('tolerates a rounding wobble from a drawing tool', () => {
+    assert.equal(isCentredViewBox('-2.9999999 -3 6 6'), true);
+  });
+
+  it('reads commas as separators, which a viewBox allows', () => {
+    assert.equal(isCentredViewBox('-5,-5,10,10'), true);
+  });
+
+  it('refuses nonsense rather than guessing', () => {
+    assert.equal(isCentredViewBox('-5 -5 10'), false);
+    assert.equal(isCentredViewBox('a b c d'), false);
+    assert.equal(isCentredViewBox('-5 -5 0 10'), false);
   });
 });
 

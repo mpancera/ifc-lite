@@ -50,6 +50,10 @@ import { PlanLabels } from './PlanLabels';
 import { PlanOpeningSymbols } from './PlanOpeningSymbols';
 import { PlanNorthArrow } from './PlanNorthArrow';
 import { PlanDeviceMarks } from './PlanDeviceMarks';
+import { PlanWiringCable } from './PlanWiringCable';
+import { symbolEntryFor } from '@/lib/symbolCatalog/symbolCatalog';
+import { useSymbolCatalog } from '@/lib/symbolCatalog/useSymbolCatalog';
+import { useActiveSymbolSet } from '@/hooks/useActiveSymbolSet';
 import { PlanRoomShape } from './PlanRoomShape';
 import { PlanWallEnds } from './PlanWallEnds';
 import { PlanMoveGizmo } from './PlanMoveGizmo';
@@ -542,6 +546,34 @@ export function PlanView({
   // Devices, which the cut never shows: a ceiling detector is above it and a
   // floor socket below what the projection reaches, so without this layer the
   // plan simply does not say they are there.
+  /**
+   * A click on a device symbol.
+   *
+   * Two meanings, and the tool decides which: while wiring, a click is the
+   * next stop on the cable; otherwise it selects, the same as clicking the
+   * body in 3D. Routing it here rather than inside the mark layer keeps that
+   * layer a drawing — it has no business knowing what a tool is.
+   */
+  const wiringSequence = useViewerStore((s) => s.wiringSequence);
+  const wiringRing = useViewerStore((s) => s.wiringRing);
+  const wiringHover = useViewerStore((s) => s.wiringHover);
+  const pushWiringPick = useViewerStore((s) => s.pushWiringPick);
+  const setWiringHover = useViewerStore((s) => s.setWiringHover);
+  const wiringActive = activeTool === 'wiring';
+
+  const handleDeviceMarkClick = useCallback((expressId: number) => {
+    if (wiringActive) {
+      pushWiringPick(expressId);
+      return;
+    }
+    // The selection speaks global ids; the mark carries the model's own. Read
+    // through `getState` rather than subscribed: this runs on a click, and a
+    // subscription would repaint the whole plan whenever the selection moves.
+    useViewerStore.getState().setSelectedEntityId(
+      storeyModelId ? toGlobalIdFromModels(models, storeyModelId, expressId) : expressId,
+    );
+  }, [wiringActive, pushWiringPick, storeyModelId, models]);
+
   const deviceMarks = usePlanDeviceMarks({
     enabled: active,
     geometryResult,
@@ -550,6 +582,40 @@ export function PlanView({
     drawsElement,
     modelId: storeyModelId,
   });
+
+  /**
+   * What the catalogue cannot draw on this storey.
+   *
+   * Counted by ENTRY, not by drawing: an entry that names no picture yet and
+   * one whose picture failed to fetch are both "no symbol" to a reader of the
+   * plan, and looking the entry up is a map hit where decoding the drawing is
+   * not. Recomputed with the marks, which change per storey.
+   */
+  const symbolCatalog = useSymbolCatalog();
+  const symbolSet = useActiveSymbolSet();
+  const deviceSymbolGap = useMemo(() => {
+    if (deviceMarks.length === 0) return null;
+    if (!symbolCatalog) return { catalogSynced: false, withoutSymbol: deviceMarks.length };
+    let withoutSymbol = 0;
+    let attributed = false;
+    for (const mark of deviceMarks) {
+      const entry = symbolEntryFor(symbolCatalog, mark.ifcType, {
+        predefinedType: mark.predefinedType,
+        objectType: mark.objectType,
+        productId: symbolSet,
+      });
+      if (!entry?.symbol) withoutSymbol += 1;
+      // Only if such a symbol is actually ON this sheet. Naming a source whose
+      // drawings the reader cannot see would be a credit line for nothing.
+      if (entry?.symbol && entry.attributionRequired) attributed = true;
+    }
+    return {
+      catalogSynced: true,
+      withoutSymbol,
+      attribution: attributed ? symbolCatalog.attribution ?? null : null,
+    };
+  }, [deviceMarks, symbolCatalog, symbolSet]);
+
 
   // ── The FKS boundary around each Auslösezone ────────────────────────────
   // Derived whenever the plan is open, like the room labels: the layer menu
@@ -1592,7 +1658,28 @@ export function PlanView({
       {/* Device marks sit under the text and over the swings: a mark is
           looked at, a name is read, and where they collide the text wins. */}
       {planShowDeviceMarks && (
-        <PlanDeviceMarks marks={deviceMarks} transform={planTransform} />
+        <>
+          <PlanDeviceMarks
+            marks={deviceMarks}
+            transform={planTransform}
+            picked={wiringActive ? wiringSequence : undefined}
+            onMarkClick={handleDeviceMarkClick}
+            onMarkHover={wiringActive ? setWiringHover : undefined}
+          />
+          {/* The cable, in the plan's own frame. The 3D overlay projects
+              through the scene camera and would draw the run somewhere else
+              entirely here — the plan is a separate canvas with a separate
+              transform, and the marks already know where they are. */}
+          {wiringActive && (
+            <PlanWiringCable
+              marks={deviceMarks}
+              transform={planTransform}
+              sequence={wiringSequence}
+              ring={wiringRing}
+              hover={wiringHover}
+            />
+          )}
+        </>
       )}
 
       {/* Moving the whole object. Below the reshape handles in the source and
@@ -1903,6 +1990,7 @@ export function PlanView({
           showDeviceMarks={planShowDeviceMarks}
           onToggleDeviceMarks={() => setPlanShowDeviceMarks(!planShowDeviceMarks)}
           deviceCount={deviceMarks.length}
+          deviceSymbolGap={deviceSymbolGap}
           settingsOpen={settingsOpen}
           onToggleSettings={() => setSettingsOpen((v) => !v)}
           dxfOpen={dxfPanelOpen}

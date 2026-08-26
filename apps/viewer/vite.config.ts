@@ -314,6 +314,20 @@ export default defineConfig({
       allow: ['../..'],
     },
     proxy: {
+      '/api/symbolkatalog': {
+        // In production this path is a Pages Function holding a credential
+        // (`functions/api/symbolkatalog.ts`). A dev server has no Functions,
+        // so the association symbols would simply be absent — and "absent" is
+        // the one state that looks identical to a bug.
+        //
+        // Points at the data dictionary's own dev server, which answers the
+        // same path from a stand-in. Override with SES_CATALOG_DEV_URL when it
+        // runs on another port; without either, the fetch fails and the viewer
+        // carries on with the open catalogue, exactly as a deployment without
+        // access does.
+        target: process.env.SES_CATALOG_DEV_URL || 'http://localhost:5173',
+        changeOrigin: true,
+      },
       '/api/chat': {
         // Single API source of truth lives at repo-root `api/chat.ts`.
         // For local dev, run `pnpm dev:api` from repo root.

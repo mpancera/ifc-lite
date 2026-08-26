@@ -27,6 +27,7 @@ import {
   parseSymbolCatalog, referencedSymbols, symbolDrawingUrl,
   DEFAULT_SYMBOL_CATALOG_URL, type SymbolCatalog,
 } from './symbolCatalog.js';
+import { mergeSesCatalog, parseSesCatalog } from './sesCatalog.js';
 import { loadStoredSymbolCatalog, storeSymbolCatalog } from './symbolCatalogStorage.js';
 import { checkSymbolSvg, isSymbolSvgRenderable, describeSymbolSvgProblems } from './symbolSvg.js';
 import { externalRequestsAllowed } from '@/lib/privacy/externalRequests';
@@ -68,6 +69,54 @@ export interface SymbolCatalogSyncResult {
   readonly rejected?: readonly RejectedSymbol[];
   /** What to tell the user, on failure. */
   readonly error?: string;
+  /** How many association symbols came with it. */
+  readonly sesSymbols?: number;
+  /**
+   * Why none did, when none did.
+   *
+   * Not an error: the association symbols are licensed to this application by
+   * name, so a deployment without that access is a normal deployment. Saying
+   * so beats leaving somebody to wonder why a Werkplan is drawn with generic
+   * circles.
+   */
+  readonly sesSkipped?: string;
+}
+
+/**
+ * Where this deployment's own server hands over the association symbols.
+ *
+ * Same origin on purpose. The credential for them must not be in the bundle,
+ * so a small function on the server side holds it — see
+ * `functions/api/symbolkatalog.ts`. Same origin also means no preflight.
+ */
+const SES_CATALOG_PATH = '/api/symbolkatalog';
+
+/**
+ * Fetch the association symbols, or explain why not.
+ *
+ * Never throws and never fails the sync. The dictionary's own catalogue is
+ * useful on its own, and a deployment that has no access to the association
+ * symbols must still get one.
+ */
+async function fetchSesCatalog(): Promise<
+  { source: ReturnType<typeof parseSesCatalog>; skipped?: string }
+> {
+  try {
+    const response = await fetch(SES_CATALOG_PATH, { cache: 'no-store' });
+    if (!response.ok) {
+      // 503 is this deployment saying it was never given the access, which is
+      // the ordinary state of any copy of the viewer.
+      const reason = response.status === 503
+        ? 'Diese Installation hat keinen Zugang zu den Verbandssymbolen.'
+        : `Die Verbandssymbole antworteten mit ${response.status}.`;
+      return { source: null, skipped: reason };
+    }
+    const source = parseSesCatalog(await response.json());
+    if (!source) return { source: null, skipped: 'Die Verbandssymbole kamen in einer unbekannten Form zurück.' };
+    return { source };
+  } catch (error) {
+    return { source: null, skipped: `Verbandssymbole nicht erreichbar: ${(error as Error).message}` };
+  }
 }
 
 /** How many drawings to fetch at once. */
@@ -150,7 +199,14 @@ export async function syncSymbolCatalog(
     }
 
     const { drawings, rejected } = await fetchDrawings(referencedSymbols(listing), url);
-    const catalog: SymbolCatalog = { ...listing, drawings };
+    const base: SymbolCatalog = { ...listing, drawings };
+
+    // The association's symbols come from this deployment's own server, which
+    // holds the credential for them. They are fetched inside this action and
+    // not on their own, because a catalogue and half its symbols is a state
+    // nothing downstream should have to reason about.
+    const ses = await fetchSesCatalog();
+    const catalog = mergeSesCatalog(base, ses.source) ?? base;
 
     await storeSymbolCatalog(catalog);
     loaded = true;
@@ -159,8 +215,10 @@ export async function syncSymbolCatalog(
     return {
       ok: true,
       count: catalog.entries.length,
-      drawings: Object.keys(drawings).length,
+      drawings: Object.keys(catalog.drawings).length,
       rejected,
+      sesSymbols: ses.source?.entries.length ?? 0,
+      sesSkipped: ses.skipped,
     };
   } catch (error) {
     return {
