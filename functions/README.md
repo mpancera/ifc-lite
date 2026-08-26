@@ -53,6 +53,13 @@ dictionary's side; its setup is documented there
 the one setting that is easy to get wrong — the Access policy action has to be
 *Service Auth*, not *Allow*.
 
+> **Saving the variables changes nothing on its own.** Pages reads them when it
+> BUILDS, so the running deployment keeps the values it was built with. A
+> deployment has to follow — *Deployments → Retry deployment*, or simply the
+> next push to the connected branch. Without it the route keeps answering
+> `503 unconfigured` with both values sitting right there in the dashboard,
+> which is a confusing half hour.
+
 ### What the answers mean
 
 | Status | Meaning |
