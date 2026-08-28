@@ -21,11 +21,12 @@
  * This panel is the cure for the other half of it — being able to SEE what a
  * product settles, without having to read the source.
  *
- * # What this table cannot show yet
- * The classes column lists what the product WOULD draw. `productDrawsClass()`
- * exists, is tested, and is called by nobody: the 2D derivation still draws
- * whatever the storey holds. So the column is an announcement, and it says so
- * rather than implying a filter that is not running.
+ * # Every column here is in force
+ * It was not always: the classes column shipped one commit before the filter
+ * that honours it, and said so in the panel. The note came out with the filter
+ * going in - a caveat left standing after it stops being true is worse than
+ * the caveat never having been there, because the next reader believes the
+ * other ones too.
  */
 
 import { useState } from 'react';
@@ -123,9 +124,10 @@ export function PlanProductsPanel({ trigger }: PlanProductsPanelProps) {
         </div>
 
         <p className="text-[11px] text-muted-foreground">
-          <strong>Bauteile wirken noch nicht.</strong> Die Spalte sagt, was das Produkt zeichnen
-          soll; die 2D-Ableitung zeichnet zurzeit noch alles, was im Geschoss steht. Zonen und
-          Symbolsatz wirken bereits.
+          Alle drei Spalten wirken. Bauteile, die nicht auf ein Planprodukt gehören, bleiben
+          im Modell — auswählbar und mit ihren Eigenschaften; nur die Zeichnung lässt sie weg.
+          Wie viele das sind, sagt die 2D-Leiste, und dort lässt sich der Filter für einen
+          Blick auch aussetzen.
         </p>
       </DialogContent>
     </Dialog>
