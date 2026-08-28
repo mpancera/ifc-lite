@@ -102,6 +102,13 @@ export interface PlanToolbarProps {
     attribution?: string | null;
   } | null;
 
+  /** How many parts the active plan product left off this sheet. */
+  productHiddenCount: number;
+  /** Whether that filter is currently suspended. */
+  productFilterOff: boolean;
+  /** Suspend it, or put it back. */
+  onToggleProductFilter: () => void;
+
   settingsOpen: boolean;
   onToggleSettings: () => void;
   dxfOpen: boolean;
@@ -156,6 +163,7 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
     showOpeningSymbols, onToggleOpeningSymbols, openingCount, assumedLinings,
     wallMeasuredDepths, doorsWithSymbol,
     showDeviceMarks, onToggleDeviceMarks, deviceCount, deviceSymbolGap,
+    productHiddenCount, productFilterOff, onToggleProductFilter,
     settingsOpen, onToggleSettings, dxfOpen, onToggleDxf,
     activeTool, onSetTool, hasAnnotations, onClearAnnotations,
     canCommitAnnotation, onCommitAnnotation, doorLabelCount, onCommitPlanAnnotations,
@@ -317,6 +325,39 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
         <span className="ml-0.5 text-[10px] leading-4 text-muted-foreground">
           Symbole: {deviceSymbolGap.attribution}
         </span>
+      )}
+
+      {(productHiddenCount > 0 || productFilterOff) && (
+        // A DRAWING that shows less than the model holds has to say so, or a
+        // missing duct reads as a missing duct. Clickable rather than a mere
+        // note: the question it raises — "is that really not there?" — is
+        // answered by looking, and switching product to look would also change
+        // the symbols and the zones.
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={onToggleProductFilter}
+              className={`ml-0.5 rounded-sm border px-1 text-[10px] leading-4 tabular-nums ${
+                productFilterOff
+                  ? 'border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-300'
+                  : 'border-border bg-muted/50 text-muted-foreground'
+              }`}
+            >
+              {productFilterOff
+                ? 'Planprodukt-Filter aus'
+                : `${productHiddenCount} nicht auf diesem Plan`}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-xs text-xs">
+            {productFilterOff
+              ? 'Der Plan zeigt gerade alles, was im Geschoss steht — auch was dieses '
+                + 'Planprodukt nicht zeichnet. Klicken, um wieder nur das Dokument zu sehen.'
+              : `${productHiddenCount} Bauteile stehen im Modell, gehören aber nicht auf dieses `
+                + 'Planprodukt. Sie sind nicht ausgeblendet, sondern nicht Teil dieser Zeichnung — '
+                + 'auswählbar und in den Eigenschaften bleiben sie. Klicken, um sie kurz mitzuzeichnen.'}
+          </TooltipContent>
+        </Tooltip>
       )}
 
       {showOpeningSymbols && assumedLinings > 0 && (

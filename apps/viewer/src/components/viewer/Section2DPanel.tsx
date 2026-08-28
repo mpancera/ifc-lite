@@ -41,6 +41,7 @@ import { TitleBlockEditor } from './TitleBlockEditor';
 import { TextAnnotationEditor } from './TextAnnotationEditor';
 import { Drawing2DCanvas } from './Drawing2DCanvas';
 import { useDrawingGeneration, AXIS_MAP, ANNOTATION_VIEW_DEPTH } from '@/hooks/useDrawingGeneration';
+import { findProduct } from '@/lib/planProducts/planProducts';
 import { useMeasure2D } from '@/hooks/useMeasure2D';
 import { useAnnotation2D } from '@/hooks/useAnnotation2D';
 import { useViewControls } from '@/hooks/useViewControls';
@@ -253,8 +254,29 @@ export function Section2DPanel({
   // EXTRACTED HOOKS
   // ═══════════════════════════════════════════════════════════════════════════
 
+  /**
+   * The active plan product's classes, exactly as `PlanView` computes them.
+   *
+   * WHY THIS PANEL NEEDS THEM TOO
+   *
+   * Both surfaces run their own generation and write the SAME store field.
+   * While only one of them knew about the product the two raced: the plan
+   * produced the reduced drawing and this panel put the full one back a moment
+   * later, so the filter worked and was invisible. Whoever writes the drawing
+   * has to apply the same rules to it.
+   */
+  const planProducts = useViewerStore((s) => s.planProducts);
+  const activePlanProductId = useViewerStore((s) => s.activePlanProductId);
+  const planProductClassFilterOff = useViewerStore((s) => s.planProductClassFilterOff);
+  const planProductClasses = useMemo(() => {
+    if (planProductClassFilterOff) return null;
+    const product = findProduct(planProducts, activePlanProductId);
+    return product && product.classes.length > 0 ? product.classes : null;
+  }, [planProducts, activePlanProductId, planProductClassFilterOff]);
+
   const { generateDrawing, doRegenerate, isRegenerating } = useDrawingGeneration({
     geometryResult, ifcDataStore, sectionPlane, displayOptions, typeVisibility,
+    planProductClasses,
     combinedHiddenIds, combinedIsolatedIds, computedIsolatedIds,
     models, panelVisible, drawing,
     setDrawing, setDrawingStatus, setDrawingProgress, setDrawingError,

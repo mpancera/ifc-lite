@@ -47,6 +47,19 @@ import { hashIdSet } from '@/lib/drawing/idSetHash';
 import { buildModelViewIdFilter, selectModelMeshes } from '@/lib/type-view-visibility';
 import { isTypeVisible, type TypeVisibilityGate } from '@/store/typeVisibilityFilter';
 
+/**
+ * Whether a plan product's class list covers this entity.
+ *
+ * Case-folded on both sides, the same rule `productDrawsClass` applies to a
+ * whole product. Taken as a bare list here so the drawing hook does not have
+ * to hold a `PlanProduct` just to ask one question of it.
+ */
+function drawsClass(classes: readonly string[], entity: string | undefined): boolean {
+  const wanted = (entity ?? '').trim().toLowerCase();
+  if (wanted.length === 0) return false;
+  return classes.some((name) => name.toLowerCase() === wanted);
+}
+
 // The winding-robust Rust `meshOutline2d` binding (issue #979) is gitignored →
 // CI-built, so reference it defensively: against an older wasm bundle it's
 // undefined and projection falls back to the TS mesh silhouette. The wasm
@@ -111,6 +124,28 @@ interface UseDrawingGenerationParams {
    * `generateDrawing` (issue #2060).
    */
   typeVisibility: TypeVisibilityGate;
+  /**
+   * The IFC classes the active plan product draws, or `null` for no product.
+   *
+   * A DOCUMENT filter, next to the global class toggles above and distinct
+   * from them: those say what this person wants to see anywhere, this says
+   * what belongs on this drawing. A Werkplan BMA shows detectors and their
+   * wiring against thin fabric; the ventilation ducts are not hidden, they
+   * were never part of that sheet.
+   *
+   * The model is untouched by it. Only the drawing is reduced - an element
+   * left out here is still selectable, still has its properties, still exports
+   * with the file. Filtering the model instead would make a document's opinion
+   * look like missing data.
+   */
+  planProductClasses?: readonly string[] | null;
+  /**
+   * How many meshes the product filter removed, reported after each run.
+   *
+   * A plan that quietly shows less than the model holds reads as a broken
+   * model. The count is what lets the strip say otherwise.
+   */
+  onProductFiltered?: (hidden: number) => void;
   combinedHiddenIds: Set<number>;
   combinedIsolatedIds: Set<number> | null;
   computedIsolatedIds?: Set<number> | null;
@@ -136,6 +171,8 @@ export function useDrawingGeneration({
   sectionPlane,
   displayOptions,
   typeVisibility,
+  planProductClasses = null,
+  onProductFiltered,
   combinedHiddenIds,
   combinedIsolatedIds,
   computedIsolatedIds,
@@ -282,6 +319,29 @@ export function useDrawingGeneration({
       if (cache && cache.useSymbolic) {
         symbolicCacheRef.current = null;
       }
+    }
+
+    // THE SAME DOCUMENT FILTER, ON THE OTHER HALF OF THE DRAWING
+    //
+    // A plan is drawn from two sources: the section cut through the meshes,
+    // and the symbolic representations the file carries for plan view. On a
+    // model authored with symbolic plan geometry the cut can be empty and
+    // EVERY line comes from here — so filtering only the meshes would leave
+    // the drawing unchanged while the strip reported parts left off it. A
+    // caveat that does not match the drawing is worse than no caveat.
+    const productHiddenIds = new Set<number>();
+    if (planProductClasses && planProductClasses.length > 0 && symbolicLines.length > 0) {
+      const kept: typeof symbolicLines = [];
+      for (const line of symbolicLines) {
+        if (drawsClass(planProductClasses, line.ifcType)) kept.push(line);
+        else productHiddenIds.add(line.entityId);
+      }
+      symbolicLines = kept;
+      // The ids leave with their lines: `entitiesWithSymbols` decides further
+      // down which entities the cut may skip because a symbol already stands
+      // for them. Leaving a filtered-out id in there would silently drop its
+      // cut geometry too.
+      for (const id of productHiddenIds) entitiesWithSymbols.delete(id);
     }
 
     // Construction projection runs on any CARDINAL cut (plan 'down' + vertical
@@ -503,6 +563,23 @@ export function useDrawingGeneration({
       // export, so all six toggles stay in lockstep.
       meshesToProcess = meshesToProcess.filter((mesh) => isTypeVisible(mesh.ifcType, typeVisibility));
 
+      // The plan product's own class list, applied after the global toggles
+      // and before hiding/isolation. `productDrawsClass` folds case, because
+      // one tool writes IFCWALL where another writes IfcWall.
+      if (planProductClasses && planProductClasses.length > 0) {
+        const kept: typeof meshesToProcess = [];
+        for (const mesh of meshesToProcess) {
+          if (drawsClass(planProductClasses, mesh.ifcType)) kept.push(mesh);
+          else productHiddenIds.add(mesh.expressId);
+        }
+        meshesToProcess = kept;
+      }
+      // Counted by ENTITY across both sources: one wall is one part left off
+      // the sheet, whether it contributed four meshes, forty symbolic segments
+      // or both. A count of meshes would be a number nobody can check against
+      // what they see.
+      onProductFiltered?.(productHiddenIds.size);
+
       // Filter out hidden entities (using combined multi-model set)
       if (combinedHiddenIds.size > 0) {
         meshesToProcess = meshesToProcess.filter(
@@ -555,6 +632,14 @@ export function useDrawingGeneration({
         // express id would still be free to project it back in.
         projectionProfiles = projectionProfiles.filter((p) => isModelViewExpressId(p.expressId));
         projectionProfiles = projectionProfiles.filter((p) => isTypeVisible(p.ifcType, typeVisibility));
+        if (planProductClasses && planProductClasses.length > 0) {
+          // Mirrored onto the projection for the same reason the class gate
+          // above is: otherwise a class the product leaves out would come
+          // back as a projected outline.
+          projectionProfiles = projectionProfiles.filter(
+            (p) => drawsClass(planProductClasses, p.ifcType),
+          );
+        }
         if (combinedHiddenIds.size > 0) {
           projectionProfiles = projectionProfiles.filter((p) => !combinedHiddenIds.has(p.expressId));
         }
@@ -867,6 +952,8 @@ export function useDrawingGeneration({
     sectionPlane,
     displayOptions,
     typeVisibility,
+    planProductClasses,
+    onProductFiltered,
     combinedHiddenIds,
     combinedIsolatedIds,
     computedIsolatedIds,
@@ -967,7 +1054,12 @@ export function useDrawingGeneration({
    * panel, which is far cheaper than the section cut it guards.
    */
   const visibilityKey = `${hashIdSet(combinedHiddenIds)}|${hashIdSet(combinedIsolatedIds)}`
-    + `|${hashIdSet(computedIsolatedIds)}`;
+    + `|${hashIdSet(computedIsolatedIds)}`
+    // The plan product's class list belongs in the key that triggers a
+    // regeneration: switching product changes WHAT IS DRAWN, and without this
+    // the drawing would keep the previous document's content until something
+    // else happened to invalidate it.
+    + `|${(planProductClasses ?? []).join(',')}`;
 
   /**
    * The display options that change what the generator PRODUCES, as opposed to

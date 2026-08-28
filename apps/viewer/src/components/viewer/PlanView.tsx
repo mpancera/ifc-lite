@@ -54,6 +54,7 @@ import { PlanWiringCable } from './PlanWiringCable';
 import { symbolEntryFor } from '@/lib/symbolCatalog/symbolCatalog';
 import { useSymbolCatalog } from '@/lib/symbolCatalog/useSymbolCatalog';
 import { useActiveSymbolSet } from '@/hooks/useActiveSymbolSet';
+import { findProduct } from '@/lib/planProducts/planProducts';
 import { PlanRoomShape } from './PlanRoomShape';
 import { PlanWallEnds } from './PlanWallEnds';
 import { PlanMoveGizmo } from './PlanMoveGizmo';
@@ -702,12 +703,35 @@ export function PlanView({
   // generating at a fallback height would draw a plan of somewhere else.
   const generationActive = active && cut?.ok === true;
 
+  const activePlanProductId = useViewerStore((s) => s.activePlanProductId);
+  const planProducts = useViewerStore((s) => s.planProducts);
+  const planProductClassFilterOff = useViewerStore((s) => s.planProductClassFilterOff);
+  const setPlanProductClassFilterOff = useViewerStore((s) => s.setPlanProductClassFilterOff);
+
+  /**
+   * The classes this document draws, or `null` for "draw everything".
+   *
+   * `null` in two cases that mean different things and behave the same: no
+   * product chosen, and the filter suspended while one is. Both say "do not
+   * reduce this drawing", which is all the generator needs to know.
+   */
+  const planProductClasses = useMemo(() => {
+    if (planProductClassFilterOff) return null;
+    const product = findProduct(planProducts, activePlanProductId);
+    return product && product.classes.length > 0 ? product.classes : null;
+  }, [planProducts, activePlanProductId, planProductClassFilterOff]);
+
+  /** How many parts the product left off this sheet, for the strip to say so. */
+  const [productHiddenCount, setProductHiddenCount] = useState(0);
+
   const { doRegenerate, isRegenerating } = useDrawingGeneration({
     geometryResult,
     ifcDataStore,
     sectionPlane,
     displayOptions,
     typeVisibility,
+    planProductClasses,
+    onProductFiltered: setProductHiddenCount,
     combinedHiddenIds,
     combinedIsolatedIds,
     computedIsolatedIds,
@@ -804,7 +828,6 @@ export function PlanView({
   // after another: without it the run writes the previous sheet under the next
   // one's filename. Published rather than put in the store because `status`
   // and `drawing` change on every regenerate, and only a runner reads them.
-  const activePlanProductId = useViewerStore((s) => s.activePlanProductId);
   useEffect(() => {
     setPlanDrawingState({
       storeyExpressId: storey?.expressId ?? null,
@@ -1991,6 +2014,9 @@ export function PlanView({
           onToggleDeviceMarks={() => setPlanShowDeviceMarks(!planShowDeviceMarks)}
           deviceCount={deviceMarks.length}
           deviceSymbolGap={deviceSymbolGap}
+          productHiddenCount={productHiddenCount}
+          productFilterOff={planProductClassFilterOff}
+          onToggleProductFilter={() => setPlanProductClassFilterOff(!planProductClassFilterOff)}
           settingsOpen={settingsOpen}
           onToggleSettings={() => setSettingsOpen((v) => !v)}
           dxfOpen={dxfPanelOpen}

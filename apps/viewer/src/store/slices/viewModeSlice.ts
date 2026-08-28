@@ -138,6 +138,17 @@ export interface ViewModeSlice {
   planShowDeviceMarks: boolean;
   /** The FKS boundary around each Auslösezone. */
   planShowZoneOutlines: boolean;
+  /**
+   * Suspend the active plan product's class filter, without leaving the
+   * product.
+   *
+   * A reading aid, not a setting: "is that duct really missing, or does this
+   * document just not show it?" is a question you answer by looking, and
+   * switching product to answer it would also change the symbols and the
+   * zones. Deliberately NOT stored per project — it is a moment, not a
+   * decision, and it resets with the session.
+   */
+  planProductClassFilterOff: boolean;
 
   setViewMode: (mode: ViewMode) => void;
   toggleViewMode: () => void;
@@ -147,6 +158,7 @@ export interface ViewModeSlice {
   setPlanShowDoorLabels: (show: boolean) => void;
   setShowSpaceGraph: (show: boolean) => void;
   setPlanShowDeviceMarks: (show: boolean) => void;
+  setPlanProductClassFilterOff: (off: boolean) => void;
   setPlanShowZoneOutlines: (show: boolean) => void;
   setPlanRotation: (radians: number) => void;
   /**
@@ -180,6 +192,8 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   planShowDoorLabels: true,
   showSpaceGraph: false,
   planShowDeviceMarks: true,
+  // Off means "the product filters", which is the point of choosing one.
+  planProductClassFilterOff: false,
   // Off by default: it is a fire-plan convention, not part of an
   // architectural drawing, and it is the heaviest line on the sheet.
   planShowZoneOutlines: false,
@@ -252,6 +266,7 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   setShowSpaceGraph: (showSpaceGraph) => set({ showSpaceGraph }),
 
   setPlanShowDeviceMarks: (planShowDeviceMarks) => set({ planShowDeviceMarks }),
+  setPlanProductClassFilterOff: (planProductClassFilterOff) => set({ planProductClassFilterOff }),
   setPlanShowZoneOutlines: (planShowZoneOutlines) => set({ planShowZoneOutlines }),
 
   restorePlanRotationForProject: () => {

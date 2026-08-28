@@ -59,6 +59,7 @@ import {
   Shapes,
   ShieldCheck,
   Spline,
+  ClipboardList,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
@@ -94,6 +95,7 @@ import { DataPrivacyPanel } from './DataPrivacyPanel';
 import { DisciplineRolePanel } from './DisciplineRolePanel';
 import { ProjectFolderPanel } from './ProjectFolderPanel';
 import { RelationKindsPanel } from './RelationKindsPanel';
+import { PlanProductsPanel } from './PlanProductsPanel';
 import { SymbolCatalogPanel } from './SymbolCatalogPanel';
 import { ExportChangesButton } from './ExportChangesButton';
 import { LevelDisplayIndicator } from './LevelDisplayIndicator';
@@ -1298,6 +1300,17 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
               <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
                 <Spline className="h-4 w-4 mr-2" />
                 Beziehungsarten
+              </DropdownMenuItem>
+            }
+          />
+          {/* Likewise a reference: what each plan product settles. Both strips
+              carry it, because a capability only the ribbon can reach is one
+              the classic strip's users simply do not have. */}
+          <PlanProductsPanel
+            trigger={
+              <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
+                <ClipboardList className="h-4 w-4 mr-2" />
+                Planprodukte
               </DropdownMenuItem>
             }
           />
