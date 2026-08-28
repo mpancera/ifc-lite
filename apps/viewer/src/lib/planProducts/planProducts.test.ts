@@ -78,14 +78,26 @@ describe('the shipped products', () => {
     }
   });
 
-  it('holds class names lower-cased, the way lookup expects', () => {
-    // productDrawsClass lower-cases what it is asked about but NOT what it
-    // holds — a capital in the table would never match anything.
+  it('holds class names the way EXPRESS spells them', () => {
+    // They used to be stored folded, because the matcher only folded the side
+    // it was asked about. But this list is read by people too - the
+    // Planprodukte panel prints it - and `ifcwallstandardcase` is not a name
+    // anybody recognises. The canonical spelling stays in the data; the
+    // matcher folds both sides.
     for (const product of BUILT_IN_PRODUCTS) {
       for (const entity of product.classes) {
-        assert.equal(entity, entity.toLowerCase(), `${product.id}: "${entity}"`);
+        assert.match(entity, /^Ifc[A-Z]/, `${product.id}: "${entity}"`);
       }
     }
+  });
+
+  it('matches a class however the file spells it', () => {
+    // The reason the folding existed at all: one tool writes IFCWALL, another
+    // IfcWall, and both mean the same entity.
+    assert.ok(productDrawsClass(brandschutz, 'IFCWALL'));
+    assert.ok(productDrawsClass(brandschutz, 'ifcwall'));
+    assert.ok(productDrawsClass(brandschutz, ' IfcWall '));
+    assert.ok(!productDrawsClass(brandschutz, 'IfcBeam'));
   });
 
   it('starts both products unturned, so neither guesses an angle', () => {

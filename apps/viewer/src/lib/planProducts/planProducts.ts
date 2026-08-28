@@ -70,7 +70,7 @@ export interface PlanProduct {
    */
   readonly zoneThemes: readonly string[];
   /**
-   * IFC entity names that carry the drawing, lower-cased for lookup.
+   * IFC entity names that carry the drawing, spelled as EXPRESS spells them.
    *
    * The building fabric a drawing needs for orientation plus the fire safety
    * equipment it is actually about. Held as entity names rather than
@@ -110,13 +110,13 @@ export const WERKPLAN_BMA_ID = 'werkplan-bma';
  * drawing is about is added per product below.
  */
 const FABRIC: readonly string[] = [
-  'ifcwall',
-  'ifcwallstandardcase',
-  'ifcdoor',
-  'ifcstair',
-  'ifcstairflight',
-  'ifcslab',
-  'ifccolumn',
+  'IfcWall',
+  'IfcWallStandardCase',
+  'IfcDoor',
+  'IfcStair',
+  'IfcStairFlight',
+  'IfcSlab',
+  'IfcColumn',
 ];
 
 /**
@@ -146,13 +146,13 @@ export const BUILT_IN_PRODUCTS: readonly PlanProduct[] = [
     ],
     classes: [
       ...FABRIC,
-      'ifcwindow',
-      'ifcalarm',
-      'ifcsensor',
-      'ifcfiresuppressionterminal',
-      'ifcflowterminal',
-      'ifcdamper',
-      'ifcannotation',
+      'IfcWindow',
+      'IfcAlarm',
+      'IfcSensor',
+      'IfcFireSuppressionTerminal',
+      'IfcFlowTerminal',
+      'IfcDamper',
+      'IfcAnnotation',
     ],
     symbolSet: BRANDSCHUTZKONZEPT_ID,
     // North up. A concept plan is read alongside the architect's drawings and
@@ -174,14 +174,14 @@ export const BUILT_IN_PRODUCTS: readonly PlanProduct[] = [
     ],
     classes: [
       ...FABRIC,
-      'ifcalarm',
-      'ifcfiresuppressionterminal',
+      'IfcAlarm',
+      'IfcFireSuppressionTerminal',
       // Site level: the access route and the key depot. Authored as real
       // elements under IfcSite, which is why they are entity names here like
       // everything else rather than a special case.
-      'ifcgeographicelement',
-      'ifccivilelement',
-      'ifcannotation',
+      'IfcGeographicElement',
+      'IfcCivilElement',
+      'IfcAnnotation',
     ],
     symbolSet: FEUERWEHRLAGEPLAN_ID,
     // Deliberately null rather than an angle: the approach direction is a
@@ -212,17 +212,17 @@ export const BUILT_IN_PRODUCTS: readonly PlanProduct[] = [
     zoneThemes: ['fire-trigger'],
     classes: [
       ...FABRIC,
-      'ifcsensor',
-      'ifcalarm',
+      'IfcSensor',
+      'IfcAlarm',
       // The equipment that makes a detection loop a loop: the line module each
       // circuit hangs on, and the panel it reports to.
-      'ifccontroller',
-      'ifcunitarycontrolelement',
-      'ifcdistributionboard',
+      'IfcController',
+      'IfcUnitaryControlElement',
+      'IfcDistributionBoard',
       // Reflectors, key boxes — accessories the association draws and the
       // authority plans leave out.
-      'ifcdiscreteaccessory',
-      'ifcannotation',
+      'IfcDiscreteAccessory',
+      'IfcAnnotation',
     ],
     symbolSet: WERKPLAN_BMA_ID,
     // North up, like the concept plan: a Werkplan is set out against the
@@ -252,7 +252,12 @@ export function findProduct(
  */
 export function productDrawsClass(product: PlanProduct, entity: string): boolean {
   const wanted = entity.trim().toLowerCase();
-  return wanted.length > 0 && product.classes.includes(wanted);
+  if (wanted.length === 0) return false;
+  // Both sides folded here rather than storing a folded copy: the list is
+  // read by people too - it is shown in the Planprodukte panel - and
+  // `ifcwallstandardcase` is not a name anybody recognises. The canonical
+  // spelling stays in the data; only the comparison ignores case.
+  return product.classes.some((name) => name.toLowerCase() === wanted);
 }
 
 /** Whether a product draws a given zone theme, by its `themes.ts` id. */

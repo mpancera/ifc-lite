@@ -77,7 +77,9 @@ export function parseProducts(payload: unknown): PlanProduct[] {
       // the viewer ships, whatever the JSON claims.
       builtIn: false,
       zoneThemes,
-      classes: classes.map((value) => value.toLowerCase()),
+      // Kept as written: the EXPRESS spelling is what a reader sees in the
+      // Planprodukte panel, and `productDrawsClass` folds case when matching.
+      classes,
       symbolSet: typeof record.symbolSet === 'string' && record.symbolSet ? record.symbolSet : null,
       rotation: null,
       sheet,

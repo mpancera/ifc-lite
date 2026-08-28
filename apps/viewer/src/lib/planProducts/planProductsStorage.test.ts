@@ -76,11 +76,14 @@ describe('parseProducts', () => {
     assert.deepEqual(parseProducts([{ id: 'leer', name: 'Leer', sheet }]), []);
   });
 
-  it('lower-cases class names so lookup can find them', () => {
+  it('keeps class names as they were written', () => {
+    // Stored folded until 2026-08-25, which made the saved product unreadable
+    // in the Planprodukte panel. Case is folded when matching instead, so a
+    // file spelling IFCDOOR is still found.
     const products = parseProducts([
       { id: 'meins', name: 'Meins', classes: ['IfcWall', 'IFCDOOR'], sheet },
     ]);
-    assert.deepEqual(products[0].classes, ['ifcwall', 'ifcdoor']);
+    assert.deepEqual(products[0].classes, ['IfcWall', 'IFCDOOR']);
   });
 
   it('drops a view placed off the page', () => {

@@ -8,7 +8,7 @@
  */
 
 import React from 'react';
-import { BookMarked, FolderOpen, HardHat, Palette, Ruler, Shapes, ShieldCheck, Spline } from 'lucide-react';
+import { BookMarked, ClipboardList, FolderOpen, HardHat, Palette, Ruler, Shapes, ShieldCheck, Spline } from 'lucide-react';
 import { AddFile, CloudSources, Loading, OpenFile, Refresh, Share, CollabsRoom } from '@/icons';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -20,6 +20,7 @@ import { ClassCatalogPanel } from '@/components/viewer/ClassCatalogPanel';
 import { SymbolCatalogPanel } from '@/components/viewer/SymbolCatalogPanel';
 import { DataPrivacyPanel } from '../../DataPrivacyPanel';
 import { RelationKindsPanel } from '../../RelationKindsPanel';
+import { PlanProductsPanel } from '../../PlanProductsPanel';
 import { DisciplineRolePanel } from '../../DisciplineRolePanel';
 import type { FileCommands } from '../../toolbar/useFileCommands';
 import { RibbonExportGroup } from './RibbonExportGroup';
@@ -233,6 +234,22 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
                 icon={Shapes}
                 label="Symbolkatalog"
                 tooltip="Die Plansymbole abgleichen, die eine Fachklasse auf der Zeichnung bekommt"
+              />
+            }
+          />
+        </RibbonSmallStack>
+        <RibbonSmallStack>
+          {/* A reference like Beziehungsarten: what a plan product settles, to
+              read once. Its own stack rather than a fourth button in one of
+              the two above - those hold three each, which is a small stack's
+              height, and the products will get siblings here (sheet layouts,
+              saved views) before this one grows. */}
+          <PlanProductsPanel
+            trigger={
+              <RibbonSmallButton
+                icon={ClipboardList}
+                label="Planprodukte"
+                tooltip="Welche Zeichnungen aus diesem Modell entstehen — und was jede zeigt"
               />
             }
           />
