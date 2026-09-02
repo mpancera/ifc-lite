@@ -61,6 +61,12 @@
       "@ifc-lite/mutations/*": [
         "packages/mutations/dist/*"
       ],
+      "@ifc-lite/harmonizer": [
+        "packages/harmonizer/dist/index.d.ts"
+      ],
+      "@ifc-lite/harmonizer/*": [
+        "packages/harmonizer/dist/*"
+      ],
       "@ifc-lite/drawing-2d": [
         "packages/drawing-2d/dist/index.d.ts"
       ],
