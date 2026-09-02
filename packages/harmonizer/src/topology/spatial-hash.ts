@@ -18,6 +18,11 @@ import type { Point2 } from '../types.js';
 export interface SegmentLike {
   a: Point2;
   b: Point2;
+  /**
+   * What the stroke stands for: a wall, or a divider that separates two
+   * spaces without a wall (an open-plan boundary). Unknown means wall.
+   */
+  kind?: 'wall' | 'divider';
 }
 
 export class SegmentGrid {

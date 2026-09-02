@@ -88,7 +88,20 @@ export {
   type RejectedFace,
 } from './topology/enclosed-areas.js';
 export { SegmentGrid, cellSizeFor, type SegmentLike } from './topology/spatial-hash.js';
+export type { PlanarGraph, PlanarEdge, PlanarFace } from './topology/enclosed-areas.js';
+export {
+  buildSpaceGraph,
+  neighboursOf,
+  OUTSIDE_ID,
+  type SpaceGraph,
+  type SpaceGraphNode,
+  type SpaceGraphEdge,
+  type SpaceGraphNodeKind,
+  type SpaceGraphEdgeKind,
+  type SpaceGraphOptions,
+} from './topology/space-graph.js';
 export { renderTopologyVisual } from './visual/topology-visual.js';
+export { renderSpaceGraphVisual, GRAPH_COLORS } from './visual/space-graph-visual.js';
 export { classifyBlock, isAnonymousBlock, DEFAULT_SYMBOL_RULES, type SymbolClass, type SymbolRule, type SymbolClassification } from './interpret/symbols.js';
 export { area, perimeter, regionWidth, centroid, pointInPolygon, bounds, normaliseLoop, type Bounds } from './interpret/geometry.js';
 

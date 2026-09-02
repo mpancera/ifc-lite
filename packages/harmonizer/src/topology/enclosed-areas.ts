@@ -60,11 +60,38 @@ export interface TopologyStats {
   timeMs: number;
 }
 
+/** One undirected edge of the planar graph: a piece of wall (or divider) between two corners. */
+export interface PlanarEdge {
+  a: number;
+  b: number;
+  kind: 'wall' | 'divider';
+  /** Index into `PlanarGraph.faces` on the left when walking a→b, or -1. */
+  faceLeft: number;
+  /** Index into `PlanarGraph.faces` on the right when walking a→b, or -1. */
+  faceRight: number;
+}
+
+export interface PlanarFace extends Face {
+  kind: 'room' | 'narrow' | 'small' | 'outer';
+}
+
+/**
+ * Level 1 of a space graph: corners as nodes, walls as edges, and the faces
+ * each edge borders. Everything else (adjacency, connectivity) reads off it.
+ */
+export interface PlanarGraph {
+  vertices: Point2[];
+  edges: PlanarEdge[];
+  faces: PlanarFace[];
+}
+
 export interface TopologyResult {
   faces: Face[];
   rejected: RejectedFace[];
   /** Ends of strokes that meet nothing: where a loop leaks. */
   dangling: Point2[];
+  /** The planar graph the faces came from. */
+  graph: PlanarGraph;
   stats: TopologyStats;
 }
 
@@ -132,7 +159,7 @@ export function findEnclosedAreas(input: readonly SegmentLike[], options: Topolo
       droppedShort += 1;
       continue;
     }
-    segs.push({ a: { x: s.a.x, y: s.a.y }, b: { x: s.b.x, y: s.b.y } });
+    segs.push({ a: { x: s.a.x, y: s.a.y }, b: { x: s.b.x, y: s.b.y }, kind: s.kind ?? 'wall' });
     if (segs.length >= maxSegments) break;
   }
   const truncated = input.length - droppedShort > segs.length;
@@ -147,9 +174,9 @@ export function findEnclosedAreas(input: readonly SegmentLike[], options: Topolo
     cellSize: 0,
     timeMs: 0,
   };
-  const finish = (faces: Face[], rejected: RejectedFace[], dangling: Point2[]): TopologyResult => {
+  const finish = (faces: Face[], rejected: RejectedFace[], dangling: Point2[], graph: PlanarGraph = { vertices: [], edges: [], faces: [] }): TopologyResult => {
     stats.timeMs = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - started;
-    return { faces, rejected, dangling, stats };
+    return { faces, rejected, dangling, graph, stats };
   };
   if (segs.length < 3) return finish([], [], []);
 
@@ -179,7 +206,7 @@ export function findEnclosedAreas(input: readonly SegmentLike[], options: Topolo
       }
       return best ?? e;
     };
-    const snapped = segs.map((s, i) => ({ a: snapEnd(s.a, i), b: snapEnd(s.b, i) }));
+    const snapped = segs.map((s, i) => ({ a: snapEnd(s.a, i), b: snapEnd(s.b, i), kind: s.kind }));
     for (let i = 0; i < segs.length; i++) segs[i] = snapped[i];
   }
 
@@ -209,10 +236,14 @@ export function findEnclosedAreas(input: readonly SegmentLike[], options: Topolo
     return id;
   };
   const indexed: Array<[number, number]> = [];
+  const indexedKind: Array<'wall' | 'divider'> = [];
   for (const s of segs) {
     const a = lookup(s.a);
     const b = lookup(s.b);
-    if (a !== b) indexed.push([a, b]);
+    if (a !== b) {
+      indexed.push([a, b]);
+      indexedKind.push(s.kind ?? 'wall');
+    }
   }
 
   // 3. Splits: T-junctions (an endpoint on another stroke's interior) and
@@ -260,20 +291,27 @@ export function findEnclosedAreas(input: readonly SegmentLike[], options: Topolo
     }
   }
 
-  const undirected = new Set<string>();
+  const undirected = new Map<string, number>();
   const edgesIn: Array<[number, number]> = [];
-  for (const list of splits) {
+  const edgeKind: Array<'wall' | 'divider'> = [];
+  splits.forEach((list, host) => {
     list.sort((p, q) => p.t - q.t);
     for (let k = 0; k < list.length - 1; k++) {
       const a = list[k].v;
       const b = list[k + 1].v;
       if (a === b) continue;
       const key = a < b ? `${a}-${b}` : `${b}-${a}`;
-      if (undirected.has(key)) continue;
-      undirected.add(key);
+      const existing = undirected.get(key);
+      if (existing !== undefined) {
+        // Drawn twice: a wall beats a divider.
+        if (indexedKind[host] === 'wall') edgeKind[existing] = 'wall';
+        continue;
+      }
+      undirected.set(key, edgesIn.length);
       edgesIn.push([a, b]);
+      edgeKind.push(indexedKind[host]);
     }
-  }
+  });
   stats.vertices = vertices.length;
   stats.edgesAfterSplit = edgesIn.length;
   if (edgesIn.length < 3) return finish([], [], []);
@@ -321,22 +359,46 @@ export function findEnclosedAreas(input: readonly SegmentLike[], options: Topolo
   stats.faces = cycles.length;
 
   // 6. Keep the counter-clockwise faces that are rooms; report the rest.
+  //    Every cycle becomes a planar face so the graph can name what borders
+  //    an edge, rooms and non-rooms alike.
   const faces: Face[] = [];
   const rejected: RejectedFace[] = [];
-  for (const cycle of cycles) {
+  const planarFaces: PlanarFace[] = [];
+  const faceOfCycle: number[] = cycles.map(() => -1);
+  cycles.forEach((cycle, ci) => {
     const outline = normaliseLoop(cycle.map((eid) => ({ x: vertices[edges[eid].origin].x, y: vertices[edges[eid].origin].y })));
-    if (outline.length < 3) continue;
-    if (signedArea(outline) <= 0) {
-      stats.outerFaces += 1;
-      continue;
-    }
+    if (outline.length < 3) return;
     const a = area(outline);
     const w = regionWidth(outline);
-    const face: Face = { outline, area: a, width: w };
-    if (a < minArea) rejected.push({ ...face, reason: 'small' });
-    else if (w < minWidth) rejected.push({ ...face, reason: 'narrow' });
-    else faces.push(face);
-  }
+    let kind: PlanarFace['kind'];
+    if (signedArea(outline) <= 0) {
+      stats.outerFaces += 1;
+      kind = 'outer';
+    } else if (a < minArea) {
+      kind = 'small';
+      rejected.push({ outline, area: a, width: w, reason: 'small' });
+    } else if (w < minWidth) {
+      kind = 'narrow';
+      rejected.push({ outline, area: a, width: w, reason: 'narrow' });
+    } else {
+      kind = 'room';
+      faces.push({ outline, area: a, width: w });
+    }
+    faceOfCycle[ci] = planarFaces.length;
+    planarFaces.push({ outline, area: a, width: w, kind });
+  });
   faces.sort((p, q) => q.area - p.area);
-  return finish(faces, rejected, dangling);
+
+  const planarEdges: PlanarEdge[] = edgesIn.map(([a, b], i) => {
+    const fwd = edges[2 * i];
+    const bwd = edges[2 * i + 1];
+    return {
+      a,
+      b,
+      kind: edgeKind[i],
+      faceLeft: fwd.face >= 0 ? faceOfCycle[fwd.face] : -1,
+      faceRight: bwd.face >= 0 ? faceOfCycle[bwd.face] : -1,
+    };
+  });
+  return finish(faces, rejected, dangling, { vertices: vertices.map((v) => ({ x: v.x, y: v.y })), edges: planarEdges, faces: planarFaces });
 }
