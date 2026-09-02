@@ -75,6 +75,8 @@ export interface CollectPdfPageStatsOptions {
    */
   collectGeometry?: boolean;
   maxClosedPaths?: number;
+  /** Straight segments kept when geometry is collected. Default 150 000. */
+  maxSegments?: number;
 }
 
 type Matrix = [number, number, number, number, number, number];
@@ -130,6 +132,9 @@ interface PathCounts {
   /** Closed loops in sheet coordinates, when geometry is collected. */
   loops?: Array<Array<{ x: number; y: number }>>;
   maxLoops: number;
+  /** Straight segments in sheet coordinates, when geometry is collected. */
+  strokes?: Array<{ a: { x: number; y: number }; b: { x: number; y: number } }>;
+  maxStrokes: number;
 }
 
 function makeGrid(cols: number, widthPt: number, heightPt: number): Grid {
@@ -166,6 +171,7 @@ function line(x1: number, y1: number, x2: number, y2: number, ctm: Matrix, micro
   into.lines += 1;
   if (micro) into.micro += 1;
   if (into.grid) bin(into.grid, (ax + bx) / 2, (ay + by) / 2, micro);
+  if (into.strokes && into.strokes.length < into.maxStrokes) into.strokes.push({ a: { x: ax, y: ay }, b: { x: bx, y: by } });
 }
 
 /** Bounding box of the unit square under the CTM: where an image lands on the page. */
@@ -295,6 +301,8 @@ export async function collectPdfPageStats(
     grid: options.densityCols && options.densityCols > 0 ? makeGrid(Math.floor(options.densityCols), viewport.width, viewport.height) : undefined,
     loops: options.collectGeometry ? [] : undefined,
     maxLoops: options.maxClosedPaths ?? 5000,
+    strokes: options.collectGeometry ? [] : undefined,
+    maxStrokes: options.maxSegments ?? 150000,
   };
 
   const fns = opList.fnArray;
@@ -380,6 +388,7 @@ export async function collectPdfPageStats(
     textChars,
     imageBoxes,
     ...(counts.loops ? { closedPaths: counts.loops } : {}),
+    ...(counts.strokes ? { segments: counts.strokes } : {}),
     ...(texts ? { texts } : {}),
     ...(counts.grid
       ? { density: { cols: counts.grid.cols, rows: counts.grid.rows, segments: counts.grid.segments, micro: counts.grid.micro, max: counts.grid.max } }

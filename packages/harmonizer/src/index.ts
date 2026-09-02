@@ -77,7 +77,18 @@ export {
   type InterpretResult,
   type InterpretStats,
 } from './interpret/interpret.js';
+export { spacesFromLoops, addTopologySpaces, dxfLabels, type Loop, type Label } from './interpret/interpret.js';
 export { parseLabel, type LabelKind, type ParsedLabel } from './interpret/labels.js';
+export {
+  findEnclosedAreas,
+  type TopologyOptions,
+  type TopologyResult,
+  type TopologyStats,
+  type Face,
+  type RejectedFace,
+} from './topology/enclosed-areas.js';
+export { SegmentGrid, cellSizeFor, type SegmentLike } from './topology/spatial-hash.js';
+export { renderTopologyVisual } from './visual/topology-visual.js';
 export { classifyBlock, isAnonymousBlock, DEFAULT_SYMBOL_RULES, type SymbolClass, type SymbolRule, type SymbolClassification } from './interpret/symbols.js';
 export { area, perimeter, regionWidth, centroid, pointInPolygon, bounds, normaliseLoop, type Bounds } from './interpret/geometry.js';
 

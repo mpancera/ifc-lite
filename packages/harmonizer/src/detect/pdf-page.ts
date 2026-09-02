@@ -71,6 +71,8 @@ export interface PdfPageStats {
   closedPaths?: Array<Array<{ x: number; y: number }>>;
   /** Present when the adapter was asked for geometry: text items with their anchors. */
   texts?: PdfTextItem[];
+  /** Present when the adapter was asked for geometry: every painted straight segment, sheet points, capped. */
+  segments?: Array<{ a: { x: number; y: number }; b: { x: number; y: number } }>;
 }
 
 export type PdfPageKind = 'vector' | 'raster' | 'hybrid' | 'empty';

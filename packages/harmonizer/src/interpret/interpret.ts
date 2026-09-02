@@ -56,16 +56,18 @@ export interface InterpretResult {
   stats: InterpretStats;
 }
 
-interface Loop {
+export interface Loop {
   points: Point2[];
   layer?: string;
-  /** How much the layer's role vouches for this being a room outline. */
+  /** How much the source vouches for this being a room outline. */
   layerFactor: number;
   handle: string;
   page?: number;
+  /** Extra named factors, e.g. `{ topology: 0.8 }` for a loop the stroke network closed. */
+  factors?: Record<string, number>;
 }
 
-interface Label {
+export interface Label {
   text: string;
   position: Point2;
   layer?: string;
@@ -77,7 +79,11 @@ function product(factors: Record<string, number>): number {
   return Object.values(factors).reduce((p, f) => p * f, 1);
 }
 
-/** Rooms from closed loops, names from the labels inside them. Shared by DXF and PDF. */
+/** Rooms from closed loops, names from the labels inside them. Shared by DXF, PDF and the topology stage. */
+export function spacesFromLoops(loops: Loop[], labels: Label[], opts: InterpretOptions, route: Candidate['route']): { spaces: Candidate[]; usedLabels: Set<Label>; stats: Pick<InterpretStats, 'spaces' | 'named' | 'rejected'> } {
+  return buildSpaces(loops, labels, opts, route);
+}
+
 function buildSpaces(loops: Loop[], labels: Label[], opts: InterpretOptions, route: Candidate['route']): { spaces: Candidate[]; usedLabels: Set<Label>; stats: Pick<InterpretStats, 'spaces' | 'named' | 'rejected'> } {
   const minWidth = opts.minRegionWidthM ?? 0.35;
   const minArea = opts.minAreaM2 ?? 1;
@@ -111,6 +117,7 @@ function buildSpaces(loops: Loop[], labels: Label[], opts: InterpretOptions, rou
       area: 1,
       slenderness: w >= minWidth * 2 ? 1 : 0.8,
       'text-inside': name || number ? 1 : inside.length > 0 ? 0.8 : 0.6,
+      ...(loop.factors ?? {}),
     };
     if (areaLabel?.parsed.areaM2 && areaLabel.parsed.areaM2 > 0) {
       // A drawn area label is a check: the polygon should measure about the same.
@@ -307,6 +314,55 @@ export function interpretPdfPage(stats: PdfPageStats, metresPerPoint: number, op
     candidates: [...built.spaces, ...labelCands],
     stats: { ...built.stats, labels: labelCands.length, symbols: 0, doors: 0, columns: 0 },
   };
+}
+
+/** Labels of a DXF as the topology stage needs them: every text on a layer that is not excluded. */
+export function dxfLabels(doc: DxfDocument, roles: Readonly<Record<string, LayerRole>>, metresPerUnit: number): Label[] {
+  const out: Label[] = [];
+  for (const e of doc.entities) {
+    if (e.kind !== 'text' || roles[e.layer] === 'exclude' || e.invisible) continue;
+    const position = { x: e.x * metresPerUnit, y: e.y * metresPerUnit };
+    out.push({ text: e.text, position, layer: e.layer, handle: geometryHandle('text', e.layer, [position]) + `:${e.text}` });
+  }
+  return out;
+}
+
+/**
+ * Add the rooms the topology stage closed to an interpretation. A closed
+ * face whose centroid already lies in a drawn outline is the same room and
+ * is not added twice: the drawn outline is the better source.
+ */
+export function addTopologySpaces(
+  result: InterpretResult,
+  faces: ReadonlyArray<{ outline: Point2[] }>,
+  labels: Label[],
+  opts: InterpretOptions,
+  route: Candidate['route'] = 'vector',
+): InterpretResult {
+  const drawn = result.candidates.filter((c) => c.type === 'space');
+  const loops: Loop[] = faces
+    .filter((f) => {
+      const c = centroid(f.outline);
+      return !drawn.some((d) => pointInPolygon(c, d.geometry));
+    })
+    .map((f) => ({ points: f.outline, layerFactor: 0.8, handle: geometryHandle('face', 'topology', f.outline), factors: { topology: 1 } }));
+  const usedByDrawn = new Set(drawn.flatMap((d) => d.source.handles));
+  const freeLabels = labels.filter((l) => !usedByDrawn.has(l.handle));
+  const built = buildSpaces(loops, freeLabels, opts, route);
+  return {
+    candidates: [...result.candidates.filter((c) => c.type !== 'label' || !built.usedLabels.has(labelByHandle(labels, c.source.handles[0]))), ...built.spaces],
+    stats: {
+      ...result.stats,
+      spaces: result.stats.spaces + built.stats.spaces,
+      named: result.stats.named + built.stats.named,
+      labels: Math.max(0, result.stats.labels - built.usedLabels.size),
+      rejected: [...result.stats.rejected, ...built.stats.rejected],
+    },
+  };
+}
+
+function labelByHandle(labels: Label[], handle: string | undefined): Label {
+  return labels.find((l) => l.handle === handle) ?? ({ text: '', position: { x: 0, y: 0 }, handle: '' } as Label);
 }
 
 /** Confidence band a host colours by. */
