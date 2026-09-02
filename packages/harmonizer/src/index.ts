@@ -38,6 +38,7 @@ export {
   type PdfPageStats,
   type PdfDensityGrid,
   type PdfBox,
+  type PdfTextItem,
   type PdfPageKind,
   type PdfPageThresholds,
   type PdfPageClassification,
@@ -67,7 +68,21 @@ export { metresPerInsunit, estimateMetresPerUnit, INSUNITS_NAMES } from './units
 
 export { stableUuid, stableGlobalId, candidateId } from './ids/stable-id.js';
 
+export {
+  interpretDxf,
+  interpretPdfPage,
+  confidenceBand,
+  type ConfidenceBand,
+  type InterpretOptions,
+  type InterpretResult,
+  type InterpretStats,
+} from './interpret/interpret.js';
+export { parseLabel, type LabelKind, type ParsedLabel } from './interpret/labels.js';
+export { classifyBlock, isAnonymousBlock, DEFAULT_SYMBOL_RULES, type SymbolClass, type SymbolRule, type SymbolClassification } from './interpret/symbols.js';
+export { area, perimeter, regionWidth, centroid, pointInPolygon, bounds, normaliseLoop, type Bounds } from './interpret/geometry.js';
+
 export type { StageVisual } from './visual/stage-visual.js';
+export { renderCandidatesVisual, BAND_COLORS } from './visual/candidates-visual.js';
 export { renderRouteVisual } from './visual/route-visual.js';
 export { renderPdfPageVisual, renderPdfDocumentVisual, drawPageThumb, type PdfPageVisualInput } from './visual/pdf-visual.js';
 export { renderDxfVisual, type DxfVisualOptions } from './visual/dxf-visual.js';

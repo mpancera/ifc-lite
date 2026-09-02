@@ -20,7 +20,7 @@
  * `endPath` is a clipping path and is not drawn.
  */
 
-import type { PdfBox, PdfDensityGrid, PdfPageStats } from './pdf-page.js';
+import type { PdfBox, PdfDensityGrid, PdfPageStats, PdfTextItem } from './pdf-page.js';
 
 export interface PdfOperatorList {
   fnArray: ArrayLike<number>;
@@ -68,6 +68,13 @@ export interface CollectPdfPageStatsOptions {
    * proportion. Omit for counts only. 48 is a good picture, 96 a fine one.
    */
   densityCols?: number;
+  /**
+   * Also keep the closed painted loops and the text items with positions, for
+   * the interpretation stage. Loops are capped at `maxClosedPaths` (default
+   * 5000) and only kept when they have at least three corners.
+   */
+  collectGeometry?: boolean;
+  maxClosedPaths?: number;
 }
 
 type Matrix = [number, number, number, number, number, number];
@@ -120,6 +127,9 @@ interface PathCounts {
   lines: number;
   micro: number;
   grid?: Grid;
+  /** Closed loops in sheet coordinates, when geometry is collected. */
+  loops?: Array<Array<{ x: number; y: number }>>;
+  maxLoops: number;
 }
 
 function makeGrid(cols: number, widthPt: number, heightPt: number): Grid {
@@ -175,12 +185,28 @@ function countPath(data: ArrayLike<number>, ctm: Matrix, microThresholdPt: numbe
   let sx = 0;
   let sy = 0;
   const n = data.length;
+  // The current subpath, in sheet coordinates, when loops are collected.
+  let sub: Array<{ x: number; y: number }> | null = null;
+  const keep = (x: number, y: number) => {
+    if (!sub) return;
+    const [px, py] = apply(ctm, x, y);
+    sub.push({ x: px, y: py });
+  };
+  const closeSub = () => {
+    if (sub && into.loops && sub.length >= 3 && into.loops.length < into.maxLoops) into.loops.push(sub);
+    sub = null;
+  };
   while (i < n) {
     const op = data[i++];
     switch (op) {
       case DRAW_MOVE: {
+        closeSubIfReturned();
         cx = sx = data[i++];
         cy = sy = data[i++];
+        if (into.loops) {
+          sub = [];
+          keep(cx, cy);
+        }
         break;
       }
       case DRAW_LINE: {
@@ -189,6 +215,7 @@ function countPath(data: ArrayLike<number>, ctm: Matrix, microThresholdPt: numbe
         line(cx, cy, x, y, ctm, microThresholdPt, into);
         cx = x;
         cy = y;
+        keep(x, y);
         break;
       }
       case DRAW_CURVE: {
@@ -196,6 +223,7 @@ function countPath(data: ArrayLike<number>, ctm: Matrix, microThresholdPt: numbe
         cx = data[i++];
         cy = data[i++];
         into.segments += 1;
+        keep(cx, cy);
         break;
       }
       case DRAW_QUAD: {
@@ -203,18 +231,32 @@ function countPath(data: ArrayLike<number>, ctm: Matrix, microThresholdPt: numbe
         cx = data[i++];
         cy = data[i++];
         into.segments += 1;
+        keep(cx, cy);
         break;
       }
       case DRAW_CLOSE: {
         if (cx !== sx || cy !== sy) line(cx, cy, sx, sy, ctm, microThresholdPt, into);
         cx = sx;
         cy = sy;
+        closeSub();
         break;
       }
       default:
         // Unknown draw op: the encoding changed under us. Stop counting this
         // path rather than reading coordinates as opcodes.
         return;
+    }
+  }
+  closeSubIfReturned();
+
+  // A subpath that ends where it began is closed even without an explicit closePath.
+  function closeSubIfReturned(): void {
+    if (!sub) return;
+    if (sub.length >= 4 && Math.abs(cx - sx) < 1e-6 && Math.abs(cy - sy) < 1e-6) {
+      sub.pop();
+      closeSub();
+    } else {
+      sub = null;
     }
   }
 }
@@ -251,6 +293,8 @@ export async function collectPdfPageStats(
     lines: 0,
     micro: 0,
     grid: options.densityCols && options.densityCols > 0 ? makeGrid(Math.floor(options.densityCols), viewport.width, viewport.height) : undefined,
+    loops: options.collectGeometry ? [] : undefined,
+    maxLoops: options.maxClosedPaths ?? 5000,
   };
 
   const fns = opList.fnArray;
@@ -301,6 +345,7 @@ export async function collectPdfPageStats(
 
   let textItems = 0;
   let textChars = 0;
+  const texts: PdfTextItem[] | undefined = options.collectGeometry ? [] : undefined;
   for (let i = 0; i < text.items.length; i++) {
     const item = text.items[i];
     const str = item !== null && typeof item === 'object' && 'str' in item ? (item as { str?: unknown }).str : undefined;
@@ -308,6 +353,15 @@ export async function collectPdfPageStats(
     if (s.length === 0) continue;
     textItems += 1;
     textChars += s.length;
+    if (texts) {
+      // A text item's transform carries its anchor in user space; through the
+      // base matrix it lands on the sheet like everything else.
+      const tr = (item as { transform?: unknown }).transform;
+      if (isMatrix(tr)) {
+        const [x, y] = apply(base, tr[4], tr[5]);
+        texts.push({ text: s, x, y });
+      }
+    }
   }
 
   return {
@@ -325,6 +379,8 @@ export async function collectPdfPageStats(
     textItems,
     textChars,
     imageBoxes,
+    ...(counts.loops ? { closedPaths: counts.loops } : {}),
+    ...(texts ? { texts } : {}),
     ...(counts.grid
       ? { density: { cols: counts.grid.cols, rows: counts.grid.rows, segments: counts.grid.segments, micro: counts.grid.micro, max: counts.grid.max } }
       : {}),

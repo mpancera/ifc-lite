@@ -35,6 +35,13 @@ export interface PdfBox {
   h: number;
 }
 
+/** A text item with its anchor on the sheet, top-left origin, y down, in points. */
+export interface PdfTextItem {
+  text: string;
+  x: number;
+  y: number;
+}
+
 /** What was counted on one page. Lengths are in PDF points on paper. */
 export interface PdfPageStats {
   pageIndex: number;
@@ -60,6 +67,10 @@ export interface PdfPageStats {
   density?: PdfDensityGrid;
   /** Bounding boxes of the painted images, for the stage picture. */
   imageBoxes?: PdfBox[];
+  /** Present when the adapter was asked for geometry: closed painted loops, sheet points, top-left origin. */
+  closedPaths?: Array<Array<{ x: number; y: number }>>;
+  /** Present when the adapter was asked for geometry: text items with their anchors. */
+  texts?: PdfTextItem[];
 }
 
 export type PdfPageKind = 'vector' | 'raster' | 'hybrid' | 'empty';
