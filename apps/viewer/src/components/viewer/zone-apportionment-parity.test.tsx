@@ -129,12 +129,12 @@ function openPanelsMenu(container: HTMLElement): void {
 function zonesControl(surface: 'classic' | 'ribbon', container: HTMLElement): HTMLElement {
   const found = surface === 'classic'
     ? [...document.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]')].filter(
-        (e) => e.textContent?.trim() === 'Compartments')
+        (e) => e.textContent?.trim() === 'Location Zones')
     // Matched on the VISIBLE label: `RibbonLargeButton` sets
     // `aria-label={tooltip ?? label}`, so this button's accessible name is the
     // tooltip prose, not "Zones".
     : [...container.querySelectorAll<HTMLElement>('button')].filter(
-        (e) => e.textContent?.trim() === 'Compartments');
+        (e) => e.textContent?.trim() === 'Zones');
   assert.equal(found.length, 1, `${surface}: expected one Zones control, found ${found.length}`);
   return found[0];
 }
@@ -571,7 +571,7 @@ describe('#2508 zone apportionment reachability', () => {
   });
 
   describe('the panel entry points land where they belong', () => {
-    it('announces Compartments by name instead of falling back to "Analysis"', () => {
+    it('announces Zones by name instead of falling back to "Analysis"', () => {
       const seen: Array<string | null> = [];
       function Probe() {
         seen.push(useWorkspacePanelControls().workspacePanelLabel);
@@ -583,7 +583,7 @@ describe('#2508 zone apportionment reachability', () => {
       try {
         act(() => probeRoot.render(<Probe />));
         act(() => { useViewerStore.getState().toggleWorkspacePanel('zones'); });
-        assert.equal(seen.at(-1), 'Compartments');
+        assert.equal(seen.at(-1), 'Location Zones');
       } finally {
         act(() => probeRoot.unmount());
         host.remove();

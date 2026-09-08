@@ -264,8 +264,12 @@ export function resolveInitialToolbarStyle(): ToolbarStyle {
   }
 }
 
-/** Ribbon tab strip contexts, in strip order. */
-export type RibbonTabId = 'file' | 'home' | 'view' | 'elements' | 'analyze' | 'author';
+/** Ribbon tab strip contexts, in strip order. The six base tabs are upstream's;
+ *  the five after them are this fork's discipline registers
+ *  (`components/viewer/disciplines/definitions.ts`). */
+export type RibbonTabId =
+  | 'file' | 'home' | 'view' | 'elements' | 'analyze' | 'author'
+  | 'data' | 'architecture' | 'fire' | 'security' | 'automation';
 
 /** Home first: it holds the everyday tool and camera loop. */
 export const RIBBON_DEFAULT_TAB: RibbonTabId = 'home';

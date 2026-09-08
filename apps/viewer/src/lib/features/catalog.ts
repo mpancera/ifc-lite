@@ -13,8 +13,14 @@
  * hier steht nur, was jemand beim Öffnen der App wissen muss.
  *
  * Beim Ergänzen: `where` ist der Ribbon-Pfad, wie er in der Oberfläche
- * steht (also "Author › Create › Zones", nicht der Komponentenname), damit
- * die Zeile auch als Wegbeschreibung taugt.
+ * steht (also "Architecture › Rooms › Zones", nicht der Komponentenname),
+ * damit die Zeile auch als Wegbeschreibung taugt.
+ *
+ * Die Ergänzungen dieses Forks liegen in fünf eigenen Registern — Data,
+ * Architecture, Fire, Security, Automation — rechts der sechs Register von
+ * IFClite, die unverändert bleiben. Ein `where`, das mit einem dieser fünf
+ * beginnt, wird gegen `components/viewer/disciplines/definitions.ts`
+ * geprüft (definitions.test.ts), damit die Wegbeschreibung nicht veraltet.
  */
 
 /** Woher eine Funktion stammt: Basis-App oder dieser Fork. */
@@ -76,7 +82,7 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
       },
       {
         name: 'Projektbindung',
-        where: 'File › Settings › Projekt',
+        where: 'Data › Workspace › Projekt',
         what: 'Ein Ordner ist ein Projekt. Höhensystem, Zonen und Anmerkungen gehören zu ihm und tauchen nicht im nächsten Projekt wieder auf.',
         origin: 'ifcedit',
       },
@@ -143,7 +149,7 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
       },
       {
         name: 'Farbpaletten',
-        where: 'File › Settings › Colour palette',
+        where: 'Data › Workspace › Colour palette',
         what: 'Die Oberfläche und die Lens-Farben aus einer JSON-Datei laden, damit eine Installation auf einen Blick als solche erkennbar ist. Keine Markenfarbe liegt im Repository.',
         origin: 'ifcedit',
       },
@@ -186,13 +192,13 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
       },
       {
         name: 'Beziehungsarten',
-        where: 'File › Settings › Beziehungsarten',
+        where: 'Data › Catalogs › Beziehungsarten',
         what: 'Auswählen, welche IFC-Beziehungen überhaupt ausgewertet und angezeigt werden.',
         origin: 'ifcedit',
       },
       {
         name: 'Graph',
-        where: 'Analyze › Data › Graph',
+        where: 'Data › Catalogs › Graph',
         what: 'Ein Schema neben dem Modell: Elemente und ihre Beziehungen als Netz, mit derselben Auswahl wie im 3D.',
         origin: 'ifcedit',
       },
@@ -246,13 +252,13 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
       },
       {
         name: 'Smart Properties',
-        where: 'Author › Properties › Smart Property',
+        where: 'Data › Properties › Smart Property',
         what: 'Regelbasierte Werte: eine Anlagenkennzeichnung aus Gebäude, Geschoss, Raum, Produkttyp und Zähler zusammensetzen, statt sie zu tippen.',
         origin: 'ifcedit',
       },
       {
         name: 'Regeln für fehlende Angaben',
-        where: 'Author › Properties › Smart Property',
+        where: 'Data › Properties › Smart Property',
         what: 'Was passiert, wenn ein Gerät in einem Korridor keinen Raum hat: Segment weglassen, ersetzen oder melden — statt stillschweigend eine plausible falsche Kennung zu erzeugen.',
         origin: 'ifcedit',
       },
@@ -264,6 +270,30 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
       {
         name: 'Typ statt Instanz',
         what: 'Katalogprodukte tragen ihre Vorgabewerte auf einem geteilten IfcXxxType, den alle Platzierungen desselben Produkts benutzen — nicht als Kopie an jedem Element.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Housekeeping',
+        where: 'Data › Housekeeping › Housekeeping',
+        what: 'Der Prüfplan des Modells: jede Prüfung als Zeile, die ihre Treffer im Modell auswählt — der Überblick, der sagt, welcher Aufräumer gebraucht wird.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Clean Proxy',
+        where: 'Data › Housekeeping › Clean Proxy',
+        what: 'Elemente ohne Fachklasse (IfcBuildingElementProxy), gruppiert nach dem, was der Autor schon gesagt hat, und gruppenweise der richtigen Klasse zugewiesen.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Clean Classes',
+        where: 'Data › Housekeeping › Clean Classes',
+        what: 'Dasselbe für Elemente auf einer abstrakten oder Zwischenklasse: eine Gruppe, eine Entscheidung, die richtige Fachklasse.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Objektkatalog',
+        where: 'Data › Catalogs › Objektkatalog',
+        what: 'Die Liste der Fachklassen, aus der ein Element seine Klasse bekommt — abgleichbar mit dem Data Dictionary, nur nach Freigabe im Datenschutz-Gate.',
         origin: 'ifcedit',
       },
     ],
@@ -300,6 +330,18 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
       {
         name: 'Listen filtern selbst',
         what: 'Eine Liste antwortet auf ihren eigenen Filter, nicht auf das, was gerade im Fenster sichtbar ist.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Exportprodukte',
+        where: 'Data › Deliverables › Exportprodukte',
+        what: 'Was aus einem Projekt herausgegeben wird — Pläne, Listen, Graph, Struktur — als benannte Produkte, und ein Stapellauf, der alle auf einmal schreibt und vorher sagt, was ihm fehlt.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Planprodukte',
+        where: 'Data › Deliverables › Planprodukte',
+        what: 'Brandschutzkonzept, Feuerwehrlageplan, Werkplan BMA: welche Zeichnung was zeigt, mit Blatt, Ansichten und Massstab je Ansicht.',
         origin: 'ifcedit',
       },
     ],
@@ -342,13 +384,13 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
       },
       {
         name: 'Einheiten-Übersicht',
-        where: 'File › Settings › Höhen & Lage',
+        where: 'Architecture › Levels › Höhen & Lage',
         what: 'Was jedes geladene Modell tatsächlich als Einheit deklariert — und wo zwei sich widersprechen.',
         origin: 'ifcedit',
       },
       {
         name: 'Änderungen am Referenzmodell',
-        where: 'Author › Properties › Changes to the reference model',
+        where: 'Data › Properties › Reference changes',
         what: 'Was am fremden Modell angefasst wurde: Element, Feld, vorher/nachher — getrennt von allem, was man selbst dazugestellt hat.',
         origin: 'ifcedit',
       },
@@ -368,7 +410,7 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
       },
       {
         name: 'Plan-Modus',
-        where: 'View › Mode › 2D',
+        where: 'Architecture › Plan › 2D',
         what: 'Ein Geschoss, geschnitten, orthografisch, solo geschaltet — und auf dem Weg zurück wieder so, wie es vorher war.',
         origin: 'ifcedit',
       },
@@ -417,7 +459,7 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
       },
       {
         name: 'DXF-Unterlage',
-        where: 'View › Mode › 2D',
+        where: 'Architecture › Plan › 2D',
         what: 'Einen gescannten oder exportierten Plan unterlegen und je Geschoss zuweisen.',
         origin: 'ifcedit',
       },
@@ -465,13 +507,13 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
       },
       {
         name: 'Firmenbibliothek',
-        where: 'Author › Create › Product Library',
+        where: 'Data › Catalogs › Product Library',
         what: 'Einen eigenen Produktkatalog als JSON importieren. Er bleibt im Browser und liegt nie im Repository.',
         origin: 'ifcedit',
       },
       {
         name: 'Projekt-Produkte',
-        where: 'Author › Create › Product Library',
+        where: 'Data › Catalogs › Product Library',
         what: 'Welche Katalogprodukte im aktuellen Modell tatsächlich verbaut sind, aufklappbar bis zur einzelnen Instanz.',
         origin: 'ifcedit',
       },
@@ -482,25 +524,25 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
       },
       {
         name: 'Disziplin-Rollen',
-        where: 'File › Settings › Disziplin',
+        where: 'Data › Workspace › Disziplin',
         what: 'Mit aktiver Rolle tritt jedes platzierte Gerät seiner Anlage bei — einem IfcDistributionSystem — statt lose im Modell zu stehen.',
         origin: 'ifcedit',
       },
       {
         name: 'Schreibschutz je Rolle',
-        where: 'File › Settings › Disziplin, Anzeige in der Statusleiste',
+        where: 'Data › Workspace › Disziplin, Anzeige in der Statusleiste',
         what: 'Viewer liest nur, eine Disziplin ergänzt und darf das Referenzmodell nicht ändern, Editor darf alles. Der Zustand steht in der Statusleiste, weil er ändert, was ein Klick bewirkt.',
         origin: 'ifcedit',
       },
       {
         name: 'Zonen',
-        where: 'Author › Create › Zones',
+        where: 'Architecture › Rooms › Zones',
         what: 'Räume zu einer IfcZone zusammenfassen — als IFC-Beziehung geschrieben, also überlebt sie den Export. Farbe und Thema hängen an der Zone selbst.',
         origin: 'ifcedit',
       },
       {
         name: 'Kompartimente',
-        where: 'Author › Create › Compartments',
+        where: 'Fire › Compartments › Compartments',
         what: 'Brandabschnitte und ähnliche Bereiche über Geschosse hinweg, mit Zyklusschutz bei verketteten Zugehörigkeiten.',
         origin: 'ifcedit',
       },
@@ -508,6 +550,60 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
         name: 'Nach Zone einfärben',
         where: 'Analyze › Style › Lens',
         what: '„Color by Zone / Group“, auf ein Thema einschränkbar; jede Zone bestimmt ihre eigene Farbe.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Clean Rooms',
+        where: 'Architecture › Rooms › Clean Rooms',
+        what: 'Räume ohne Nummer, ohne Bezeichnung oder doppelt vergeben — einzeln nachgetragen oder als Splitter der Wanderkennung verworfen, mit Wiederherstellung.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Türnummern',
+        where: 'Architecture › Rooms › Türnummern',
+        what: 'Türen nach dem Raum nummerieren, aus dem man durch sie flüchtet, und mit beiden angrenzenden Räumen verknüpfen — nach den Räumen, weil die Nummer aus der Raumnummer entsteht.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Rollen je Register',
+        where: 'Fire › Role › Branddetektion, und ebenso unter Security und Automation',
+        what: 'Jedes Disziplin-Register beginnt mit seinen Anlagen: ein Klick auf Branddetektion oder Zutrittskontrolle wählt die Rolle, in die ab dann platziert wird.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'SpatialGraph',
+        where: 'Fire › Escape › SpatialGraph',
+        what: 'Räume als Punkte, Türen als Linien, dazu die Zahl der Türen bis ins Freie — als Overlay über Plan oder Modell, die Grundlage von Fluchtwegen und Türnummern.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Fluchtwege',
+        where: 'Werkzeugstreifen im Plan',
+        what: 'Fluchtwege im Grundriss zeichnen, kürzeste Wege über den SpatialGraph in Metern, und als IfcAnnotation ins Modell übernehmen.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Auslösezonen',
+        where: 'Ebenenmenü im Plan',
+        what: 'Die Umrandung der Auslösezonen nach FKS als eigene Planebene, an Türen unterbrochen.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Verkabeln',
+        where: 'Fire › Detection › Verkabeln',
+        what: 'Melder der Reihe nach anklicken, wie das Kabel läuft: legt Anschlüsse, Verbindungen und den Melderkreis (IfcDistributionCircuit) an, die Zentrale gleich mit.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Meldergruppen',
+        where: 'Fire › Detection › Meldergruppen',
+        what: 'Je Auslösezone einen Melderkreis bilden (IfcGroup) und die Melder mit ihrem Kennzeichen beschriften.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Symbolkatalog',
+        where: 'Fire › Symbols › Symbolkatalog',
+        what: 'Die Plansymbole je Fachklasse — eigene Zeichnung nach SES-Vorgabe, vom eigenen Server geladen, mit Namensnennung des Verbands.',
         origin: 'ifcedit',
       },
     ],
@@ -526,19 +622,19 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
       },
       {
         name: 'Referenz-Höhensystem',
-        where: 'File › Settings › Höhen & Lage',
+        where: 'Architecture › Levels › Höhen & Lage',
         what: 'Geschosshöhen als eine projektweite Referenz — von Hand definierbar, bevor überhaupt ein Modell existiert.',
         origin: 'ifcedit',
       },
       {
         name: 'Modellabgleich',
-        where: 'File › Settings › Höhen & Lage',
+        where: 'Architecture › Levels › Höhen & Lage',
         what: 'Was jedes geladene Modell an Geschossen und Höhen mitbringt, gegen die Referenz gestellt.',
         origin: 'ifcedit',
       },
       {
         name: 'Höhensystem exportieren',
-        where: 'File › Settings › Höhen & Lage',
+        where: 'Architecture › Levels › Höhen & Lage',
         what: 'Als heights.json in den Projektordner, benannt nach dem Projekt.',
         origin: 'ifcedit',
       },
@@ -588,7 +684,7 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
       },
       {
         name: 'Datenschutz-Gate',
-        where: 'File › Settings › Data privacy',
+        where: 'Data › Workspace › Data privacy',
         what: 'Ein einziger Schalter vor allen ausgehenden Anfragen — Kartenkacheln, Geländehöhe, Ortssuche, EPSG, bSDD. Aus, bis er eingeschaltet wird, und im Zweifel aus.',
         origin: 'ifcedit',
       },
@@ -640,6 +736,18 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
         where: 'Strg+K',
         what: 'Jeden Befehl über die Tastatur erreichen.',
         origin: 'ifclite',
+      },
+      {
+        name: 'Disziplin-Register',
+        where: 'Ribbon, rechts der sechs Basis-Register; in der klassischen Leiste das Menü mit dem Helm',
+        what: 'Alles, was dieser Fork ergänzt, liegt in fünf eigenen Registern — Data, Architecture, Fire, Security, Automation. Die sechs Register von IFClite bleiben, wie sie sind.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Demo-Flows',
+        where: 'Data › Workspace › Flows',
+        what: 'Die User Journey als Screenflows vorführen oder aufnehmen — mit Untertiteln, Kamerafahrten und Kapiteln.',
+        origin: 'ifcedit',
       },
       {
         name: 'CLI & Pakete',

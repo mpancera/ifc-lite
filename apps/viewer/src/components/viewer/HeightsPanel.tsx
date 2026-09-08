@@ -6,7 +6,7 @@
  * Höhen & Lage — the project's reference height system.
  *
  * A verification view, not a tool: it lives in the bottom strip like Lists and
- * opens from File ▸ Settings, because the question it answers ("what do the
+ * opens from Architecture ▸ Levels, because the question it answers ("what do the
  * levels in this project actually mean") is one you ask occasionally and then
  * leave alone.
  *

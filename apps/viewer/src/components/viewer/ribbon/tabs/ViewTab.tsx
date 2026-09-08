@@ -8,7 +8,7 @@
  */
 
 import { Globe2, MousePointerClick, Move, PanelTop, } from 'lucide-react';
-import { TopView, IsometricView, Orthographic, Viewpoint, SpaceMouse, Lighting } from '@/icons';
+import { Orthographic, Viewpoint, SpaceMouse, Lighting } from '@/icons';
 import { useViewerStore } from '@/store';
 import { TOUR_ANCHORS, tourAnchor } from '@/lib/tours/anchors';
 import { useCameraCommands } from '../../toolbar/CameraCommands';
@@ -34,8 +34,6 @@ export function ViewTab() {
   // Cesium 3D overlay state
   const cesiumAvailable = useViewerStore((state) => state.cesiumAvailable);
   const cesiumEnabled = useViewerStore((state) => state.cesiumEnabled);
-  const showSelectionOrigin = useViewerStore((state) => state.showSelectionOrigin);
-  const setShowSelectionOrigin = useViewerStore((state) => state.setShowSelectionOrigin);
   const toggleCesium = useViewerStore((state) => state.toggleCesium);
   const cesiumPlacementEditMode = useViewerStore((state) => state.cesiumPlacementEditMode);
   const setCesiumPlacementEditMode = useViewerStore((state) => state.setCesiumPlacementEditMode);
@@ -59,34 +57,10 @@ export function ViewTab() {
   const basketViewCount = useViewerStore((state) => state.basketViews.length);
   const basketPresentationVisible = useViewerStore((state) => state.basketPresentationVisible);
   const toggleBasketPresentationVisible = useViewerStore((state) => state.toggleBasketPresentationVisible);
-  const viewMode = useViewerStore((state) => state.viewMode);
-  const setViewMode = useViewerStore((state) => state.setViewMode);
   const hasModels = useViewerStore((state) => state.models.size > 0 || (state.geometryResult?.meshes.length ?? 0) > 0);
 
   return (
     <>
-      {/* First, before Projection: which of the two things you are looking at
-          decides what every other control in this tab means. */}
-      <RibbonGroup label="Mode">
-        <RibbonLargeButton
-          icon={TopView}
-          label="2D"
-          tooltip="Grundriss: ein Geschoss, geschnitten, orthogonal — ergänzt das 2D-Section-Werkzeug, ersetzt es nicht"
-          active={viewMode === '2d'}
-          onClick={() => setViewMode('2d')}
-          disabled={!hasModels}
-        />
-        <RibbonLargeButton
-          icon={IsometricView}
-          label="3D"
-          tooltip="Das Gebäude als Ganzes"
-          active={viewMode === '3d'}
-          onClick={() => setViewMode('3d')}
-        />
-      </RibbonGroup>
-
-      <RibbonGroupDivider />
-
       <RibbonGroup label="Projection">
         <RibbonLargeButton
           icon={Orthographic}
@@ -149,16 +123,6 @@ export function ViewTab() {
               onClick={command.run}
             />
           ))}
-        {/* A display aid rather than a camera command, so it sits after them
-            rather than in their generated list. */}
-        <RibbonLargeButton
-          icon={Viewpoint}
-          label="Origin"
-          tooltip="Kleines Koordinatensystem auf dem gewählten Bauteil"
-          active={showSelectionOrigin}
-          activeClassName="bg-teal-600/20 text-foreground ring-1 ring-inset ring-teal-600/50"
-          onClick={() => setShowSelectionOrigin(!showSelectionOrigin)}
-        />
       </RibbonGroup>
 
       <RibbonGroupDivider />

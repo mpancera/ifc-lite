@@ -319,14 +319,13 @@ export function useWorkspacePanelControls() {
     if (activeWorkspacePanels.has('clash')) return 'Clash Detection';
     if (activeWorkspacePanels.has('compare')) return 'Compare Models';
     if (activeWorkspacePanels.has('extensions')) return 'Extensions';
-    if (activeWorkspacePanels.has('zones')) return 'Compartments';
     if (activeWorkspacePanels.has('heights')) return 'Höhen & Lage';
     if (activeWorkspacePanels.has('sources')) return 'Cloud Sources';
     if (activeWorkspacePanels.has('addElement')) return 'Add Element';
     if (activeWorkspacePanels.has('zonePaint')) return 'Zones';
     if (activeWorkspacePanels.has('layers')) return 'Layer Stack';
     if (activeWorkspacePanels.has('collab')) return 'Collaboration Room';
-    if (activeWorkspacePanels.has('zones')) return 'Compartments';
+    if (activeWorkspacePanels.has('zones')) return 'Location Zones';
     return activeAnalysisExtension?.label ?? 'Analysis';
   }, [activeAnalysisExtension?.label, activeWorkspacePanels]);
 

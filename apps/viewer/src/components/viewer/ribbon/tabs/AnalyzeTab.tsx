@@ -10,10 +10,7 @@
  */
 
 import { Issue, List, Compare, Layer, Clash, Check, Script, Schedule, Coloring } from '@/icons';
-// No house icon for a schematic yet — the icon set is drawn for the panels that
-// predate it. Borrowed from lucide, as the panel registry does for the same
-// reason; worth a matching `@/icons` entry if the Graph earns a second home.
-import { Workflow, Box as ZoneBox, Waypoints } from 'lucide-react';
+import { Box as ZoneBox } from 'lucide-react';
 import { useViewerStore } from '@/store';
 import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
 import {
@@ -32,8 +29,6 @@ function chunk<T>(items: T[], size: number): T[][] {
 }
 
 export function AnalyzeTab() {
-  const showSpaceGraph = useViewerStore((s) => s.showSpaceGraph);
-  const setShowSpaceGraph = useViewerStore((s) => s.setShowSpaceGraph);
   const {
     activeWorkspacePanels,
     handleToggleBottomPanel,
@@ -87,18 +82,12 @@ export function AnalyzeTab() {
           active={activeWorkspacePanels.has('layers')}
           onClick={() => useViewerStore.getState().toggleWorkspacePanel('layers')}
         />
-        {/* The SAME panel Author → Compartments opens, and it said so nowhere:
-            one button called it "Zones" and the other "Compartments", which
-            reads as two tools that do different things. The panel's own title
-            has been Compartments all along — this follows it.
-
-            Both entries stay: this tab is where a compartment gets looked at,
-            the Author tab is where one gets drawn. Zones over ROOMS are a
-            different thing again and live on Author → Zones (IfcZone). */}
+        {/* Location zones (#1810), reachable from a toolbar for the first time
+            (#2508): the ActivityBar rail was its only entry point. */}
         <RibbonLargeButton
           icon={ZoneBox}
-          label="Compartments"
-          tooltip="Abschnitte (Bereiche mit eigenem Körper) ansehen und auswerten — dieselben, die unter Author gezeichnet werden"
+          label="Zones"
+          tooltip="Location zones (sections / takt areas)"
           active={activeWorkspacePanels.has('zones')}
           onClick={() => useViewerStore.getState().toggleWorkspacePanel('zones')}
         />
@@ -122,28 +111,11 @@ export function AnalyzeTab() {
           onClick={() => handleToggleBottomPanel('gantt')}
         />
         <RibbonLargeButton
-          icon={Workflow}
-          label="Graph"
-          tooltip="Schema: Elemente nach ihrer Zugehörigkeit statt nach ihrer Lage — hebt im Modell hervor, was gezeichnet ist"
-          active={activeWorkspacePanels.has('graph')}
-          onClick={() => handleToggleBottomPanel('graph')}
-        />
-        <RibbonLargeButton
           icon={Script}
           label="Script"
           tooltip="Script editor"
           active={activeWorkspacePanels.has('script')}
           onClick={() => handleToggleBottomPanel('script')}
-        />
-        {/* Not a panel — an overlay, in whichever view is on screen. It lives
-            in Analyze because it answers a question ABOUT the model rather
-            than changing it: is the way out the software found the way out. */}
-        <RibbonLargeButton
-          icon={Waypoints}
-          label="SpatialGraph"
-          tooltip="Räume als Punkte, Türen als Linien, dazu die Anzahl Türen bis ins Sichere — die Grundlage von Fluchtwegen und Türnummern, sichtbar gemacht"
-          active={showSpaceGraph}
-          onClick={() => setShowSpaceGraph(!showSpaceGraph)}
         />
       </RibbonGroup>
 

@@ -46,20 +46,6 @@ import {
   RefreshCw,
   Share2,
   Users,
-  Blocks,
-  Boxes,
-  DoorClosed,
-  Radio,
-  DoorOpen,
-  ListChecks,
-  Workflow,
-  Settings2,
-  HardHat,
-  BookMarked,
-  Shapes,
-  ShieldCheck,
-  Spline,
-  ClipboardList,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
@@ -78,27 +64,17 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Progress } from '@/components/ui/progress';
 import { useViewerStore } from '@/store';
-import { useMayAuthor } from '@/hooks/useMayAuthor';
 import { goHomeFromStore, resetVisibilityForHomeFromStore } from '@/store/homeView';
 import { executeBasketIsolate } from '@/store/basket/basketCommands';
 import { useIfc } from '@/hooks/useIfc';
+import { useMayAuthor } from '@/hooks/useMayAuthor';
 import { cn } from '@/lib/utils';
 import { FileSpreadsheet, FileJson, FileText, Filter, Upload, Pencil, DraftingCompass, Box, Cloud } from 'lucide-react';
 import { BulkPropertyEditor } from './BulkPropertyEditor';
 import { DataConnector } from './DataConnector';
-// The Settings cluster, shared verbatim with the ribbon's File tab: these
-// dialogs outlive a viewing session, so neither toolbar style may be the only
-// way to reach them.
-import { ClassCatalogPanel } from './ClassCatalogPanel';
-import { ColorPalettePanel } from './ColorPalettePanel';
-import { DataPrivacyPanel } from './DataPrivacyPanel';
-import { DisciplineRolePanel } from './DisciplineRolePanel';
-import { ProjectFolderPanel } from './ProjectFolderPanel';
-import { RelationKindsPanel } from './RelationKindsPanel';
-import { PlanProductsPanel } from './PlanProductsPanel';
-import { SymbolCatalogPanel } from './SymbolCatalogPanel';
 import { ExportChangesButton } from './ExportChangesButton';
 import { LevelDisplayIndicator } from './LevelDisplayIndicator';
+import { DisciplinesMenu } from './disciplines/DisciplinesMenu';
 import { isCollabEnabled } from '@/lib/collab/config';
 import { SearchInline } from './SearchInline';
 import { ThemeSwitch } from './ThemeSwitch';
@@ -313,12 +289,6 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
     rightAnalysisExtensions,
     bottomAnalysisExtensions,
   } = useWorkspacePanelControls();
-  // Registry panels (layers, zones, collab, the Housekeeping cleaners) toggle
-  // by id rather than through the older RightPanel union, exactly as the
-  // ribbon's Author tab does. Read through a selector rather than
-  // `useViewerStore.getState()` so the toolbar-parity walk can see that this
-  // strip reaches them too.
-  const toggleWorkspacePanel = useViewerStore((state) => state.toggleWorkspacePanel);
 
   const activeTool = useViewerStore((state) => state.activeTool);
   const setActiveTool = useViewerStore((state) => state.setActiveTool);
@@ -331,8 +301,8 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
   const collabEditRole = useViewerStore((state) => state.collabRole);
   const canEditInSession =
     collabEditRole === null || collabEditRole === 'editor' || collabEditRole === 'admin';
-  // The ROLE's answer, separate from the session's: a shared session can grant
-  // editor access to somebody whose role is still read-only, and the reverse.
+  // The ROLE's answer, separate from the session's: a Viewer role may not
+  // author even where a shared session would allow it (fork: discipline roles).
   const mayAuthor = useMayAuthor();
   const selectedEntityId = useViewerStore((state) => state.selectedEntityId);
   const selectedEntityIds = useViewerStore((state) => state.selectedEntityIds);
@@ -558,7 +528,7 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
                 <Button
                   variant={collabPanelVisible ? 'secondary' : 'ghost'}
                   size="icon-sm"
-                  onClick={() => toggleWorkspacePanel('collab')}
+                  onClick={() => useViewerStore.getState().toggleWorkspacePanel('collab')}
                   className="relative"
                   aria-label="Room"
                   aria-pressed={collabPanelVisible}
@@ -619,13 +589,6 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
             <CalendarClock className="h-4 w-4 mr-2" />
             Schedule (Gantt)
           </DropdownMenuCheckboxItem>
-          <DropdownMenuCheckboxItem
-            checked={activeWorkspacePanels.has('graph')}
-            onCheckedChange={() => handleToggleBottomPanel('graph')}
-          >
-            <Workflow className="h-4 w-4 mr-2" />
-            Graph
-          </DropdownMenuCheckboxItem>
           <DropdownMenuSeparator />
           <DropdownMenuLabel className="text-[10px] uppercase tracking-wide text-muted-foreground">
             Inspect & validate
@@ -677,7 +640,7 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
           </DropdownMenuCheckboxItem>
           <DropdownMenuCheckboxItem
             checked={activeWorkspacePanels.has('layers')}
-            onCheckedChange={() => toggleWorkspacePanel('layers')}
+            onCheckedChange={() => useViewerStore.getState().toggleWorkspacePanel('layers')}
           >
             <Layers className="h-4 w-4 mr-2" />
             Layer Stack
@@ -686,15 +649,15 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
               time (#2508): the ActivityBar rail was its only entry point. */}
           <DropdownMenuCheckboxItem
             checked={activeWorkspacePanels.has('zones')}
-            onCheckedChange={() => toggleWorkspacePanel('zones')}
+            onCheckedChange={() => useViewerStore.getState().toggleWorkspacePanel('zones')}
           >
             <Box className="h-4 w-4 mr-2" />
-            Compartments
+            Location Zones
           </DropdownMenuCheckboxItem>
           {collabEnabled && (
             <DropdownMenuCheckboxItem
               checked={activeWorkspacePanels.has('collab')}
-              onCheckedChange={() => toggleWorkspacePanel('collab')}
+              onCheckedChange={() => useViewerStore.getState().toggleWorkspacePanel('collab')}
             >
               <Users className="h-4 w-4 mr-2" />
               Collaboration Room
@@ -722,65 +685,6 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
           >
             <Puzzle className="h-4 w-4 mr-2" />
             Extensions
-          </DropdownMenuCheckboxItem>
-          <DropdownMenuSeparator />
-          {/* Putting the model's classes right, in bulk — the same group the
-              ribbon's Author tab hosts. The ActivityBar rail used to be the
-              only way in for this strip's users; the cleaners decide WHAT an
-              element is, which is not something one surface may own alone.
-              Order matches the ribbon: the overview first (it says which
-              cleaner a model needs), and door numbers last, because a door
-              number is built out of a room number. */}
-          <DropdownMenuLabel className="text-[10px] uppercase tracking-wide text-muted-foreground">
-            Housekeeping
-          </DropdownMenuLabel>
-          <DropdownMenuCheckboxItem
-            checked={activeWorkspacePanels.has('housekeeping')}
-            disabled={!ifcDataStore}
-            onCheckedChange={() => toggleWorkspacePanel('housekeeping')}
-          >
-            <ListChecks className="h-4 w-4 mr-2" />
-            Housekeeping
-          </DropdownMenuCheckboxItem>
-          <DropdownMenuCheckboxItem
-            checked={activeWorkspacePanels.has('proxyTriage')}
-            disabled={!ifcDataStore}
-            onCheckedChange={() => toggleWorkspacePanel('proxyTriage')}
-          >
-            <Boxes className="h-4 w-4 mr-2" />
-            Clean Proxy
-          </DropdownMenuCheckboxItem>
-          <DropdownMenuCheckboxItem
-            checked={activeWorkspacePanels.has('classTriage')}
-            disabled={!ifcDataStore}
-            onCheckedChange={() => toggleWorkspacePanel('classTriage')}
-          >
-            <Blocks className="h-4 w-4 mr-2" />
-            Clean Classes
-          </DropdownMenuCheckboxItem>
-          <DropdownMenuCheckboxItem
-            checked={activeWorkspacePanels.has('roomTriage')}
-            disabled={!ifcDataStore}
-            onCheckedChange={() => toggleWorkspacePanel('roomTriage')}
-          >
-            <DoorOpen className="h-4 w-4 mr-2" />
-            Clean Rooms
-          </DropdownMenuCheckboxItem>
-          <DropdownMenuCheckboxItem
-            checked={activeWorkspacePanels.has('doorNumbers')}
-            disabled={!ifcDataStore}
-            onCheckedChange={() => toggleWorkspacePanel('doorNumbers')}
-          >
-            <DoorClosed className="h-4 w-4 mr-2" />
-            Türnummern
-          </DropdownMenuCheckboxItem>
-          <DropdownMenuCheckboxItem
-            checked={activeWorkspacePanels.has('detectorGroups')}
-            disabled={!ifcDataStore}
-            onCheckedChange={() => toggleWorkspacePanel('detectorGroups')}
-          >
-            <Radio className="h-4 w-4 mr-2" />
-            Meldergruppen
           </DropdownMenuCheckboxItem>
           {(rightAnalysisExtensions.length > 0 || bottomAnalysisExtensions.length > 0) && (
             <>
@@ -1208,114 +1112,10 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
         </DropdownMenuContent>
       </DropdownMenu>
 
-      {/* ── Settings ──
-          Application-wide preferences, mirroring the ribbon's File > Settings
-          group item for item. These outlive a viewing session and are not
-          about what is on screen, which is why they sit apart from View
-          options rather than inside it. Until now the ribbon's File tab was
-          the ONLY way to reach any of them: a classic-strip user could not
-          bind a project folder or pick a discipline role at all. */}
-      <DropdownMenu>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon-sm" aria-label="Settings">
-                <Settings2 className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-          </TooltipTrigger>
-          <TooltipContent>Settings</TooltipContent>
-        </Tooltip>
-        <DropdownMenuContent align="end" className="w-60">
-          {/* The discipline role leads, as in the ribbon: it governs what may
-              be written at all, so it is not one preference among five. */}
-          <DisciplineRolePanel
-            trigger={
-              <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
-                <HardHat className="h-4 w-4 mr-2" />
-                Disziplin
-              </DropdownMenuItem>
-            }
-          />
-          {/* The project is a folder, and the thing the others hang off: the
-              height system and the zones belong to a project, and the boundary
-              decides what survives a model switch. */}
-          <ProjectFolderPanel
-            trigger={
-              <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
-                <FolderOpen className="h-4 w-4 mr-2" />
-                Projekt
-              </DropdownMenuItem>
-            }
-          />
-          {/* A verification view rather than a tool, so it opens in the bottom
-              strip like Lists — what the storey levels and units actually are. */}
-          <DropdownMenuCheckboxItem
-            checked={activeWorkspacePanels.has('heights')}
-            onCheckedChange={() => handleToggleBottomPanel('heights')}
-          >
-            <Ruler className="h-4 w-4 mr-2" />
-            Höhen &amp; Lage
-          </DropdownMenuCheckboxItem>
-          <DropdownMenuSeparator />
-          <ColorPalettePanel
-            trigger={
-              <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
-                <Palette className="h-4 w-4 mr-2" />
-                Colour palette
-              </DropdownMenuItem>
-            }
-          />
-          <DataPrivacyPanel
-            trigger={
-              <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
-                <ShieldCheck className="h-4 w-4 mr-2" />
-                Data privacy
-              </DropdownMenuItem>
-            }
-          />
-          {/* The list an element's Fachklasse is chosen FROM, and the symbols
-              keyed on that same class. Beside data privacy on purpose: both
-              reach outside the app, through the same gate. */}
-          <ClassCatalogPanel
-            trigger={
-              <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
-                <BookMarked className="h-4 w-4 mr-2" />
-                Objektkatalog
-              </DropdownMenuItem>
-            }
-          />
-          <SymbolCatalogPanel
-            trigger={
-              <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
-                <Shapes className="h-4 w-4 mr-2" />
-                Symbolkatalog
-              </DropdownMenuItem>
-            }
-          />
-          <DropdownMenuSeparator />
-          {/* A reference, not a setting — the line styles are read-only. */}
-          <RelationKindsPanel
-            trigger={
-              <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
-                <Spline className="h-4 w-4 mr-2" />
-                Beziehungsarten
-              </DropdownMenuItem>
-            }
-          />
-          {/* Likewise a reference: what each plan product settles. Both strips
-              carry it, because a capability only the ribbon can reach is one
-              the classic strip's users simply do not have. */}
-          <PlanProductsPanel
-            trigger={
-              <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
-                <ClipboardList className="h-4 w-4 mr-2" />
-                Planprodukte
-              </DropdownMenuItem>
-            }
-          />
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {/* The fork's discipline registers — Data, Architecture, Fire, Security,
+          Automation — as one dropdown, mirroring the ribbon's five tabs item
+          for item. Everything above this line is upstream's classic strip. */}
+      <DisciplinesMenu />
 
       {/* Spacer */}
       <div className="flex-1" />

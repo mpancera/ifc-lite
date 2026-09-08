@@ -8,21 +8,12 @@
  */
 
 import React from 'react';
-import { BookMarked, ClipboardList, FolderOpen, HardHat, Palette, Ruler, Shapes, ShieldCheck, Spline } from 'lucide-react';
 import { AddFile, CloudSources, Loading, OpenFile, Refresh, Share, CollabsRoom } from '@/icons';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
 import { isCollabEnabled } from '@/lib/collab/config';
-import { ColorPalettePanel } from '../../ColorPalettePanel';
-import { ProjectFolderPanel } from '../../ProjectFolderPanel';
-import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
-import { ClassCatalogPanel } from '@/components/viewer/ClassCatalogPanel';
-import { SymbolCatalogPanel } from '@/components/viewer/SymbolCatalogPanel';
-import { DataPrivacyPanel } from '../../DataPrivacyPanel';
-import { RelationKindsPanel } from '../../RelationKindsPanel';
-import { PlanProductsPanel } from '../../PlanProductsPanel';
-import { DisciplineRolePanel } from '../../DisciplineRolePanel';
 import type { FileCommands } from '../../toolbar/useFileCommands';
+import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
 import { RibbonExportGroup } from './RibbonExportGroup';
 import { RIBBON_EXPORT_ICONS } from './ribbon-export-icons';
 import {
@@ -36,7 +27,6 @@ import {
 export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
   const { handleOpenClick, handleAddModelClick, handleRefresh, canRefresh, hasModelsLoaded, openShareDialog } = fileCommands;
   const { loading, models } = useIfc();
-  const { handleToggleBottomPanel } = useWorkspacePanelControls();
 
   // Collaboration: the Share cluster is gated behind the collab feature flag.
   // The ShareDialog itself (and its `ifc-lite:open-share-dialog` listener)
@@ -131,130 +121,6 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
           </RibbonGroup>
         </>
       )}
-
-      <RibbonGroupDivider />
-
-      {/* Application-wide preferences. Deliberately here rather than in View:
-          these outlive a viewing session and are not about what is on screen.
-          Further settings topics are meant to join this group. */}
-      {/* TWO LARGE BUTTONS, AND THEY ARE THE TWO GATES
-
-          Disziplin decides what may be WRITTEN into the model; Data privacy
-          decides what may LEAVE the application. Everything else in this group
-          adjusts how things are named or drawn, which is undone by adjusting it
-          again. These two are not: an element written under the wrong
-          discipline is in the file, and a request that went out has gone out.
-          Their size says so before anybody reads a tooltip.
-
-          The small buttons then fall into two honest stacks - the project and
-          its reference views, and the lists that decide how things are called
-          and drawn. */}
-      <RibbonGroup label="Settings">
-        <DisciplineRolePanel
-          trigger={
-            <RibbonLargeButton
-              icon={HardHat}
-              label="Disziplin"
-              tooltip="Welcher Anlage neue Bauteile beitreten, und ob das Referenzmodell geändert werden darf"
-            />
-          }
-        />
-        <DataPrivacyPanel
-          trigger={
-            <RibbonLargeButton
-              icon={ShieldCheck}
-              label="Data privacy"
-              tooltip="Control whether the app may contact third-party services"
-            />
-          }
-        />
-        <RibbonSmallStack>
-          {/* The project is a folder, and the thing the others hang off: the
-              height system and the zones belong to a project, and the boundary
-              decides what survives a model switch. */}
-          <ProjectFolderPanel
-            trigger={
-              <RibbonSmallButton
-                icon={FolderOpen}
-                label="Projekt"
-                tooltip="Diese Sitzung an einen Projektordner binden — entscheidet, was ein Modellwechsel behält"
-              />
-            }
-          />
-          {/* A verification view rather than a tool: what the storey levels and
-              units in this project actually are. Opens in the bottom strip like
-              Lists, because it is a wide table one consults, not something one
-              works beside. */}
-          <RibbonSmallButton
-            icon={Ruler}
-            label="Höhen & Lage"
-            tooltip="Geschosskoten, Stockwerkshöhen und die geltenden Einheiten dieses Projekts"
-            onClick={() => handleToggleBottomPanel('heights')}
-          />
-          {/* Also a reference and not a setting - the line styles are read-only
-              for now. It answers what the schematic's lines mean, which is a
-              question one has once, away from the drawing. */}
-          <RelationKindsPanel
-            trigger={
-              <RibbonSmallButton
-                icon={Spline}
-                label="Beziehungsarten"
-                tooltip="Welche Beziehungsarten der Graph kennt, und mit welcher Linienart jede gezeichnet wird"
-              />
-            }
-          />
-        </RibbonSmallStack>
-        <RibbonSmallStack>
-          {/* What things are called and how they look. The palette colours the
-              model, the two catalogues decide the Fachklasse an element gets
-              and the symbol that Fachklasse is drawn with - one list keyed on
-              the other, which is why they stand together. Both reach outside
-              the app and go through the gate above. */}
-          <ColorPalettePanel
-            trigger={
-              <RibbonSmallButton
-                icon={Palette}
-                label="Colour palette"
-                tooltip="Load a colour palette, or return to the built-in one"
-              />
-            }
-          />
-          <ClassCatalogPanel
-            trigger={
-              <RibbonSmallButton
-                icon={BookMarked}
-                label="Objektkatalog"
-                tooltip="Die Liste der Fachklassen abgleichen, aus der ein Element seine Klasse bekommt"
-              />
-            }
-          />
-          <SymbolCatalogPanel
-            trigger={
-              <RibbonSmallButton
-                icon={Shapes}
-                label="Symbolkatalog"
-                tooltip="Die Plansymbole abgleichen, die eine Fachklasse auf der Zeichnung bekommt"
-              />
-            }
-          />
-        </RibbonSmallStack>
-        <RibbonSmallStack>
-          {/* A reference like Beziehungsarten: what a plan product settles, to
-              read once. Its own stack rather than a fourth button in one of
-              the two above - those hold three each, which is a small stack's
-              height, and the products will get siblings here (sheet layouts,
-              saved views) before this one grows. */}
-          <PlanProductsPanel
-            trigger={
-              <RibbonSmallButton
-                icon={ClipboardList}
-                label="Planprodukte"
-                tooltip="Welche Zeichnungen aus diesem Modell entstehen — und was jede zeigt"
-              />
-            }
-          />
-        </RibbonSmallStack>
-      </RibbonGroup>
     </>
   );
 }

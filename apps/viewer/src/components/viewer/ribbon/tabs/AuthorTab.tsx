@@ -9,20 +9,13 @@
  * toolbar (viewer/commenter roles cannot unlock authoring).
  */
 
-import { Cable, Blocks, Box, Boxes, Brush, DoorClosed,
-  Radio, DoorOpen, FileDiff, Library, ListChecks, Wand2 } from 'lucide-react';
-import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, List, Select, Undo, Redo } from '@/icons';
+import { Extension, SpaceSketch, AddElement, EditElement, EditProperty, ImportData, Undo, Redo } from '@/icons';
 import { useViewerStore } from '@/store';
-import { useMayAuthor } from '@/hooks/useMayAuthor';
 import { useIfc } from '@/hooks/useIfc';
+import { useMayAuthor } from '@/hooks/useMayAuthor';
 import { tourAnchor, toolAnchor } from '@/lib/tours/anchors';
 import { BulkPropertyEditor } from '../../BulkPropertyEditor';
 import { DataConnector } from '../../DataConnector';
-import { ProductLibraryPanel } from '../../catalog/ProductLibraryPanel';
-
-
-import { ReferenceOverridesPanel } from '../../ReferenceOverridesPanel';
-import { SmartPropertyPanel } from '../../SmartPropertyPanel';
 import { useWorkspacePanelControls } from '../../toolbar/useWorkspacePanelControls';
 import {
   RibbonGroup,
@@ -41,8 +34,10 @@ export function AuthorTab() {
   const activeTool = useViewerStore((state) => state.activeTool);
   const setActiveTool = useViewerStore((state) => state.setActiveTool);
   const editEnabled = useViewerStore((state) => state.editEnabled);
-  const mayAuthor = useMayAuthor();
   const toggleEditEnabled = useViewerStore((state) => state.toggleEditEnabled);
+  // The ROLE's answer, separate from the session's: a Viewer role may not
+  // author even where a shared session would allow it (fork: discipline roles).
+  const mayAuthor = useMayAuthor();
   // Collab role: editing is reserved for editor/admin. Derive from the
   // reactive role so the Edit switch enables/disables live when the role
   // changes. null role = single-user, always editable.
@@ -60,23 +55,11 @@ export function AuthorTab() {
   const canUndo = canEditInSession && activeModelId !== null && (undoStacks.get(activeModelId)?.length ?? 0) > 0;
   const canRedo = canEditInSession && activeModelId !== null && (redoStacks.get(activeModelId)?.length ?? 0) > 0;
 
-  const { activeWorkspacePanels, handleToggleRightPanel, handleToggleBottomPanel } = useWorkspacePanelControls();
-  // The two Clean panels are registry panels, so they toggle by id rather than
-  // through the older RightPanel union.
-  const toggleWorkspacePanel = useViewerStore((s) => s.toggleWorkspacePanel);
+  const { activeWorkspacePanels, handleToggleRightPanel } = useWorkspacePanelControls();
 
   return (
     <>
       <RibbonGroup label="Edit">
-        {/* The pointer lives here as well as under Home: leaving edit mode to
-            pick something up should not cost a tab switch. */}
-        <RibbonLargeButton
-          icon={Select}
-          label="Select"
-          shortcut="V"
-          active={activeTool === 'select'}
-          onClick={() => setActiveTool('select')}
-        />
         <RibbonLargeButton
           icon={EditElement}
           label="Edit mode"
@@ -134,82 +117,21 @@ export function AuthorTab() {
           onClick={() => setActiveTool('spaceSketch')}
           {...tourAnchor(toolAnchor('spaceSketch'))}
         />
-        {/* Zones group ROOMS, so they belong next to the tools that make rooms
-            rather than under Analyze — painting a zone is authoring, and it
-            writes IfcZone into the model like anything else here. */}
-        <RibbonLargeButton
-          icon={Brush}
-          label="Zones"
-          tooltip="Zonen anlegen und Räume hineinmalen (IfcZone)"
-          active={activeWorkspacePanels.has('zonePaint')}
-          activeClassName={EDIT_ACTIVE_CLASS}
-          disabled={!canEditInSession || !ifcDataStore}
-          onClick={() => handleToggleRightPanel('zonePaint')}
-        />
-        {/* Compartments are the geometric counterpart of Zones: a zone groups
-            the architect's rooms, a compartment carries its own body for the
-            cases where the zone boundary does not follow room boundaries.
-            Side by side, because choosing between them IS the decision. */}
-        <RibbonLargeButton
-          icon={Box}
-          label="Compartments"
-          tooltip="Abschnitte zeichnen und Bauteile darin klassifizieren"
-          active={activeWorkspacePanels.has('zones')}
-          activeClassName={EDIT_ACTIVE_CLASS}
-          disabled={!ifcDataStore}
-          onClick={() => handleToggleRightPanel('zones')}
-        />
-        <ProductLibraryPanel
-          trigger={
-            <RibbonLargeButton
-              icon={Library}
-              label="Product Library"
-              tooltip="Browse the company catalog and see which products are placed in this project"
-            />
-          }
-        />
       </RibbonGroup>
 
       <RibbonGroupDivider />
 
-      {/* The two ways of authoring property VALUES get the large buttons; the
-          two that inspect or import sit in the stack beside them. Four small
-          buttons in one column were unreadable and gave no sense of which is
-          the everyday tool. */}
       <RibbonGroup label="Properties">
-        <SmartPropertyPanel
-          trigger={
-            <RibbonLargeButton
-              icon={Wand2}
-              label="Smart Property"
-              tooltip="Rules that build a property value from the model around an element"
-              disabled={!ifcDataStore}
-            />
-          }
-        />
-        <BulkPropertyEditor
-          trigger={
-            <RibbonLargeButton
-              icon={EditProperty}
-              label="Bulk Edit"
-              tooltip="Bulk property editor — set a property across a query result"
-              disabled={!ifcDataStore}
-            />
-          }
-        />
-        {/* The same tool as under Analyze, named and iconed identically —
-            because it IS the same panel. Whether its cells accept typing
-            follows the global Edit Mode, exactly as the properties panel does,
-            rather than a second switch that could disagree with it. */}
-        <RibbonLargeButton
-          icon={List}
-          label="List"
-          tooltip="Lists & schedules — im Edit Mode direkt in der Tabelle bearbeitbar"
-          disabled={!ifcDataStore}
-          active={activeWorkspacePanels.has('list')}
-          onClick={() => handleToggleBottomPanel('lists')}
-        />
         <RibbonSmallStack>
+          <BulkPropertyEditor
+            trigger={
+              <RibbonSmallButton
+                icon={EditProperty}
+                label="Bulk property editor"
+                disabled={!ifcDataStore}
+              />
+            }
+          />
           <DataConnector
             trigger={
               <RibbonSmallButton
@@ -219,95 +141,7 @@ export function AuthorTab() {
               />
             }
           />
-          <ReferenceOverridesPanel
-            trigger={
-              <RibbonSmallButton
-                icon={FileDiff}
-                label="Changes to the reference model"
-                disabled={!ifcDataStore}
-              />
-            }
-          />
         </RibbonSmallStack>
-      </RibbonGroup>
-
-      <RibbonGroupDivider />
-
-      {/* Putting the model's classes right, in bulk.
-          Its own group rather than a corner of Properties: these tools do not
-          set a value on an element, they decide WHAT an element is, and that
-          is a different job from editing its properties. Both work the same
-          way — find the elements whose class says too little, group them by
-          what the author already told us, and decide a group at a time. */}
-      <RibbonGroup label="Housekeeping">
-        {/* Housekeeping first: it is the overview that says WHICH of the
-            cleaners a model needs, so it reads left to right as "look, then
-            fix". It was reachable only from the sidebar until now. */}
-        <RibbonLargeButton
-          icon={ListChecks}
-          label="Housekeeping"
-          tooltip="Überblick über den Modellzustand — was fehlt, was doppelt ist, was aufgeräumt werden sollte"
-          disabled={!ifcDataStore}
-          active={activeWorkspacePanels.has('housekeeping')}
-          onClick={() => toggleWorkspacePanel('housekeeping')}
-        />
-        <RibbonLargeButton
-          icon={Boxes}
-          label="Clean Proxy"
-          tooltip="Elemente ohne Fachklasse (IfcBuildingElementProxy) gruppenweise der richtigen Klasse zuweisen"
-          disabled={!ifcDataStore}
-          active={activeWorkspacePanels.has('proxyTriage')}
-          onClick={() => toggleWorkspacePanel('proxyTriage')}
-        />
-        <RibbonLargeButton
-          icon={Blocks}
-          label="Clean Classes"
-          tooltip="Elemente auf einer Zwischen- oder abstrakten Klasse gruppenweise der richtigen Fachklasse zuweisen"
-          disabled={!ifcDataStore}
-          active={activeWorkspacePanels.has('classTriage')}
-          onClick={() => toggleWorkspacePanel('classTriage')}
-        />
-        <RibbonLargeButton
-          icon={DoorOpen}
-          label="Clean Rooms"
-          tooltip="Räume ohne Nummer, ohne Bezeichnung oder doppelt vergeben einzeln nachtragen — oder als Splitter der Wanderkennung verwerfen"
-          disabled={!ifcDataStore}
-          active={activeWorkspacePanels.has('roomTriage')}
-          onClick={() => toggleWorkspacePanel('roomTriage')}
-        />
-        {/* After Clean Rooms on purpose: a door number is built out of a room
-            number, so numbering doors before the rooms are named produces
-            nothing but a list of rooms without numbers. */}
-        <RibbonLargeButton
-          icon={DoorClosed}
-          label="Türnummern"
-          tooltip="Türen nach dem Raum nummerieren, aus dem man durch sie flüchtet — und sie mit beiden angrenzenden Räumen verknüpfen"
-          disabled={!ifcDataStore}
-          active={activeWorkspacePanels.has('doorNumbers')}
-          onClick={() => toggleWorkspacePanel('doorNumbers')}
-        />
-        {/* Last in the group because it is last in the sequence: rooms named,
-            devices placed, zones painted — only then is there a group to
-            derive. */}
-        {/* Before Meldergruppen because it comes first in the work: the
-            cable decides the numbers, and the groups are a reading of the
-            zones on top of devices that are already placed and wired. */}
-        <RibbonLargeButton
-          icon={Cable}
-          label="Verkabeln"
-          tooltip="Melder der Reihe nach anklicken, wie das Kabel läuft — legt Anschlüsse, Verbindungen und den Melderkreis an"
-          disabled={!ifcDataStore}
-          active={activeWorkspacePanels.has('wiring')}
-          onClick={() => toggleWorkspacePanel('wiring')}
-        />
-        <RibbonLargeButton
-          icon={Radio}
-          label="Meldergruppen"
-          tooltip="Je Auslösezone einen Melderkreis bilden und die Melder mit ihrem Kennzeichen beschriften"
-          disabled={!ifcDataStore}
-          active={activeWorkspacePanels.has('detectorGroups')}
-          onClick={() => toggleWorkspacePanel('detectorGroups')}
-        />
       </RibbonGroup>
 
       <RibbonGroupDivider />

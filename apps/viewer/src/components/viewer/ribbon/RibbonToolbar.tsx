@@ -38,10 +38,13 @@ import { ViewTab } from './tabs/ViewTab';
 import { ElementsTab } from './tabs/ElementsTab';
 import { AnalyzeTab } from './tabs/AnalyzeTab';
 import { AuthorTab } from './tabs/AuthorTab';
+import { DISCIPLINE_TABS, disciplineTab } from '../disciplines/definitions';
+import { DisciplineRibbonTab } from '../disciplines/DisciplineRibbonTab';
 import { RibbonSwitchNotice } from './RibbonSwitchNotice';
 import { useRibbonContextualTab } from './useRibbonContextualTab';
 
-const RIBBON_TABS: { id: RibbonTabId; label: string }[] = [
+/** Upstream's six tabs, untouched: the base modeller. */
+const BASE_TABS: { id: RibbonTabId; label: string }[] = [
   { id: 'file', label: 'File' },
   { id: 'home', label: 'Home' },
   { id: 'view', label: 'View' },
@@ -49,6 +52,18 @@ const RIBBON_TABS: { id: RibbonTabId; label: string }[] = [
   { id: 'analyze', label: 'Analyze' },
   { id: 'author', label: 'Author' },
 ];
+
+/**
+ * The fork's discipline registers follow the base tabs, after a hairline:
+ * what this installation adds on top of the base application, sorted by the
+ * trade that uses it. Their content is data (`disciplines/definitions.ts`)
+ * and the classic strip renders the same data as one menu.
+ */
+const RIBBON_TABS: { id: RibbonTabId; label: string }[] = [
+  ...BASE_TABS,
+  ...DISCIPLINE_TABS.map((tab) => ({ id: tab.id, label: tab.label })),
+];
+const FIRST_DISCIPLINE_TAB: RibbonTabId | undefined = DISCIPLINE_TABS[0]?.id;
 
 interface RibbonToolbarProps {
   onShowShortcuts?: () => void;
@@ -63,6 +78,9 @@ export function RibbonToolbar({ onShowShortcuts }: RibbonToolbarProps = {} as Ri
   const setRibbonCollapsed = useViewerStore((s) => s.setRibbonCollapsed);
 
   useRibbonContextualTab();
+
+  // Null for the six base tabs; those render their hand-laid components below.
+  const activeDiscipline = disciplineTab(activeTab);
 
   // Shared command surface — registers the global load listeners and the
   // hidden file inputs exactly once for this toolbar style.
@@ -94,30 +112,36 @@ export function RibbonToolbar({ onShowShortcuts }: RibbonToolbarProps = {} as Ri
           {RIBBON_TABS.map((tab) => {
             const isActive = tab.id === activeTab;
             return (
-              <button
-                key={tab.id}
-                type="button"
-                role="tab"
-                aria-selected={isActive}
-                onClick={() => handleTabClick(tab.id)}
-                onDoubleClick={() => {
-                  if (isActive) setRibbonCollapsed(!ribbonCollapsed);
-                }}
-                className={cn(
-                  'relative flex h-8 select-none items-center rounded-t-md px-3 text-xs font-medium tracking-wide transition-colors',
-                  'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-                  isActive
-                    ? 'text-foreground'
-                    : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground',
+              <React.Fragment key={tab.id}>
+                {/* Hairline between the base modeller and the fork's
+                    registers: the strip says where upstream ends. */}
+                {tab.id === FIRST_DISCIPLINE_TAB && (
+                  <span aria-hidden="true" className="mx-1 mb-2 h-4 w-px self-center bg-border" />
                 )}
-              >
-                {tab.label}
-                {/* Drafting-pen underline for the active tab — reads in
-                    every theme without a filled pill. */}
-                {isActive && (
-                  <span aria-hidden="true" className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-primary" />
-                )}
-              </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={isActive}
+                  onClick={() => handleTabClick(tab.id)}
+                  onDoubleClick={() => {
+                    if (isActive) setRibbonCollapsed(!ribbonCollapsed);
+                  }}
+                  className={cn(
+                    'relative flex h-8 select-none items-center rounded-t-md px-3 text-xs font-medium tracking-wide transition-colors',
+                    'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+                    isActive
+                      ? 'text-foreground'
+                      : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground',
+                  )}
+                >
+                  {tab.label}
+                  {/* Drafting-pen underline for the active tab — reads in
+                      every theme without a filled pill. */}
+                  {isActive && (
+                    <span aria-hidden="true" className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-primary" />
+                  )}
+                </button>
+              </React.Fragment>
             );
           })}
         </div>
@@ -238,6 +262,7 @@ export function RibbonToolbar({ onShowShortcuts }: RibbonToolbarProps = {} as Ri
           {activeTab === 'elements' && <ElementsTab />}
           {activeTab === 'analyze' && <AnalyzeTab />}
           {activeTab === 'author' && <AuthorTab />}
+          {activeDiscipline && <DisciplineRibbonTab tab={activeDiscipline} />}
         </div>
       )}
 

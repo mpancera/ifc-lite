@@ -99,7 +99,7 @@ async function fetchJson<T>(url: string): Promise<T> {
   // not "no third party except the ones that felt harmless".
   if (!externalRequestsAllowed()) {
     throw new Error(
-      'bSDD lookups are off: external requests are disabled. Enable them under File › Settings › Data privacy.',
+      'bSDD lookups are off: external requests are disabled. Enable them under Data › Workspace › Data privacy.',
     );
   }
   const res = await fetch(url, {
