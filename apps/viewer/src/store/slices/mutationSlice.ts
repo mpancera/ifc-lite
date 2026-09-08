@@ -929,6 +929,19 @@ export interface MutationSlice {
     modelId: string,
   ) => { panelId: number; created: boolean; reason: string } | { error: string };
   /**
+   * Give every Auslösezone a line controller to hang its runs off.
+   *
+   * A run has to start somewhere, and in a real installation the module is
+   * mounted before anybody pulls cable. Placing them per zone up front is what
+   * lets the wiring tool be used the way it is meant to be — click the module,
+   * then the detectors — instead of having one invented at the first click.
+   *
+   * A zone that already has one is left alone, so this can be re-run.
+   */
+  ensureLineControllers: (
+    modelId: string,
+  ) => { created: number; skipped: number; zonesWithoutRoom: number } | { error: string };
+  /**
    * Replace a room's outline, keeping the room.
    *
    * A wall comes out and the room behind it should grow into the space. The
@@ -3856,6 +3869,102 @@ export const createMutationSlice: StateCreator<
       portsCreated,
       connections: result.connections,
     };
+  },
+
+  ensureLineControllers: (modelId) => {
+    const state = get();
+    const dataStore = state.models.get(modelId)?.ifcDataStore;
+    if (!dataStore) return { error: `No model loaded for id "${modelId}"` };
+
+    const system = findDisciplineSystem(state.activeDisciplineSystemId);
+    if (!system) {
+      return { error: 'Keine Anlage aktiv — auf die Rolle der Installation wechseln.' };
+    }
+
+    const view = state.mutationViews.get(modelId);
+    const entities = view ? authoredEntities(view) : [];
+
+    // The zones this installation triggers on — file and session, the same
+    // widened reading the detector groups use.
+    const theme = system.objectType === 'GasDetection' ? 'gas-trigger' : 'fire-trigger';
+    const zones = readZonesForDisplay(
+      parsedZonesOf(dataStore, RelationshipType.AssignsToGroup),
+      readZones(entities),
+    ).filter((zone) => themeOfZone(zone.objectType)?.id === theme);
+    if (zones.length === 0) {
+      return { error: 'Keine Auslösezone gefunden — zuerst Zonen anlegen und Räume hineinmalen.' };
+    }
+
+    // Modules already there, by the zone they are named for. `Tag` carries the
+    // zone name, which is what makes this re-runnable: a second pass finds its
+    // own work rather than doubling it.
+    const taken = new Set<string>();
+    for (const entity of entities) {
+      if (entity.type !== 'IfcController') continue;
+      const tag = entity.attributes[7];
+      if (typeof tag === 'string' && tag) taken.add(tag);
+    }
+    for (const expressId of dataStore.entityIndex?.byType?.get('IFCCONTROLLER') ?? []) {
+      const tag = dataStore.entities?.getTag?.(expressId);
+      if (tag) taken.add(tag);
+    }
+
+    const footprints = spacesByStorey(dataStore, view, state.mutationVersion);
+    const storeyOfRoom = new Map<number, number>();
+    for (const [storeyId, rooms] of footprints) {
+      for (const room of rooms) storeyOfRoom.set(room.spaceExpressId, storeyId);
+    }
+
+    let created = 0;
+    let skipped = 0;
+    let zonesWithoutRoom = 0;
+
+    for (const zone of zones) {
+      if (taken.has(zone.name)) { skipped += 1; continue; }
+      // The zone's first room decides where the module goes. Arbitrary among
+      // the zone's rooms and deliberately so — it is a starting point somebody
+      // drags, and putting it in the zone is the part that matters.
+      const roomId = [...zone.memberIds].sort((a, b) => a - b)
+        .find((id) => storeyOfRoom.has(id));
+      if (roomId === undefined) { zonesWithoutRoom += 1; continue; }
+      const storeyId = storeyOfRoom.get(roomId);
+      if (storeyId === undefined) { zonesWithoutRoom += 1; continue; }
+      const polygon = footprints.get(storeyId)
+        ?.find((entry) => entry.spaceExpressId === roomId)?.polygon;
+      if (!polygon || polygon.length === 0) { zonesWithoutRoom += 1; continue; }
+      const centre = polygon.reduce(
+        (acc, point) => ({
+          x: acc.x + point[0] / polygon.length,
+          y: acc.y + point[1] / polygon.length,
+        }),
+        { x: 0, y: 0 },
+      );
+
+      const result = runInStoreElementBuilder(
+        get, set, modelId, storeyId, 'IFCCONTROLLER', 'place line controller',
+        (editor, anchor) => {
+          const controllerId = addControllerToStore(editor, anchor, {
+            Position: [centre.x, centre.y, PANEL_MOUNTING_HEIGHT_M],
+            Name: `Linienmodul ${zone.name}`,
+            ObjectType: system.objectType,
+            PredefinedType: 'PROGRAMMABLE',
+            Tag: zone.name,
+            ContainerId: roomId,
+          }).elementId;
+          joinActiveDisciplineSystem(get, editor, anchor, modelId, controllerId);
+          return controllerId;
+        },
+        {
+          type: 'sensor',
+          params: { Width: 0.2, Depth: 0.12, Height: 0.25, PredefinedType: 'NOTDEFINED' },
+          position: [centre.x, centre.y, PANEL_MOUNTING_HEIGHT_M],
+        },
+      );
+      if (typeof result === 'object' && result !== null && 'error' in result) return result;
+      created += 1;
+    }
+
+    return { created, skipped, zonesWithoutRoom };
   },
 
   ensureAlarmPanel: (modelId) => {
