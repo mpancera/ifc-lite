@@ -33,6 +33,8 @@ import {
   FORMATS_BY_KIND, KIND_LABELS, batchProducts, productBlocker, productFilename,
   type ExportFormat, type ExportProduct,
 } from '@/lib/exportProducts/exportProducts';
+import type { BuildingXSettings } from '@/store/slices/exportProductsSlice';
+import { BuildingXSettingsFields } from './BuildingXSettingsFields';
 
 interface ExportProductsPanelProps {
   onClose?: () => void;
@@ -49,6 +51,8 @@ export function ExportProductsPanel({ onClose }: ExportProductsPanelProps) {
   const addPlan2D = useViewerStore((s) => s.addPlan2DExportProduct);
   const addList = useViewerStore((s) => s.addListExportProduct);
   const addGraph = useViewerStore((s) => s.addGraphExportProduct);
+  const addBuildingX = useViewerStore((s) => s.addBuildingXExportProduct);
+  const setBuildingXSetting = useViewerStore((s) => s.setBuildingXSetting);
   const graphChainId = useViewerStore((s) => s.graphChainId);
   const graphStartTypes = useViewerStore((s) => s.graphStartTypes);
   const remove = useViewerStore((s) => s.removeExportProduct);
@@ -66,6 +70,9 @@ export function ExportProductsPanel({ onClose }: ExportProductsPanelProps) {
 
   const selected = batchProducts(products);
   const running = run.runningProductId !== null;
+  // There is one spatial hierarchy, so there is one such product; a second
+  // would write over the first's file in the same batch.
+  const hasBuildingX = products.some((product) => product.kind === 'buildingx');
 
   /**
    * Issue every selected product.
@@ -138,6 +145,19 @@ export function ExportProductsPanel({ onClose }: ExportProductsPanelProps) {
           <Plus className="mr-1 h-3 w-3" />
           Diagramm
         </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 shrink-0 text-xs"
+          disabled={hasBuildingX}
+          title={hasBuildingX
+            ? 'Die Building-X-Struktur ist schon in der Liste'
+            : 'Die Geschossstruktur als Building-X-Aufrufe ausgeben'}
+          onClick={addBuildingX}
+        >
+          <Plus className="mr-1 h-3 w-3" />
+          Building X
+        </Button>
         <Select onValueChange={addFromList} value="" disabled={listDefinitions.length === 0}>
           <SelectTrigger className="h-8 flex-1 text-xs">
             <SelectValue placeholder={listDefinitions.length === 0 ? 'Keine Liste gespeichert' : 'Liste hinzufügen…'} />
@@ -175,6 +195,7 @@ export function ExportProductsPanel({ onClose }: ExportProductsPanelProps) {
                 onInBatch={(inBatch) => setInBatch(product.id, inBatch)}
                 onMove={(direction) => move(product.id, direction)}
                 onRemove={() => remove(product.id)}
+                onSetting={(key, value) => setBuildingXSetting(product.id, key, value)}
               />
             ))}
           </ul>
@@ -216,11 +237,12 @@ interface ProductRowProps {
   onInBatch: (inBatch: boolean) => void;
   onMove: (direction: -1 | 1) => void;
   onRemove: () => void;
+  onSetting: <K extends keyof BuildingXSettings>(key: K, value: BuildingXSettings[K]) => void;
 }
 
 function ProductRow({
   product, blocker, isFirst, isLast, disabled, failure,
-  onRename, onFormat, onInBatch, onMove, onRemove,
+  onRename, onFormat, onInBatch, onMove, onRemove, onSetting,
 }: ProductRowProps) {
   return (
     <li className="px-3 py-2">
@@ -283,6 +305,14 @@ function ProductRow({
           </Button>
         </div>
       </div>
+
+      {product.kind === 'buildingx' && (
+        <BuildingXSettingsFields
+          product={product}
+          disabled={disabled}
+          onSetting={onSetting}
+        />
+      )}
 
       {(blocker || failure) && (
         <p className="mt-1 flex items-start gap-1 pl-6 text-[10px] text-amber-600 dark:text-amber-500">

@@ -22,7 +22,14 @@ import {
 
 const STORAGE_KEY = 'ifc-lite:export-products';
 
-const KINDS: ReadonlySet<string> = new Set<ExportProductKind>(['plan2d', 'list', 'graph']);
+const KINDS: ReadonlySet<string> = new Set<ExportProductKind>([
+  'plan2d', 'list', 'graph', 'buildingx',
+]);
+
+/** A stored string field, trimmed, or the given fallback. */
+function text(value: unknown, fallback = ''): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
 
 /**
  * Read stored products, skipping anything unusable.
@@ -79,6 +86,27 @@ export function parseExportProducts(payload: unknown): ExportProduct[] {
       const listId = typeof record.listId === 'string' ? record.listId.trim() : '';
       if (!listId) continue;
       products.push({ kind: 'list', id, name, inBatch, format, listId });
+      continue;
+    }
+
+    if (kind === 'buildingx') {
+      // Unlike the three kinds above, nothing here can make the product
+      // meaningless — a missing time zone is a blocked product the panel can
+      // explain, not an unreadable one. So the defaults stand in and the row
+      // survives, rather than vanishing from somebody's delivery list.
+      products.push({
+        kind: 'buildingx', id, name, inBatch, format,
+        timeZone: text(record.timeZone, 'Europe/Zurich'),
+        countryCode: text(record.countryCode, 'CHE'),
+        locality: text(record.locality),
+        postalCode: text(record.postalCode),
+        street: text(record.street),
+        equipmentClasses: Array.isArray(record.equipmentClasses)
+          ? record.equipmentClasses.filter(
+            (entry): entry is string => typeof entry === 'string' && entry.length > 0,
+          )
+          : [],
+      });
       continue;
     }
 

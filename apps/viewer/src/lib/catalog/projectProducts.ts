@@ -16,6 +16,7 @@
  */
 
 import type { MutablePropertyView } from '@ifc-lite/mutations';
+import { readAasLink, type AasLink } from '@/lib/aas/connectorPset';
 
 export interface ProjectProductInstance {
   expressId: number;
@@ -29,6 +30,13 @@ export interface ProjectProduct {
   ifcType: string;
   /** The Type's `Tag` — the catalog entry id it was created from, when known. */
   catalogEntryId: string | null;
+  /**
+   * The product's type AAS, read off the Type's `AAS_PSet_Connector`, or
+   * `null` where the product carries no such link. This is what makes
+   * "which of the products in this building have a passport behind them"
+   * answerable from the model.
+   */
+  aas: AasLink | null;
   instances: ProjectProductInstance[];
 }
 
@@ -61,6 +69,10 @@ export function getProjectProducts(mutationView: MutablePropertyView | null | un
         typeName: entityName(typeEntity?.attributes, typeEntity?.type ?? 'Type'),
         ifcType: typeEntity?.type ?? 'Unknown',
         catalogEntryId: typeof typeEntity?.attributes[7] === 'string' ? (typeEntity.attributes[7] as string) : null,
+        // Read through the view rather than off the new-entity record: the
+        // connector Pset is attached with `addPropertySet`, so it lives in the
+        // property overlay and never appears in the Type's own attributes.
+        aas: readAasLink(mutationView.getForEntity(typeId)),
         instances: [],
       };
       products.set(typeId, product);

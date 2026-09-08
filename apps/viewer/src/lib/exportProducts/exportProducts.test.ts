@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import type { ProjectKey } from '@ifc-lite/project';
 import {
   batchProducts, productFilename, productBlocker, isFormatValid, defaultFormat,
-  newPlan2DProduct, FORMATS_BY_KIND,
+  newPlan2DProduct, newBuildingXExportProduct, FORMATS_BY_KIND,
   type ExportProduct,
 } from './exportProducts.js';
 import {
@@ -219,5 +219,66 @@ describe('newPlan2DProduct', () => {
     assert.equal(created.planProductId, BUILT_IN_PRODUCTS[1].id);
     assert.equal(created.inBatch, true);
     assert.equal(created.format, 'pdf');
+  });
+});
+
+describe('newBuildingXExportProduct', () => {
+  it('starts usable: JSON, in the batch, with the settings the API insists on', () => {
+    const created = newBuildingXExportProduct('buildingx-1');
+    assert.equal(created.kind, 'buildingx');
+    assert.equal(created.format, 'json');
+    assert.equal(created.inBatch, true);
+    assert.equal(created.timeZone, 'Europe/Zurich');
+    assert.equal(created.countryCode, 'CHE');
+    // Locations only until somebody names a class — an empty list is an
+    // answer here, not an unfinished setting.
+    assert.deepEqual(created.equipmentClasses, []);
+    assert.equal(productBlocker(created, { planProducts: [] }), null);
+  });
+
+  it('is blocked, with a reason, when a required setting was cleared', () => {
+    const base = newBuildingXExportProduct('buildingx-1');
+    assert.match(
+      productBlocker({ ...base, timeZone: '  ' }, { planProducts: [] }) ?? '',
+      /Zeitzone/,
+    );
+    assert.match(
+      productBlocker({ ...base, countryCode: 'CH' }, { planProducts: [] }) ?? '',
+      /Ländercode/,
+    );
+  });
+
+  it('offers only JSON, because the Data Setup columns are not published', () => {
+    assert.deepEqual(FORMATS_BY_KIND.buildingx, ['json']);
+    assert.equal(isFormatValid('buildingx', 'csv'), false);
+    assert.equal(isFormatValid('buildingx', 'json'), true);
+  });
+});
+
+describe('storing a Building X product', () => {
+  it('survives a save and load with its settings', () => {
+    const created = {
+      ...newBuildingXExportProduct('buildingx-1'),
+      countryCode: 'DEU',
+      locality: 'Hamburg',
+      equipmentClasses: ['IfcSensor'],
+    };
+    saveExportProducts(PROJECT_A, [created]);
+    const [loaded] = loadExportProducts(PROJECT_A);
+    assert.equal(loaded.kind, 'buildingx');
+    assert.deepEqual(loaded, created);
+  });
+
+  it('fills the defaults back in rather than dropping a half-written row', () => {
+    // A row hand-edited into nonsense costs its settings, not its existence:
+    // unlike a plan pointing at a deleted drawing, this product still names
+    // something real — the model's own hierarchy.
+    globalThis.localStorage.setItem(
+      'ifc-lite:export-products:projekt-a',
+      JSON.stringify([{ id: 'buildingx-1', kind: 'buildingx', format: 'json' }]),
+    );
+    const [loaded] = loadExportProducts(PROJECT_A);
+    assert.equal(loaded.kind === 'buildingx' && loaded.timeZone, 'Europe/Zurich');
+    assert.equal(loaded.kind === 'buildingx' && loaded.countryCode, 'CHE');
   });
 });

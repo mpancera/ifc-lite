@@ -37,7 +37,11 @@
  */
 type ViewerStoreApi = typeof import('@/store').useViewerStore;
 import { planDrawingState } from '@/lib/plan/planViewport';
-import { batchProducts, productBlocker, type ExportProduct, type ProductSources } from './exportProducts';
+import { downloadFile, sanitizeFilename } from '@/lib/export/download';
+import {
+  buildStructureRequests, toPlanFile, type EquipmentCandidate,
+} from '@/lib/buildingX/structureExport';
+import { batchProducts, productBlocker, productFilename, type ExportProduct, type ProductSources } from './exportProducts';
 
 /**
  * How long one sheet may take to cut, and how long the plan may take to write
@@ -204,6 +208,86 @@ async function writeGraph(
 }
 
 /**
+ * Write the Building X structure plan. Returns why it could not be, or `null`.
+ *
+ * The odd one out among the writers, and deliberately so: the other three
+ * drive a panel because what they produce IS what is on screen. This one has
+ * nothing on screen — the deliverable is the spatial hierarchy, which the
+ * store already holds in full — so driving a panel would only add a way for
+ * the run to fail.
+ *
+ * Reads the ACTIVE model rather than federating all of them. A federation
+ * mixes several buildings' hierarchies, and a plan that silently merged an
+ * architecture model with a services model would create every storey twice.
+ */
+async function writeBuildingX(
+  store: ViewerStoreApi,
+  product: Extract<ExportProduct, { kind: 'buildingx' }>,
+): Promise<string | null> {
+  const state = store.getState();
+  const modelId = state.activeModelId ?? [...state.models.keys()][0];
+  const model = modelId ? state.models.get(modelId) : undefined;
+  const data = model?.ifcDataStore;
+  if (!data) return 'Kein Modell geladen';
+
+  const hierarchy = data.spatialHierarchy;
+  if (!hierarchy) return 'Das Modell hat keine Geschossstruktur, aus der eine Building-X-Struktur würde';
+
+  // Devices are matched by CLASS NAME rather than through `getByType`, which
+  // only knows the curated enum: `IfcSensor` and most other MEP classes fall
+  // outside it, and a filter that silently found nothing would look like a
+  // model without sensors.
+  const wanted = new Set(product.equipmentClasses.map((entry) => entry.toLowerCase()));
+  const equipment: EquipmentCandidate[] = [];
+  if (wanted.size > 0) {
+    const containers = hierarchy.elementToContainer ?? hierarchy.elementToStorey;
+    for (let index = 0; index < data.entities.count; index += 1) {
+      const expressId = data.entities.expressId[index];
+      const ifcClass = data.entities.getTypeName(expressId);
+      if (!wanted.has(ifcClass.toLowerCase())) continue;
+      equipment.push({
+        expressId,
+        globalId: data.entities.getGlobalId(expressId),
+        name: data.entities.getName(expressId),
+        ifcClass,
+        containerId: containers.get(expressId) ?? null,
+      });
+    }
+  }
+
+  const result = buildStructureRequests({
+    project: hierarchy.project,
+    globalIdOf: (expressId) => data.entities.getGlobalId(expressId),
+    equipment,
+    settings: {
+      timeZone: product.timeZone.trim(),
+      address: {
+        countryCode: product.countryCode.trim().toUpperCase(),
+        locality: product.locality,
+        postalCode: product.postalCode,
+        street: product.street,
+      },
+      equipmentClasses: product.equipmentClasses,
+    },
+  });
+
+  // A plan with nothing in it is a refusal, not a file. Writing an empty one
+  // would be indistinguishable from a successful export at the point where
+  // somebody looks at the folder.
+  if (result.requests.length === 0) {
+    return 'Aus diesem Modell entsteht keine einzige Building-X-Struktur — hat es benannte Geschosse?';
+  }
+
+  const file = toPlanFile(result, new Date().toISOString());
+  downloadFile(
+    JSON.stringify(file, null, 2),
+    `${sanitizeFilename(productFilename(product), { fallback: 'buildingx' })}.json`,
+    'application/json;charset=utf-8;',
+  );
+  return null;
+}
+
+/**
  * Run the batch. Resolves when every product has been written or refused.
  *
  */
@@ -235,6 +319,19 @@ export async function runExportBatch(
   for (const product of products) {
     if (product.kind === 'list') {
       const failure = await writeList(store, product, sources, timeouts);
+      if (failure) {
+        failures[product.id] = failure;
+        store.getState().reportExportProduct(product.id, failure);
+      } else {
+        written.push(product.id);
+        store.getState().reportExportProduct(product.id);
+      }
+      await sleep(400);
+      continue;
+    }
+
+    if (product.kind === 'buildingx') {
+      const failure = await writeBuildingX(store, product);
       if (failure) {
         failures[product.id] = failure;
         store.getState().reportExportProduct(product.id, failure);

@@ -17,6 +17,11 @@
  * submodel-style property bag) without depending on the AAS metamodel
  * itself — no AAS client exists yet, this just avoids a reshape later.
  * `provenance` records where an entry actually came from today.
+ *
+ * Since then `aas` (see `CatalogAasLink`) makes that link concrete: an entry
+ * may name the type AAS its product data belongs to, and placing it writes
+ * that link into the model. Reading FROM an AAS is still not implemented —
+ * but recording which one an entry belongs to no longer waits for a client.
  */
 
 /**
@@ -97,7 +102,45 @@ export interface CatalogEntry {
   articleNumber?: string;
   /** AAS `globalAssetId`-shaped identifier — unpopulated until entries are actually AAS-backed. */
   globalAssetId?: string;
+  /** The product's type AAS, when one is attached. See `CatalogAasLink`. */
+  aas?: CatalogAasLink;
   provenance: CatalogProvenance;
+}
+
+/**
+ * The type AAS attached to a catalog product.
+ *
+ * # Why this hangs off a catalog entry rather than replacing it
+ * An AAS supplies a product's alphanumeric data and its documentation, and
+ * supplies them better than any catalog file could — they stay current at the
+ * manufacturer instead of ageing in a copy. What an AAS does NOT carry is
+ * geometry, an IFC class mapping, a placement rule, or the short designation a
+ * plan needs (`RM`, `HFM`). Those are this catalog's own contribution and have
+ * no source anywhere else.
+ *
+ * So the catalog is not a stand-in until an AAS connection exists — it is the
+ * layer BETWEEN the AAS and the model: geometry and placement defaults live
+ * here, and an AAS gets attached to them. An entry with an `aas` link and an
+ * entry without are both complete entries; only the second one has to carry
+ * its product data itself.
+ *
+ * Written into the model as `AAS_PSet_Connector` on the product's `IfcXxxType`
+ * — see `lib/aas/connectorPset.ts` for the property names and where they come
+ * from.
+ */
+export interface CatalogAasLink {
+  /**
+   * Unique URL or reference ID of the product's type AAS.
+   *
+   * "URL or reference ID" is the specification's own wording: an AAS is
+   * addressed by an identifier that often looks like a URL without being a
+   * reachable endpoint. Consumers must not assume this dereferences.
+   */
+  address: string;
+  /** The AAS version this entry's data was taken from, when known. */
+  versionNumber?: string;
+  /** When this entry's data was last taken over from that AAS (ISO 8601), when known. */
+  fetchDate?: string;
 }
 
 /** Something that can list catalog entries — local seed data today, an AAS registry client later. */

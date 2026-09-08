@@ -29,7 +29,7 @@
 import type { PlanProduct } from '@/lib/planProducts/planProducts';
 
 /** What kind of deliverable a product produces. */
-export type ExportProductKind = 'plan2d' | 'list' | 'graph';
+export type ExportProductKind = 'plan2d' | 'list' | 'graph' | 'buildingx';
 
 /** The formats a product can be written as. */
 /** Every format any kind can be written as. */
@@ -92,10 +92,44 @@ export interface GraphExportProduct extends ExportProductBase {
   readonly startTypes: readonly string[];
 }
 
+/**
+ * The building structure, written as the calls that would create it in
+ * Building X.
+ *
+ * Unlike the three above, this one draws nothing and opens no panel: it is a
+ * transform over the spatial hierarchy, so the runner produces it directly.
+ *
+ * # Why the settings live on the product
+ * `timeZone` and a country are REQUIRED by the Structure API on every
+ * `Building`, and an IFC carries neither reliably — a time zone is not
+ * modelled at all. They cannot be derived, and defaulting them silently would
+ * put a Hamburg project in Zurich. So they are part of the recipe, set once
+ * and reused on every re-export, which is also what makes the export
+ * reproducible.
+ */
+export interface BuildingXExportProduct extends ExportProductBase {
+  readonly kind: 'buildingx';
+  /** IANA zone, required by the API on every Building. */
+  readonly timeZone: string;
+  /** ISO 3166-1 alpha-3. The only address field the API insists on. */
+  readonly countryCode: string;
+  readonly locality: string;
+  readonly postalCode: string;
+  readonly street: string;
+  /**
+   * IFC classes exported as `Equipment`.
+   *
+   * Empty is a real answer, not an unfinished one: the structure is what Data
+   * Setup is slowest at, and devices usually arrive from the field side.
+   */
+  readonly equipmentClasses: readonly string[];
+}
+
 export type ExportProduct =
   | Plan2DExportProduct
   | ListExportProduct
-  | GraphExportProduct;
+  | GraphExportProduct
+  | BuildingXExportProduct;
 
 /** Which formats a kind can actually be written as. */
 export const FORMATS_BY_KIND: Readonly<Record<ExportProductKind, readonly ExportFormat[]>> = {
@@ -107,6 +141,13 @@ export const FORMATS_BY_KIND: Readonly<Record<ExportProductKind, readonly Export
   // a product that can never be issued, and nothing said so until the run.
   list: ['csv', 'xlsx', 'pdf'],
   graph: ['csv', 'json'],
+  // JSON only, and deliberately not CSV/XLSX yet. The Data Setup app imports
+  // `.csv`/`.xlsx`, but its column headers exist only inside the template
+  // files it hands out — they are in no published documentation, and the app
+  // rejects a file whose headers differ. Offering a spreadsheet built on
+  // guessed headers would produce a file that looks ready and fails on upload.
+  // Add the formats once a real template has been read.
+  buildingx: ['json'],
 };
 
 /** Whether a format is valid for a kind. */
@@ -124,6 +165,7 @@ export const KIND_LABELS: Readonly<Record<ExportProductKind, string>> = {
   plan2d: 'Pläne',
   list: 'Listen',
   graph: 'Diagramme',
+  buildingx: 'Building X',
 };
 
 /**
@@ -189,6 +231,16 @@ export function productBlocker(
     if (!list) return `Liste "${product.listId}" gibt es nicht mehr`;
     return null;
   }
+  if (product.kind === 'buildingx') {
+    // Both are required by the Structure API on every Building, so a run
+    // without them writes a plan every request of which would be rejected.
+    // Caught here, where the panel can say so, rather than at upload.
+    if (!product.timeZone.trim()) return 'Ohne Zeitzone lehnt Building X jedes Gebäude ab';
+    if (!/^[A-Za-z]{3}$/.test(product.countryCode.trim())) {
+      return 'Der Ländercode muss dreibuchstabig sein (ISO 3166-1 alpha-3, z. B. CHE)';
+    }
+    return null;
+  }
   // A chain with nothing to start from draws nothing, and an empty diagram is
   // worse than a refusal: it looks like an answer.
   if (product.startTypes.length === 0) return 'Dem Diagramm fehlen die Startklassen';
@@ -222,6 +274,29 @@ export function newGraphExportProduct(
     format: defaultFormat('graph'),
     chainId: chain.id,
     startTypes: [...startTypes],
+  };
+}
+
+/**
+ * A new Building X structure product, ready to be added.
+ *
+ * The defaults are Swiss because this fork's projects are, and because a
+ * default that is wrong in an obvious way (a Zurich time zone on a German
+ * building) gets corrected, while an empty field gets skipped past.
+ */
+export function newBuildingXExportProduct(id: string): BuildingXExportProduct {
+  return {
+    kind: 'buildingx',
+    id,
+    name: 'Building X Struktur',
+    inBatch: true,
+    format: defaultFormat('buildingx'),
+    timeZone: 'Europe/Zurich',
+    countryCode: 'CHE',
+    locality: '',
+    postalCode: '',
+    street: '',
+    equipmentClasses: [],
   };
 }
 

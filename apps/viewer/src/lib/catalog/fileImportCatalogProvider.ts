@@ -91,6 +91,7 @@ function validateEntry(raw: unknown, index: number): CatalogEntry {
     manufacturer: typeof e.manufacturer === 'string' ? e.manufacturer : undefined,
     articleNumber: typeof e.articleNumber === 'string' ? e.articleNumber : undefined,
     globalAssetId: typeof e.globalAssetId === 'string' ? e.globalAssetId : undefined,
+    aas: readAasLink(e.aas),
     provenance: {
       source,
       sourceRef: provenance && typeof provenance.sourceRef === 'string' ? provenance.sourceRef : undefined,
@@ -100,6 +101,26 @@ function validateEntry(raw: unknown, index: number): CatalogEntry {
 
 function isPlainRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * The optional `aas` link on an imported entry.
+ *
+ * Dropped rather than rejected when malformed, unlike the fields above: a
+ * missing geometry makes an entry unplaceable, but a missing AAS link only
+ * costs the link — and losing one whole product out of a company library
+ * because someone typed the address as a number would be the worse trade.
+ * `address` is the only required part, for the reason given in `AasLink`.
+ */
+function readAasLink(raw: unknown): CatalogEntry['aas'] {
+  if (!isPlainRecord(raw)) return undefined;
+  const address = typeof raw.address === 'string' ? raw.address.trim() : '';
+  if (!address) return undefined;
+  return {
+    address,
+    versionNumber: typeof raw.versionNumber === 'string' ? raw.versionNumber : undefined,
+    fetchDate: typeof raw.fetchDate === 'string' ? raw.fetchDate : undefined,
+  };
 }
 
 /** Parses + validates catalog JSON text. Pure — does not touch storage. */

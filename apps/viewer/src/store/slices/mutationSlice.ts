@@ -75,6 +75,7 @@ import { EntityExtractor, type MapConversion, type ProjectedCRS } from '@ifc-lit
 import type { MeshData } from '@ifc-lite/geometry';
 import { getEntityBounds, getEntityCenter } from '@/utils/viewportUtils';
 import { TRADE_PROPERTY, TRADE_PSET, tradeCodeFor } from '@/lib/catalog/tradeCode';
+import { AAS_CONNECTOR_PSET, AAS_KIND, aasConnectorProperties } from '@/lib/aas/connectorPset';
 import type { CatalogEntry } from '@/lib/catalog';
 import {
   disciplineSystemName, findDisciplineSystem, normalizeRoleId, parsedDisciplineSystemOf,
@@ -986,6 +987,12 @@ export interface MutationSlice {
       /** The product's short designation — `RM`, `WM`, `HFM`. */
       CatalogEntryTag?: string;
       TechnicalData?: CatalogEntry['technicalData'];
+      /**
+       * The product's type AAS, when the catalog entry names one. Written onto
+       * the shared `IfcXxxType` as `AAS_PSet_Connector`, so the model addresses
+       * the product data instead of only copying it.
+       */
+      Aas?: CatalogEntry['aas'];
     }
   ) => { expressId: number } | { error: string };
   /**
@@ -3285,7 +3292,7 @@ export const createMutationSlice: StateCreator<
   ),
 
   addLibraryElement: (modelId, storeyExpressId, params) => {
-    const { Discipline, CatalogEntryId, CatalogEntryTag, TechnicalData, ...ifcParams } = params;
+    const { Discipline, CatalogEntryId, CatalogEntryTag, TechnicalData, Aas, ...ifcParams } = params;
     return runInStoreElementBuilder(
       get, set, modelId, storeyExpressId, ifcParams.IfcEntity.toUpperCase(), `add ${ifcParams.IfcEntity}`,
       (editor, anchor) => {
@@ -3348,6 +3355,23 @@ export const createMutationSlice: StateCreator<
             ]);
           }
 
+          // The link to the product's type AAS, written on the TYPE because
+          // that is what it describes: one product, however many placements.
+          // The instance link — one physical device, one serial number — is a
+          // different link on the occurrence, and it cannot be written here
+          // because at placement time no such device exists yet.
+          //
+          // Alongside the trade code rather than through the builder, for the
+          // same reason: `@ifc-lite/create` holds no opinion about this
+          // repository's catalogue.
+          if (Aas?.address) {
+            editor.addPropertySet(typeId, AAS_CONNECTOR_PSET, aasConnectorProperties({
+              address: Aas.address,
+              kind: AAS_KIND.type,
+              fetchDate: Aas.fetchDate,
+              versionNumber: Aas.versionNumber,
+            }));
+          }
         }
         emitRelDefinesByType(editor, anchor.ownerHistoryId, [elementId], typeId, anchor.guidRandom);
 

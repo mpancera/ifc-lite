@@ -12,6 +12,7 @@ import {
 } from '@ifc-lite/mutations';
 import { addLibraryElementToStore, addLibraryTypeToStore, emitRelDefinesByType } from '@ifc-lite/create';
 import { getProjectProducts } from './projectProducts.js';
+import { AAS_CONNECTOR_PSET, AAS_KIND, aasConnectorProperties } from '../aas/connectorPset.js';
 
 function makeStore(maxId: number): MutationStoreShape {
   const byId = new Map<number, MutationEntityRef>();
@@ -66,4 +67,39 @@ test('getProjectProducts: ignores unrelated overlay entities', () => {
   const editor = new StoreEditor(makeStore(50), view);
   editor.addEntity('IfcWall', ['guid', null, 'Wall 1', null, null, '#1', '#2', null]);
   assert.deepEqual(getProjectProducts(view), []);
+});
+
+test('getProjectProducts: reads the type AAS link off the Type, and reports its absence as null', () => {
+  // Mirrors what `addLibraryElement` does for a catalog entry that carries an
+  // `aas` link: the connector Pset goes on the shared Type, next to the trade
+  // code, not on each placed instance.
+  const view = new MutablePropertyView(null, 'm1');
+  const editor = new StoreEditor(makeStore(200), view);
+
+  const { typeId } = addLibraryTypeToStore(editor, anchor, {
+    IfcEntity: 'IfcSensorType', Name: 'Rauchmelder', Tag: 'fire.smoke-detector', PredefinedType: 'SMOKESENSOR',
+  });
+  editor.addPropertySet(typeId, AAS_CONNECTOR_PSET, aasConnectorProperties({
+    address: 'https://example.com/aas/smoke-detector',
+    kind: AAS_KIND.type,
+    versionNumber: '1.4',
+  }));
+  const smoke = addLibraryElementToStore(editor, anchor, { IfcEntity: 'IfcSensor', Position: [0, 0, 0], PredefinedType: 'SMOKESENSOR', Name: 'Rauchmelder' }).elementId;
+  emitRelDefinesByType(editor, anchor.ownerHistoryId, [smoke], typeId);
+
+  // A second product with no AAS at all — the ordinary case today.
+  const { typeId: cameraTypeId } = addLibraryTypeToStore(editor, anchor, {
+    IfcEntity: 'IfcAudioVisualApplianceType', Name: 'Kamera', Tag: 'security.camera', PredefinedType: 'CAMERA',
+  });
+  const camera = addLibraryElementToStore(editor, anchor, { IfcEntity: 'IfcAudioVisualAppliance', Position: [2, 0, 0], PredefinedType: 'CAMERA', Name: 'Kamera' }).elementId;
+  emitRelDefinesByType(editor, anchor.ownerHistoryId, [camera], cameraTypeId);
+
+  const [cameraProduct, smokeProduct] = getProjectProducts(view);
+
+  assert.equal(cameraProduct.aas, null);
+  assert.deepEqual(smokeProduct.aas, {
+    address: 'https://example.com/aas/smoke-detector',
+    kind: AAS_KIND.type,
+    versionNumber: '1.4',
+  });
 });

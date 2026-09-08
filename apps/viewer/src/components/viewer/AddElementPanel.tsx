@@ -1032,6 +1032,7 @@ function PlaceBySpaceSection({ type, modelId, storeyId }: PlaceBySpaceSectionPro
             CatalogEntryId: selection!.id,
             CatalogEntryTag: selection!.tag,
             TechnicalData: selection!.technicalData,
+            Aas: selection!.aas,
           });
         if ('error' in result) {
           failure = result.error;

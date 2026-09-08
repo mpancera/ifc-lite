@@ -296,6 +296,12 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
         what: 'Die Liste der Fachklassen, aus der ein Element seine Klasse bekommt — abgleichbar mit dem Data Dictionary, nur nach Freigabe im Datenschutz-Gate.',
         origin: 'ifcedit',
       },
+      {
+        name: 'AAS-Anbindung',
+        where: 'Data › Catalogs › Product Library',
+        what: 'Ein Katalogprodukt kann seine Verwaltungsschale (AAS) nennen; beim Platzieren wird der Verweis als AAS_PSet_Connector auf den geteilten Typ geschrieben — das Modell adressiert die Produktdaten, statt sie zu kopieren.',
+        origin: 'ifcedit',
+      },
     ],
   },
 
@@ -342,6 +348,12 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
         name: 'Planprodukte',
         where: 'Data › Deliverables › Planprodukte',
         what: 'Brandschutzkonzept, Feuerwehrlageplan, Werkplan BMA: welche Zeichnung was zeigt, mit Blatt, Ansichten und Massstab je Ansicht.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Building X Struktur',
+        where: 'Data › Deliverables › Exportprodukte',
+        what: 'Die Geschossstruktur als Plan der Aufrufe, die sie in Building X anlegen würden — Campus, Gebäude, Geschoss, Raum, wahlweise Geräte — mit Zeitzone und Adresse als Produkteinstellung, weil das Modell beides nicht kennt.',
         origin: 'ifcedit',
       },
     ],

@@ -43,6 +43,8 @@ import { toGlobalIdFromModels } from '@/store/globalId';
 import { useCatalogEntries } from '@/lib/catalog';
 import { getProjectProducts } from '@/lib/catalog/projectProducts';
 import { CatalogImportControls } from './CatalogImportControls';
+import { AasLinkCell } from './AasLinkCell';
+import { AAS_KIND } from '@/lib/aas/connectorPset';
 
 interface ProductLibraryPanelProps {
   trigger?: React.ReactNode;
@@ -124,12 +126,13 @@ export function ProductLibraryPanel({ trigger }: ProductLibraryPanelProps) {
                     <TableHead className="font-mono text-[10px] uppercase">IFC Mapping</TableHead>
                     <TableHead className="font-mono text-[10px] uppercase">Mounting</TableHead>
                     <TableHead className="font-mono text-[10px] uppercase">Technical Data</TableHead>
+                    <TableHead className="font-mono text-[10px] uppercase" title="Asset Administration Shell of the product type">AAS</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {entries.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={6} className="text-center text-[11px] font-mono text-zinc-500 py-6">
+                      <TableCell colSpan={7} className="text-center text-[11px] font-mono text-zinc-500 py-6">
                         No catalog entries.
                       </TableCell>
                     </TableRow>
@@ -147,6 +150,9 @@ export function ProductLibraryPanel({ trigger }: ProductLibraryPanelProps) {
                         {entry.technicalData && Object.keys(entry.technicalData).length > 0
                           ? Object.entries(entry.technicalData).map(([k, v]) => `${k}=${v}`).join(', ')
                           : '—'}
+                      </TableCell>
+                      <TableCell>
+                        <AasLinkCell link={entry.aas ? { address: entry.aas.address, kind: AAS_KIND.type, versionNumber: entry.aas.versionNumber, fetchDate: entry.aas.fetchDate } : null} />
                       </TableCell>
                     </TableRow>
                   ))}
@@ -170,22 +176,31 @@ export function ProductLibraryPanel({ trigger }: ProductLibraryPanelProps) {
                     const isOpen = expanded.has(product.typeId);
                     return (
                       <div key={product.typeId}>
-                        <button
-                          type="button"
-                          onClick={() => toggleExpanded(product.typeId)}
-                          className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-zinc-50 dark:hover:bg-zinc-900"
-                        >
-                          <ChevronRight className={`h-3 w-3 shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
-                          <span className="min-w-0 flex-1">
-                            <span className="block text-xs font-mono text-zinc-900 dark:text-zinc-100">{product.typeName}</span>
-                            <span className="block text-[10px] font-mono text-zinc-500 dark:text-zinc-400">
-                              {product.ifcType}{product.catalogEntryId ? ` · ${product.catalogEntryId}` : ''}
+                        {/* The AAS link sits OUTSIDE the expand button rather than
+                            inside it: it renders an anchor, and an anchor nested in
+                            a button is invalid markup that browsers resolve by
+                            swallowing one of the two clicks. */}
+                        <div className="flex items-stretch hover:bg-zinc-50 dark:hover:bg-zinc-900">
+                          <button
+                            type="button"
+                            onClick={() => toggleExpanded(product.typeId)}
+                            className="min-w-0 flex-1 flex items-center gap-2 px-3 py-2 text-left"
+                          >
+                            <ChevronRight className={`h-3 w-3 shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                            <span className="min-w-0 flex-1">
+                              <span className="block text-xs font-mono text-zinc-900 dark:text-zinc-100">{product.typeName}</span>
+                              <span className="block text-[10px] font-mono text-zinc-500 dark:text-zinc-400">
+                                {product.ifcType}{product.catalogEntryId ? ` · ${product.catalogEntryId}` : ''}
+                              </span>
                             </span>
+                            <span className="text-[10px] font-mono text-zinc-400 shrink-0">
+                              {product.instances.length} instance{product.instances.length === 1 ? '' : 's'}
+                            </span>
+                          </button>
+                          <span className="flex items-center pl-3 pr-3 shrink-0">
+                            <AasLinkCell link={product.aas} />
                           </span>
-                          <span className="text-[10px] font-mono text-zinc-400 shrink-0">
-                            {product.instances.length} instance{product.instances.length === 1 ? '' : 's'}
-                          </span>
-                        </button>
+                        </div>
                         {isOpen && (
                           <div className="pl-8 pb-2">
                             {product.instances.map((instance) => (

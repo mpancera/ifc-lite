@@ -19,8 +19,10 @@ import type { StateCreator } from 'zustand';
 import type { ViewerState } from '../index.js';
 import type { ExportProduct, ExportFormat } from '@/lib/exportProducts/exportProducts';
 import {
-  isFormatValid, newGraphExportProduct, newListExportProduct, newPlan2DProduct,
+  isFormatValid, newBuildingXExportProduct, newGraphExportProduct, newListExportProduct,
+  newPlan2DProduct,
 } from '@/lib/exportProducts/exportProducts';
+import type { BuildingXExportProduct } from '@/lib/exportProducts/exportProducts';
 import {
   loadExportProducts, saveExportProducts, nextProductId,
 } from '@/lib/exportProducts/exportProductsStorage';
@@ -41,6 +43,16 @@ export interface ExportRunState {
 const IDLE: ExportRunState = {
   runningProductId: null, done: 0, total: 0, failures: {},
 };
+
+/**
+ * The editable half of the Building X product.
+ *
+ * Named separately so the setter can be keyed rather than one function per
+ * field — five near-identical setters is five places a rename has to reach.
+ */
+export type BuildingXSettings = Omit<
+  BuildingXExportProduct, 'kind' | 'id' | 'name' | 'inBatch' | 'format'
+>;
 
 export interface ExportProductsSlice {
   /**
@@ -74,6 +86,19 @@ export interface ExportProductsSlice {
    * configured.
    */
   addGraphExportProduct: (name: string) => void;
+  /**
+   * Add the Building X structure product.
+   *
+   * No argument and no picker: unlike a plan or a list, there is nothing to
+   * choose from — the deliverable IS the model's spatial hierarchy, and there
+   * is one of those. What varies (time zone, address, which classes become
+   * equipment) is edited on the row afterwards.
+   */
+  addBuildingXExportProduct: () => void;
+  /** Change one of the Building X product's settings. */
+  setBuildingXSetting: <K extends keyof BuildingXSettings>(
+    id: string, key: K, value: BuildingXSettings[K],
+  ) => void;
   removeExportProduct: (id: string) => void;
   renameExportProduct: (id: string, name: string) => void;
   setExportProductFormat: (id: string, format: ExportFormat) => void;
@@ -153,6 +178,20 @@ export const createExportProductsSlice: StateCreator<
         graphStartTypes,
         nextProductId(products, 'graph'),
       )]);
+    },
+
+    addBuildingXExportProduct: () => {
+      const products = get().exportProducts;
+      // One is enough. A second would write the same file over the first in a
+      // batch, and there is no second spatial hierarchy to point it at.
+      if (products.some((product) => product.kind === 'buildingx')) return;
+      commit([...products, newBuildingXExportProduct(nextProductId(products, 'buildingx'))]);
+    },
+
+    setBuildingXSetting: (id, key, value) => {
+      update(id, (product) => (
+        product.kind === 'buildingx' ? { ...product, [key]: value } : product
+      ));
     },
 
     removeExportProduct: (id) => {
