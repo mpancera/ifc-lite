@@ -106,9 +106,11 @@ export function SpaceSketchOverlay() {
   const dragRef = useRef<number | null>(null);
   const dragStartRef = useRef<Pt | null>(null);
   const otherVertsRef = useRef<Pt[]>([]);
-  /** Handle position minus its axis node, frozen when the drag starts. The
-   *  user aims the CORNER; the node has to arrive where the corner needs it. */
+  /** Handle position minus its axis node at the moment of grabbing — the first
+   *  guess at where to put the node so the corner lands on the pointer. */
   const dragOffsetRef = useRef<Pt>([0, 0]);
+  /** The room whose corner is being dragged. */
+  const dragFaceRef = useRef<number | null>(null);
   const draggedRef = useRef(false);
   const panningRef = useRef(false); // Issue 4: middle-mouse / empty-drag panning
   // While drawing, Undo pops the last placed point onto this stack and Redo
@@ -694,15 +696,15 @@ export function SpaceSketchOverlay() {
    */
   const handles = useMemo(() => {
     const session = sessionRef.current;
-    if (!session) return [] as { pos: Pt; anchor: number }[];
-    const out: { pos: Pt; anchor: number }[] = [];
+    if (!session) return [] as { pos: Pt; anchor: number; face: number }[];
+    const out: { pos: Pt; anchor: number; face: number }[] = [];
     const seen = new Set<string>();
     for (const r of rooms) {
       for (const h of session.boundaryHandles(r.face, boundaryMode)) {
         const key = `${h.pos[0].toFixed(4)},${h.pos[1].toFixed(4)}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        out.push({ pos: h.pos as Pt, anchor: h.anchor });
+        out.push({ pos: h.pos as Pt, anchor: h.anchor, face: r.face });
       }
     }
     return out;
@@ -751,8 +753,8 @@ export function SpaceSketchOverlay() {
   const snapVertsRef = useRef(snapVerts);
   snapVertsRef.current = snapVerts;
 
-  const nearestHandle = useCallback((wx: number, wy: number): { pos: Pt; anchor: number } | null => {
-    let best: { pos: Pt; anchor: number } | null = null;
+  const nearestHandle = useCallback((wx: number, wy: number): { pos: Pt; anchor: number; face: number } | null => {
+    let best: { pos: Pt; anchor: number; face: number } | null = null;
     let bestD = PICK_PX / fitRef.current.scale;
     for (const h of handlesRef.current) {
       const d = Math.hypot(h.pos[0] - wx, h.pos[1] - wy);
@@ -1062,8 +1064,57 @@ export function SpaceSketchOverlay() {
       setSnapPos(snap.kind === 'none' ? null : snap.pt);
       setSnapKind(snap.kind);
       setIntent({ text: snap.kind === 'line' ? 'Move onto wall' : snap.kind === 'vertex' ? 'Move onto corner' : m.shift ? 'Move (straight)' : 'Move node', tone: 'move' });
-      const off = dragOffsetRef.current;
-      session.dragTo(vid, snap.pt[0] - off[0], snap.pt[1] - off[1]);
+      // Aim the CORNER, not the node. The offset between the two is not a
+      // constant: moving the node swings the walls that meet there, and the
+      // corner — their intersection — swings with them. Freezing the offset at
+      // grab time was therefore only right for the first pixel, and at a
+      // T-junction, where the edges are short and turn fast, the corner ended
+      // up a fifth of a metre from where it was aimed.
+      //
+      // So place the node, look at where the corner actually went, and correct
+      // by the miss. Two or three passes settle it because each pass shrinks
+      // the error by the amount the walls turned, which is small.
+      const face = dragFaceRef.current;
+      /** Where the grabbed corner sits now, after the node has been placed. */
+      const cornerNow = (): Pt | null => {
+        if (face == null) return null;
+        return session.boundaryHandles(face, boundaryMode)
+          .filter((h) => h.anchor === vid)
+          .reduce<{ pos: Pt; d: number } | null>((best, h) => {
+            const d = Math.hypot(h.pos[0] - snap.pt[0], h.pos[1] - snap.pt[1]);
+            return !best || d < best.d ? { pos: h.pos as Pt, d } : best;
+          }, null)?.pos ?? null;
+      };
+      let guess: Pt = [snap.pt[0] - dragOffsetRef.current[0], snap.pt[1] - dragOffsetRef.current[1]];
+      session.dragTo(vid, guess[0], guess[1]);
+      let bestGuess = guess;
+      let bestErr = Infinity;
+      // Correct by the miss, DAMPED. A corner does not answer a node's move
+      // one for one: where the walls meet at a shallow angle it moves several
+      // times as far, so correcting by the whole error overshoots, and three
+      // passes of overshoot is not a refinement, it is a divergence — measured
+      // at 172 px off a 34 px drag before this. Halving each step keeps a gain
+      // of up to two in hand, and the best guess so far is kept so a pass that
+      // makes things worse cannot be the one that survives.
+      for (let pass = 0; pass < 4; pass++) {
+        const corner = cornerNow();
+        if (!corner) break;
+        const ex = snap.pt[0] - corner[0];
+        const ey = snap.pt[1] - corner[1];
+        const err = Math.hypot(ex, ey);
+        if (err < bestErr) { bestErr = err; bestGuess = guess; }
+        if (err < 1e-4) break;
+        guess = [guess[0] + 0.5 * ex, guess[1] + 0.5 * ey];
+        session.dragTo(vid, guess[0], guess[1]);
+      }
+      const finalCorner = cornerNow();
+      const finalErr = finalCorner
+        ? Math.hypot(snap.pt[0] - finalCorner[0], snap.pt[1] - finalCorner[1])
+        : Infinity;
+      if (finalErr > bestErr) session.dragTo(vid, bestGuess[0], bestGuess[1]);
+      // Keep the opening guess honest for the next move of this same drag.
+      const node = session.vertexPos(vid);
+      if (node) dragOffsetRef.current = [snap.pt[0] - node[0], snap.pt[1] - node[1]];
       refreshRooms();
       return;
     }
@@ -1359,6 +1410,10 @@ export function SpaceSketchOverlay() {
     if (v != null && grabbed) {
       const start = grabbed.pos;
       dragRef.current = v; dragStartRef.current = start; draggedRef.current = false;
+      // Which room's corner was grabbed. A node is shared, so it carries one
+      // corner per adjoining room; the drag has to follow the one under the
+      // hand, not an arbitrary sibling.
+      dragFaceRef.current = grabbed.face;
       // Where the handle sits relative to the node it drags. Frozen for the
       // gesture: the pointer aims the CORNER, so the node is placed offset from
       // it and the corner lands where the user pointed. Exact as long as the

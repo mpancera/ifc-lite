@@ -132,7 +132,7 @@ export function SpaceSketchCanvas(props: SpaceSketchCanvasProps) {
                   gone — the room itself is the solid line. */}
               {boundaryMode !== 'center' && (
                 <polygon points={r.outline.map((p) => `${sX(f, p[0])},${sY(f, p[1])}`).join(' ')}
-                  fill="none" stroke={color} strokeOpacity={0.12} strokeDasharray="2 4" strokeWidth={0.75} />
+                  fill="none" stroke={color} strokeOpacity={0.22} strokeDasharray="3 3" strokeWidth={1} />
               )}
               {/* A discarded room keeps its shape — the author is not editing
                   the drawing, only deciding what leaves it — but goes grey and
