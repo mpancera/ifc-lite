@@ -38,6 +38,32 @@ const value = view.getPropertyValue(entityId, 'Pset_WallCommon', 'FireRating');
 // Returns 'REI 120'
 ```
 
+### Changing a property's declared IFC type
+
+The fifth argument is the property's `PropertyValueType`. Most of its members
+are *shapes* (`String`, `Real`, `Integer`, …) — what the parser collapses a
+source token into — but `Label`, `Identifier` and `Text` each *name* one
+`IfcValue` member, so passing one of those sets the type the exported file
+declares:
+
+```typescript
+import { PropertyValueType } from '@ifc-lite/data';
+
+// A value that outgrew IfcLabel's 255 characters: export it as IfcText.
+view.setProperty(entityId, 'Pset_WallCommon', 'Reference', 'a long description…', PropertyValueType.Text);
+```
+
+The exported line becomes `IFCTEXT('…')` where the source declared
+`IFCLABEL('…')` — which is what an IDS `property` facet with
+`dataType="IFCTEXT"` checks.
+
+Passing a *shape* instead leaves the declared type alone: a value-only edit
+(`String`, the default) keeps whatever token the source line carried, so
+re-serializing a property set never rewrites the declared types of the
+neighbours you did not touch. For the same reason a numeric type cannot be
+changed this way — `Real` names neither `IfcLengthMeasure` nor `IfcReal`, so
+the source token wins.
+
 ### Mutation History
 
 ```typescript
@@ -350,7 +376,7 @@ In the viewer's QuickJS sandbox and the TypeScript SDK, the same surface is expo
 
 ```typescript
 // SDK (TypeScript app)
-const profile = bim.store.addEntity('arch', {
+const profile = bim.store.addEntity('default', {
   type: 'IfcRectangleProfileDef',
   attributes: ['.AREA.', null, '#34', 0.6, 0.4],
 });
@@ -359,12 +385,14 @@ bim.store.removeEntity(unwantedRef);
 
 // High-level builder
 const storey = bim.query().byType('IfcBuildingStorey').refs()[0].expressId;
-const col = bim.store.addColumn('arch', storey, {
+const col = bim.store.addColumn('default', storey, {
   Position: [1, 1, 0],
   Width: 0.3, Depth: 0.4, Height: 3,
   Name: 'Column 1',
 });
 ```
+
+**Which `modelId`?** The headless backend behind `ifc-lite run` and `ifc-lite eval` holds exactly one model and answers for two spellings of it: `'default'` and the file's basename (`'tower.ifc'`). Any other id throws at the create call, rather than handing back a ref that the next `bim.mutate.*` write would refuse. Use the id you were given: the refs from `bim.query()` already carry it, and in the viewer it is the real model id from the model registry.
 
 The sandbox gates `bim.store.*` behind a `store: true` permission (default `false`, mirrors the existing `mutate` permission). The viewer opts in.
 

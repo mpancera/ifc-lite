@@ -21,6 +21,7 @@ import {
 import { selectBoundingBoxesInRect } from './scene-rect-select.js';
 import { mergeGeometry, splitMeshDataForBufferLimit, colorSaltByte, packEntityLane, worldAabbFromPieces } from './scene-geometry.js';
 import { sumResidentGpuBytes, type ResidentGpuBytes } from './render-stats.js';
+import { composeInstancedOverrideColor } from './instanced-override-color.js';
 import { simplifyIndicesByClustering, lodCellSizeForBounds, LOD_MIN_TRIANGLES } from './lod-simplify.js';
 import { quantizeInterleaved } from './quantize.js';
 import { bucketBaseKeyFor, type SpatialChunkingConfig } from './chunk-grid.js';
@@ -148,6 +149,9 @@ interface InstancedOccurrence {
   templateIndex: number;
   byteOffset: number;
   originalColor: [number, number, number, number];
+  /** Originating `IfcRepresentationItem` id (#2985), absent when the shard
+   *  carried none. CPU-side by design — see `InstancedRenderTemplate.itemIds`. */
+  itemId?: number;
 }
 
 /** Compact CPU-side copy of one instanced template, retained so CPU consumers
@@ -2584,6 +2588,11 @@ export class Scene {
       this.sharedFrameOrigin = merged.origin;
     }
     const expressIds = meshDataArray.map(m => m.expressId);
+    // Parallel to `expressIds` (same index = same source piece) so picking
+    // can scope each batch ENTRY to its own model — batches group by colour,
+    // not by model, so distinct models sharing an expressId+colour can be
+    // co-batched (see BatchedMesh.modelIndices doc).
+    const modelIndices = meshDataArray.map(m => m.modelIndex);
 
     // Create vertex buffer (interleaved positions + normals)
     // Use mappedAtCreation to avoid a separate writeBuffer IPC round-trip
@@ -2593,13 +2602,43 @@ export class Scene {
     // the u16 lattice range. Order note: the LOD build further down reads
     // merged.vertexData (the CPU f32 copy) and produces INDICES only, which
     // are valid for either vertex format.
+    // This function allocates a RUN of GPU buffers (vertex, index, uniform,
+    // and — when LOD1 qualifies — a second index buffer). `device.createBuffer`
+    // genuinely throws in production (scene.ts:2057 / index.ts:168 document a
+    // real "createBuffer failed, size (...) is too large" RangeError), so every
+    // buffer created earlier in the run must be destroyed before a later throw
+    // propagates — otherwise it is orphaned: allocated, never referenced again,
+    // never freed. Same paired-allocation idiom as `appendChunkToNode` /
+    // `DeviationPipeline.uploadBvh` (see paired-buffer-leak.test.ts), generalised
+    // to a run of N instead of a pair.
+    const allocated: GPUBuffer[] = [];
+    const createTracked = (desc: GPUBufferDescriptor): GPUBuffer => {
+      let buf: GPUBuffer;
+      try {
+        buf = device.createBuffer(desc);
+      } catch (err) {
+        for (const b of allocated) {
+          try {
+            b.destroy();
+          } catch (destroyErr) {
+            // Non-fatal: surfaced rather than swallowed, per the no-silent-catch
+            // house rule — this firing would mean a real teardown bug.
+            console.warn('[Scene] failed to release a batch buffer after a paired allocation failure', destroyErr);
+          }
+        }
+        throw err;
+      }
+      allocated.push(buf);
+      return buf;
+    };
+
     let quantized: { min: [number, number, number]; step: number } | undefined;
     let vertexBuffer: GPUBuffer;
     const quantizedData = this.quantizedBatchesEnabled
       ? quantizeInterleaved(merged.vertexData, BATCH_CONSTANTS.BYTES_PER_VERTEX / 4)
       : null;
     if (quantizedData) {
-      vertexBuffer = device.createBuffer({
+      vertexBuffer = createTracked({
         size: Math.max(4, quantizedData.vertexData.byteLength),
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
         mappedAtCreation: true,
@@ -2609,7 +2648,7 @@ export class Scene {
       vertexBuffer.unmap();
       quantized = { min: quantizedData.quantMin, step: quantizedData.step };
     } else {
-      vertexBuffer = device.createBuffer({
+      vertexBuffer = createTracked({
         size: merged.vertexData.byteLength,
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
         mappedAtCreation: true,
@@ -2619,7 +2658,7 @@ export class Scene {
     }
 
     // Create index buffer
-    const indexBuffer = device.createBuffer({
+    const indexBuffer = createTracked({
       size: merged.indices.byteLength,
       usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
       mappedAtCreation: true,
@@ -2628,7 +2667,7 @@ export class Scene {
     indexBuffer.unmap();
 
     // Create uniform buffer for this batch
-    const uniformBuffer = device.createBuffer({
+    const uniformBuffer = createTracked({
       size: pipeline.getUniformBufferSize(),
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
@@ -2666,7 +2705,7 @@ export class Scene {
         cellSize,
       );
       if (lodIndices) {
-        lod1IndexBuffer = device.createBuffer({
+        lod1IndexBuffer = createTracked({
           size: lodIndices.byteLength,
           usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
           mappedAtCreation: true,
@@ -2688,6 +2727,7 @@ export class Scene {
       bindGroup,
       uniformBuffer,
       bounds: merged.bounds,
+      modelIndices,
       // Per-batch local frame: positions are stored relative to this; the draw
       // loop applies model = translate(origin) so they land in world space.
       origin: merged.origin,
@@ -3224,6 +3264,11 @@ export class Scene {
     // Selected ids whose occurrences arrived in THIS shard (selection recorded
     // before the shard streamed in) — their flags are written after upload.
     const lateSelectedEids = new Set<number>();
+    // Same for COLOUR (#3890): an override is recorded against ids with no
+    // occurrence yet, and nothing consulted it when they arrived. The viewer's
+    // catch-up cannot cover this — a shard-only streaming event never moves the
+    // geometry counter it keys on.
+    const lateOverriddenEids = new Set<number>();
     for (const t of prepared) {
       const vcount = Math.floor(t.positions.length / 3);
       if (vcount === 0 || t.indices.length === 0 || t.instanceCount === 0) continue;
@@ -3334,7 +3379,8 @@ export class Scene {
           arr = [];
           this.instancedEntityMap.set(eid, arr);
         }
-        arr.push({ templateIndex, byteOffset, originalColor });
+        // #2985; no id column or the 0 sentinel ⇒ none. ASSIGNED, never conditionally spread: ONE object shape for records that outlive the shard.
+        arr.push({ templateIndex, byteOffset, originalColor, itemId: t.itemIds?.[i] || undefined });
 
         // A shard can stream in AFTER a selection was recorded (its ids may
         // exist in earlier shards or the flat path). setInstancedSelection
@@ -3345,6 +3391,7 @@ export class Scene {
           template.selectedCount++;
           lateSelectedEids.add(eid);
         }
+        if (this.instancedOverrideColors?.has(eid)) lateOverriddenEids.add(eid);
 
         if (haveBox) {
           const w = this.unionInstancedWorldAabb(eid, cdv, byteOffset, lmnx, lmny, lmnz, lmxx, lmxy, lmxz);
@@ -3362,6 +3409,11 @@ export class Scene {
     // so the highlight shows on late-streamed geometry too.
     for (const eid of lateSelectedEids) {
       this.writeInstanceFlags(device, eid);
+    }
+    // Paint ids whose override predates their occurrences.
+    for (const eid of lateOverriddenEids) {
+      const rgba = this.instancedOverrideColors?.get(eid);
+      if (rgba) this.writeInstanceColor(device, eid, composeInstancedOverrideColor(rgba, this.instancedGhosted.has(eid), this.lastGhostAlpha));
     }
     // New occurrences default to flags=0 (visible). Force the next setInstancedVisibility
     // to recompute so an already-active isolate/hide also applies to geometry that
@@ -3494,7 +3546,10 @@ export class Scene {
       // world-space positions (issue #1405). templateIndex+byteOffset uniquely
       // and stably identifies an occurrence within the instance buffers.
       const occurrenceKey = `${expressId}:inst:${o.templateIndex}:${o.byteOffset}`;
-      out.push({ expressId, positions, normals, indices: tpl.indices, color, occurrenceKey });
+      // #2985: the same drill-to-source id a flat mesh carries, so a consumer of
+      // these pieces is not worse off for the geometry having been instanced.
+      const item = o.itemId !== undefined ? { geometryItemId: o.itemId } : {};
+      out.push({ expressId, positions, normals, indices: tpl.indices, color, occurrenceKey, ...item });
     }
     return out.length > 0 ? out : undefined;
   }
@@ -3625,11 +3680,7 @@ export class Scene {
     }
     let hasTransparent = false;
     for (const [eid, rgba] of next) {
-      // An occurrence that is currently ghosted keeps the ghost alpha: X-Ray is
-      // a stronger statement about visibility than a lens tint, and the flat
-      // path resolves the same way.
-      const ghosted = this.instancedGhosted.has(eid);
-      this.writeInstanceColor(device, eid, ghosted ? [rgba[0], rgba[1], rgba[2], this.lastGhostAlpha] : rgba);
+      this.writeInstanceColor(device, eid, composeInstancedOverrideColor(rgba, this.instancedGhosted.has(eid), this.lastGhostAlpha));
       // Instanced occurrences are opaque by partition; only an override can drop alpha
       // below the cutoff (lens-ghost / x-ray / compare). Track it so the renderer runs
       // the transparent instanced sub-pass only when something is actually translucent.

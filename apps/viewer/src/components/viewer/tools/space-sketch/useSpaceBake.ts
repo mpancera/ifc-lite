@@ -176,7 +176,8 @@ export function useSpaceBake({
     let error: string | null = null;
     for (const space of planned) {
       // `OuterCurve` is the engine's net/gross/centre outline; gross area stays
-      // on the centreline so the quantity reflects the room, not the wall face.
+      // on the centreline and net area stays on the inner face, so neither
+      // quantity is at the mercy of which boundary the user chose to emit.
       // The name counts SUCCESSFUL emissions, so a failed space does not leave
       // a gap in the numbering the user can see.
       const res = addSpace(sketchModelId, sid, {
@@ -186,6 +187,7 @@ export function useSpaceBake({
         Name: `Space ${made.length + 1}`,
         ObjectType: GENERATED_SPACE_OBJECTTYPE,
         grossFloorArea: space.grossFloorArea,
+        netFloorArea: space.netFloorArea,
       });
       if (res && 'expressId' in res) made.push({ id: res.expressId, name: `Space ${made.length + 1}` });
       else error ??= (res && 'error' in res ? res.error : 'unknown error');
@@ -253,6 +255,10 @@ export function useSpaceBake({
       const rooms = session.rooms().map((r) => ({
         outline: r.outline,
         boundary: session.boundaryOutline(r.face, boundaryMode),
+        // Always the inner face, independent of `boundaryMode` — so
+        // NetFloorArea stays net even when the user emits "outer" as the
+        // room's OuterCurve.
+        inner: session.boundaryOutline(r.face, 'inner'),
       }));
       const res = createSpacesForStorey(sid, rooms, authoredMap.get(sid) ?? []);
       emitted += res.emitted;

@@ -10,7 +10,7 @@
  */
 
 import type { IfcxFile, ComposedNode } from './types.js';
-import { ATTR, isTypedPropertyValue, parseV5aKey } from './types.js';
+import { ATTR, SPATIAL_TYPES, isTypedPropertyValue, parseV5aKey } from './types.js';
 import { composeIfcx, findRoots } from './composition.js';
 import { extractEntities } from './entity-extractor.js';
 import { extractProperties, routesToQuantityTable } from './property-extractor.js';
@@ -327,10 +327,10 @@ function determineRelationshipType(
   return RelationshipType.ContainsElements;
 }
 
+/** The tree builder's gate, not a second copy of it: a hand-written duplicate
+ *  here decided Aggregates vs ContainsElements and had drifted from that one. */
 function isSpatialElement(typeCode: string | undefined): boolean {
-  if (!typeCode) return false;
-  const spatialTypes = ['IfcProject', 'IfcSite', 'IfcBuilding', 'IfcBuildingStorey', 'IfcSpace'];
-  return spatialTypes.includes(typeCode);
+  return typeCode ? SPATIAL_TYPES.has(typeCode) : false;
 }
 
 /**
@@ -384,9 +384,9 @@ function buildQuantities(
 
       builder.add({
         entityId: expressId,
-        // Keep the authored set name (Qto_* or custom) when the key
-        // carries one; only heuristic-routed keys get the synthesized set.
+        // Keep the authored set name (Qto_* or custom) when the key carries one; else the synthesized set.
         qsetName: v5a ? v5a.setName : qsetName,
+        qsetGlobalId: '', // IFCX's flat model has no qset GlobalId; parity with property-extractor.ts's psetGlobalId.
         quantityName: propName,
         quantityType: getQuantityType(propName, v5a ? v5a.setName.startsWith('Qto_') : true),
         value: effective as number,

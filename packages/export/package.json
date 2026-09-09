@@ -1,6 +1,6 @@
 {
   "name": "@ifc-lite/export",
-  "version": "2.9.3",
+  "version": "4.0.1",
   "description": "Export formats for IFC-Lite",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@ifc-lite/geometry": "workspace:^",
+    "@ifc-lite/codegen": "workspace:^",
     "@ifc-lite/data": "workspace:^",
     "@ifc-lite/encoding": "workspace:^",
     "@ifc-lite/parser": "workspace:^",
@@ -31,7 +32,7 @@
   "devDependencies": {
     "@ifc-lite/ifcx": "workspace:^",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   },
   "license": "MPL-2.0",
   "author": "Louis True",

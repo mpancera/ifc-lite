@@ -44,13 +44,12 @@
  * (`by_entity` on the same tool still asks the store and so still misses them;
  * that is pre-existing behaviour of a different flag, untouched here.)
  *
- * The same distinction closes the drop-out's mirror image. The parser fills the
- * table's GlobalId column positionally, and for a resource entity slot 0 is not
- * a GlobalId: an `IfcMaterial`, `IfcSurfaceStyle`, `IfcClassification` or
- * `IfcProjectedCRS` was being compared under its *Name*, which put colliding
- * keys into the comparison — a material and a surface style of the same name
- * arriving as one entity. None of them is an `IfcRoot`, so the chain check
- * leaves them out and the key set is unique again.
+ * The same distinction closes the drop-out's mirror image. The parser fills
+ * the table's GlobalId column positionally, and for a resource entity slot 0
+ * is not a GlobalId: an `IfcMaterial`, `IfcSurfaceStyle`, `IfcClassification`
+ * or `IfcProjectedCRS` was compared under its *Name*, colliding keys into the
+ * comparison — a material and a surface style of the same name arriving as
+ * one entity. None is an `IfcRoot`, so the chain check leaves them out.
  *
  * ## Why this is a second copy, and what stops it drifting
  *
@@ -69,10 +68,8 @@
  *   to parser-domain — it exists to compensate for the columnar parser's own
  *   `EntityTable` gaps — but which `IfcRoot` branches a comparison may speak
  *   for is diff policy, and exporting that from the most-depended-on package
- *   under a neutral name would only rename the problem.
- *
- * That leaves a fourth package both could depend on, which is a published
- * artefact and a release decision rather than a review fix.
+ *   under a neutral name would only rename the problem. (A fourth package both
+ *   could depend on is a published artefact and a release decision, not this.)
  *
  * Until then the agreement is **asserted, not assumed**. The copies previously
  * relied on parallel suites (`diff.test.ts` here, `diff-content.test.ts` in the
@@ -80,15 +77,14 @@
  * fixing one copy and not the other passes both. It took hours to find out —
  * #2001 moved the CLI's membership check to the cross-schema inheritance lookup
  * and this copy stayed on the IFC4 codegen pin, silently dropping every IFC2X3
- * and IFC4X3 object class outside that pin. `diff-fingerprints.test.ts` now runs
- * *both* copies over the CLI's own fixtures and requires the same entities under
- * the same type names, so the next divergence fails a build instead of shipping.
+ * and IFC4X3 object class outside it. `diff-fingerprints.test.ts` now runs
+ * *both* copies over the CLI's own fixtures, so the next divergence fails a
+ * build instead of shipping.
  *
- * The one thing this copy has and the CLI's does not is the optional
- * `overlay` argument. It is additive, not a divergence: a `model_id` on this
- * server names a session that may carry queued mutations, and the CLI diffs two
- * files that cannot. Called without it, the two copies compute byte-identical
- * fingerprints, which is what the paired tests check.
+ * The one thing this copy has and the CLI's does not is the optional `overlay`
+ * argument: a `model_id` here may carry queued mutations the CLI's two files
+ * cannot. Called without it, the two copies compute byte-identical
+ * fingerprints, which the paired tests check.
  */
 
 import {
@@ -101,13 +97,19 @@ import { RelationshipType } from '@ifc-lite/data';
 import {
   EntityExtractor,
   extractAllEntityAttributes,
+  extractClassificationsOnDemand,
+  extractProjectUnits,
   extractPropertiesOnDemand,
   extractQuantitiesOnDemand,
   extractRootAttributesFromEntity,
   getAttributeNamesAcrossSchemas,
   getInheritanceChainAcrossSchemas,
-  type IfcDataStore,
+  quantitySiScale,
+  roundToScale,
+  scaledPropertyValue,
+  type IfcDataStore, type ProjectUnits,
 } from '@ifc-lite/parser';
+import { classificationLabel } from './diff-classification-label.js';
 import type { CreatedEntity, PendingOverlay } from '../overlay.js';
 
 /** Adapter handle threaded through the diff: the entity's express id. */
@@ -204,10 +206,10 @@ export function buildModelFingerprints(
 ): EntityFingerprint<DiffRef>[] {
   const fingerprints: EntityFingerprint<DiffRef>[] = [];
   const seen = new Set<number>();
-  // One extractor for the whole model: it holds a buffer reference, and the
-  // source read below only fires for the (small) set of object types the
-  // EntityTable declines to hold.
+  // One extractor for the whole model: the source read below only fires for
+  // the (small) set of object types the EntityTable declines to hold.
   const extractor = new EntityExtractor(store.source);
+  const units = extractProjectUnits(store.source, store.entityIndex); // for quantitySiScale/scaledPropertyValue
 
   for (const [typeKey, ids] of store.entityIndex.byType) {
     // Classified once per type rather than once per entity — the geometry
@@ -241,7 +243,7 @@ export function buildModelFingerprints(
       // type name: `ifcType` is hashed into the fingerprint and cross-checked
       // on every content match, so 'Unknown' would pair a task with an actor.
       const ifcType = source && (!tableType || tableType === 'Unknown') ? type.name : tableType;
-      const input = buildDataInput(store, expressId, ifcType, source, type.typeObject, overlay);
+      const input = buildDataInput(store, expressId, ifcType, source, type.typeObject, overlay, units);
       fingerprints.push({
         key: globalId,
         ifcType,
@@ -253,7 +255,7 @@ export function buildModelFingerprints(
   }
 
   for (const entity of overlay?.created ?? []) {
-    const fingerprint = createdFingerprint(entity, overlay as PendingOverlay);
+    const fingerprint = createdFingerprint(entity, overlay as PendingOverlay, units);
     if (fingerprint) fingerprints.push(fingerprint);
   }
 
@@ -293,6 +295,7 @@ export function buildModelFingerprints(
 function createdFingerprint(
   entity: CreatedEntity,
   overlay: PendingOverlay,
+  units: ProjectUnits, // scales Qto_ quantities and measure-typed Pset properties to base SI
 ): EntityFingerprint<DiffRef> | null {
   const type = classifyType(entity.ifcType);
   if (type.role === 'dependent') return null;
@@ -305,13 +308,13 @@ function createdFingerprint(
     tag: type.typeObject ? override(edited.get('Tag'), undefined) : undefined,
     propertySets: overlay.propertySets(entity.expressId).map((set) => ({
       name: set.name,
-      properties: set.properties.map((property) => ({ name: property.name, value: property.value })),
+      properties: set.properties.map((property) => ({ name: property.name, value: scaledPropertyValue(property.value, property.dataType, units) })),
     })),
     quantitySets: overlay.quantitySets(entity.expressId).map((set) => ({
       name: set.name,
       quantities: set.quantities.map((quantity) => ({
         name: quantity.name,
-        value: roundQuantity(quantity.value),
+        value: roundToScale(quantity.value * quantitySiScale(quantity, units)),
       })),
     })),
     typeAssignments: [],
@@ -359,6 +362,7 @@ function buildDataInput(
   /** Set when the session has queued edits; its reads are base-merged, so it
    *  replaces the store read rather than being layered on top of it. */
   overlay: PendingOverlay | null | undefined,
+  units: ProjectUnits, // scales Qto_ quantities and measure-typed Pset properties to base SI
 ): DataFingerprintInput {
   const predefinedType = extractAllEntityAttributes(store, expressId).find(
     (attribute) => attribute.name === 'PredefinedType',
@@ -379,7 +383,7 @@ function buildDataInput(
     : extractPropertiesOnDemand(store, expressId)
   ).map((set) => ({
     name: set.name,
-    properties: set.properties.map((property) => ({ name: property.name, value: property.value })),
+    properties: set.properties.map((property) => ({ name: property.name, value: scaledPropertyValue(property.value, property.dataType, units) })),
   }));
 
   const quantitySets = (overlay
@@ -387,13 +391,9 @@ function buildDataInput(
     : extractQuantitiesOnDemand(store, expressId)
   ).map((set) => ({
     name: set.name,
-    quantities: set.quantities.map((quantity) => ({
-      name: quantity.name,
-      // Rounded to 4 dp, matching the viewer: re-exporting a model with
-      // sub-tolerance float jitter must not flip the data hash on an otherwise
-      // identical element, which on this path would cost the pair its match.
-      value: roundQuantity(quantity.value),
-    })),
+    // Scaled to base SI, then rounded — both stored and overlaid values, a
+    // queued edit being authored in the project unit same as a parsed one.
+    quantities: set.quantities.map((quantity) => ({ name: quantity.name, value: roundToScale(quantity.value * quantitySiScale(quantity, units)) })),
   }));
 
   const typeAssignments = store.relationships
@@ -404,8 +404,10 @@ function buildDataInput(
       type: store.entities.getTypeName(typeId) || undefined,
     }));
 
+  const classifications = extractClassificationsOnDemand(store, expressId).map(classificationLabel);
   return {
     ifcType,
+    classifications,
     // The hash sees all four attributes `entity_set_attribute` accepts, but
     // `Tag` only on a type object (issue #2021) — on an occurrence it stays out
     // of the hash, so an edit to it is deliberately invisible here. The overlay
@@ -425,9 +427,6 @@ function buildDataInput(
   };
 }
 
-function roundQuantity(value: number): number {
-  return Number.isFinite(value) ? Math.round(value * 1e4) / 1e4 : value;
-}
 
 /**
  * One named attribute, read positionally through the **cross-schema** attribute

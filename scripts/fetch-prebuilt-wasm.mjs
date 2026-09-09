@@ -11,6 +11,7 @@ import { execSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tarballNameFromPackOutput } from './lib/npm-pack-output.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(__dirname, '..');
@@ -33,20 +34,22 @@ if (existsSync(wasmFile)) {
 }
 
 console.log(`Fetching ${tarball} from npm…`);
-const tgzName = execSync(`npm pack ${tarball}`, {
-  cwd: rootDir,
-  encoding: 'utf8',
-}).trim();
+const tgzName = tarballNameFromPackOutput(
+  execSync(`npm pack ${tarball} --json`, { cwd: rootDir, encoding: 'utf8' }),
+);
 
-const extractDir = join(rootDir, '.wasm-fetch-tmp');
+const EXTRACT_DIR_NAME = '.wasm-fetch-tmp';
+const extractDir = join(rootDir, EXTRACT_DIR_NAME);
 rmSync(extractDir, { recursive: true, force: true });
 mkdirSync(extractDir, { recursive: true });
 
-// Paths stay RELATIVE to the cwd set below. GNU tar -- which is what Git Bash
-// and MSYS put on PATH -- reads an archive name containing a colon as
-// `host:path` and tries to fetch it over the network, so an absolute Windows
-// path fails with a bare status 2 and no useful message.
-execSync(`tar -xzf ${JSON.stringify(tgzName)} -C ${JSON.stringify(relative(rootDir, extractDir))}`, {
+// Relative paths, not absolute ones. GNU tar — what Git for Windows ships and
+// what is first on PATH there — reads a leading `C:` as a REMOTE HOST and
+// fails with "Cannot connect to C: resolve failed" before it opens anything.
+// `--force-local` would fix that for GNU tar and break Windows' own bsdtar,
+// which does not know the flag; running from `rootDir` with relative paths
+// works for both and needs no branch on which tar is installed.
+execSync(`tar -xzf ${JSON.stringify(tgzName)} -C ${JSON.stringify(EXTRACT_DIR_NAME)}`, {
   cwd: rootDir,
   stdio: 'inherit',
 });

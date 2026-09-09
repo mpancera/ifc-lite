@@ -24,7 +24,11 @@ import { SIDEBAR_PANEL_FLAGS } from './index.js';
 const DOCKED_SIDE_PANELS = WORKSPACE_PANELS.filter(
   (p) => p.region === 'side' && !isBottomPanel(p.id) && !isLeftPanel(p.id)
     // The Information panel is the fallback, revealed by closing the others.
-    && p.id !== 'properties',
+    && p.id !== 'properties'
+    // Upstream's Load report is flag-free by design (#3927): the generic
+    // non-flag branch of `openWorkspacePanel` adopts it as the active panel
+    // directly, so it is openable without an entry in SIDEBAR_PANEL_FLAGS.
+    && p.id !== 'loadReport',
 ).map((p) => p.id);
 
 describe('sidebar panel flags', () => {

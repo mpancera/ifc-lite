@@ -19,7 +19,7 @@ const sheet = (): DrawingSheet => ({
   viewportBounds: { x: 20, y: 10, width: 380, height: 250 },
   scale: { factor: 50 },
   northArrow: { style: 'simple', rotation: 0, positionMm: { x: 30, y: 30 }, sizeMm: 15 },
-} as DrawingSheet);
+} as unknown as DrawingSheet);
 
 describe('productViewports', () => {
   it('places the Lageplan’s two views side by side', () => {

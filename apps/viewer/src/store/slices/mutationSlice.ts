@@ -461,7 +461,7 @@ export interface MutationSlice {
     psetName: string,
     propName: string,
     value: PropertyValue,
-    valueType?: PropertyValueType
+    valueType?: PropertyValueType, dataType?: string
   ) => Mutation | null;
   /** Delete a property */
   deleteProperty: (
@@ -1858,7 +1858,7 @@ export const createMutationSlice: StateCreator<
   },
 
   // Property Mutations
-  setProperty: (modelId, entityId, psetName, propName, value, valueType = PropertyValueType.String) => {
+  setProperty: (modelId, entityId, psetName, propName, value, valueType = PropertyValueType.String, dataType) => {
     if (!get().canAuthorOn(modelId, entityId).allowed) return null;
     // Collab role gate BEFORE the local commit: in a shared session only
     // editor/admin may write. Gating here (not just at the mirror) keeps the
@@ -1869,7 +1869,7 @@ export const createMutationSlice: StateCreator<
     const view = get().mutationViews.get(modelId);
     if (!view) return null;
 
-    const mutation = view.setProperty(entityId, psetName, propName, value, valueType);
+    const mutation = view.setProperty(entityId, psetName, propName, value, valueType, undefined, false, dataType);
 
     set((state) => {
       // Add to undo stack
@@ -1893,10 +1893,11 @@ export const createMutationSlice: StateCreator<
       };
     });
 
-    // Mirror into the collab CRDT (no-op without a session).
-    if (modelId === get().activeModelId) {
-      get().mirrorPropertyEdit(entityId, psetName, propName, value, valueType);
-    }
+    // Mirror into the collab CRDT (no-op without a session, and no-op unless
+    // `modelId` is the ROOM's model — the mirror gates itself on the modelId it
+    // is handed, so this call site cannot get the subject wrong. See
+    // `@/lib/collab/room-model-target`.)
+    get().mirrorPropertyEdit(modelId, entityId, psetName, propName, value, valueType);
 
     return mutation;
   },
@@ -1930,10 +1931,9 @@ export const createMutationSlice: StateCreator<
       };
     });
 
-    // Mirror into the collab CRDT (no-op without a session).
-    if (modelId === get().activeModelId) {
-      get().mirrorPropertyDelete(entityId, psetName, propName);
-    }
+    // Mirror into the collab CRDT — room model only, gated in the callee. See
+    // the note in `setProperty`.
+    get().mirrorPropertyDelete(modelId, entityId, psetName, propName);
 
     return mutation;
   },
@@ -1972,6 +1972,11 @@ export const createMutationSlice: StateCreator<
   },
 
   deletePropertySet: (modelId, entityId, psetName) => {
+    // Collab role gate before the local commit — see setProperty. Removing a
+    // pset is no less of a write than creating one, and this arm was the one
+    // `createPropertySet` and `deleteProperty` were both given the gate and
+    // this one was not.
+    if (!get().canCollabEdit()) return null;
     if (!get().canAuthorOn(modelId, entityId).allowed) return null;
     const view = get().mutationViews.get(modelId);
     if (!view) return null;
@@ -2112,16 +2117,18 @@ export const createMutationSlice: StateCreator<
       };
     });
 
-    // Mirror into the collab CRDT (no-op without a session).
-    if (modelId === get().activeModelId) {
-      get().mirrorAttributeEdit(entityId, attrName, value);
-    }
+    // Mirror into the collab CRDT — room model only, gated in the callee. See
+    // the note in `setProperty`.
+    get().mirrorAttributeEdit(modelId, entityId, attrName, value);
 
     return mutation;
   },
 
   // Entity retype (reassign class)
   setEntityType: (modelId, entityId, newType, predefinedType) => {
+    // Collab role gate before the local commit — see setProperty. Reclassing an
+    // entity is an attribute write like any other, and `setAttribute` is gated.
+    if (!get().canCollabEdit()) return null;
     if (!get().canAuthorOn(modelId, entityId).allowed) return null;
     const view = get().mutationViews.get(modelId);
     if (!view) return null;
@@ -2164,6 +2171,10 @@ export const createMutationSlice: StateCreator<
 
   // Store-Level Mutations
   setPositionalAttribute: (modelId, entityId, index, value) => {
+    // Collab role gate before the local commit — see setProperty. This is the
+    // rawest write in the slice (a direct STEP slot overwrite); every named
+    // mutation above it is gated, so leaving this one open gated nothing.
+    if (!get().canCollabEdit()) return null;
     if (!get().canAuthorOn(modelId, entityId).allowed) return null;
     const view = get().mutationViews.get(modelId);
     if (!view) return null;
@@ -2252,7 +2263,7 @@ export const createMutationSlice: StateCreator<
       // No STEP placement chain — e.g. a recipient's IFCX-reconstructed store.
       // Route the move through the collab doc (`usd::xformop`) instead, which
       // syncs to peers and moves the local mesh. Returns false outside a room.
-      if (get().collabTranslateEntity(expressId, delta)) {
+      if (get().collabTranslateEntity(modelId, expressId, delta)) {
         return { ok: true, newCoordinates: delta };
       }
       return {
@@ -2328,14 +2339,14 @@ export const createMutationSlice: StateCreator<
     if (!chain) {
       // No STEP chain (recipient/IFCX store): translate by the delta from the
       // current collab placement to the requested absolute position.
-      const current = get().readCollabPlacement(expressId);
+      const current = get().readCollabPlacement(modelId, expressId);
       if (current) {
         const delta: [number, number, number] = [
           position[0] - current.location[0],
           position[1] - current.location[1],
           position[2] - current.location[2],
         ];
-        if (get().collabTranslateEntity(expressId, delta)) {
+        if (get().collabTranslateEntity(modelId, expressId, delta)) {
           return { ok: true, newCoordinates: position };
         }
       }
@@ -2422,7 +2433,7 @@ export const createMutationSlice: StateCreator<
     }
     // No STEP rotation chain (recipient's IFCX-reconstructed store): rotate via
     // the collab doc, which syncs + live-rotates the local mesh.
-    if (get().collabRotateEntity(expressId, deltaYaw)) {
+    if (get().collabRotateEntity(modelId, expressId, deltaYaw)) {
       return { ok: true, newYawZ: deltaYaw };
     }
     return {
@@ -2444,7 +2455,7 @@ export const createMutationSlice: StateCreator<
         if (state) return { yawZ: state.yawZ, refDirection: state.refDirection };
       }
     }
-    const placement = get().readCollabPlacement(expressId);
+    const placement = get().readCollabPlacement(modelId, expressId);
     if (placement) {
       const ref = (placement.refDirection ?? [1, 0, 0]) as [number, number, number];
       return { yawZ: Math.atan2(ref[1], ref[0]), refDirection: ref };
@@ -2478,7 +2489,7 @@ export const createMutationSlice: StateCreator<
     // collab placement so the move gizmo + geometry card still surface. The
     // gizmo's origin comes from the mesh bbox, so a [0,0,0] here is fine — this
     // is purely the "is this entity movable?" gate.
-    return get().readCollabPlacement(expressId)?.location ?? null;
+    return get().readCollabPlacement(modelId, expressId)?.location ?? null;
   },
 
   resizeWall: (modelId, expressId, newStart, newEnd) => {
@@ -2611,6 +2622,10 @@ export const createMutationSlice: StateCreator<
   },
 
   splitWallAtDistance: (modelId, expressId, distanceFromStart) => {
+    // Collab role gate — same rule and same return shape as `resizeWall`.
+    if (!get().canCollabEdit()) {
+      return { ok: false, reason: 'Editing is disabled for your role in this shared session' };
+    }
     const ctx = resolveSplitContext(get, set, modelId, expressId, 'Wall is not contained in a building storey');
     if ('ok' in ctx) return ctx;
     const { view, editor, dataStore, storeyExpressId } = ctx;
@@ -2763,6 +2778,10 @@ export const createMutationSlice: StateCreator<
   },
 
   splitLinearElementAtDistance: (modelId, expressId, distanceFromStart) => {
+    // Collab role gate — same rule and same return shape as `resizeWall`.
+    if (!get().canCollabEdit()) {
+      return { ok: false, reason: 'Editing is disabled for your role in this shared session' };
+    }
     const ctx = resolveSplitContext(get, set, modelId, expressId, 'Element is not contained in a building storey');
     if ('ok' in ctx) return ctx;
     const { view, editor, dataStore, storeyExpressId } = ctx;
@@ -2870,6 +2889,10 @@ export const createMutationSlice: StateCreator<
   },
 
   splitSlabByLine: (modelId, expressId, cutA, cutB) => {
+    // Collab role gate — same rule and same return shape as `resizeWall`.
+    if (!get().canCollabEdit()) {
+      return { ok: false, reason: 'Editing is disabled for your role in this shared session' };
+    }
     const ctx = resolveSplitContext(get, set, modelId, expressId, 'Slab is not contained in a building storey');
     if ('ok' in ctx) return ctx;
     const { view, editor, dataStore, storeyExpressId } = ctx;
@@ -4266,6 +4289,10 @@ export const createMutationSlice: StateCreator<
   },
 
   duplicateEntity: (modelId, sourceExpressId, direction = DUPLICATE_DEFAULT_DIRECTION, options) => {
+    // Collab role gate before the local commit — see setProperty. Duplicating
+    // creates an entity exactly as `addWall`/`addColumn` do, and those are
+    // gated inside `addElementViaBuilder`.
+    if (!get().canCollabEdit()) return { error: 'Editing is disabled for your role in this shared session' };
     const state = get();
     const model = state.models.get(modelId);
     const dataStore = model?.ifcDataStore;

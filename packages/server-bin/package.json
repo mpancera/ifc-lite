@@ -1,6 +1,6 @@
 {
   "name": "@ifc-lite/server-bin",
-  "version": "1.16.7",
+  "version": "1.17.0",
   "description": "Pre-built IFC-Lite server binary - run without Docker or Rust",
   "type": "module",
   "bin": {
@@ -31,9 +31,9 @@
     "tar": "^7.5.20"
   },
   "devDependencies": {
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.4.1",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   },
   "engines": {
     "node": ">=18.0.0"

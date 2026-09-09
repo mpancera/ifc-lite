@@ -7,6 +7,7 @@
  */
 
 import { ensureParquetInit } from './parquet-decoder.js';
+import { nullableFloat64Column } from './parquet-nullable.js';
 
 export interface EntityMetadata {
   entity_id: number;
@@ -239,6 +240,10 @@ export interface Relationship {
   rel_type: string;
   relating_id: number;
   related_id: number;
+  /** Express id of the `IfcRel*` entity this row came from. v6 payload (issue
+   *  #3860); `undefined` for older servers. `0` on the synthetic
+   *  `TYPEHASPROPERTYSETS` rows, which no IFC entity declares. */
+  rel_id?: number;
 }
 
 export interface SpatialNode {
@@ -316,11 +321,10 @@ export interface DataModel {
 }
 
 /**
- * Decode data model from Parquet buffer.
- *
- * OPTIMIZED: Uses toArray() for bulk string extraction instead of per-element .get() calls.
- * Arrow's .get(i) is slow for strings (offset lookup + UTF-8 decode per call).
- * toArray() decodes all strings in one pass which is 10-20x faster for large datasets.
+ * Decode data model from Parquet buffer. Bulk string columns use toArray()
+ * instead of per-element .get() (10-20x faster, no per-row UTF-8 decode); a
+ * NULLABLE numeric column is the exception — see `nullableFloat64Column` in
+ * `parquet-nullable.ts` for why toArray() alone silently turns a null into 0.
  *
  * Format: [entities_len][entities_data][properties_len][properties_data][quantities_len][quantities_data][relationships_len][relationships_data][spatial_len][spatial_data]
  */
@@ -548,6 +552,10 @@ export async function decodeDataModel(data: ArrayBuffer): Promise<DataModel> {
   const relTypesArr = relationshipsArrow.getChild('rel_type')?.toArray() as string[];
   const relatingIds = relationshipsArrow.getChild('relating_id')?.toArray() as Uint32Array;
   const relatedIds = relationshipsArrow.getChild('related_id')?.toArray() as Uint32Array;
+  // rel_id arrives with the v6 payload (issue #3860). An older server sends no
+  // such column: leave the field absent rather than defaulting to 0, so a
+  // caller can tell "no id on the wire" from the genuine 0 on synthetic rows.
+  const relIds = relationshipsArrow.getChild('rel_id')?.toArray() as Uint32Array | undefined;
 
   // Pre-allocate array for better performance
   const relationships: Relationship[] = new Array(relatingIds.length);
@@ -557,6 +565,7 @@ export async function decodeDataModel(data: ArrayBuffer): Promise<DataModel> {
       relating_id: relatingIds[i],
       related_id: relatedIds[i],
     };
+    if (relIds !== undefined) relationships[i].rel_id = relIds[i];
   }
 
   // Parse spatial hierarchy - format: [nodes_len][nodes_data][element_to_storey_len][element_to_storey_data]...
@@ -609,7 +618,7 @@ export async function decodeDataModel(data: ArrayBuffer): Promise<DataModel> {
   const pathsArr = nodesArrow.getChild('path')?.toArray() as string[];
   const spatialTypeNamesArr = nodesArrow.getChild('type_name')?.toArray() as string[];
   const spatialNamesArr = nodesArrow.getChild('name')?.toArray() as (string | null)[];
-  const elevationsArr = nodesArrow.getChild('elevation')?.toArray() as (number | null)[];
+  const elevationsArr = nullableFloat64Column(nodesArrow, 'elevation');
   const childrenIdsList = nodesArrow.getChild('children_ids');
   const elementIdsList = nodesArrow.getChild('element_ids');
 
@@ -644,7 +653,7 @@ export async function decodeDataModel(data: ArrayBuffer): Promise<DataModel> {
       path: pathsArr[i] ?? '',
       type_name: spatialTypeNamesArr[i] ?? '',
       name: spatialNamesArr[i] || undefined,
-      elevation: elevationsArr[i] ?? undefined,
+      elevation: elevationsArr?.[i] ?? undefined,
       children_ids: childrenIds,
       element_ids: elementIds,
     };
@@ -700,7 +709,7 @@ export async function decodeDataModel(data: ArrayBuffer): Promise<DataModel> {
     const setNames = t.getChild('set_name')?.toArray() as (string | null)[];
     const layerIndices = t.getChild('layer_index')?.toArray() as Uint32Array;
     const materialNames = t.getChild('material_name')?.toArray() as (string | null)[];
-    const thicknesses = t.getChild('thickness')?.toArray() as (number | null)[];
+    const thicknesses = nullableFloat64Column(t, 'thickness');
     const ventChild = t.getChild('is_ventilated');
     const categories = t.getChild('category')?.toArray() as (string | null)[];
     for (let i = 0; i < elementIds.length; i++) {

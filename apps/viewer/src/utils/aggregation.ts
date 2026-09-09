@@ -16,57 +16,21 @@
  * cache loads retain (issue #1133).
  */
 
-import { RelationshipType } from '@ifc-lite/data';
+import {
+  RelationshipType,
+  getAggregatedChildren,
+  collectAggregatedDescendants,
+  type DecompositionRelationships,
+} from '@ifc-lite/data';
 
-/** Structural view of the relationship graph — both the parser's
- *  `RelationshipGraph` and the cache-rebuilt graph satisfy it. */
-export interface AggregationRelationships {
-  getRelated(
-    entityId: number,
-    relType: RelationshipType,
-    direction: 'forward' | 'inverse'
-  ): number[];
-}
-
-/** Direct `IfcRelAggregates` children of `expressId` (one level down). */
-export function getAggregatedChildren(
-  relationships: AggregationRelationships | undefined,
-  expressId: number
-): number[] {
-  if (!relationships) return [];
-  return relationships.getRelated(expressId, RelationshipType.Aggregates, 'forward');
-}
-
-/**
- * All decomposition descendants of `rootId` via `IfcRelAggregates`, depth-first
- * and excluding `rootId` itself. Cycle-guarded against malformed files
- * (A aggregates B, B aggregates A) so it always terminates. Order is a stable
- * pre-order so callers can rely on it for display.
- */
-export function collectAggregatedDescendants(
-  relationships: AggregationRelationships | undefined,
-  rootId: number
-): number[] {
-  if (!relationships) return [];
-  const out: number[] = [];
-  const seen = new Set<number>([rootId]);
-  // DFS with an explicit stack; push children in reverse so siblings keep
-  // their authored order in the pre-order output.
-  const stack: number[] = [];
-  const pushChildren = (parentId: number) => {
-    const kids = relationships.getRelated(parentId, RelationshipType.Aggregates, 'forward');
-    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
-  };
-  pushChildren(rootId);
-  while (stack.length > 0) {
-    const id = stack.pop()!;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    out.push(id);
-    pushChildren(id);
-  }
-  return out;
-}
+// The traversal itself (`getAggregatedChildren`, `collectAggregatedDescendants`)
+// lives in `@ifc-lite/data` — `packages/mcp` needs the identical
+// `IfcRelAggregates` walk and cannot import from this app, so the walk moved
+// to the shared package and this module re-exports it under its existing
+// names so every consumer in this app keeps working unchanged (issue #3338).
+export { getAggregatedChildren, collectAggregatedDescendants };
+/** @deprecated import `DecompositionRelationships` from `@ifc-lite/data` instead — kept as an alias so existing imports in this app don't need touching. */
+export type AggregationRelationships = DecompositionRelationships;
 
 /**
  * Does `rootId` — or any of its `IfcRelAggregates` descendants — carry geometry?
@@ -142,18 +106,41 @@ export interface AggregationModelAccess {
 }
 
 /**
- * Replace every id in `globalIds` that has no renderable geometry with the
- * aggregated parts that do.
+ * Replace every id in `globalIds` that has no renderable geometry with ALL of
+ * its aggregated descendants.
  *
- * Framing, like the class trees, asks each selected id for a bounding box and
- * skips it when there is none — so selecting a geometry-less assembly and
- * pressing Frame moved the camera nowhere. Expanding here makes an assembly
- * frame as the union of its parts.
+ * Two use cases, both solved by the same full expansion:
+ *
+ * 1. Framing: the class trees ask each selected id for a bounding box and skip
+ *    it when there is none — so selecting a geometry-less assembly and pressing
+ *    Frame moves the camera nowhere. Expanding makes an assembly frame as the
+ *    union of its parts.
+ *
+ * 2. Presentation channels: `hasGeometry` is a point-in-time check — during
+ *    streaming or behind a type-visibility filter, it says "no" for a part that
+ *    legitimately has geometry and simply hasn't rendered YET (#3426, #3865).
+ *    Persisting only currently-meshed parts means parts that stream in later
+ *    escape the action. Always including the full descendant set ensures the
+ *    persisted action applies to all parts, present and future. Carrying an id
+ *    with no mesh is free: it simply never matches a renderer's mesh whitelist.
+ *
+ *    This buys HIDE and ISOLATE, and only those two. Both are whitelists the
+ *    renderer re-matches mesh ids against, so a mesh-less id in the persisted
+ *    set starts matching the moment its mesh lands. COLOUR does not get the
+ *    same benefit from a bigger set: both colour sinks in
+ *    `useGeometryStreaming.ts` drain their pending map and clear it, and
+ *    `scene.setColorOverrides` builds overlay batches once from `meshDataMap`,
+ *    so a part whose mesh arrives after the flush is never painted. Making
+ *    colour repaint late meshes needs a re-application on the geometry tick,
+ *    which is #3890, not this expansion.
  *
  * Ids that already have geometry pass through untouched and in order. An id
- * with neither geometry nor geometry-bearing parts is dropped, exactly as the
- * caller's own `continue` would have dropped it. Resolution stays inside one
- * model: descendants are mapped back through the SAME model's offset.
+ * with neither geometry nor ANY aggregated descendant at all is dropped — that
+ * is the one case this function genuinely cannot help with, because there is
+ * nothing to expand to.
+ *
+ * Resolution stays inside one model: descendants are mapped back through the
+ * SAME model's offset.
  */
 export function expandToGeometryBearingIds(
   globalIds: readonly number[],
@@ -175,10 +162,18 @@ export function expandToGeometryBearingIds(
     const { modelId, expressId } = access.resolve(globalId);
     const relationships = access.relationshipsFor(modelId);
     if (!relationships) continue;
-    for (const descendant of collectAggregatedDescendants(relationships, expressId)) {
-      const partGlobalId = access.toGlobalId(modelId, descendant);
-      if (hasGeometry(partGlobalId)) push(partGlobalId);
-    }
+    const descendantGlobalIds = collectAggregatedDescendants(relationships, expressId).map(
+      (descendant) => access.toGlobalId(modelId, descendant),
+    );
+    // Include ALL aggregated descendants, regardless of current renderability
+    // (#3426, #3865). `hasGeometry` is a point-in-time check — during streaming,
+    // it says "no" for a part that has geometry and simply hasn't rendered YET.
+    // Including the full set puts parts that stream in later into the persisted
+    // hide/isolate whitelist, so they are hidden or isolated the moment their
+    // mesh lands. Colour needs a repaint on the geometry tick as well (#3890).
+    // Carrying an id with no mesh is free: it simply never matches a renderer's
+    // mesh whitelist.
+    for (const partGlobalId of descendantGlobalIds) push(partGlobalId);
   }
   return out;
 }

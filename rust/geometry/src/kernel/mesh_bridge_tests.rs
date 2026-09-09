@@ -439,3 +439,168 @@ fn subtract_many_disjoint_openings_matches_sequential() {
         "batched volume {v} != sequential volume {vs} on disjoint cutters"
     );
 }
+
+/// Issue #3353, the N-ary half.
+///
+/// `union_many` reaches the same broadphase, `near_coplanar` guard and
+/// classifier as the binary union, so the per-axis snap that leaves two flush
+/// faces a few µm apart tears it the same way — and `union_many` is the
+/// PRIMARY union in the pipeline (`processors/boolean` builds the cutter union
+/// with it, `coaxial_union` behind that), not a side path.
+///
+/// # Why the binary fix did not simply extend here, and what was actually wrong
+///
+/// Applying `promote_operands_mutually` in `union_many` DOES help this family:
+/// a three-box near-coplanar sweep (49 corner placements x 3 snap offsets)
+/// tears 105 of 147 without it and 36 of 147 with it, and this fixture goes
+/// from 20 unmatched directed edges to 0.
+///
+/// Naively applying it also broke `tests/issue_960_segmented_roof_clip.rs`:
+/// wall #4148 came back 9850 mm tall against an expected ~8984 mm — the
+/// sequential fallback's full-height seam sliver, the exact defect #960
+/// removed. The mechanism (confirmed by instrumenting a debug build against
+/// the #960 fixture, not inferred): the roof-segment cutter prisms are
+/// authored analytically and already share BIT-IDENTICAL vertices at their
+/// true adjacency seams — no reconciliation needed there. But
+/// `promote_cutter_verts_onto_host_faces`'s per-vertex plane search
+/// deliberately EXCLUDES a vertex's own exact-match plane from candidacy
+/// (`d == 0.0 { continue }`, load-bearing for the tunnel-wall jamb-corner
+/// case elsewhere in this module) and then searches every OTHER host face
+/// within band for a nearer one. With `host` pooling many roof segments that
+/// share the same pitch (hence near-parallel planes), that search finds a
+/// spurious near-match on an unrelated, non-adjacent operand's plane and
+/// nudges the vertex a few µm off its true neighbour — measured on the #960
+/// fixture's four `union_many` calls: the count of bit-identical vertex pairs
+/// shared between operand pairs drops from (148, 4, 12, 248) pre-weld to
+/// (88, 4, 5, 159) post-weld. The weld was actively DESTROYING pre-existing
+/// exact seams, not merely reconciling noisy ones. The fix
+/// (`promote_cutter_verts_onto_host_faces` in `plane_weld.rs`) skips any
+/// cutter vertex that is already bit-identical to some host vertex — safe
+/// everywhere, since a genuinely-imprecise cutter vertex (the tunnel-wall
+/// case this guard was designed around) is by construction never in that
+/// set.
+///
+/// These live in-crate rather than beside
+/// `tests/issue_3353_near_coplanar_rotated_overlap.rs` because the production
+/// combination is `consolidate_coplanar(union_many(..))` and
+/// `consolidate_coplanar` is `pub(crate)`. Asserting the RAW `union_many`
+/// output instead would assert the wrong thing: raw N-ary output carries
+/// T-junctions that consolidation is expected to close (at `dz = 0` this same
+/// three-box fixture is 26 open edges raw and 0 consolidated), so a raw
+/// assertion would fail on geometry that is fine.
+mod issue_3353_nary_near_coplanar {
+    use super::*;
+    use crate::csg::ClippingProcessor;
+    use nalgebra::{Point3, Rotation3, Unit, Vector3};
+    use std::collections::HashMap;
+
+    /// `SNAP_GRID`, spelled out so the fixture is visibly scaled to the grid.
+    const SG: f64 = 1.0 / 65536.0;
+
+    fn boxed(min: [f64; 3], size: [f64; 3], rot: Option<(Vector3<f64>, f64, [f64; 3])>) -> Mesh {
+        let mx = [min[0] + size[0], min[1] + size[1], min[2] + size[2]];
+        let c = |i: usize| -> [f64; 2] { [min[i], mx[i]] };
+        let mut corners: Vec<Point3<f64>> = [
+            (0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
+            (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1),
+        ]
+        .iter()
+        .map(|&(i, j, k)| Point3::new(c(0)[i], c(1)[j], c(2)[k]))
+        .collect();
+        if let Some((axis, angle, about)) = rot {
+            let r = Rotation3::from_axis_angle(&Unit::new_normalize(axis), angle);
+            let o = Point3::new(about[0], about[1], about[2]);
+            for p in corners.iter_mut() {
+                *p = o + r * (*p - o);
+            }
+        }
+        let faces: [[usize; 4]; 6] = [
+            [0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4],
+            [2, 3, 7, 6], [0, 4, 7, 3], [1, 2, 6, 5],
+        ];
+        let mut m = Mesh::with_capacity(24, 36);
+        for f in &faces {
+            let e1 = corners[f[1]] - corners[f[0]];
+            let e2 = corners[f[2]] - corners[f[0]];
+            let n = e1.cross(&e2).try_normalize(1e-12).unwrap_or(Vector3::z());
+            let b = m.vertex_count() as u32;
+            for &i in f {
+                m.add_vertex(corners[i], n);
+            }
+            m.add_triangle(b, b + 1, b + 2);
+            m.add_triangle(b, b + 2, b + 3);
+        }
+        m
+    }
+
+    /// Unmatched directed edges after welding by position at 0.1 mm — the same
+    /// census check the `issue_3353_*` integration tests use.
+    fn open_edges(m: &Mesh) -> Result<usize, String> {
+        if m.is_empty() {
+            return Err("union produced nothing".to_string());
+        }
+        let w = m.welded_by_position(1e-4);
+        let mut edges: HashMap<(u32, u32), (u32, u32)> = HashMap::new();
+        for t in w.indices.chunks_exact(3) {
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                if a == b {
+                    return Err(format!("degenerate edge: triangle repeats welded vertex {a}"));
+                }
+                let e = edges.entry((a.min(b), a.max(b))).or_insert((0, 0));
+                if a < b {
+                    e.0 += 1;
+                } else {
+                    e.1 += 1;
+                }
+            }
+        }
+        Ok(edges.values().filter(|&&(f, r)| f != 1 || r != 1).count())
+    }
+
+    /// A axis-aligned at the origin; B rotated +30 degrees about Z overlapping
+    /// its +X+Y corner; C rotated -20 degrees overlapping its -X+Y corner. Both
+    /// rotated boxes sit `dz` above A, so TWO of the three horizontal face
+    /// pairs are near-coplanar rather than flush.
+    fn three_boxes(dz: f64) -> [Mesh; 3] {
+        let a = boxed([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], None);
+        let b = boxed(
+            [0.4, 0.4, dz],
+            [1.0, 1.0, 1.0],
+            Some((Vector3::z(), 30.0f64.to_radians(), [0.9, 0.9, 0.5 + dz])),
+        );
+        let c = boxed(
+            [-0.4, 0.4, dz],
+            [1.0, 1.0, 1.0],
+            Some((Vector3::z(), -20.0f64.to_radians(), [0.1, 0.9, 0.5 + dz])),
+        );
+        [a, b, c]
+    }
+
+    /// One snap step of offset: 20 unmatched directed edges before the weld
+    /// reached `union_many`, closed after. `dz = 0` is the control — exactly
+    /// flush was always clean, which is what names the near-coplanar regime.
+    #[test]
+    fn a_three_operand_near_coplanar_union_stays_closed() {
+        for dz in [SG, 0.0] {
+            let [a, b, c] = three_boxes(dz);
+            for (name, m) in [("A", &a), ("B", &b), ("C", &c)] {
+                assert_eq!(open_edges(m), Ok(0), "operand {name} must be closed going in");
+            }
+            // Every ordering: `union_many` has no privileged first operand, and
+            // the mutual weld walks the operands in index order, so the result
+            // must not depend on which one the caller lists first.
+            for order in [
+                [&a, &b, &c], [&a, &c, &b], [&b, &a, &c],
+                [&b, &c, &a], [&c, &a, &b], [&c, &b, &a],
+            ] {
+                let out = ClippingProcessor::consolidate_coplanar(union_many(&order));
+                assert_eq!(
+                    open_edges(&out),
+                    Ok(0),
+                    "a three-operand near-coplanar union must come back closed (dz={dz})"
+                );
+            }
+        }
+    }
+}

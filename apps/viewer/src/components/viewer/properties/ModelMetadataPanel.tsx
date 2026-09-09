@@ -114,9 +114,12 @@ export function ModelMetadataPanel({ model }: { model: FederatedModel }) {
   // Classification systems used in THIS model (e.g. Uniclass, OmniClass, a
   // national system — a model can carry several at once). Walks only the
   // handful of IfcClassification entities via the byType index, so it's
-  // cheap even on large models — not a per-element scan.
+  // cheap even on large models — not a per-element scan. `unresolved` means
+  // the model HAS classification systems but this store (server-parsed, no
+  // source bytes) can't read their names — distinct from "genuinely none"
+  // (#3948); `names` is always `[]` in that case.
   const classificationSystems = useMemo(() => {
-    if (!dataStore) return [];
+    if (!dataStore) return { names: [], unresolved: false };
     return extractClassificationSystemsOnDemand(dataStore as IfcDataStore);
   }, [dataStore]);
 
@@ -242,8 +245,10 @@ export function ModelMetadataPanel({ model }: { model: FederatedModel }) {
             {/* Project Properties */}
             {projectData.properties.length > 0 && (
               <div className="p-3 pt-0 space-y-2">
-                {projectData.properties.map((pset) => (
-                  <PropertySetCard key={pset.name} pset={pset} projectUnits={projectUnits} unitDisplayOverrides={unitDisplayOverrides} />
+                {projectData.properties.map((pset, index) => (
+                  // Pset names are not unique per entity (two IfcPropertySet
+                  // entities may legitimately share a Name); index disambiguates.
+                  <PropertySetCard key={`${pset.name}-${index}`} pset={pset} projectUnits={projectUnits} unitDisplayOverrides={unitDisplayOverrides} />
                 ))}
               </div>
             )}
@@ -299,13 +304,18 @@ export function ModelMetadataPanel({ model }: { model: FederatedModel }) {
             </h4>
           </div>
           <div className="divide-y divide-zinc-100 dark:divide-zinc-900">
-            {classificationSystems.length === 0 ? (
+            {classificationSystems.unresolved ? (
+              <div className="flex items-center gap-3 px-3 py-2">
+                <BookMarked className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
+                <span className="text-xs text-zinc-500">Classification systems present, but unavailable on this data source</span>
+              </div>
+            ) : classificationSystems.names.length === 0 ? (
               <div className="flex items-center gap-3 px-3 py-2">
                 <BookMarked className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
                 <span className="text-xs text-zinc-500">No classification systems</span>
               </div>
             ) : (
-              classificationSystems.map((system) => (
+              classificationSystems.names.map((system) => (
                 <div key={system} className="flex items-center gap-3 px-3 py-2">
                   <BookMarked className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
                   <span className="text-xs font-mono text-zinc-900 dark:text-zinc-100">

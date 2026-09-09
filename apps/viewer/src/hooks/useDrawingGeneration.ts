@@ -29,13 +29,14 @@ import {
   type ProfileEntry,
 } from '@ifc-lite/drawing-2d';
 import { createMeshOutlineProvider, type MeshOutline2dFn } from './meshOutlineProvider.js';
+import { createDrawingRequestQueue } from './drawingRequestQueue.js';
 import { type GeometryResult } from '@ifc-lite/geometry';
 import {
   getWholeSourceForWorker,
   parseProfilesFlat,
   parseSymbolicFlat,
 } from '@/lib/overlay-parse/index.js';
-import { buildProfileEntries } from '@/lib/overlay-parse/profile-entries.js';
+import { buildProfileEntries, warnAboutSkippedProfiles } from '@/lib/overlay-parse/profile-entries.js';
 import {
   buildSymbolicDrawingLines,
   type SymbolicDrawingLine,
@@ -151,6 +152,7 @@ interface UseDrawingGenerationParams {
   computedIsolatedIds?: Set<number> | null;
   models: Map<string, { id: string; visible: boolean; idOffset?: number }>;
   panelVisible: boolean;
+  activeTool: string;
   drawing: Drawing2D | null;
   // Store actions
   setDrawing: (d: Drawing2D | null) => void;
@@ -178,14 +180,13 @@ export function useDrawingGeneration({
   computedIsolatedIds,
   models,
   panelVisible,
+  activeTool,
   drawing,
   setDrawing,
   setDrawingStatus,
   setDrawingProgress,
   setDrawingError,
 }: UseDrawingGenerationParams): UseDrawingGenerationResult {
-  // Track if this is a regeneration (vs initial generation)
-  const isRegeneratingRef = useRef(false);
 
   // Cache for symbolic representations - these don't change with section position
   // Only re-parse when model or display options change
@@ -217,7 +218,7 @@ export function useDrawingGeneration({
   } | null>(null);
 
   // Generate drawing when panel opens
-  const generateDrawing = useCallback(async (isRegenerate = false) => {
+  const computeDrawing = useCallback(async (isRegenerate = false, isCurrent: () => boolean = () => true) => {
     if (!geometryResult?.meshes || geometryResult.meshes.length === 0) {
       // Clear the drawing when no geometry is available (e.g., all models hidden)
       setDrawing(null);
@@ -247,7 +248,6 @@ export function useDrawingGeneration({
       setDrawingStatus('generating');
       setDrawingProgress(0, 'Initializing...');
     }
-    isRegeneratingRef.current = isRegenerate;
 
     // Parse symbolic representations if enabled (for hybrid mode)
     // OPTIMIZATION: Cache symbolic data - it doesn't change with section position
@@ -400,6 +400,7 @@ export function useDrawingGeneration({
           // profile extraction would require iterating over each model separately.
           profiles = buildProfileEntries(flat, shift, 0);
           profileCacheRef.current = { profiles, sourceId: modelCacheKey };
+          warnAboutSkippedProfiles(flat); // #3691-class silent-drop signal, one layer over
         } catch (error) {
           // Degrade gracefully: the drawing still renders without projection.
           console.warn('Profile extraction failed:', error);
@@ -417,6 +418,7 @@ export function useDrawingGeneration({
     try {
       generator = new Drawing2DGenerator();
       await generator.initialize();
+      if (!isCurrent()) return;
 
       // Convert semantic axis to geometric
       const axis = AXIS_MAP[sectionPlane.axis];
@@ -679,6 +681,8 @@ export function useDrawingGeneration({
         projectionOn ? projectionProfiles : undefined,
       );
 
+      if (!isCurrent()) return;
+
       // If we have symbolic representations, create a hybrid drawing
       if (symbolicLines.length > 0 && entitiesWithSymbols.size > 0) {
         // Get entity IDs that actually appear in the section cut (these are being cut by the plane)
@@ -938,10 +942,9 @@ export function useDrawingGeneration({
 
       // Always set status to ready (whether initial generation or regeneration)
       setDrawingStatus('ready');
-      isRegeneratingRef.current = false;
     } catch (error) {
       console.error('Drawing generation failed:', error);
-      setDrawingError(error instanceof Error ? error.message : 'Generation failed');
+      if (isCurrent()) setDrawingError(error instanceof Error ? error.message : 'Generation failed');
     } finally {
       // Always cleanup generator to prevent resource leaks
       generator?.dispose();
@@ -964,71 +967,18 @@ export function useDrawingGeneration({
     setDrawingError,
   ]);
 
-  // Track panel visibility and geometry for detecting changes
-  const prevPanelVisibleRef = useRef(false);
-  const prevOverlayEnabledRef = useRef(false);
-  const prevMeshCountRef = useRef(0);
-  const prevTypeVisibilityRef = useRef(typeVisibility);
-
-  // Auto-generate when panel opens (or 3D overlay is enabled) and no drawing exists
-  // Also regenerate when geometry changes significantly (e.g., models hidden/shown)
-  useEffect(() => {
-    const wasVisible = prevPanelVisibleRef.current;
-    const wasOverlayEnabled = prevOverlayEnabledRef.current;
-    const prevMeshCount = prevMeshCountRef.current;
-    const currentMeshCount = geometryResult?.meshes?.length ?? 0;
-    const hasGeometry = currentMeshCount > 0;
-
-    // Track panel visibility separately from overlay
-    const panelJustOpened = panelVisible && !wasVisible;
-    const overlayJustEnabled = displayOptions.show3DOverlay && !wasOverlayEnabled;
-    const isNowActive = panelVisible || displayOptions.show3DOverlay;
-    const geometryChanged = currentMeshCount !== prevMeshCount;
-    // Flipping a class toggle changes the drawing's input without changing the
-    // mesh count, so `geometryChanged` never fires for it (issue #2060). The
-    // store replaces the whole `typeVisibility` object on every toggle, so an
-    // identity compare is enough — this hook's own tests can't prove that on
-    // their own, since they pass their own object literals; it's pinned by
-    // `visibilitySlice.test.ts`'s "replaces the typeVisibility object identity
-    // on every toggle" case, which fails if `toggleTypeVisibility` is
-    // refactored to structural sharing (#2070 review).
-    const typeVisibilityChanged = prevTypeVisibilityRef.current !== typeVisibility;
-
-    // Always update refs
-    prevPanelVisibleRef.current = panelVisible;
-    prevOverlayEnabledRef.current = displayOptions.show3DOverlay;
-    prevMeshCountRef.current = currentMeshCount;
-    prevTypeVisibilityRef.current = typeVisibility;
-
-    if (isNowActive) {
-      if (!hasGeometry) {
-        // No geometry available - clear the drawing
-        if (drawing) {
-          setDrawing(null);
-          setDrawingStatus('idle');
-        }
-      } else if (panelJustOpened || overlayJustEnabled || !drawing || geometryChanged || typeVisibilityChanged) {
-        // Generate if:
-        // 1. Panel just opened, OR
-        // 2. Overlay just enabled, OR
-        // 3. No drawing exists, OR
-        // 4. Geometry changed significantly (models hidden/shown), OR
-        // 5. A class-visibility toggle flipped (issue #2060)
-        generateDrawing();
-      }
-    }
-  }, [panelVisible, displayOptions.show3DOverlay, drawing, geometryResult, typeVisibility, generateDrawing, setDrawing, setDrawingStatus]);
-
-  // Auto-regenerate when section plane changes
-  // Strategy: INSTANT - no debounce, but prevent overlapping computations
-  // The generation time itself acts as natural batching for fast slider movements
-  //
-  // For face-picked custom planes (issue #243), `customKey` collapses the
-  // plane's normal+distance into a string we can compare cheaply — without
-  // it dragging the gizmo wouldn't trigger regeneration because the
-  // cardinal axis/position/flipped triple stays the same.
-  const customKey = (sp: { custom?: { normal: [number, number, number]; distance: number } }) =>
-    sp.custom ? `${sp.custom.normal.join(',')}|${sp.custom.distance}` : '';
+  // Every entry point shares one queue. A superseded cut still disposes its
+  // generator, but cannot publish over the newest requested inputs (#3921).
+  const queueRef = useRef<ReturnType<typeof createDrawingRequestQueue> | null>(null);
+  if (!queueRef.current) queueRef.current = createDrawingRequestQueue();
+  const queue = queueRef.current;
+  const [isRegenerating, setIsRegenerating] = useState(false);
+  const generateDrawing = useCallback((isRegenerate = false) => queue.request(async (isCurrent) => {
+    setIsRegenerating(isRegenerate);
+    try { await computeDrawing(isRegenerate, isCurrent); }
+    finally { setIsRegenerating(false); }
+  }), [computeDrawing, queue]);
+  const doRegenerate = useCallback(() => generateDrawing(true), [generateDrawing]);
 
   /**
    * Which elements are in scope, collapsed to something comparable.
@@ -1092,127 +1042,44 @@ export function useDrawingGeneration({
    */
   const modelKey = useViewerStore((s) => s.mutationVersion);
 
-  const sectionRef = useRef({
-    axis: sectionPlane.axis,
-    position: sectionPlane.position,
-    flipped: sectionPlane.flipped,
-    customKey: customKey(sectionPlane),
-    visibilityKey,
-    displayKey,
-    modelKey,
-  });
-  const isGeneratingRef = useRef(false);
-  const latestSectionRef = useRef({
-    axis: sectionPlane.axis,
-    position: sectionPlane.position,
-    flipped: sectionPlane.flipped,
-    customKey: customKey(sectionPlane),
-    visibilityKey,
-    displayKey,
-    modelKey,
-  });
-  const [isRegenerating, setIsRegenerating] = useState(false);
-
-  // `generateDrawing` is a new closure whenever the cut (or the visible set)
-  // changes, and the catch-up path below runs AFTER an await — so it must reach
-  // the newest one, not the one captured when this run started. Going through a
-  // ref is what makes that true.
-  //
-  // Without it the catch-up re-ran the generator it was created with, which
-  // still held the OLD cut: it would finish, notice the cut still did not
-  // match, and queue itself again with the same stale closure. On a small model
-  // generation is fast enough that a fresh render usually breaks the cycle; on
-  // a real one (940 meshes) it showed up as a storey switch that took ~14 s to
-  // appear, or silently never did — a plan of the floor you were looking at
-  // before.
-  const generateDrawingRef = useRef(generateDrawing);
-  useEffect(() => { generateDrawingRef.current = generateDrawing; }, [generateDrawing]);
-
-  // Stable across renders, so the catch-up below always re-enters THIS function
-  // rather than a snapshot of it.
-  const doRegenerateRef = useRef<() => Promise<void>>(async () => {});
-  const doRegenerate = useCallback(async () => {
-    if (isGeneratingRef.current) {
-      // Already generating - the latest position is already tracked in latestSectionRef
-      // When current generation finishes, it will check if another is needed
-      return;
-    }
-
-    isGeneratingRef.current = true;
-    setIsRegenerating(true);
-
-    // Capture position at start of generation
-    const targetSection = { ...latestSectionRef.current };
-
-    try {
-      await generateDrawingRef.current(true);
-    } finally {
-      isGeneratingRef.current = false;
-      setIsRegenerating(false);
-
-      // Check if section changed while we were generating
-      const current = latestSectionRef.current;
-      if (
-        current.axis !== targetSection.axis ||
-        current.position !== targetSection.position ||
-        current.flipped !== targetSection.flipped ||
-        current.customKey !== targetSection.customKey ||
-        current.visibilityKey !== targetSection.visibilityKey ||
-        current.displayKey !== targetSection.displayKey
-      ) {
-        // Position changed during generation - regenerate immediately with latest
-        // Use microtask to avoid blocking
-        queueMicrotask(() => doRegenerateRef.current());
-      }
-    }
-  }, []);
-  useEffect(() => { doRegenerateRef.current = doRegenerate; }, [doRegenerate]);
-
-  const customKeyValue = customKey(sectionPlane);
+  // Match useRenderUpdates: a saved overlay preference needs the section tool.
+  // Compare the CONTENT keys above, not set identities: the hidden/isolated
+  // sets are rebuilt on many renders and would regenerate continuously.
+  const drawingActive = panelVisible || (activeTool === 'section' && displayOptions.show3DOverlay);
+  const previousInputs = useRef<unknown[]>([]);
+  const wasActive = useRef(false);
+  const previousPlane = useRef('');
+  useEffect(() => () => {
+    queue.cancel();
+    wasActive.current = false;
+    previousInputs.current = [];
+  }, [queue]);
   useEffect(() => {
-    // Always update latest section ref (even if generating)
-    latestSectionRef.current = {
-      axis: sectionPlane.axis,
-      position: sectionPlane.position,
-      flipped: sectionPlane.flipped,
-      customKey: customKeyValue,
-      visibilityKey,
-      displayKey,
-      modelKey,
-    };
-
-    // Check if anything that changes the drawing actually changed
-    const prev = sectionRef.current;
-    if (
-      prev.axis === sectionPlane.axis &&
-      prev.position === sectionPlane.position &&
-      prev.flipped === sectionPlane.flipped &&
-      prev.customKey === customKeyValue &&
-      prev.visibilityKey === visibilityKey &&
-      prev.displayKey === displayKey &&
-      prev.modelKey === modelKey
-    ) {
+    const plane = JSON.stringify([sectionPlane.axis, sectionPlane.position, sectionPlane.flipped,
+      sectionPlane.custom]);
+    const inputs = [geometryResult, geometryResult?.meshes.length, ifcDataStore,
+      displayKey, typeVisibility, visibilityKey, modelKey, models];
+    const changed = inputs.some((value, index) => value !== previousInputs.current[index]);
+    const planeChanged = plane !== previousPlane.current;
+    const activated = drawingActive && !wasActive.current;
+    const deactivated = !drawingActive && wasActive.current;
+    previousInputs.current = inputs;
+    previousPlane.current = plane;
+    wasActive.current = drawingActive;
+    if (!drawingActive) { if (deactivated) queue.cancel(); return; }
+    if (!geometryResult?.meshes.length) {
+      queue.cancel();
+      if (drawing) { setDrawing(null); setDrawingStatus('idle'); }
       return;
     }
-
-    // Update processed ref
-    sectionRef.current = {
-      axis: sectionPlane.axis,
-      position: sectionPlane.position,
-      flipped: sectionPlane.flipped,
-      customKey: customKeyValue,
-      visibilityKey,
-      displayKey,
-      modelKey,
-    };
-
-    // If panel is visible OR 3D overlay is enabled, and we have geometry, regenerate INSTANTLY
-    if ((panelVisible || displayOptions.show3DOverlay) && geometryResult?.meshes) {
-      // Start immediately - no debounce
-      // doRegenerate handles preventing overlaps and will auto-regenerate with latest when done
-      doRegenerate();
+    if (activated || changed || planeChanged) {
+      const regenerate = !activated && !changed && planeChanged;
+      void generateDrawing(regenerate).catch(error => {
+        console.error('Automatic drawing request failed:', error);
+        setDrawingError(error instanceof Error ? error.message : 'Generation failed');
+      });
     }
-  }, [panelVisible, displayOptions.show3DOverlay, sectionPlane.axis, sectionPlane.position, sectionPlane.flipped, customKeyValue, visibilityKey, displayKey, modelKey, geometryResult, combinedHiddenIds, combinedIsolatedIds, computedIsolatedIds, doRegenerate]);
+  });
 
   return {
     generateDrawing,

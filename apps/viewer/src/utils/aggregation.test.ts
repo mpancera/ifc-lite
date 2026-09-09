@@ -145,13 +145,13 @@ describe('expandToGeometryBearingIds', () => {
         : { modelId: 'A', expressId: globalId },
     relationshipsFor: (modelId) =>
       modelId === 'A'
-        ? makeRelationships({ 10: [11, 12] })
+        ? makeRelationships({ 10: [11, 12], 20: [21, 22], 30: [31, 32] })
         : modelId === 'B'
           ? makeRelationships({ 10: [11] })
           : undefined,
     toGlobalId: (modelId, expressId) => (modelId === 'B' ? expressId + 1000 : expressId),
   };
-  const meshed = new Set([11, 12, 14, 1011]);
+  const meshed = new Set([11, 12, 14, 1011, 31]);
   const hasGeometry = (id: number) => meshed.has(id);
 
   it('expands a geometry-less assembly into its meshed parts', () => {
@@ -175,6 +175,40 @@ describe('expandToGeometryBearingIds', () => {
 
   it('dedups when an assembly and one of its parts are both selected', () => {
     assert.deepStrictEqual(expandToGeometryBearingIds([11, 10], hasGeometry, access), [11, 12]);
+  });
+
+  // #3426, correcting #3382: `hasGeometry` is a point-in-time mesh/bounds
+  // check — during streaming, or behind a type-visibility filter, it says
+  // "no" for a part that legitimately has geometry and just hasn't rendered
+  // YET. Assembly 20's parts (21, 22) are neither in `meshed`.
+  it('falls back to ALL aggregated parts when none of them currently render (#3426)', () => {
+    assert.deepStrictEqual(expandToGeometryBearingIds([20], hasGeometry, access), [21, 22]);
+  });
+
+  it('the #3426 fallback still dedups and composes with an ordinary meshed id', () => {
+    assert.deepStrictEqual(
+      expandToGeometryBearingIds([20, 14], hasGeometry, access),
+      [21, 22, 14],
+    );
+  });
+
+  // Control: an entity with NO aggregated descendants at all (13) is still
+  // dropped — the #3426 fallback only helps an id that HAS parts to expand
+  // to; there is nothing here to expand id 13 into.
+  it('control: an entity with no aggregated descendants at all is still dropped', () => {
+    assert.deepStrictEqual(expandToGeometryBearingIds([13], hasGeometry, access), []);
+  });
+
+  // Always expand to ALL aggregated descendants, regardless of renderability
+  // (#3426, #3865). Point-in-time `hasGeometry` checks cannot predict which
+  // parts will arrive during streaming, so presentation channels (hide,
+  // isolate, colour) must persist the complete descendant set to ensure that
+  // parts streaming in later respect the action. Assembly 30 has two parts
+  // (31 meshed, 32 not) — both must be included in the expansion so that when
+  // 32 streams in later, it's already in the persisted set. Carrying an id
+  // with no mesh is free: it simply never matches a renderer's mesh whitelist.
+  it('expands to ALL aggregated parts, including unmeshed ones that may stream in later', () => {
+    assert.deepStrictEqual(expandToGeometryBearingIds([30], hasGeometry, access), [31, 32]);
   });
 
   // frameSelection and resolveHighlightIds live in a useImperativeHandle

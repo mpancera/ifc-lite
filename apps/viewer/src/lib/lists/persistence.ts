@@ -26,6 +26,10 @@ const STORAGE_KEY = 'ifc-lite-lists';
  */
 export function migrateListDefinition(definition: ListDefinition): ListDefinition {
   let changed = false;
+  // A stored entry may predate columns entirely; there is nothing to migrate
+  // in it, and the object must come back untouched (identity matters: a fresh
+  // object each load re-renders the whole list panel for nothing).
+  if (!Array.isArray(definition.columns)) return definition;
   const columns = definition.columns.map((column) => {
     if (column.source === 'spatial' && column.propertyName === 'Container'
       && (column.label === undefined || column.label === 'Container')) {
@@ -41,7 +45,13 @@ export function loadListDefinitions(): ListDefinition[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
-    return (JSON.parse(raw) as ListDefinition[]).map(migrateListDefinition);
+    const parsed: unknown = JSON.parse(raw);
+    // A hand-edited or half-written entry can be valid JSON that isn't an
+    // array (an object, a stray number, `null`...). `listSlice` spreads this
+    // result (`[...listDefinitions, def]`) on the very first list the user
+    // creates, so anything non-array here throws "is not iterable" and
+    // bricks the List panel at boot instead of just starting empty.
+    return Array.isArray(parsed) ? (parsed as ListDefinition[]).map(migrateListDefinition) : [];
   } catch {
     return [];
   }

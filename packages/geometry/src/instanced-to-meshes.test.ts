@@ -22,6 +22,8 @@ const TURN_Z = [0, -1, 0, 1, 0, 0, 0, 0, 1];
 
 function shard(overrides: Partial<DecodedInstancedShard> = {}): DecodedInstancedShard {
   return {
+    // No occurrence in this fixture names an item (see the field's doc).
+    carriesItemIds: false,
     templates: [{
       positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
       normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),

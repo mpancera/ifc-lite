@@ -70,6 +70,70 @@ describe('SpatialHierarchyBuilder', () => {
     expect(hierarchy.byBuilding.get(2)).toEqual([]);
   });
 
+  it('builds an IFC4.3 marine facility down through its IfcMarinePart berths', () => {
+    // `IfcMarineFacility` was a recognised spatial structure type while
+    // `IfcMarinePart` — its only part type, the exact counterpart of
+    // IfcBridgePart above — was not. `addSpatialChild` recurses only into a
+    // child `isSpatialStructureType` accepts, so the berth node and the
+    // mooring device it contained were dropped from the tree entirely: the
+    // Hierarchy panel showed the facility with nothing under it.
+    const strings = new StringTable();
+    const entities = new EntityTableBuilder(4, strings);
+    entities.add(1, 'IFCPROJECT', '0', 'Port Project', '', '');
+    entities.add(2, 'IFCMARINEFACILITY', '1', 'Harbour', '', '');
+    entities.add(3, 'IFCMARINEPART', '2', 'Berth 4', '', '');
+    entities.add(4, 'IFCMOORINGDEVICE', '3', 'Bollard', '', '', true);
+
+    const relationships = new RelationshipGraphBuilder();
+    relationships.addEdge(1, 2, RelationshipType.Aggregates, 10);
+    relationships.addEdge(2, 3, RelationshipType.Aggregates, 11);
+    relationships.addEdge(3, 4, RelationshipType.ContainsElements, 12);
+
+    const hierarchy = new SpatialHierarchyBuilder().build(
+      entities.build(),
+      relationships.build(),
+      strings,
+      new Uint8Array(),
+      { byId: { get: () => undefined } },
+    );
+
+    const facility = hierarchy.project.children[0];
+    expect(facility.type).toBe(IfcTypeEnum.IfcMarineFacility);
+    expect(facility.children.map((c) => c.type)).toEqual([IfcTypeEnum.IfcMarinePart]);
+    expect(facility.children[0].elements).toEqual([4]);
+    expect(hierarchy.getPath(4).map((node) => node.expressId)).toEqual([1, 2, 3]);
+  });
+
+  it('builds a generic IFC4.3 facility down through its IfcFacilityPartCommon segments', () => {
+    // Same drop, the other missing IfcFacilityPart subtype. `IfcFacilityPart`
+    // itself is ABSTRACT in IFC4X3, so a real file never carries one — the
+    // concrete leaf is what has to be recognised.
+    const strings = new StringTable();
+    const entities = new EntityTableBuilder(4, strings);
+    entities.add(1, 'IFCPROJECT', '0', 'Campus Project', '', '');
+    entities.add(2, 'IFCFACILITY', '1', 'Terminal', '', '');
+    entities.add(3, 'IFCFACILITYPARTCOMMON', '2', 'Segment A', '', '');
+    entities.add(4, 'IFCWALL', '3', 'Partition', '', '', true);
+
+    const relationships = new RelationshipGraphBuilder();
+    relationships.addEdge(1, 2, RelationshipType.Aggregates, 10);
+    relationships.addEdge(2, 3, RelationshipType.Aggregates, 11);
+    relationships.addEdge(3, 4, RelationshipType.ContainsElements, 12);
+
+    const hierarchy = new SpatialHierarchyBuilder().build(
+      entities.build(),
+      relationships.build(),
+      strings,
+      new Uint8Array(),
+      { byId: { get: () => undefined } },
+    );
+
+    const facility = hierarchy.project.children[0];
+    expect(facility.children.map((c) => c.type)).toEqual([IfcTypeEnum.IfcFacilityPartCommon]);
+    expect(facility.children[0].elements).toEqual([4]);
+    expect(hierarchy.getPath(4).map((node) => node.expressId)).toEqual([1, 2, 3]);
+  });
+
   it('keeps contained elements whose type was not categorized into the EntityTable', () => {
     // Reporter scenario: linear-placement-of-signal.ifc has an IfcRailway whose
     // IfcRelContainedInSpatialStructure names 26 IfcReferent / IfcSignal /
@@ -271,6 +335,124 @@ describe('SpatialHierarchyBuilder', () => {
     const deck = bridge.children[0];
     expect(deck.type).toBe(IfcTypeEnum.IfcBridgePart);
     expect(deck.longName).toBe('Bridge Deck');
+  });
+
+  describe('cross-linked space (aggregated under one storey, contained under another) (#4095)', () => {
+    // Malformed-but-real authoring pattern: StoreyA aggregates the space via
+    // IfcRelAggregates, StoreyB merely contains it via
+    // IfcRelContainedInSpatialStructure. The Rust server (apps/server, #3973)
+    // resolves this with a canonical-parent pass: aggregation always wins,
+    // computed from ALL IfcRelAggregates edges before any containment is
+    // considered, so the result is independent of traversal/file order. This
+    // builder must agree - both on which storey wins AND that the losing
+    // storey retains no phantom reference to the node.
+    //
+    // #6 (IfcFurniture, contained IN the space) makes a real node
+    // distinguishable from an empty stub: only the storey that gets the real
+    // node has [6] flow through to its elements list via the space's subtree
+    // (checked indirectly via elementToStorey/elementToContainer would need a
+    // deeper walk - here we assert directly on children_ids-equivalent
+    // (`storey.children`) and the space's own `elements`).
+    function buildCrossLinkedFixture(order: 'A,B' | 'B,A') {
+      const strings = new StringTable();
+      const entities = new EntityTableBuilder(6, strings);
+      entities.add(1, 'IFCPROJECT', 'p0', 'Project', '', '');
+      entities.add(2, 'IFCBUILDINGSTOREY', 'stA', 'Storey A', '', '');
+      entities.add(3, 'IFCBUILDINGSTOREY', 'stB', 'Storey B', '', '');
+      entities.add(5, 'IFCSPACE', 'sp0', 'Room', '', '', true);
+      entities.add(6, 'IFCFURNITURE', 'fu0', 'Chair', '', '', true);
+
+      const relationships = new RelationshipGraphBuilder();
+      if (order === 'A,B') {
+        relationships.addEdge(1, 2, RelationshipType.Aggregates, 10);
+        relationships.addEdge(1, 3, RelationshipType.Aggregates, 11);
+      } else {
+        relationships.addEdge(1, 3, RelationshipType.Aggregates, 11);
+        relationships.addEdge(1, 2, RelationshipType.Aggregates, 10);
+      }
+      // StoreyA aggregates the space (canonical parent, per the Rust rule).
+      relationships.addEdge(2, 5, RelationshipType.Aggregates, 20);
+      // StoreyB merely contains the same space (loses the tie).
+      relationships.addEdge(3, 5, RelationshipType.ContainsElements, 21);
+      relationships.addEdge(5, 6, RelationshipType.ContainsElements, 22);
+
+      return new SpatialHierarchyBuilder().build(
+        entities.build(),
+        relationships.build(),
+        strings,
+        new Uint8Array(),
+        { byId: { get: () => undefined } },
+      );
+    }
+
+    it.each([['A,B'], ['B,A']] as const)('resolves storey A as the canonical parent regardless of order (%s)', (order) => {
+      const hierarchy = buildCrossLinkedFixture(order);
+      const storeyA = hierarchy.project.children.find((n) => n.expressId === 2)!;
+      const storeyB = hierarchy.project.children.find((n) => n.expressId === 3)!;
+
+      // Defect 1: the aggregating storey must win regardless of DFS order.
+      const spaceInA = storeyA.children.find((n) => n.expressId === 5);
+      expect(spaceInA).toBeDefined();
+      expect(spaceInA!.elements).toEqual([6]); // real node, not an empty stub
+
+      // Defect 2: the merely-containing storey must NOT retain a phantom
+      // reference to the id at all - asserting only the winner (defect 1)
+      // would miss this; that is how it survived.
+      expect(storeyB.children.map((n) => n.expressId)).not.toContain(5);
+      expect(storeyB.children).toEqual([]);
+    });
+
+    it('produces an identical hierarchy shape for both orderings (order independence)', () => {
+      const shape = (h: ReturnType<typeof buildCrossLinkedFixture>) => {
+        const storeyA = h.project.children.find((n) => n.expressId === 2)!;
+        const storeyB = h.project.children.find((n) => n.expressId === 3)!;
+        return {
+          storeyAChildren: storeyA.children.map((n) => n.expressId),
+          storeyBChildren: storeyB.children.map((n) => n.expressId),
+          spaceElements: storeyA.children.find((n) => n.expressId === 5)?.elements ?? [],
+        };
+      };
+      expect(shape(buildCrossLinkedFixture('A,B'))).toEqual(shape(buildCrossLinkedFixture('B,A')));
+    });
+
+    it('breaks a same-precedence tie by first declaration order, not lowest express id (matches apps/server spatial.rs)', () => {
+      // STEP does not require express ids to ascend with declaration
+      // position. Storey A's IfcRelAggregates is declared FIRST but carries
+      // a HIGH express id (#9999); Storey B's is declared SECOND with a LOW
+      // id (#1). apps/server's canonical_parent (spatial.rs) does
+      // `entry(...).or_insert(...)` while iterating relationships in the
+      // Vec order `extract_relationships` scans the file in - i.e. first
+      // occurrence wins, independent of numeric id. A lowest-express-id
+      // tie-break (the bug) would instead pick Storey B here.
+      const strings = new StringTable();
+      const entities = new EntityTableBuilder(6, strings);
+      entities.add(1, 'IFCPROJECT', 'p0', 'Project', '', '');
+      entities.add(2, 'IFCBUILDINGSTOREY', 'stA', 'Storey A', '', '');
+      entities.add(3, 'IFCBUILDINGSTOREY', 'stB', 'Storey B', '', '');
+      entities.add(5, 'IFCSPACE', 'sp0', 'Room', '', '', true);
+
+      const relationships = new RelationshipGraphBuilder();
+      relationships.addEdge(1, 2, RelationshipType.Aggregates, 100);
+      relationships.addEdge(1, 3, RelationshipType.Aggregates, 101);
+      // Declared first, high express id.
+      relationships.addEdge(2, 5, RelationshipType.Aggregates, 9999);
+      // Declared second, low express id.
+      relationships.addEdge(3, 5, RelationshipType.Aggregates, 1);
+
+      const hierarchy = new SpatialHierarchyBuilder().build(
+        entities.build(),
+        relationships.build(),
+        strings,
+        new Uint8Array(),
+        { byId: { get: () => undefined } },
+      );
+
+      const storeyA = hierarchy.project.children.find((n) => n.expressId === 2)!;
+      const storeyB = hierarchy.project.children.find((n) => n.expressId === 3)!;
+
+      expect(storeyA.children.map((n) => n.expressId)).toContain(5);
+      expect(storeyB.children.map((n) => n.expressId)).not.toContain(5);
+    });
   });
 
   it('leaves longName undefined on the source-less cache-restore path', () => {

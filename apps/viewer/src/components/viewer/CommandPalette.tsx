@@ -3,10 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * CommandPalette — Ctrl+K / Cmd+K
- *
- * Raycast-style command palette for the entire viewer.
- * Keyboard-first, scored search, recent usage tracking.
+ * CommandPalette — Ctrl+K / Cmd+K. Raycast-style command palette for the
+ * entire viewer. Keyboard-first, scored search, recent usage tracking.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -44,12 +42,14 @@ import {
   FileCode2,
   MessageSquare,
   ClipboardCheck,
+  FileWarning,
   FileSpreadsheet,
   Palette,
   Puzzle,
   Camera,
   Download,
   FileJson,
+  ShieldQuestion,
   Sun,
   Info,
   Orbit,
@@ -102,135 +102,34 @@ import { exportCsvFromBytes } from '@/lib/export/csv';
 import { downloadFile, buildExportFilename, stripExtension } from '@/lib/export/download';
 import { GeometryProcessor } from '@ifc-lite/geometry';
 import { isUsdExportableModel, resolveUsdExportBytes } from './usd-export-source';
+import { buildCommandPaletteJsonEntities } from './commandPaletteJsonExport';
 import { getRecentFiles, formatFileSize, getCachedFile, getCachedFileNames } from '@/lib/recent-files';
 import type { RecentFileEntry } from '@/lib/recent-files';
 import { closeActiveAnalysisExtension } from '@/services/analysis-extensions';
 import { describeRunCommandError } from '@/services/extensions/runtime-errors';
-
-// ── Types ──────────────────────────────────────────────────────────────
-
-type Category =
-  | 'Recent'
-  | 'File'
-  | 'View'
-  | 'Tools'
-  | 'Visibility'
-  | 'Panels'
-  | 'Export'
-  | 'Automation'
-  | 'Preferences'
-  | 'Extensions'
-  | 'Learn';
-
-interface Command {
-  id: string;
-  label: string;
-  keywords: string;           // extra search tokens (no UI display)
-  category: Exclude<Category, 'Recent'>;
-  icon: React.ElementType;
-  shortcut?: string;
-  detail?: string;            // subtle secondary text (e.g. file size)
-  action: () => void;
-  /**
-   * Run the action synchronously inside the click handler instead of deferring
-   * to the next animation frame. Required for actions that open a file dialog:
-   * Chrome only honours `input.click()` / `showOpenFilePicker()` while transient
-   * user activation is live, which a `requestAnimationFrame` hop would discard.
-   */
-  immediate?: boolean;
-}
-
-interface FlatItem {
-  cmd: Command;
-  flatIdx: number;
-}
-
-// ── Constants ──────────────────────────────────────────────────────────
-
-const RECENT_KEY = 'ifc-lite:cmd-palette:recent';
-const MAX_RECENT = 5;
-const CATEGORY_ORDER: Category[] = [
-  'Recent', 'File', 'View', 'Tools', 'Visibility', 'Panels', 'Export', 'Automation', 'Preferences',
-];
-
-// ── Search scoring ─────────────────────────────────────────────────────
-
-/**
- * Score how well `query` matches `text`.
- *   0   = no match
- *   100 = exact substring
- *   50  = word-start initials
- *   1-25 = tight fuzzy (avg gap ≤ 5)
- */
-function score(query: string, text: string): number {
-  const q = query.toLowerCase();
-  const t = text.toLowerCase();
-
-  // Exact substring
-  if (t.includes(q)) return 100;
-
-  // Word-start initials (e.g. "cs" → "Color Spaces")
-  const words = t.split(/[\s\-_:\/,]+/);
-  let wi = 0, qi = 0;
-  while (wi < words.length && qi < q.length) {
-    if (words[wi].length > 0 && words[wi][0] === q[qi]) qi++;
-    wi++;
-  }
-  if (qi === q.length) return 50;
-
-  // Tight fuzzy — reject if chars are scattered
-  let lastIdx = -1, totalGap = 0;
-  qi = 0;
-  for (let i = 0; i < t.length && qi < q.length; i++) {
-    if (t[i] === q[qi]) {
-      if (lastIdx >= 0) totalGap += i - lastIdx - 1;
-      lastIdx = i;
-      qi++;
-    }
-  }
-  if (qi < q.length) return 0;
-  const avgGap = q.length > 1 ? totalGap / (q.length - 1) : 0;
-  if (avgGap > 5) return 0;
-  return Math.max(1, 25 - Math.round(avgGap * 3));
-}
-
-/** Rank a command against the search query. Label dominates. */
-function rankCommand(cmd: Command, query: string): number {
-  const l = score(query, cmd.label);
-  const k = score(query, cmd.keywords) * 0.9;
-  const c = score(query, cmd.category) * 0.5;
-  return Math.max(l, k, c);
-}
-
-// ── Recent usage ───────────────────────────────────────────────────────
-
-function getRecentIds(): string[] {
-  try { return JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]'); }
-  catch { return []; }
-}
-function recordUsage(id: string) {
-  try {
-    const r = getRecentIds().filter(x => x !== id);
-    r.unshift(id);
-    localStorage.setItem(RECENT_KEY, JSON.stringify(r.slice(0, 30)));
-  } catch { /* noop */ }
-}
+import {
+  type Command,
+  type FlatItem,
+  MAX_RECENT,
+  CATEGORY_ORDER,
+  rankCommand,
+  getRecentIds,
+  recordUsage,
+} from './commandPaletteSearch';
 
 /** Toggle a sidebar workspace panel (#1208). The store's `toggleWorkspacePanel`
- *  owns the single-tenant + re-dock + detach semantics; a second activation
- *  closes the panel back to the Information fallback. Closing any active
- *  analysis extension first preserves the prior "panels win the slot" behavior.
- *  Kept as two thin helpers so every command action keeps its call site. */
-function activateRightPanel(panel: 'bcf' | 'ids' | 'lens' | 'clash' | 'compare' | 'extensions' | 'layers' | 'collab' | 'sources' | 'zones') {
+ *  owns the single-tenant + re-dock + detach semantics; a second activation closes
+ *  the panel back to the Information fallback. Closing any active analysis extension
+ *  first preserves the prior "panels win the slot" behavior; kept as two thin helpers so every command action keeps its call site. */
+function activateRightPanel(panel: 'bcf' | 'ids' | 'lens' | 'clash' | 'compare' | 'extensions' | 'layers' | 'collab' | 'sources' | 'zones' | 'loadReport') {
   closeActiveAnalysisExtension();
   useViewerStore.getState().toggleWorkspacePanel(panel);
 }
 
-/** Bottom panel (Script / Lists / Gantt) — mutually exclusive in the bottom
- *  strip, independent of the sidebar. The store owns the toggle, including the
- *  re-dock of a floating or popped-out panel; the hand-rolled flag flips that
- *  used to live here knew only the dock flags, so toggling a FLOATING Lists
- *  panel left it on screen with nothing latched. */
+/** Bottom panel (Script / Lists / Gantt) — mutually exclusive in the bottom strip,
+ *  independent of the sidebar. The store owns the toggle, including the re-dock of a
+ *  floating or popped-out panel; the hand-rolled flag flips that used to live here
+ *  knew only the dock flags, so toggling a FLOATING Lists panel left it on screen with nothing latched. */
 function activateBottomPanel(panel: 'script' | 'lists' | 'gantt') {
   closeActiveAnalysisExtension();
   useViewerStore.getState().toggleBottomPanel(panel);
@@ -251,8 +150,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const navigatedByKeyboard = useRef(false);
-  // Names currently in the blob cache, refreshed each open. Lets recent-file
-  // clicks decide hit/miss without an async gap that would void user activation.
+  // Names currently in the blob cache, refreshed each open — lets recent-file clicks decide hit/miss without an async gap that would void user activation.
   const cachedNamesRef = useRef<Set<string>>(new Set());
 
   const { execute } = useSandbox();
@@ -269,8 +167,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     }
   }, [open]);
 
-  // Collab role: in a shared session only editor/admin may author. Read
-  // reactively so the authoring commands appear the moment a role is upgraded.
+  // Collab role: in a shared session only editor/admin may author. Read reactively so authoring commands appear the moment a role is upgraded.
   const collabRole = useViewerStore((s) => s.collabRole);
   const canEditInSession = collabRole === null || collabRole === 'editor' || collabRole === 'admin';
   // Cesium only has something to show once a model carries georeferencing.
@@ -281,16 +178,19 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     const c: Command[] = [];
 
     // ── File ──
-    // `immediate` so the open action runs inside the click gesture: opening a
-    // file dialog needs live user activation, which a rAF hop would discard.
-    // The actual picker is driven by MainToolbar's handleOpenClick (via the
-    // `ifc-lite:open-files` event) so palette opens capture a live handle too.
+    // `immediate` so the open action runs inside the click gesture: opening a file
+    // dialog needs live user activation, which a rAF hop would discard. The actual
+    // picker is driven by MainToolbar's handleOpenClick (via the `ifc-lite:open-files`
+    // event) so palette opens capture a live handle too.
     c.push(
       { id: 'file:open', label: 'Open File', keywords: 'ifc ifcx glb load model browse', category: 'File', icon: FolderOpen,
         immediate: true,
         action: () => {
           window.dispatchEvent(new CustomEvent('ifc-lite:open-files'));
         } },
+      // #3930 portable federation setup — handlers live in `FederationSetupControls` (mounted from `useFileCommands`, ShareDialog's pattern).
+      { id: 'file:save-federation-setup', label: 'Save Federation Setup', keywords: 'federation setup save export portable models order alignment anchor', category: 'File', icon: Save, action: () => { window.dispatchEvent(new CustomEvent('ifc-lite:save-federation-setup')); } },
+      { id: 'file:open-federation-setup', label: 'Open Federation Setup', keywords: 'federation setup restore reopen import portable models order alignment anchor', category: 'File', icon: FolderOpen, immediate: true, action: () => { window.dispatchEvent(new CustomEvent('ifc-lite:open-federation-setup')); } },
     );
     for (const rf of recentFiles) {
       const fileName = rf.name;
@@ -454,7 +354,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         action: () => { const s = useViewerStore.getState(); s.setLeftPanelCollapsed(!s.leftPanelCollapsed); } },
       { id: 'panel:script', label: 'Script Editor', keywords: 'code automation console', category: 'Panels', icon: FileCode2,
         action: () => { activateBottomPanel('script'); } },
-      { id: 'panel:bcf', label: 'BCF Issues', keywords: 'collaboration topics comments viewpoint', category: 'Panels', icon: MessageSquare,
+      { id: 'panel:bcf', label: 'BCF Topics', keywords: 'collaboration topics comments viewpoint', category: 'Panels', icon: MessageSquare,
         action: () => { activateRightPanel('bcf'); } },
       { id: 'panel:ids', label: 'IDS Validation', keywords: 'information delivery specification check', category: 'Panels', icon: ClipboardCheck,
         action: () => { activateRightPanel('ids'); } },
@@ -477,6 +377,8 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         action: () => { activateRightPanel('sources'); } },
       { id: 'panel:zones', label: 'Location Zones', keywords: 'compartment abschnitt zone section takt area construction location apportionment storey', category: 'Panels', icon: Box,
         action: () => { activateRightPanel('zones'); } },
+      { id: 'panel:loadReport', label: 'Load Report', keywords: 'geometry diagnostics warnings dropped items csg openings unsupported load report', category: 'Panels', icon: FileWarning,
+        action: () => { activateRightPanel('loadReport'); } },
       ...(isCollabEnabled()
         ? [{ id: 'panel:collab', label: 'Collaboration Room', keywords: 'share invite live multiplayer presence room realtime sync', category: 'Panels' as const, icon: Users,
             action: () => { activateRightPanel('collab'); } }]
@@ -587,12 +489,13 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         action: async () => { const d = useViewerStore.getState().ifcDataStore; if (!d || d.source.byteLength <= 0) return; try { downloadFile(await exportCsvFromBytes(d.source.materialize(), 'quantities'), 'quantities.csv', 'text/csv'); } catch (e) { console.error(e); } } },
       { id: 'export:csv-spatial', label: 'Export CSV: Spatial', keywords: 'hierarchy spreadsheet download', category: 'Export', icon: FileSpreadsheet,
         action: async () => { const d = useViewerStore.getState().ifcDataStore; if (!d || d.source.byteLength <= 0) return; try { downloadFile(await exportCsvFromBytes(d.source.materialize(), 'spatial'), 'spatial-hierarchy.csv', 'text/csv'); } catch (e) { console.error(e); } } },
+      { id: 'export:anonymized', label: 'Export Anonymized Subset…', keywords: 'anonymize obfuscate isolate scrub redact bug report reproduction privacy scrub-safe', category: 'Export', icon: ShieldQuestion,
+        action: () => { useViewerStore.getState().setAnonymizedExportRequested(true); } },
       { id: 'export:json', label: 'Export JSON', keywords: 'data entities all download', category: 'Export', icon: FileJson,
         action: () => {
           const d = useViewerStore.getState().ifcDataStore; if (!d) return;
           try {
-            const out: Record<string, unknown>[] = [];
-            for (let i = 0; i < d.entities.count; i++) { const id = d.entities.expressId[i]; out.push({ expressId: id, globalId: d.entities.getGlobalId(id), name: d.entities.getName(id), type: d.entities.getTypeName(id), properties: d.properties.getForEntity(id) }); }
+            const out = buildCommandPaletteJsonEntities(d);
             downloadFile(JSON.stringify({ entities: out }, null, 2), 'model-data.json', 'application/json');
           } catch (e) { console.error(e); }
         } },

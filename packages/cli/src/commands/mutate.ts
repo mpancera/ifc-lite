@@ -15,7 +15,8 @@ import { getFlag, getAllFlags, hasFlag, fatal, printJson } from '../output.js';
 import { MutablePropertyView } from '@ifc-lite/mutations';
 import { StepExporter } from '@ifc-lite/export';
 import { extractPropertiesOnDemand, extractQuantitiesOnDemand } from '@ifc-lite/parser';
-import { PropertyValueType } from '@ifc-lite/data';
+import { PropertyValueType, findAttribute, type IfcSchemaVersion } from '@ifc-lite/data';
+import { splitTopLevelStepArgs } from './step-args.js';
 
 /**
  * Parse a --where filter string.
@@ -232,7 +233,11 @@ export async function mutateCommand(args: string[]): Promise<void> {
   // Apply attribute mutations via STEP text post-processing
   if (attributeMutations.length > 0) {
     const textContent = new TextDecoder().decode(result.content);
-    const outputContent = applyAttributeMutations(textContent, attributeMutations);
+    const outputContent = applyAttributeMutations(
+      textContent,
+      attributeMutations,
+      await entitiesWithObjectType(schema),
+    );
     await writeFile(outPath, outputContent, 'utf-8');
   } else {
     await writeFile(outPath, result.content);
@@ -272,26 +277,53 @@ const ATTRIBUTE_INDEX: Record<string, number> = {
 };
 
 /**
- * IFC types that have an ObjectType attribute at index 4.
- * Only IfcObject subtypes (building elements, spatial elements) define ObjectType.
- * Relationship types (IfcRelAggregates, etc.) and type objects do NOT.
+ * IFC types that define an ObjectType attribute, read from the bundled
+ * buildingSMART schema for the file's own version.
+ *
+ * This used to be a hand-written list of 29 type names. Every entry in it was
+ * correct, but IFC4 declares ObjectType on **218** entities, so 189 were
+ * missing — `--set ObjectType=...` on an IfcFurniture, IfcStairFlight,
+ * IfcPipeSegment or IfcSanitaryTerminal was refused with a "not applicable"
+ * warning that was simply wrong. Deriving the set means it cannot fall behind
+ * the schema again, and it is schema-aware: IFC2X3 and IFC4 do not declare
+ * ObjectType on the same entities.
  */
-const OBJECTTYPE_TYPES = new Set([
-  'IFCWALL', 'IFCWALLSTANDARDCASE', 'IFCSLAB', 'IFCCOLUMN', 'IFCBEAM',
-  'IFCDOOR', 'IFCWINDOW', 'IFCROOF', 'IFCSTAIR', 'IFCRAILING', 'IFCMEMBER',
-  'IFCPLATE', 'IFCCOVERING', 'IFCFOOTING', 'IFCPILE', 'IFCCURTAINWALL',
-  'IFCRAMP', 'IFCSPACE', 'IFCBUILDINGELEMENTPROXY', 'IFCFURNISHINGELEMENT',
-  'IFCFLOWSEGMENT', 'IFCFLOWTERMINAL', 'IFCFLOWFITTING', 'IFCDISTRIBUTIONELEMENT',
-  'IFCOPENINGELEMENT', 'IFCSITE', 'IFCBUILDING', 'IFCBUILDINGSTOREY', 'IFCPROJECT',
-]);
+export async function entitiesWithObjectType(schema: string): Promise<ReadonlySet<string>> {
+  // `findAttribute` only knows the versions it has tables for; anything else
+  // (notably IFC5, which StepExporter accepts) falls back to IFC4 rather than
+  // throwing, which is what the hand-written list effectively did.
+  const known = new Set(['IFC2X3', 'IFC4', 'IFC4X3', 'IFC4X3_ADD2']);
+  const version = (known.has(schema) ? schema : 'IFC4') as IfcSchemaVersion;
+  const attr = await findAttribute(version, 'ObjectType');
+  // An attribute can be declared on an entity as a simple value or as part of
+  // a complex type; both mean the slot exists on that entity.
+  return new Set([...(attr?.simpleValueEntities ?? []), ...(attr?.complexEntities ?? [])]);
+}
 
 /**
  * Apply attribute mutations to STEP content via text replacement.
  * For each target entity, finds its STEP line and replaces the attribute at the known index.
+ *
+ * THROWS rather than rewriting a record whose text this pass cannot read. The
+ * write below is BY INDEX, so it is only correct if `args[2]` really is the
+ * record's third attribute; when the scan lost its place `args` still has parts
+ * and the write still lands somewhere, silently (#4125, #2470). What a mis-scan
+ * looks like, and why `splitTopLevelStepArgs` refuses one, is in
+ * `step-args.ts`'s header.
+ *
+ * Throwing, not skipping-and-reporting, because this command's whole output is
+ * a FILE: a skip writes one that looks like what was asked for and is missing
+ * the edit, under a `Mutated 1 entities` line. The throw reaches `main().catch`
+ * in `index.ts`, which prints `Error [mutate]: ...` and exits 1 with no output
+ * file, so exit code and filesystem agree. The `Warning: ... skipping` paths
+ * below stay warnings, and they are not both about the request: one names an attribute
+ * the SCHEMA does not give that entity, the other ALSO fires when the record has fewer
+ * arguments than the attribute index. Both stay warnings because the record was read.
  */
-function applyAttributeMutations(
+export function applyAttributeMutations(
   content: string,
   mutations: { entity: any; propName: string; value: string }[],
+  objectTypeEntities: ReadonlySet<string>,
 ): string {
   // Group mutations by expressId for efficient single-pass replacement
   const mutationsByEntity = new Map<number, { propName: string; value: string }[]>();
@@ -301,6 +333,10 @@ function applyAttributeMutations(
     list.push({ propName: m.propName, value: m.value });
     mutationsByEntity.set(id, list);
   }
+
+  // Records this pass was asked to rewrite and could not read. Collected
+  // rather than thrown on first sight so one run names every one of them.
+  const unreadable: string[] = [];
 
   const lines = content.split('\n');
   for (let i = 0; i < lines.length; i++) {
@@ -317,15 +353,24 @@ function applyAttributeMutations(
     // Parse the STEP argument list (handle nested parens and quoted strings)
     const argsStart = line.indexOf('(');
     const argsEnd = line.lastIndexOf(')');
-    if (argsStart === -1 || argsEnd === -1) continue;
-
-    const args = splitStepArgs(line.slice(argsStart + 1, argsEnd));
+    // A record wrapped across lines is caught rather than truncated: `argsEnd`
+    // is the LAST ')' on the line and the slice EXCLUDES it, so the nested list
+    // that ')' closed is left open and the split refuses. The exporter re-emits
+    // source lines verbatim, so a wrapped record from the input reaches here
+    // intact, and used to be skipped in silence while the run reported the
+    // mutation as done.
+    const args =
+      argsEnd > argsStart ? splitTopLevelStepArgs(line.slice(argsStart + 1, argsEnd)) : null;
+    if (args === null) {
+      unreadable.push(`#${expressId}=${entityType}`);
+      continue;
+    }
 
     for (const mut of entityMuts) {
       const attrIdx = ATTRIBUTE_INDEX[mut.propName.toLowerCase()];
       if (attrIdx !== undefined && attrIdx < args.length) {
         // Validate ObjectType is only written to entities that define it
-        if (mut.propName.toLowerCase() === 'objecttype' && !OBJECTTYPE_TYPES.has(entityType)) {
+        if (mut.propName.toLowerCase() === 'objecttype' && !objectTypeEntities.has(entityType)) {
           process.stderr.write(`Warning: attribute "ObjectType" not applicable to ${entityType} #${expressId}, skipping\n`);
           continue;
         }
@@ -340,44 +385,16 @@ function applyAttributeMutations(
     lines[i] = line.slice(0, argsStart + 1) + args.join(',') + line.slice(argsEnd);
   }
 
-  return lines.join('\n');
-}
-
-/**
- * Split a STEP argument string by commas, respecting nested parens and quoted strings.
- */
-export function splitStepArgs(argsStr: string): string[] {
-  const result: string[] = [];
-  let current = '';
-  let depth = 0;
-  let inString = false;
-
-  for (let i = 0; i < argsStr.length; i++) {
-    const ch = argsStr[i];
-    if (inString) {
-      current += ch;
-      if (ch === "'" && argsStr[i + 1] === "'") {
-        current += "'";
-        i++; // skip escaped quote
-      } else if (ch === "'") {
-        inString = false;
-      }
-    } else if (ch === "'") {
-      inString = true;
-      current += ch;
-    } else if (ch === '(') {
-      depth++;
-      current += ch;
-    } else if (ch === ')') {
-      depth--;
-      current += ch;
-    } else if (ch === ',' && depth === 0) {
-      result.push(current);
-      current = '';
-    } else {
-      current += ch;
-    }
+  if (unreadable.length > 0) {
+    throw new Error(
+      `refusing to rewrite ${unreadable.length} record(s) whose STEP text could not be read as a ` +
+        `complete argument list: ${unreadable.join(', ')}. Attributes are written by index, so a ` +
+        `mis-scanned list would put the value on the wrong attribute and drop the ones it swallowed ` +
+        `(LTplus-AG/ifc-lite#4125). Usual causes: an undoubled apostrophe inside a quoted string, an ` +
+        `unbalanced parenthesis, a comment inside the argument list, or a record spanning several ` +
+        `lines. No output file was written.`,
+    );
   }
-  if (current) result.push(current);
-  return result;
+
+  return lines.join('\n');
 }

@@ -282,6 +282,7 @@ export function useWorkspacePanelControls() {
     if (layersPanelVisible) panels.add('layers');
     if (collabPanelVisible) panels.add('collab');
     if (sidebarActivePanel === 'zones') panels.add('zones');
+    if (sidebarActivePanel === 'loadReport') panels.add('loadReport');
     if (analysisExtensionState.activeId) panels.add(analysisExtensionState.activeId);
     return panels;
   }, [
@@ -313,7 +314,7 @@ export function useWorkspacePanelControls() {
     if (activeWorkspacePanels.has('script')) return 'Script Editor';
     if (activeWorkspacePanels.has('lists')) return 'Lists';
     if (activeWorkspacePanels.has('gantt')) return 'Schedule';
-    if (activeWorkspacePanels.has('bcf')) return 'BCF Issues';
+    if (activeWorkspacePanels.has('bcf')) return 'BCF Topics';
     if (activeWorkspacePanels.has('ids')) return 'IDS Validation';
     if (activeWorkspacePanels.has('lens')) return 'Lens Rules';
     if (activeWorkspacePanels.has('clash')) return 'Clash Detection';
@@ -326,6 +327,7 @@ export function useWorkspacePanelControls() {
     if (activeWorkspacePanels.has('layers')) return 'Layer Stack';
     if (activeWorkspacePanels.has('collab')) return 'Collaboration Room';
     if (activeWorkspacePanels.has('zones')) return 'Location Zones';
+    if (activeWorkspacePanels.has('loadReport')) return 'Load Report';
     return activeAnalysisExtension?.label ?? 'Analysis';
   }, [activeAnalysisExtension?.label, activeWorkspacePanels]);
 

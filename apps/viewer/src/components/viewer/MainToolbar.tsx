@@ -58,9 +58,6 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-  DropdownMenuSub,
-  DropdownMenuSubTrigger,
-  DropdownMenuSubContent,
 } from '@/components/ui/dropdown-menu';
 import { Progress } from '@/components/ui/progress';
 import { useViewerStore } from '@/store';
@@ -598,7 +595,7 @@ export function MainToolbar({ onShowShortcuts }: MainToolbarProps = {} as MainTo
             onCheckedChange={() => handleToggleRightPanel('bcf')}
           >
             <MessageSquare className="h-4 w-4 mr-2" />
-            BCF Issues
+            BCF Topics
           </DropdownMenuCheckboxItem>
           <DropdownMenuCheckboxItem
             checked={activeWorkspacePanels.has('ids')}

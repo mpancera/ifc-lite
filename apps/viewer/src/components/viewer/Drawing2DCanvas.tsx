@@ -5,12 +5,13 @@
 import React, { useRef, useState, useEffect } from 'react';
 import {
   GraphicOverrideEngine,
-  calculateDrawingTransform,
   calculateViewportTransform,
   sheetViewports,
   type Drawing2D,
   type ElementData,
 } from '@ifc-lite/drawing-2d';
+import { sheetTransformCacheKeyOf, type CachedSheetTransform } from '@/lib/drawing/sheet-geometry-key';
+import { useDrawingElementPropertiesLookup } from '@/hooks/useDrawingElementPropertiesLookup';
 import type { DrawingLine2D } from '@ifc-lite/renderer';
 import { formatDistance } from './tools/formatDistance';
 import { formatArea, computePolygonCentroid } from './tools/computePolygonArea';
@@ -395,7 +396,7 @@ interface Drawing2DCanvasProps {
   sectionAxis: 'down' | 'front' | 'side';
   // Pinned mode - keep model fixed in place on sheet
   isPinned?: boolean;
-  cachedSheetTransformRef?: React.MutableRefObject<{ translateX: number; translateY: number; scaleFactor: number } | null>;
+  cachedSheetTransformRef?: React.MutableRefObject<CachedSheetTransform | null>;
   // Annotation props
   annotation2DActiveTool?: Annotation2DTool;
   annotation2DCursorPos?: Point2D | null;
@@ -497,6 +498,8 @@ export function Drawing2DCanvas({
 }: Drawing2DCanvasProps): React.ReactElement {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+  // Resolved once per (model set, polygon set) change, never per draw frame.
+  const getElementProperties = useDrawingElementPropertiesLookup(drawing, overrideEngine, overridesEnabled);
 
   // ResizeObserver to track canvas size changes
   useEffect(() => {
@@ -822,9 +825,16 @@ export function Drawing2DCanvas({
         // one's scale — an overview drawn at the floor plan's 1:200. Pinning
         // then recomputes instead, which costs a fit calculation per frame and
         // is correct, rather than being cheap and wrong.
-        if (isPinned && sheetViews.length === 1 && cachedSheetTransformRef?.current) {
+        // The cached entry is validated against the CURRENT sheet's geometry
+        // key and section axis, not trusted because it is present: the parent
+        // hook's effect that nulls this ref runs AFTER this (child) effect on
+        // the same commit, so a stale entry would otherwise draw one frame
+        // (PR #2853 review).
+        const cacheKey = sheetTransformCacheKeyOf(activeSheet, sectionAxis);
+        const cached = cachedSheetTransformRef?.current;
+        if (isPinned && sheetViews.length === 1 && cached && cached.key === cacheKey) {
           // Use cached transform to keep model fixed in place
-          drawingTransform = cachedSheetTransformRef.current;
+          drawingTransform = cached;
         } else {
           // Calculate new transform
           const baseTransform = calculateViewportTransform(drawingBounds, sheetView, activeSheet);
@@ -836,13 +846,19 @@ export function Drawing2DCanvas({
             translateY: flipY
               ? baseTransform.translateY
               : baseTransform.translateY - (drawingBounds.maxY + drawingBounds.minY) * baseTransform.scaleFactor,
+            // The mirror-image correction for X, gated the OPPOSITE way: the
+            // base transform assumes NO X flip, so a 'side' section (which
+            // flips X) lands off the sheet's edge without it (#2940).
+            translateX: flipX
+              ? baseTransform.translateX + (drawingBounds.minX + drawingBounds.maxX) * baseTransform.scaleFactor
+              : baseTransform.translateX,
           };
 
           // Cache the transform for pinned mode. Single-view sheets only, for
           // the reason above: storing the last of several views would hand
           // that one's scale to every view on the next frame.
           if (cachedSheetTransformRef && sheetViews.length === 1) {
-            cachedSheetTransformRef.current = drawingTransform;
+            cachedSheetTransformRef.current = { ...drawingTransform, key: cacheKey };
           }
         }
 
@@ -866,9 +882,6 @@ export function Drawing2DCanvas({
             // Sheet mm to screen
             return { x: mmToScreenX(sheetX), y: mmToScreenY(sheetY) };
           };
-
-          // Line width in screen pixels (convert mm to screen)
-          const mmLineToScreen = (mmWeight: number) => Math.max(0.5, mmToScreen(mmWeight / drawingTransform.scaleFactor * 0.001));
 
           // DXF reference underlays render first, beneath the cut geometry
           // (issue #1782). Data is pre-mapped drawing space and exists only
@@ -907,7 +920,7 @@ export function Drawing2DCanvas({
             } else if (overridesEnabled) {
               const elementData: ElementData = {
                 expressId: polygon.entityId,
-                ifcType: polygon.ifcType,
+                ifcType: polygon.ifcType, properties: getElementProperties(polygon.entityId),
               };
               const result = overrideEngine.applyOverrides(elementData);
               fillColor = result.style.fillColor;
@@ -951,7 +964,7 @@ export function Drawing2DCanvas({
             if (overridesEnabled) {
               const elementData: ElementData = {
                 expressId: polygon.entityId,
-                ifcType: polygon.ifcType,
+                ifcType: polygon.ifcType, properties: getElementProperties(polygon.entityId),
               };
               const result = overrideEngine.applyOverrides(elementData);
               strokeColor = result.style.strokeColor;
@@ -1062,7 +1075,18 @@ export function Drawing2DCanvas({
       // 6. Draw scale bar at BOTTOM LEFT of title block
       // Uses actual drawingTransform.scaleFactor which accounts for dynamic scaling
       // ─────────────────────────────────────────────────────────────────────
-      if (scaleBar.visible && tbH > 10) {
+      // Both sizing loops below can fail to terminate on a degenerate input
+      // (0, negative or Infinity metres; NaN/0 scale) — guard all of them,
+      // as title-block-renderer.ts already does for the exporter.
+      if (
+        scaleBar.visible &&
+        tbH > 10 &&
+        scaleBar.totalLengthM > 0 &&
+        Number.isFinite(scaleBar.totalLengthM) &&
+        principalTransform !== null &&
+        Number.isFinite(principalTransform.scaleFactor) &&
+        principalTransform.scaleFactor > 0
+      ) {
         // Position: bottom left with small margin
         const sbX = tbX + 3;
         const sbY = tbY + tbH - 8; // 8mm from bottom (leaves room for label)
@@ -1229,7 +1253,6 @@ export function Drawing2DCanvas({
       for (const polygon of drawing.cutPolygons) {
         // Get fill color - priority: IFC materials > override engine > IFC type fallback
         let fillColor = getFillColorForType(polygon.ifcType);
-        let strokeColor = '#000000';
         let opacity = 1;
 
         // Use actual IFC material colors from the mesh data
@@ -1250,11 +1273,10 @@ export function Drawing2DCanvas({
         } else if (overridesEnabled) {
           const elementData: ElementData = {
             expressId: polygon.entityId,
-            ifcType: polygon.ifcType,
+            ifcType: polygon.ifcType, properties: getElementProperties(polygon.entityId),
           };
           const result = overrideEngine.applyOverrides(elementData);
           fillColor = result.style.fillColor;
-          strokeColor = result.style.strokeColor;
           opacity = result.style.opacity;
         }
 
@@ -1301,7 +1323,7 @@ export function Drawing2DCanvas({
         if (overridesEnabled) {
           const elementData: ElementData = {
             expressId: polygon.entityId,
-            ifcType: polygon.ifcType,
+            ifcType: polygon.ifcType, properties: getElementProperties(polygon.entityId),
           };
           const result = overrideEngine.applyOverrides(elementData);
           strokeColor = result.style.strokeColor;
@@ -2147,7 +2169,7 @@ export function Drawing2DCanvas({
         }
       }
     }
-  }, [drawing, transform, showHiddenLines, canvasSize, overrideEngine, overridesEnabled, entityColorMap, useIfcMaterials, measureMode, measureStart, measureCurrent, measureResults, measureSnapPoint, sheetEnabled, activeSheet, sectionAxis, isPinned, annotation2DActiveTool, annotation2DCursorPos, polygonAreaPoints, polygonAreaResults, escapeRoutes, escapeRouteStart, textAnnotations, textAnnotationEditing, cloudAnnotationPoints, cloudAnnotations, selectedAnnotation, ifcAnnotationLines, ifcAnnotationTexts, ifcAnnotationFills, dxfUnderlays, scanPoints, scanOpacity, alignmentOverlay, selectedEntityKeys, colorKeys, unitDisplayOverrides]);
+  }, [drawing, transform, showHiddenLines, canvasSize, overrideEngine, overridesEnabled, getElementProperties, entityColorMap, useIfcMaterials, measureMode, measureStart, measureCurrent, measureResults, measureSnapPoint, sheetEnabled, activeSheet, sectionAxis, isPinned, annotation2DActiveTool, annotation2DCursorPos, polygonAreaPoints, polygonAreaResults, escapeRoutes, escapeRouteStart, textAnnotations, textAnnotationEditing, cloudAnnotationPoints, cloudAnnotations, selectedAnnotation, ifcAnnotationLines, ifcAnnotationTexts, ifcAnnotationFills, dxfUnderlays, scanPoints, scanOpacity, alignmentOverlay, selectedEntityKeys, colorKeys, unitDisplayOverrides]);
 
   return (
     <canvas

@@ -46,6 +46,9 @@ import { withMutationOverlay } from '@/lib/lists/mutationOverlayProvider';
 import { GROUP_ENTITY_TYPES } from '@/components/viewer/hierarchy/treeDataBuilder';
 import { mergeResultColumns } from '@/lib/lists/merge-result-columns';
 import { extractProjectUnits, ProjectUnits, type IfcDataStore } from '@ifc-lite/parser';
+import { useRenderFrameOffsets } from '@/hooks/useRenderFrameOffsets';
+import { makeWorldPositionGetter } from '@/lib/geo/entity-world-position';
+import { zoneVolumeSiScale } from '@/lib/units/zone-volume-scale';
 import { ListBuilder } from './ListBuilder';
 import { ListResultsTable } from './ListResultsTable';
 
@@ -67,7 +70,8 @@ const NON_SPATIAL_ROW_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 export function ListPanel({ onClose }: ListPanelProps) {
-  const { ifcDataStore, models } = useIfc();
+  const { ifcDataStore, models, geometryResult } = useIfc();
+  const renderFrame = useRenderFrameOffsets(); // scene-wide frame for World X/Y/Z (issue #3671)
   const [view, setView] = useState<PanelView>('library');
   const [editingList, setEditingList] = useState<ListDefinition | null>(null);
 
@@ -138,8 +142,7 @@ export function ListPanel({ onClose }: ListPanelProps) {
   const volumeScaleByModelId = useMemo(() => {
     const map = new Map<string, number>();
     const scaleOf = (store: IfcDataStore) => (store.source.length > 0
-      ? extractProjectUnits(store.source, store.entityIndex).resolvedForUnitType('VOLUMEUNIT')?.siScale ?? 1
-      : 1);
+      ? zoneVolumeSiScale(extractProjectUnits(store.source, store.entityIndex)) : 1);
     if (models.size > 0) {
       for (const [modelId, model] of models) {
         if (!model.ifcDataStore) continue;
@@ -151,6 +154,8 @@ export function ListPanel({ onClose }: ListPanelProps) {
     return map;
   }, [models, ifcDataStore]);
 
+  // {modelId, provider} pairs, built in one pass so the two arrays can never
+  // drift out of alignment.
   const modelProviderPairs = useMemo(() => {
     const pairs: Array<{ modelId: string; provider: ListDataProvider; store: IfcDataStore }> = [];
     // Authoring an element also creates its placement/profile/solid/shape-rep
@@ -169,14 +174,13 @@ export function ListPanel({ onClose }: ListPanelProps) {
       });
     if (models.size > 0) {
       for (const [modelId, model] of models) {
-        // Skip native-metadata models — they don't have a parsed
-        // IfcDataStore, so the list provider can't query them.
-        if (!model.ifcDataStore) continue;
+        if (!model.ifcDataStore) continue; // native-metadata model, nothing to query
         const zoneContext = {
           zoneSets, zoneAssignments,
           apportionment: zoneApportionment,
           volumeSiScale: volumeScaleByModelId.get(modelId) ?? 1,
           toGlobalId: (expressId: number) => toGlobalId(modelId, expressId),
+          getWorldPosition: makeWorldPositionGetter(model.ifcDataStore, model.geometryResult ?? geometryResult, renderFrame, (id) => toGlobalId(modelId, id)),
         };
         const provider = createListDataProvider(model.ifcDataStore, model.name, zoneContext);
         pairs.push({ modelId, provider: overlayFor(modelId, model.ifcDataStore, provider), store: model.ifcDataStore });
@@ -187,6 +191,7 @@ export function ListPanel({ onClose }: ListPanelProps) {
         apportionment: zoneApportionment,
         volumeSiScale: volumeScaleByModelId.get('default') ?? 1,
         toGlobalId: (expressId: number) => toGlobalId('default', expressId),
+        getWorldPosition: makeWorldPositionGetter(ifcDataStore, geometryResult, renderFrame, (id) => toGlobalId('default', id)),
       };
       const provider = createListDataProvider(ifcDataStore, '', zoneContext);
       pairs.push({ modelId: 'default', provider: overlayFor('default', ifcDataStore, provider), store: ifcDataStore });

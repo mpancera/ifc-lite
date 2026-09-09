@@ -154,6 +154,7 @@ const COMMON_COLUMNS: CommonColumn[] = [
   // No model value behind it: it paints the row's lens colour. Empty until a
   // lens is active or the column is pointed at a saved one.
   { id: 'col-colour', source: 'colour', propertyName: '', label: 'Colour' },
+  ...(['X', 'Y', 'Z'] as const).map((axis): CommonColumn => ({ id: `col-world-${axis.toLowerCase()}`, source: 'geometry', propertyName: axis, label: `World ${axis}` })),
 ];
 
 /** Union the per-provider complete-discovery results into one column set. */
@@ -772,11 +773,10 @@ const SOURCE_TAG: Record<ColumnDefinition['source'], string> = {
   // place a reader can tell which column is which.
   group: 'grp',
   colour: 'lens',
+  geometry: 'world',
 };
 
-/** A `spatial` column's tag reflects its level (storey / building / site /
- *  project); a `zone` column's tag reflects its display mode (zone /
- *  straddles); everything else uses the flat per-source tag. */
+/** `spatial`/`zone` tags reflect level/mode; everything else uses the flat per-source tag. */
 function colSourceTag(col: ColumnDefinition): string {
   if (col.source === 'spatial') return (col.propertyName || 'Storey').toLowerCase();
   if (col.source === 'zone') return (col.propertyName || 'Zone').toLowerCase();

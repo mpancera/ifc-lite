@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { describe, expect, it } from 'vitest';
-import { attachOnDemandTag } from './columnar-parser.js';
+import { attachOnDemandTag } from './on-demand-tag.js';
 import type { EntityRef } from './types.js';
 
 /** One STEP record per line, indexed by byte range the way the parser does. */
@@ -85,7 +85,7 @@ describe('attachOnDemandTag', () => {
     // source-backed reader would be slower and, on a store with no source
     // buffer, wrong.
     const { source, byId } = sourceOf([SENSOR]);
-    const entities = { getTag: () => 'from-the-column' };
+    const entities = { getTag: (_expressId: number) => 'from-the-column' };
     attachOnDemandTag(entities, byId, source);
     expect(entities.getTag(100)).toBe('from-the-column');
   });

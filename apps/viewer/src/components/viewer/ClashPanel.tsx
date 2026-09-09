@@ -34,6 +34,7 @@ import { useViewerStore } from '@/store';
 import { ModelBadge } from './ModelBadge';
 import { ClashBcfExportDialog } from '@/components/viewer/ClashBcfExportDialog';
 import { ClashSettingsDialog } from '@/components/viewer/ClashSettingsDialog';
+import { ClashRevisionCompareDialog } from '@/components/viewer/ClashRevisionCompareDialog';
 import { createBCFProject, createBCFTopic } from '@ifc-lite/bcf';
 import { duplicateSetSections } from '@/lib/clash/duplicate-set-sections';
 import {
@@ -41,6 +42,7 @@ import {
   penetrationDepth,
   sortClashes,
   classifyRuleCoverage,
+  describeEmptyRuleSides,
   ruleHadNoMatch,
   DUPLICATES_RULE,
   CLASH_REVIEW_STATUSES,
@@ -500,23 +502,18 @@ export function ClashPanel({ onClose }: ClashPanelProps) {
     const names = new Map(result.rulesRun.map((r) => [r.id, r.name]));
     return result.ruleCoverage.filter(ruleHadNoMatch).map((c) => names.get(c.rule) ?? c.rule);
   }, [result]);
-  // Describes WHICH selector side(s) matched nothing, per empty rule — used
-  // when the run was a single ad-hoc rule (`runAll`/`runPreset`, one rule),
-  // where "the matrix didn't apply" would be a false claim: there was no
-  // matrix, just one rule whose A or B selector doesn't describe this model.
+  // Describes WHICH side(s) matched nothing, per empty rule — used when the
+  // run was a single ad-hoc rule (`runAll`/`runPreset`, one rule), where "the
+  // matrix didn't apply" would be a false claim: there was no matrix, just one
+  // rule whose A or B side doesn't describe this model. The wording lives in
+  // the clash package because only its coverage says whether a side was a
+  // selector or a resolved filter (#3902).
   const emptySelectorDescriptions = useMemo(() => {
     if (!result?.ruleCoverage) return [] as string[];
     const rules = new Map(result.rulesRun.map((r) => [r.id, r]));
     return result.ruleCoverage
       .filter(ruleHadNoMatch)
-      .map((c) => {
-        const rule = rules.get(c.rule);
-        if (!rule) return c.rule;
-        const emptySides: string[] = [];
-        if (c.matchedA === 0) emptySides.push(`selector A ("${rule.a}")`);
-        if (c.matchedB === 0) emptySides.push(`selector B ("${rule.b}")`);
-        return `${emptySides.length > 0 ? emptySides.join(' and ') : 'a selector'} matched 0 elements`;
-      });
+      .map((c) => describeEmptyRuleSides(rules.get(c.rule), c));
   }, [result]);
   // Only a real multi-rule discipline-matrix run (`runMatrix`) can be
   // truthfully described as "the matrix didn't run" — a single ad-hoc rule
@@ -686,6 +683,7 @@ export function ClashPanel({ onClose }: ClashPanelProps) {
             <Info className="h-4 w-4" />
           </Button>
           <ClashSettingsDialog />
+          <ClashRevisionCompareDialog />
           {result && (
             <Button variant="ghost" size="icon" className="h-7 w-7" title="Clear results" onClick={clearAll}>
               <Trash2 className="h-4 w-4" />
@@ -922,7 +920,7 @@ export function ClashPanel({ onClose }: ClashPanelProps) {
             <span className="text-xs text-muted-foreground">
               {effectiveResultView === 'issues'
                 ? `${issueCount === 1 ? 'issue' : 'issues'} · ${total} ${total === 1 ? 'pair' : 'pairs'}`
-                : `${total === 1 ? 'clash' : 'clashes'}${hideTouching && touchingCount > 0 ? ` · ${shown} shown` : ''}${
+                : `${total === 1 ? 'clash' : 'clashes'}${shown < total ? ` · ${shown} shown` : ''}${
                     groups && !isDuplicateSetView ? ` · ${issueCount} ${issueCount === 1 ? 'issue' : 'issues'}` : ''
                   }`}
             </span>

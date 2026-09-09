@@ -27,13 +27,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Search, Clock, X, SlidersHorizontal } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
+import { selectorYieldsRules } from '@/lib/search/selector-to-rules';
 import { Input } from '@/components/ui/input';
 import { useViewerStore } from '@/store';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import { cn } from '@/lib/utils';
 import { runTier0Scan, type SearchResult, type ScanModel } from '@/lib/search/tier0-scan';
 import { queryTier1Indexes, type Tier1Index } from '@/lib/search/tier1-index';
-import { useSearchIndex } from '@/hooks/useSearchIndex';
 import {
   loadRecentSearches,
   pushRecentSearch,
@@ -114,9 +114,6 @@ export function SearchInline() {
       cameraCallbacks: s.cameraCallbacks,
     })),
   );
-
-  // Kick off lazy Tier-1 index builds for any loaded model.
-  useSearchIndex();
 
   // Recents list — loaded on mount, refreshed after each Enter commit.
   const [recents, setRecents] = useState<string[]>(() => loadRecentSearches());
@@ -532,6 +529,7 @@ export function SearchInline() {
       {showPopover && !showRecents && (
         <SearchPopover
           results={results}
+          query={searchQuery}
           highlightIndex={searchHighlightIndex}
           modelsCount={models.size}
           indexingCount={indexingCount}
@@ -639,6 +637,7 @@ function RecentsPopover({ recents, onPick, onClear }: RecentsPopoverProps) {
 
 interface SearchPopoverProps {
   results: SearchResult[];
+  query: string;
   highlightIndex: number;
   modelsCount: number;
   indexingCount: number;
@@ -649,6 +648,7 @@ interface SearchPopoverProps {
 
 function SearchPopover({
   results,
+  query,
   highlightIndex,
   modelsCount,
   indexingCount,
@@ -665,7 +665,7 @@ function SearchPopover({
       >
         {indexingCount > 0
           ? `Indexing ${indexingCount} model${indexingCount === 1 ? '' : 's'}… results appear as rows become searchable.`
-          : 'No results — try a name, IFC type, or full GlobalId.'}
+          : selectorYieldsRules(query) ? 'That reads as selector syntax. This box searches names, IFC types and GlobalIds — run a selector from the Filter tab (Advanced, below).' : 'No results — try a name, IFC type, or full GlobalId.'}
       </div>
     );
   }

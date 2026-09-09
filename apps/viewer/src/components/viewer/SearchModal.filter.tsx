@@ -43,6 +43,7 @@ import {
   scanFilterResultRows,
 } from '@/lib/search/isolate-filter-result';
 import { filterResultToSearchResults } from '@/lib/search/filter-result-to-search-results';
+import { selectionKeyColumnIndex } from '@/lib/search/selection-key-column';
 import type { ListDefinition } from '@/lib/lists';
 import { toast } from '@/components/ui/toast';
 import { SearchModalFilterBuilder } from './SearchModal.filter.builder';
@@ -52,10 +53,6 @@ const RESULT_ROW_HEIGHT = 28;
 const TEXT_HIT_LIMIT = 50_000;
 const FILTER_CHUNK_SIZE = 20_000;
 const DEFAULT_LIMIT = 5_000;
-
-/** Columns we treat as "selection keys" — clicking a row routes the
- *  value through the viewer's selection system. */
-const SELECTION_COLUMNS = ['express_id', 'entity_id'] as const;
 
 export function SearchModalFilter() {
   const {
@@ -141,9 +138,13 @@ export function SearchModalFilter() {
 
     const start = performance.now();
     try {
-      const modelArgs: Array<{ id: string; store: typeof activeStore }> = [];
+      const modelArgs: Array<{ id: string; filterIdentity?: string; store: typeof activeStore }> = [];
       for (const m of models.values()) {
-        if (m.ifcDataStore) modelArgs.push({ id: m.id, store: m.ifcDataStore });
+        if (m.ifcDataStore) modelArgs.push({
+          id: m.id,
+          filterIdentity: m.sourceFingerprint,
+          store: m.ifcDataStore,
+        });
       }
 
       // Fold the inline search query in as a Tier-1/Tier-0 candidate
@@ -278,11 +279,7 @@ export function SearchModalFilter() {
   const selectionKeyIndex = useMemo(() => {
     const cols = searchFilterResult?.columns;
     if (!cols) return -1;
-    for (const candidate of SELECTION_COLUMNS) {
-      const i = cols.indexOf(candidate);
-      if (i >= 0) return i;
-    }
-    return -1;
+    return selectionKeyColumnIndex(cols);
   }, [searchFilterResult]);
 
   // Frozen (per-run) conversion of the filter table into SearchResult-shaped
@@ -435,7 +432,7 @@ export function SearchModalFilter() {
       isolationIds = [...merged];
     }
 
-    // isolateEntities is a same-set TOGGLE (visibilitySlice.ts:176-194):
+    // isolateEntities is a same-set TOGGLE (visibilitySlice.ts, `isolateEntities`):
     // pressing "Isolate in 3D" again on the identical result un-isolates
     // rather than re-isolating. Detect that up front so the un-isolate press
     // only clears — it must not also select/frame the id set and close the

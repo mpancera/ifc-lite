@@ -16,7 +16,7 @@ import { FeatureOverviewDialog } from './FeatureOverviewDialog';
 import { createStatusBarStatsAccumulator } from './statusBarStats.js';
 
 export function StatusBar() {
-  const { loading, geometryResult, ifcDataStore } = useIfc();
+  const { loading, geometryResult, ifcDataStore, models } = useIfc();
   const activeRoleId = useViewerStore((s) => s.activeDisciplineSystemId);
   const activeRole = findDisciplineSystem(activeRoleId);
   const isViewerRole = activeRoleId === VIEWER_ROLE_ID;
@@ -98,20 +98,32 @@ export function StatusBar() {
     [geometryResult],
   );
 
+  // `selectedStoreys` holds raw model-space expressIds (see HierarchyPanel's
+  // `setStoreysSelection`), which may belong to ANY federated model, not just
+  // the active one — `ifcDataStore` only tracks the active model
+  // (`modelSlice.ts`). Resolve each id through the model whose own spatial
+  // hierarchy actually contains it as a storey, falling back to the active
+  // store for legacy single-model mode. Mirrors ViewportOverlays' storey-name
+  // lookup (#3506) for the same reason: a non-active model's storey must not
+  // be counted against the active model's hierarchy.
   const visibleElements = useMemo(() => {
-    if (selectedStoreys.size === 0 || !ifcDataStore?.spatialHierarchy) {
+    if (selectedStoreys.size === 0 || (!ifcDataStore?.spatialHierarchy && models.size === 0)) {
       return stats.elements;
     }
-    // Count elements from all selected storeys
     let count = 0;
     for (const storeyId of selectedStoreys) {
-      const storeyElements = ifcDataStore.spatialHierarchy.byStorey.get(storeyId);
+      const ownHierarchy = models.size > 0
+        ? Array.from(models.values()).find(
+            (m) => m.ifcDataStore?.spatialHierarchy?.byStorey.has(storeyId),
+          )?.ifcDataStore?.spatialHierarchy
+        : ifcDataStore?.spatialHierarchy;
+      const storeyElements = ownHierarchy?.byStorey.get(storeyId);
       if (storeyElements) {
         count += storeyElements.length;
       }
     }
     return count || stats.elements;
-  }, [selectedStoreys, ifcDataStore, stats.elements]);
+  }, [selectedStoreys, ifcDataStore, models, stats.elements]);
 
   return (
     <div className="h-7 px-3 border-t bg-muted/30 flex items-center justify-between text-xs text-muted-foreground">

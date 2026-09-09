@@ -9,6 +9,8 @@
 
 import { createLogger } from '@ifc-lite/data';
 import type { KmzAltitudeMode, TessellationQuality } from './types.js';
+import type { HbjsonStats } from './hbjson-stats.js';
+import * as energyExport from './energy-export-bridge.js';
 import type { GeometryDiagnostics } from './diagnostics.js';
 import { getStartedSharedWasmModule } from './wasm-shared-module.js';
 import {
@@ -320,7 +322,7 @@ export class IfcLiteBridge {
   /**
    * Parse IfcAlignment directrix curves into a flat Float32Array of 3D
    * line-list vertices `[x0,y0,z0, x1,y1,z1, …]` in renderer Y-up world space
-   * (RTC-subtracted, metres). Feed straight to `renderer.uploadAlignmentLines3D`.
+   * (RTC-subtracted, metres). Feed straight to `renderer.setLineOverlay('alignment', …)`.
    * Empty when the file has no alignments.
    */
   parseAlignmentLines(content: string): Float32Array {
@@ -347,8 +349,8 @@ export class IfcLiteBridge {
    * Parse `IfcGrid` / `IfcGridAxis` into a flat Float32Array of 3D line-list
    * vertices `[x0,y0,z0, x1,y1,z1, …]` (one segment per axis) in renderer Y-up
    * world space (RTC-subtracted, metres) — the same frame the streamed meshes
-   * render in, so grids overlay the model by construction (issue #945). Feed
-   * straight to a line pipeline (e.g. `renderer.uploadAnnotationLines3D`).
+   * render in, so grids overlay the model by construction (issue #945). Feed to
+   * `setLineOverlay('grid', …)`, NOT `'annotation'` (it expands bounds, #967).
    * Empty when the file has no grids.
    */
   parseGridLines(content: string): Float32Array {
@@ -715,23 +717,21 @@ export class IfcLiteBridge {
     }
   }
 
-  /**
-   * Export the `IfcSpace` volumes in `content` as a Honeybee HBJSON string
-   * (Ladybug Tools energy/daylight model). Rooms are built analytically from
-   * extruded-area profiles (watertight by construction).
-   */
+  /** HBJSON (Honeybee) export; see `energy-export-bridge.ts` for the contract. */
   exportHbjson(content: Uint8Array, name: string): Uint8Array {
-    return this.runExport('exportHbjson', content, (api) => api.exportHbjson(content, name));
+    return this.runExport('exportHbjson', content, (api) => energyExport.callExportHbjson(api, content, name));
   }
 
-  /**
-   * Export the `IfcSpace` volumes in `content` as a Dragonfly DFJSON string
-   * (Ladybug Tools energy model). Each space becomes an extruded `Room2D`
-   * (floor polygon + height) grouped into stories — the simpler target for
-   * mostly-vertical-wall models.
-   */
+  /** Like {@link exportHbjson}; also returns `HbjsonStats` coverage counts (see `energy-export-bridge.ts`). */
+  exportHbjsonWithStats(content: Uint8Array, name: string): { content: Uint8Array; stats: HbjsonStats } {
+    return this.runExport('exportHbjsonWithStats', content, (api) =>
+      energyExport.callExportHbjsonWithStats(api, content, name),
+    );
+  }
+
+  /** DFJSON (Dragonfly) export; see `energy-export-bridge.ts` for the contract. */
   exportDfjson(content: Uint8Array, name: string): string {
-    return this.runExport('exportDfjson', content, (api) => api.exportDfjson(content, name));
+    return this.runExport('exportDfjson', content, (api) => energyExport.callExportDfjson(api, content, name));
   }
 
   /**

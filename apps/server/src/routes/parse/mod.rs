@@ -6,18 +6,22 @@
 
 mod cache_keys;
 mod cached_replay;
+mod stream_event;
+mod stream_progress;
 mod fetch;
 mod json;
 mod parquet;
+mod parquet_optimized;
 mod parquet_stream;
 
 pub use fetch::{check_cache, get_cached_geometry, get_data_model, get_symbolic};
 pub use json::{parse_full, parse_metadata, parse_stream};
-pub use parquet::{parse_parquet, parse_parquet_optimized};
+pub use parquet::parse_parquet;
+pub use parquet_optimized::parse_parquet_optimized;
 pub use parquet_stream::parse_parquet_stream;
 
 use crate::error::ApiError;
-use crate::services::OpeningFilterMode;
+use crate::services::{OpeningFilterMode, ParquetLayout};
 use axum::extract::Multipart;
 use flate2::read::GzDecoder;
 use ifc_lite_processing::TessellationQuality;
@@ -35,6 +39,26 @@ pub struct ParseQuery {
     /// `setTessellationQuality`, keeping client and server meshes in parity).
     #[serde(default)]
     pub tessellation_quality: Option<String>,
+    /// Flat-Parquet mesh-table layout (#3888): "flat" (default) or
+    /// "shared-shapes" — see [`ParquetLayout`] for why it is opt-in. A query
+    /// parameter rather than a header because every endpoint it has to reach
+    /// (both parse routes, the cache check, the cached-geometry fetch) already
+    /// takes this struct, so the signal travels with the cache identity.
+    #[serde(default)]
+    pub parquet_layout: ParquetLayout,
+    /// SHA-256 of the file the client is asking about, hex, lowercase (#3901).
+    ///
+    /// Read only by `POST /api/v1/parse/parquet-stream`, and only when the
+    /// request carries no multipart body: see
+    /// [`cached_replay::replay_by_client_hash`] for what it does and what it
+    /// is not allowed to do. It lives on this struct rather than in a header
+    /// so it travels with the rest of the cache identity (`opening_filter`,
+    /// `tessellation_quality`, `parquet_layout`) through the one place every
+    /// parse route already parses. A hash paired with the wrong layout names a
+    /// different entry, and splitting one identity across two transports is how
+    /// such pairings drift apart.
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 impl ParseQuery {
@@ -144,6 +168,29 @@ pub(crate) async fn extract_file(
 /// one candidate rather than silently guessing which model to load, and bounds
 /// the decompressed size (zip-bomb guard) against the same `max_bytes` ceiling
 /// the raw/gzip paths use.
+/// Whether an archive entry is a macOS AppleDouble sidecar rather than content.
+///
+/// Compressing in macOS Finder writes `__MACOSX/._<name>` beside each entry,
+/// carrying resource forks and extended attributes. It keeps the original
+/// extension, so `__MACOSX/._model.ifc` counted as a second model and every
+/// Mac-made archive was rejected as ambiguous (#2812, reported from
+/// production).
+///
+/// The test is the BASENAME, not the directory. `._` is what makes a file a
+/// sidecar; `__MACOSX/` is merely where macOS puts them, so matching on it is
+/// redundant (every entry inside is already `._`-prefixed) and wrong for a user
+/// whose archive genuinely contains a folder of that name. The basename form
+/// also covers a sidecar left beside its original by a rezip that flattens the
+/// directory away.
+///
+/// Mirrors `APPLE_DOUBLE_RE` in `packages/parser/src/ifczip.ts`. The two must
+/// agree, or an archive the browser accepts is rejected by the server.
+fn is_apple_double(name: &str) -> bool {
+    name.rsplit('/')
+        .next()
+        .is_some_and(|base| base.starts_with("._"))
+}
+
 fn unwrap_ifczip(
     bytes: &[u8],
     max_bytes: usize,
@@ -165,7 +212,7 @@ fn unwrap_ifczip(
         }
         let name = entry.name();
         let lower = name.to_ascii_lowercase();
-        if lower.ends_with(".ifc") || lower.ends_with(".ifcxml") {
+        if (lower.ends_with(".ifc") || lower.ends_with(".ifcxml")) && !is_apple_double(name) {
             candidates.push((i, name.to_string()));
         }
     }
@@ -236,6 +283,9 @@ mod ifczip_tests;
 mod parquet_tests;
 
 #[cfg(test)]
+mod parquet_optimized_tests;
+
+#[cfg(test)]
 mod json_tests;
 
 #[cfg(test)]
@@ -245,72 +295,18 @@ mod fetch_tests;
 mod cache_keys_symbolic_tests;
 
 #[cfg(test)]
-mod resolved_tessellation_quality_tests {
-    use super::*;
-    use crate::error::ApiError;
+mod cache_keys_tests;
 
-    /// Omitting the query parameter must resolve to the documented default
-    /// (`Medium`, byte-identical to pre-enum behavior) — not silently to some
-    /// other level. Coverage gap found via mutation testing: swapping this arm
-    /// to `TessellationQuality::Highest` survived the full `ifc-lite-server`
-    /// suite (83/83 passed) with zero test hitting this code path.
-    #[test]
-    fn none_resolves_to_medium_default() {
-        let query = ParseQuery {
-            tessellation_quality: None,
-            ..Default::default()
-        };
-        assert_eq!(
-            query.resolved_tessellation_quality().unwrap(),
-            TessellationQuality::Medium
-        );
-    }
+#[cfg(test)]
+mod cached_replay_tests;
 
-    /// Every documented label round-trips through `resolved_tessellation_quality`,
-    /// case-insensitively.
-    #[test]
-    fn every_documented_label_parses() {
-        let cases = [
-            ("lowest", TessellationQuality::Lowest),
-            ("Low", TessellationQuality::Low),
-            ("MEDIUM", TessellationQuality::Medium),
-            ("high", TessellationQuality::High),
-            ("Highest", TessellationQuality::Highest),
-        ];
-        for (label, expected) in cases {
-            let query = ParseQuery {
-                tessellation_quality: Some(label.to_string()),
-                ..Default::default()
-            };
-            assert_eq!(
-                query.resolved_tessellation_quality().unwrap(),
-                expected,
-                "label {label:?} should resolve to {expected:?}"
-            );
-        }
-    }
+#[cfg(test)]
+mod cached_replay_batches_tests;
 
-    /// An unknown level must be rejected as a client error (`400 BadRequest`),
-    /// not swallowed or reported as a server-side `Internal` error — the two
-    /// map to different HTTP statuses and log at different severities.
-    /// Coverage gap found via mutation testing: replacing `ApiError::BadRequest`
-    /// with `ApiError::Internal` on this arm survived the full suite (83/83
-    /// passed) — no test asserted the error path at all, let alone which variant.
-    #[test]
-    fn unknown_label_is_bad_request_not_internal() {
-        let query = ParseQuery {
-            tessellation_quality: Some("ultra".to_string()),
-            ..Default::default()
-        };
-        let err = query.resolved_tessellation_quality().unwrap_err();
-        match err {
-            ApiError::BadRequest(msg) => {
-                assert!(
-                    msg.contains("ultra"),
-                    "error message should name the rejected value, got: {msg}"
-                );
-            }
-            other => panic!("expected ApiError::BadRequest, got {other:?}"),
-        }
-    }
-}
+#[cfg(test)]
+#[path = "resolved_tessellation_quality_tests.rs"]
+mod resolved_tessellation_quality_tests;
+
+#[cfg(test)]
+#[path = "apple_double_tests.rs"]
+mod apple_double_tests;

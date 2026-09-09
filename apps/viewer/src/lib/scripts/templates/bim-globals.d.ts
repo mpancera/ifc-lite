@@ -187,6 +187,16 @@ declare namespace BimClash {
     a: string;
     /** Selector for set B. Omitted ⇒ self-clash within A. */
     b?: string;
+    /**
+     * Explicit membership for set A — `clashMemberKey(model, ref)` strings. When
+     * present it REPLACES the `a` selector, so a caller that can resolve a richer
+     * filter than a type name (properties, attributes, storeys) against the model
+     * can express it. An empty array means "matched nothing", never "everything".
+     * See `members.ts`.
+     */
+    membersA?: readonly string[];
+    /** Explicit membership for set B, replacing the `b` selector. See `membersA`. */
+    membersB?: readonly string[];
     mode: ClashMode;
     /** Touching band (m). Defaults to the run-level tolerance. */
     tolerance?: number;
@@ -248,6 +258,30 @@ declare namespace BimClash {
     rule: string;
     matchedA: number;
     matchedB: number | null;
+    /**
+     * Whether each side was resolved from explicit membership (`membersA` /
+     * `membersB`) rather than from its type selector. A caller explaining an
+     * empty side needs it and cannot recover it from `rulesRun`, which
+     * deliberately drops the resolved member lists. Absent on a result recorded
+     * before this existed — which is the same thing as "by selector".
+     */
+    fromMembersA?: boolean;
+    fromMembersB?: boolean;
+    /**
+     * The durable `key` (IfcGUID / USD prim path) of every element THIS rule
+     * matched on each side, deduplicated and sorted for determinism — not just
+     * a count. `compareClashRevisions` (revision.ts) needs this to ask "was
+     * this SPECIFIC element re-examined?", which `matchedA`/`matchedB` (counts
+     * only) cannot answer: a narrowed selector that drops one previously-
+     * matched element while keeping the total count non-zero is invisible to a
+     * count-only check. `matchedKeysB` mirrors `matchedB`'s `null` for a
+     * self-clash rule (no `b` side). Absent (not just empty) on a result
+     * recorded before this existed, or from a hand-built fixture — callers
+     * MUST treat an absent `matchedKeysA` as "cannot verify", never as "matched
+     * nothing".
+     */
+    matchedKeysA?: readonly string[];
+    matchedKeysB?: readonly string[] | null;
   }
 
   /**
@@ -412,8 +446,8 @@ declare const bim: {
     select(entities: BimEntity[]): void;
     /** Fly camera to entities */
     flyTo(entities: BimEntity[]): void;
-    /** Reset all colors */
-    resetColors(): void;
+    /** Reset colors. Omit entities (or pass none) to reset every color override; pass entities to reset only theirs. */
+    resetColors(entities?: BimEntity[]): void;
     /** Reset all visibility */
     resetVisibility(): void;
   };

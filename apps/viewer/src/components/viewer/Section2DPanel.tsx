@@ -48,6 +48,7 @@ import { useViewControls } from '@/hooks/useViewControls';
 import { useCombinedVisibilityIds } from '@/hooks/useCombinedVisibilityIds';
 import { useDrawingColorKeys } from '@/hooks/useDrawingColorKeys';
 import { useDrawingExport } from '@/hooks/useDrawingExport';
+import type { CachedSheetTransform } from '@/lib/drawing/sheet-geometry-key';
 import { useSymbolicAnnotationsForDrawing, symbolicAnnotationsOverlayEnabled } from '@/hooks/useSymbolicAnnotations';
 import { useDxfUnderlaysForDrawing, useDxfMapToWorldTransform, dxfWorldShift, dxfUnderlayDrawingBounds } from '@/hooks/useDxfUnderlay';
 import { useScanSectionLayer } from '@/hooks/useScanSectionLayer';
@@ -210,7 +211,7 @@ export function Section2DPanel({
   // Track resize event handlers for cleanup
   const resizeHandlersRef = useRef<{ move: ((e: MouseEvent) => void) | null; up: (() => void) | null }>({ move: null, up: null });
   // Cache sheet drawing transform when pinned (to keep model fixed in place)
-  const cachedSheetTransformRef = useRef<{ translateX: number; translateY: number; scaleFactor: number } | null>(null);
+  const cachedSheetTransformRef = useRef<CachedSheetTransform | null>(null);
 
   // Track panel width for responsive header
   useEffect(() => {
@@ -278,7 +279,7 @@ export function Section2DPanel({
     geometryResult, ifcDataStore, sectionPlane, displayOptions, typeVisibility,
     planProductClasses,
     combinedHiddenIds, combinedIsolatedIds, computedIsolatedIds,
-    models, panelVisible, drawing,
+    models, panelVisible, activeTool, drawing,
     setDrawing, setDrawingStatus, setDrawingProgress, setDrawingError,
   });
 
@@ -591,6 +592,11 @@ export function Section2DPanel({
     sheetEnabled, activeSheet, dxfUnderlays: dxfUnderlayData,
     ifcDataStore, coordinateInfo: geometryResult?.coordinateInfo,
     scanSection: scanSectionLayer,
+    // Pin View state and the preview's transform cache: without these the
+    // print/export path recomputed the sheet placement from the CURRENT
+    // bounds while a pinned preview kept the held one. The hook only READS
+    // the ref — the preview canvas owns the write.
+    isPinned, cachedSheetTransformRef,
   });
 
   // Scale prompt for the scaled PDF export (issue #2042). A proper

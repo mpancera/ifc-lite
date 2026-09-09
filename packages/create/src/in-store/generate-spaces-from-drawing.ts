@@ -59,7 +59,7 @@ import {
   type SpaceBuildResult,
   type SpaceInStoreParams,
 } from './space.js';
-import { pointInPolygon } from './generate-spaces.js';
+import { pointInPolygon } from './room-footprint-offset.js';
 
 /**
  * Marks a space as having come from a drawing, not from a model.

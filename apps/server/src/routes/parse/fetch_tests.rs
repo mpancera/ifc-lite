@@ -12,11 +12,13 @@
 //! combination — these tests cover each partial-cache-state branch, not just
 //! both-present and both-absent.
 
-use super::cache_keys::{parquet_cache_key, parquet_metadata_cache_key};
+use super::cache_keys::{
+    cache_key_from_parts, data_model_cache_key, parquet_cache_key, parquet_metadata_cache_key,
+};
 use crate::admission::{Admission, AdmissionCfg};
 use crate::config::Config;
 use crate::services::cache::DiskCache;
-use crate::services::OpeningFilterMode;
+use crate::services::{OpeningFilterMode, ParquetLayout};
 use crate::{build_router, AppState};
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -83,12 +85,75 @@ async fn check_cache_returns_404_when_uncached() {
 async fn check_cache_returns_200_when_parquet_cached() {
     let state = test_state("check-cache-hit").await;
     let hash = "abc123hash";
-    let key = parquet_cache_key(hash, OpeningFilterMode::Default, TessellationQuality::default());
+    let key = parquet_cache_key(hash, OpeningFilterMode::Default, TessellationQuality::default(), ParquetLayout::Flat);
     state.cache.set_bytes(&key, b"parquet-bytes").await.unwrap();
+    // A hit also requires a data model at the current payload version (#3869).
+    seed_current_data_model(&state, hash, OpeningFilterMode::Default).await;
 
     let response = get(&state, &format!("/api/v1/cache/check/{hash}")).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(body_bytes(response).await.is_empty());
+}
+
+/// Seed a data-model entry at the CURRENT payload version for `hash`.
+async fn seed_current_data_model(state: &AppState, hash: &str, filter: OpeningFilterMode) {
+    let seed = cache_key_from_parts(hash, filter, TessellationQuality::default());
+    state
+        .cache
+        .set_bytes(&data_model_cache_key(&seed), b"data-model-bytes")
+        .await
+        .unwrap();
+}
+
+/// A geometry entry outlives a data-model version bump: the geometry key is
+/// versioned separately and does not move when a data-model column is added.
+/// Reporting a hit on geometry alone makes the client skip the upload, so
+/// nothing ever writes the new data-model key and `fetchDataModel` polls a key
+/// nobody writes until it times out — geometry on screen, no properties, and
+/// no error (issue #3869). The check must miss so the file is re-parsed.
+#[tokio::test]
+async fn check_cache_misses_when_the_data_model_predates_the_current_version() {
+    let state = test_state("check-cache-stale-datamodel").await;
+    let hash = "staledmhash";
+    let geometry_key =
+        parquet_cache_key(hash, OpeningFilterMode::Default, TessellationQuality::default(), ParquetLayout::Flat);
+    state
+        .cache
+        .set_bytes(&geometry_key, b"parquet-bytes")
+        .await
+        .unwrap();
+    // The data model this deployment left behind: previous payload version.
+    let seed = cache_key_from_parts(hash, OpeningFilterMode::Default, TessellationQuality::default());
+    state
+        .cache
+        .set_bytes(&format!("{seed}-datamodel-v5"), b"pre-rel_id-parquet")
+        .await
+        .unwrap();
+
+    let response = get(&state, &format!("/api/v1/cache/check/{hash}")).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "geometry alone must not report a hit when the data model is stale"
+    );
+}
+
+/// Negative control for the gate above: geometry cached with NO data model at
+/// all must also miss, so the client uploads and both get written.
+#[tokio::test]
+async fn check_cache_misses_when_no_data_model_is_cached_at_all() {
+    let state = test_state("check-cache-no-datamodel").await;
+    let hash = "nodmhash";
+    let geometry_key =
+        parquet_cache_key(hash, OpeningFilterMode::Default, TessellationQuality::default(), ParquetLayout::Flat);
+    state
+        .cache
+        .set_bytes(&geometry_key, b"parquet-bytes")
+        .await
+        .unwrap();
+
+    let response = get(&state, &format!("/api/v1/cache/check/{hash}")).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 /// The cache key is filter-specific: a cached entry for `ignore_all` must NOT
@@ -97,14 +162,20 @@ async fn check_cache_returns_200_when_parquet_cached() {
 async fn check_cache_is_scoped_to_opening_filter() {
     let state = test_state("check-cache-filter-scoped").await;
     let hash = "def456hash";
-    let key = parquet_cache_key(hash, OpeningFilterMode::IgnoreAll, TessellationQuality::default());
+    let key = parquet_cache_key(
+        hash,
+        OpeningFilterMode::IgnoreAll,
+        TessellationQuality::default(),
+        ParquetLayout::Flat,
+    );
     state.cache.set_bytes(&key, b"parquet-bytes").await.unwrap();
 
     // Default filter (no query param) must still miss.
     let default_response = get(&state, &format!("/api/v1/cache/check/{hash}")).await;
     assert_eq!(default_response.status(), StatusCode::NOT_FOUND);
 
-    // The matching filter must hit.
+    // The matching filter must hit (with a current data model beside it).
+    seed_current_data_model(&state, hash, OpeningFilterMode::IgnoreAll).await;
     let scoped_response = get(
         &state,
         &format!("/api/v1/cache/check/{hash}?opening_filter=ignore_all"),
@@ -123,7 +194,7 @@ async fn check_cache_is_scoped_to_opening_filter() {
 async fn get_cached_geometry_returns_full_payload_when_both_present() {
     let state = test_state("geometry-both-present").await;
     let hash = "fullhash1";
-    let parquet_key = parquet_cache_key(hash, OpeningFilterMode::Default, TessellationQuality::default());
+    let parquet_key = parquet_cache_key(hash, OpeningFilterMode::Default, TessellationQuality::default(), ParquetLayout::Flat);
     let metadata_key =
         parquet_metadata_cache_key(hash, OpeningFilterMode::Default, TessellationQuality::default());
     state
@@ -157,7 +228,7 @@ async fn get_cached_geometry_returns_full_payload_when_both_present() {
 async fn get_cached_geometry_404s_when_metadata_missing() {
     let state = test_state("geometry-metadata-missing").await;
     let hash = "partialhash1";
-    let parquet_key = parquet_cache_key(hash, OpeningFilterMode::Default, TessellationQuality::default());
+    let parquet_key = parquet_cache_key(hash, OpeningFilterMode::Default, TessellationQuality::default(), ParquetLayout::Flat);
     state
         .cache
         .set_bytes(&parquet_key, b"the-parquet-bytes")
@@ -207,12 +278,35 @@ async fn get_data_model_returns_202_when_not_yet_cached() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 }
 
+/// An entry written under the PREVIOUS payload version must not be served
+/// (issue #3860). The `rel_id` column was added to the relationships table, so
+/// a `v5` blob decodes cleanly and silently restores `RelId = 0` on every
+/// relationship row of a server-loaded model. The reader must miss it and let
+/// the file be re-parsed.
+#[tokio::test]
+async fn get_data_model_ignores_an_entry_written_under_the_previous_version() {
+    let state = test_state("data-model-stale").await;
+    let cache_key = "somehash-default";
+    state
+        .cache
+        .set_bytes(&format!("{cache_key}-datamodel-v5"), b"pre-rel_id-parquet")
+        .await
+        .unwrap();
+
+    let response = get(&state, &format!("/api/v1/parse/data-model/{cache_key}")).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::ACCEPTED,
+        "a pre-bump data-model blob must not be served"
+    );
+}
+
 /// Cached data model -> 200 with the exact stored bytes as the body.
 #[tokio::test]
 async fn get_data_model_returns_200_with_cached_bytes() {
     let state = test_state("data-model-hit").await;
     let cache_key = "somehash-default";
-    let data_model_key = format!("{cache_key}-datamodel-v5");
+    let data_model_key = data_model_cache_key(cache_key);
     state
         .cache
         .set_bytes(&data_model_key, b"the-data-model-parquet")

@@ -6,6 +6,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Drawing2D, DrawingSheet } from '@ifc-lite/drawing-2d';
 import { rotatedBounds } from '@/lib/plan/planRotation';
 import { useViewerStore } from '@/store';
+import { sheetGeometryKeyOf, type CachedSheetTransform } from '@/lib/drawing/sheet-geometry-key';
+import { axisFlipForSection } from '@/hooks/pdfSectionLayout';
 
 interface UseViewControlsParams {
   drawing: Drawing2D | null;
@@ -16,11 +18,7 @@ interface UseViewControlsParams {
   sheetEnabled: boolean;
   activeSheet: DrawingSheet | null;
   isPinned: boolean;
-  cachedSheetTransformRef: React.MutableRefObject<{
-    translateX: number;
-    translateY: number;
-    scaleFactor: number;
-  } | null>;
+  cachedSheetTransformRef: React.MutableRefObject<CachedSheetTransform | null>;
   /**
    * Plan view rotation in radians, for fitting a TURNED drawing.
    *
@@ -169,9 +167,7 @@ function useViewControls({
     // - 'down' (plan view): no Y flip
     // - 'front'/'side': Y flip
     // - 'side': X flip
-    const currentAxis = sectionPlane.axis;
-    const flipY = currentAxis !== 'down';
-    const flipX = currentAxis === 'side';
+    const { flipX, flipY } = axisFlipForSection(sectionPlane.axis);
 
     const centerX = (bounds.min.x + bounds.max.x) / 2;
     const centerY = (bounds.min.y + bounds.max.y) / 2;
@@ -226,6 +222,21 @@ function useViewControls({
       }
     }
   }, [sheetEnabled, status, hasSomethingToFit, fitToView]);
+
+  // Track everything the cached transform is actually derived FROM (paper,
+  // viewport bounds, scale — all of which mutate the SAME sheet id in place)
+  // rather than the sheet's id, so a pinned view cannot keep the OLD sheet's
+  // transform applied to new content. Best-effort second line of defence:
+  // the canvas validates the cached entry's own key at the read site, because
+  // as the CHILD its drawing effect runs before this one (PR #2853 review).
+  const sheetGeometryKey = sheetGeometryKeyOf(activeSheet);
+  const prevSheetGeometryKeyRef = useRef(sheetGeometryKey);
+  useEffect(() => {
+    if (sheetGeometryKey !== prevSheetGeometryKeyRef.current) {
+      prevSheetGeometryKeyRef.current = sheetGeometryKey;
+      cachedSheetTransformRef.current = null;
+    }
+  }, [sheetGeometryKey, cachedSheetTransformRef]);
 
   // Auto-fit when: (1) needsFit is true (first open or axis change), or (2) not pinned after regenerate
   // ALWAYS fit when axis changed, regardless of pin state

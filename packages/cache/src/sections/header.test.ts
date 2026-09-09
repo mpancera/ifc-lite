@@ -69,10 +69,15 @@ describe('writeHeader', () => {
     expect(view.getUint32(0, true)).toBe(0x4c434649);
     expect(Array.from(buf.subarray(0, 4))).toEqual([0x49, 0x46, 0x43, 0x4c]);
 
-    // version: uint16 LE at byte 4. Deliberately the literal, not the imported
-    // constant: the point is to catch an accidental drift. 14 because the port
-    // relationships added two relationship kinds to the cached index.
-    expect(view.getUint16(4, true)).toBe(14);
+    // version: uint16 LE at byte 4. Moved 13 -> 14 with the #3199 mesh-record
+    // change, 14 -> 15 with the Entities `rawTypeName` column, 15 -> 16 with
+    // the #2985 IFNS v2 shards (a shared key would let a pre-#2985 bundle
+    // throw away every instanced occurrence), 16 -> 17 with the QuantityTable
+    // `qsetGlobalId` column, 17 -> 18 with the Relationships section's
+    // shadowed-rel-ids trailer (#3782); update this literal only alongside a
+    // types.ts ledger entry.
+    // 18 -> 19 (fork) with the IfcTypeEnum renumbering after the upstream merge.
+    expect(view.getUint16(4, true)).toBe(19);
   });
 
   it('writes each section-table entry field at its documented byte offset within the 16-byte entry', () => {

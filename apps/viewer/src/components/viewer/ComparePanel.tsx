@@ -60,10 +60,13 @@ export function ComparePanel({ onClose }: ComparePanelProps) {
   const addExcludedType = useViewerStore((s) => s.addCompareExcludedType);
   const removeExcludedType = useViewerStore((s) => s.removeCompareExcludedType);
   const clearExcludedTypes = useViewerStore((s) => s.clearCompareExcludedTypes);
-  const clearCompare = useViewerStore((s) => s.clearCompare);
   const bcfAuthor = useViewerStore((s) => s.bcfAuthor);
 
-  const { running, result, error, runComparison } = useCompare();
+  // `clearCompare` comes from the hook, not the raw store action (#2802): an
+  // in-flight `runComparison()` only learns "the user cleared" by watching
+  // THIS wrapper get called, so every clear in this panel must go through it
+  // or a stale result can resurrect itself once the run resolves.
+  const { running, result, error, runComparison, clearCompare } = useCompare();
 
   const modelList = useMemo(() => Array.from(models.values()), [models]);
 
@@ -229,7 +232,7 @@ export function ComparePanel({ onClose }: ComparePanelProps) {
     });
   };
 
-  // Composing a BCF issue: collapse the diff chrome so the form owns the panel.
+  // Composing a BCF topic: collapse the diff chrome so the form owns the panel.
   // Gate on the selected row too, so a vanished selection can never leave the
   // panel empty (chrome hidden but no form to show).
   const bcfComposing = bcf.formOpen && !!selectedRow;
@@ -262,8 +265,8 @@ export function ComparePanel({ onClose }: ComparePanelProps) {
       ) : (
         <>
           {/* Diff chrome (run controls, counts, report, results, detail) — hidden
-              while composing a BCF issue so the form owns the panel. The user has
-              committed to raising an issue and the change context is already in the
+              while composing a BCF topic so the form owns the panel. The user has
+              committed to raising a topic and the change context is already in the
               pre-filled form, so re-running / exports / browsing only get in the way. */}
           {!bcfComposing && (
             <>
@@ -375,7 +378,7 @@ export function ComparePanel({ onClose }: ComparePanelProps) {
               >
                 <ChevronLeft className="h-4 w-4" />
               </button>
-              <span className="text-muted-foreground shrink-0">Issue for</span>
+              <span className="text-muted-foreground shrink-0">Topic for</span>
               <span className="font-medium truncate min-w-0">{selectedRow.name || selectedRow.ifcType}</span>
               <span className="ml-auto text-[10px] text-muted-foreground shrink-0">
                 {selectedRow.ifcType.replace(/^Ifc/, '')}
@@ -383,7 +386,7 @@ export function ComparePanel({ onClose }: ComparePanelProps) {
             </div>
           )}
 
-          {/* Raise a BCF issue from the focused change (#1199) */}
+          {/* Raise a BCF topic from the focused change (#1199) */}
           {selectedRow && (
             <BcfFromChange
               row={selectedRow}

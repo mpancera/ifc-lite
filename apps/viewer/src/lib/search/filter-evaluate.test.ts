@@ -5,7 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { StringTable, EntityTableBuilder } from '@ifc-lite/data';
-import type { IfcDataStore } from '@ifc-lite/parser';
+import { IfcParser, type IfcDataStore } from '@ifc-lite/parser';
 import { evaluateFilterRules, evaluateFilterRulesFederated, __internal } from './filter-evaluate.js';
 import { Rule } from './filter-rules.js';
 
@@ -140,6 +140,46 @@ describe('evaluateFilterRules — column-only rules', () => {
   });
 });
 
+describe('evaluateFilterRules — globalId rule', () => {
+  it('matches exactly the element with that GlobalId', () => {
+    const store = buildStore(rows);
+    const out = evaluateFilterRules('m1', store, [Rule.globalId(['3abcdefghijklmnopqrstu'])], 'AND');
+    assert.deepStrictEqual(out.map((r) => r.expressId), [30]);
+  });
+
+  it('notIn excludes it and keeps the rest', () => {
+    const store = buildStore(rows);
+    const out = evaluateFilterRules('m1', store, [Rule.globalId(['3abcdefghijklmnopqrstu'], 'notIn')], 'AND');
+    assert.deepStrictEqual(out.map((r) => r.expressId).sort((a, b) => a - b), [10, 20, 40]);
+  });
+
+  it('several GlobalIds in one rule union, like ifcType values do', () => {
+    const store = buildStore(rows);
+    const out = evaluateFilterRules(
+      'm1',
+      store,
+      [Rule.globalId(['1abcdefghijklmnopqrstu', '4abcdefghijklmnopqrstu'])],
+      'AND',
+    );
+    assert.deepStrictEqual(out.map((r) => r.expressId).sort((a, b) => a - b), [10, 40]);
+  });
+
+  // WRONG-RESULT test, not a parses-without-error test: a case-FOLDING
+  // implementation (the same `setOpMatches` every other set rule here uses)
+  // would treat these two different GlobalIds as equal and match BOTH
+  // elements instead of neither. GlobalId is a real IFC identity, unlike a
+  // type or storey name, so folding case here is a correctness bug, not a
+  // convenience.
+  it('is case-SENSITIVE, unlike every other set rule (#4094)', () => {
+    const store = buildStore([
+      { expressId: 100, type: 'IFCWALL', globalId: 'AbCdEfGhIjKlMnOpQrStUv', name: 'Wall-Case-A' },
+      { expressId: 200, type: 'IFCWALL', globalId: 'aBcDeFgHiJkLmNoPqRsTuV', name: 'Wall-Case-B' },
+    ]);
+    const out = evaluateFilterRules('m1', store, [Rule.globalId(['AbCdEfGhIjKlMnOpQrStUv'])], 'AND');
+    assert.deepStrictEqual(out.map((r) => r.expressId), [100]);
+  });
+});
+
 describe('evaluateFilterRules — storey & predefinedType resolvers', () => {
   it('uses storeyNameOf when provided', () => {
     const store = buildStore(rows);
@@ -157,6 +197,48 @@ describe('evaluateFilterRules — storey & predefinedType resolvers', () => {
       Rule.predefinedType(['SOLIDWALL']),
     ], 'AND', { predefinedTypeOf: (id) => ptByExpressId.get(id) ?? '' });
     assert.deepStrictEqual(out.map((r) => r.expressId), [10]);
+  });
+
+  // `IfcBuildingStorey.Name` is optional and not unique — two distinct
+  // storeys in the SAME model routinely share a Name (duplicate "Level 1"
+  // across wings, or a copy-paste authoring slip). HierarchyPanel mirrors
+  // a storey click into a `Rule.storey` filter; before this fix it only
+  // carried the Name, so clicking one "Level 1" silently pulled in every
+  // other storey named "Level 1" too — not just the one the user clicked.
+  it('a storey rule with exact refs matches only the clicked storey, not a same-named sibling', () => {
+    const storeyRows = [
+      ...rows,
+      { expressId: 500, type: 'IFCBUILDINGSTOREY', globalId: '5abcdefghijklmnopqrstu', name: 'Level 1' },
+      { expressId: 700, type: 'IFCBUILDINGSTOREY', globalId: '7abcdefghijklmnopqrstu', name: 'Level 1' },
+    ];
+    const store = buildStore(storeyRows);
+    (store as unknown as { spatialHierarchy: unknown }).spatialHierarchy = {
+      byStorey: new Map<number, number[]>([
+        [500, [10, 30]], // Level 1 (east wing): Wall-EXT-001, Door-A-201
+        [700, [20]],     // Level 1 (west wing, distinct storey, same Name): Wall-INT-002
+      ]),
+      elementToStorey: new Map<number, number>([[10, 500], [30, 500], [20, 700]]),
+    };
+
+    // RED (pre-fix behaviour, still exercised here as the legacy/manual
+    // path): no refs -> matches by name alone -> both storeys' elements.
+    const byName = evaluateFilterRules('m1', store, [Rule.storey(['Level 1'])], 'AND');
+    assert.deepStrictEqual(byName.map((r) => r.expressId).sort(), [10, 20, 30]);
+
+    // GREEN: refs scope the match to the exact (modelId, expressId) the
+    // user clicked (storey 500), excluding storey 700's element (20)
+    // even though it shares the Name.
+    const byRef = evaluateFilterRules(
+      'm1', store, [Rule.storey(['Level 1'], 'in', [{ modelId: 'm1', expressId: 500 }])], 'AND',
+    );
+    assert.deepStrictEqual(byRef.map((r) => r.expressId).sort(), [10, 30]);
+
+    // A ref for a different model never matches here — no silent
+    // cross-model name fallback once refs are present.
+    const byOtherModelRef = evaluateFilterRules(
+      'm1', store, [Rule.storey(['Level 1'], 'in', [{ modelId: 'm2', expressId: 500 }])], 'AND',
+    );
+    assert.deepStrictEqual(byOtherModelRef.map((r) => r.expressId), []);
   });
 });
 
@@ -186,6 +268,41 @@ describe('evaluateFilterRulesFederated', () => {
       { limit: 3 },
     );
     assert.strictEqual(out.length, 3);
+  });
+
+  it('selects one exact model in a federation (#4019)', async () => {
+    const a = buildStore(rows);
+    const b = buildStore(rows.map((r) => ({ ...r, expressId: r.expressId + 1000 })));
+    const progress: Array<[number, number]> = [];
+    const out = await evaluateFilterRulesFederated(
+      [
+        { id: 'runtime-architecture', filterIdentity: 'Architecture.ifc:fingerprint-a', store: a },
+        { id: 'runtime-structure', filterIdentity: 'Structure.ifc:fingerprint-b', store: b },
+      ],
+      [Rule.model(['Structure.ifc:fingerprint-b'])],
+      'AND',
+      { onProgress: (scanned, total) => progress.push([scanned, total]) },
+    );
+    assert.deepStrictEqual(new Set(out.map((r) => r.modelId)), new Set(['runtime-structure']));
+    assert.deepStrictEqual(out.map((r) => r.expressId), [1010, 1020, 1030, 1040]);
+    assert.deepStrictEqual(progress.at(-1), [4, 4], 'must not scan the rejected model');
+  });
+
+  it('survives runtime model-id changes while combining other rules (#4019)', async () => {
+    const a = buildStore(rows);
+    const b = buildStore(rows.map((r) => ({ ...r, expressId: r.expressId + 1000 })));
+    const out = await evaluateFilterRulesFederated(
+      [
+        { id: 'new-runtime-a', filterIdentity: 'Architecture.ifc:fingerprint-a', store: a },
+        { id: 'new-runtime-b', filterIdentity: 'Structure.ifc:fingerprint-b', store: b },
+      ],
+      [Rule.model(['Structure.ifc:fingerprint-b'], 'notIn'), Rule.ifcType(['IfcWall'])],
+      'AND',
+    );
+    assert.deepStrictEqual(out.map((r) => [r.modelId, r.expressId]), [
+      ['new-runtime-a', 10],
+      ['new-runtime-a', 20],
+    ]);
   });
 });
 
@@ -274,6 +391,49 @@ describe('matchQuantityRule', () => {
       ),
       false,
     );
+  });
+});
+
+describe('matchAttributeRule', () => {
+  const attrs = [
+    { name: 'Description', value: 'Fire-rated' },
+    { name: 'ObjectType', value: 'Structural' },
+    { name: 'Tag', value: 42 },
+  ];
+
+  it('matches by name (case-insensitive) and value', () => {
+    assert.strictEqual(
+      __internal.matchAttributeRule(Rule.attribute('Description', 'eq', 'fire-rated'), attrs),
+      true,
+    );
+    assert.strictEqual(
+      __internal.matchAttributeRule(Rule.attribute('description', 'eq', 'Fire-rated'), attrs),
+      true,
+    );
+  });
+
+  // WRONG-RESULT: a mutation that dropped the name filter (matched on value
+  // alone) would let this pass against the wrong attribute.
+  it('does not match a value under a different attribute name', () => {
+    assert.strictEqual(
+      __internal.matchAttributeRule(Rule.attribute('ObjectType', 'eq', 'Fire-rated'), attrs),
+      false,
+    );
+  });
+
+  it('isSet / isNotSet check presence by name only', () => {
+    assert.strictEqual(__internal.matchAttributeRule(Rule.attribute('Description', 'isSet', ''), attrs), true);
+    assert.strictEqual(__internal.matchAttributeRule(Rule.attribute('LongName', 'isSet', ''), attrs), false);
+    assert.strictEqual(__internal.matchAttributeRule(Rule.attribute('LongName', 'isNotSet', ''), attrs), true);
+  });
+
+  it('a numeric attribute value compares the same way a numeric property does', () => {
+    assert.strictEqual(__internal.matchAttributeRule(Rule.attribute('Tag', 'gt', '10'), attrs), true);
+    assert.strictEqual(__internal.matchAttributeRule(Rule.attribute('Tag', 'lt', '10'), attrs), false);
+  });
+
+  it('an absent attribute never matches a value comparison', () => {
+    assert.strictEqual(__internal.matchAttributeRule(Rule.attribute('LongName', 'eq', ''), attrs), false);
   });
 });
 
@@ -588,6 +748,26 @@ describe('selectIterationSource — index prefilter (AND + op:in)', () => {
     // full-table scan (which would also include the two storey rows).
     assert.deepStrictEqual(ids.sort(), [10, 30]);
   });
+
+  it('storey refs scope the prefilter bucket to the exact ref\'d storey, even with a same-named sibling', () => {
+    const storeyRows = [
+      ...rows,
+      { expressId: 500, type: 'IFCBUILDINGSTOREY', globalId: '5abcdefghijklmnopqrstu', name: 'Level 1' },
+      { expressId: 700, type: 'IFCBUILDINGSTOREY', globalId: '7abcdefghijklmnopqrstu', name: 'Level 1' },
+    ];
+    const s2 = buildStore(storeyRows);
+    (s2 as unknown as { spatialHierarchy: unknown }).spatialHierarchy = {
+      byStorey: new Map<number, number[]>([
+        [500, [10, 30]],
+        [700, [20]],
+      ]),
+    };
+    const source = select(
+      s2, [Rule.storey(['Level 1'], 'in', [{ modelId: 'm1', expressId: 500 }])], 'AND', undefined, 'm1',
+    );
+    const ids = Array.from(source as Iterable<number>);
+    assert.deepStrictEqual(ids.sort(), [10, 30]);
+  });
 });
 
 describe('evaluateFilterRulesFederated — large-model scaling', () => {
@@ -717,5 +897,178 @@ describe('evaluateFilterRulesFederated — async chunking, abort, progress', () 
     assert.strictEqual(out.length, 1);
     // We should have stopped before scanning all four entities.
     assert.ok(lastScanned < rows.length, `expected early termination, scanned ${lastScanned}`);
+  });
+});
+
+/**
+ * How far does a `storey` rule reach? — the question the IfcOpenShell
+ * selector's `location="Level 3"` asks, and the one #4091's docs page has to
+ * answer without guessing.
+ *
+ * The page says `location=` matches an element contained directly OR
+ * INDIRECTLY in a spatial element of that name, and gives `IfcPump,
+ * location="Level 3"` for a pump sitting in a space on Level 3. ifc-lite's
+ * `storey` rule reads `spatialHierarchy.elementToStorey`, which is a different
+ * map, so the answer is measured here against a REAL parse rather than
+ * reasoned about: a pump in a space, a wall directly in the storey, one
+ * `Rule.storey(['Level 3'])`, and whatever comes back is what the docs matrix
+ * says.
+ */
+const SPATIAL_IFC = `ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('t','',(''),(''),'','','');
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#1= IFCPROJECT('0Proj000000000000000001',$,'Proj',$,$,$,$,(#20),#30);
+#20= IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#21,$);
+#21= IFCAXIS2PLACEMENT3D(#22,$,$);
+#22= IFCCARTESIANPOINT((0.,0.,0.));
+#30= IFCUNITASSIGNMENT((#31));
+#31= IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);
+#40= IFCLOCALPLACEMENT($,#21);
+#41= IFCSITE('0Site00000000000000001',$,'Site',$,$,#40,$,$,.ELEMENT.,$,$,$,$,$);
+#42= IFCBUILDING('0Bldg00000000000000001',$,'Building',$,$,#40,$,$,.ELEMENT.,$,$,$);
+#43= IFCBUILDINGSTOREY('0Storey00000000000001',$,'Level 3',$,$,#40,$,$,.ELEMENT.,9.);
+#44= IFCSPACE('0Space000000000000001',$,'Room 301',$,$,#40,$,$,.ELEMENT.,.INTERNAL.,$);
+#50= IFCPUMP('0Pump0000000000000001',$,'Pump-01',$,$,#40,$,'tag',$);
+#51= IFCWALL('0Wall0000000000000001',$,'Wall-01',$,$,#40,$,'tag',$);
+#60= IFCRELAGGREGATES('0Agg00000000000000001',$,$,$,#1,(#41));
+#61= IFCRELAGGREGATES('0Agg00000000000000002',$,$,$,#41,(#42));
+#62= IFCRELAGGREGATES('0Agg00000000000000003',$,$,$,#42,(#43));
+#63= IFCRELAGGREGATES('0Agg00000000000000004',$,$,$,#43,(#44));
+#70= IFCRELCONTAINEDINSPATIALSTRUCTURE('0Cont0000000000000001',$,$,$,(#50),#44);
+#71= IFCRELCONTAINEDINSPATIALSTRUCTURE('0Cont0000000000000002',$,$,$,(#51),#43);
+ENDSEC;
+END-ISO-10303-21;
+`;
+
+const PUMP_IN_SPACE = 50;
+const WALL_IN_STOREY = 51;
+
+async function parseSpatialStore(): Promise<IfcDataStore> {
+  const bytes = new TextEncoder().encode(SPATIAL_IFC);
+  return new IfcParser().parseColumnar(
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+  );
+}
+
+describe('storey rule reach — what location="Level 3" resolves to (#4091)', () => {
+  it('the fixture really holds a pump in a space and a wall in the storey', async () => {
+    const store = await parseSpatialStore();
+    const ids = evaluateFilterRules('m1', store, [Rule.ifcType(['IfcPump', 'IfcWall'])], 'AND')
+      .map((e) => e.expressId).sort((a, b) => a - b);
+    assert.deepStrictEqual(ids, [PUMP_IN_SPACE, WALL_IN_STOREY]);
+    assert.strictEqual(store.spatialHierarchy?.getContainingSpace(PUMP_IN_SPACE), 44);
+  });
+
+  it('MEASURED: a storey rule matches the directly-contained wall', async () => {
+    const store = await parseSpatialStore();
+    const out = evaluateFilterRules('m1', store, [Rule.storey(['Level 3'])], 'AND');
+    assert.deepStrictEqual(out.map((e) => e.expressId), [WALL_IN_STOREY]);
+  });
+
+  it('MEASURED: it does NOT reach the pump one level down, inside the space', async () => {
+    const store = await parseSpatialStore();
+    const out = evaluateFilterRules(
+      'm1',
+      store,
+      [Rule.ifcType(['IfcPump']), Rule.storey(['Level 3'])],
+      'AND',
+    );
+    // Upstream documents the opposite (direct containment only, #4094). This
+    // fork resolves an element's storey THROUGH its containing space — a
+    // device in a room has a storey — so the pump one level down IS reached,
+    // which is what IfcOpenShell example 17 asks for.
+    assert.deepStrictEqual(out.map((e) => e.expressId), [PUMP_IN_SPACE]);
+    assert.strictEqual(store.spatialHierarchy?.elementToStorey.get(PUMP_IN_SPACE), 43);
+  });
+
+  it('MEASURED: the space itself IS mapped to its storey', async () => {
+    const store = await parseSpatialStore();
+    assert.strictEqual(store.spatialHierarchy?.elementToStorey.get(44), 43);
+  });
+});
+
+/**
+ * `attribute` rule end-to-end against a REAL parse: `Description` /
+ * `ObjectType` are read from the source buffer through
+ * `extractAllEntityAttributes`, the same on-demand extraction the IDS
+ * attribute facet uses (#4094). Two walls, one with a Description and one
+ * without, so a wrong implementation that matched on presence-of-any-value
+ * (or ignored the attribute name) would return the wrong SET, not just fail
+ * to parse.
+ */
+const ATTRIBUTE_IFC = `ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('t','',(''),(''),'','','');
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#1= IFCPROJECT('0Proj000000000000000001',$,'Proj',$,$,$,$,(#20),#30);
+#20= IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#21,$);
+#21= IFCAXIS2PLACEMENT3D(#22,$,$);
+#22= IFCCARTESIANPOINT((0.,0.,0.));
+#30= IFCUNITASSIGNMENT((#31));
+#31= IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);
+#40= IFCLOCALPLACEMENT($,#21);
+#50= IFCWALL('0WallFireRated000000001',$,'Wall-A','Fire-rated','Structural',#40,$,$,$);
+#51= IFCWALL('0WallPlain00000000000001',$,'Wall-B',$,$,#40,$,$,$);
+ENDSEC;
+END-ISO-10303-21;
+`;
+
+async function parseAttributeStore(): Promise<IfcDataStore> {
+  const bytes = new TextEncoder().encode(ATTRIBUTE_IFC);
+  return new IfcParser().parseColumnar(
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+  );
+}
+
+describe('evaluateFilterRules — attribute rule against a REAL parse (#4094)', () => {
+  it('a Description set on one wall and not the other distinguishes them', async () => {
+    // Scoped to IfcWall: the fixture's non-wall entities (project, units,
+    // placement, …) ALSO lack a Description, so an unscoped isNotSet would
+    // correctly match them too — that's the rule working, not a defect, but
+    // it makes a bad wrong-result test. Scoping to IfcWall is what makes
+    // "distinguishes Wall-A from Wall-B" the actual claim being measured.
+    const store = await parseAttributeStore();
+    const withDesc = evaluateFilterRules(
+      'm1', store, [Rule.ifcType(['IfcWall']), Rule.attribute('Description', 'isSet', '')], 'AND',
+    );
+    assert.deepStrictEqual(withDesc.map((e) => e.expressId), [50]);
+    const withoutDesc = evaluateFilterRules(
+      'm1', store, [Rule.ifcType(['IfcWall']), Rule.attribute('Description', 'isNotSet', '')], 'AND',
+    );
+    assert.deepStrictEqual(withoutDesc.map((e) => e.expressId), [51]);
+  });
+
+  it('Description eq / ObjectType eq read the RIGHT attribute, not just any set value', async () => {
+    const store = await parseAttributeStore();
+    const byDescription = evaluateFilterRules('m1', store, [Rule.attribute('Description', 'eq', 'Fire-rated')], 'AND');
+    assert.deepStrictEqual(byDescription.map((e) => e.expressId), [50]);
+    const byObjectType = evaluateFilterRules('m1', store, [Rule.attribute('ObjectType', 'eq', 'Structural')], 'AND');
+    assert.deepStrictEqual(byObjectType.map((e) => e.expressId), [50]);
+    // Cross-checks that a "match on value alone" mutation would fail: the
+    // Description VALUE does not satisfy an ObjectType comparison.
+    const crossed = evaluateFilterRules('m1', store, [Rule.attribute('ObjectType', 'eq', 'Fire-rated')], 'AND');
+    assert.deepStrictEqual(crossed, []);
+  });
+
+  it('Name eq distinguishes Wall-A from Wall-B through the SAME attribute-extraction path', async () => {
+    // Not a Name rule (that reads a different column) — an ATTRIBUTE rule
+    // named "Name", proving the generic path reaches a real per-entity value
+    // and not just a fixed set of presence checks.
+    const store = await parseAttributeStore();
+    const out = evaluateFilterRules('m1', store, [Rule.attribute('Name', 'eq', 'Wall-A')], 'AND');
+    assert.deepStrictEqual(out.map((e) => e.expressId), [50]);
+  });
+
+  it('a made-up attribute name never matches (adapt-time name validity is not checked)', async () => {
+    const store = await parseAttributeStore();
+    const out = evaluateFilterRules('m1', store, [Rule.attribute('NoSuchAttribute', 'isSet', '')], 'AND');
+    assert.deepStrictEqual(out, []);
   });
 });

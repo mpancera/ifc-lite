@@ -67,7 +67,12 @@ export const RELATIONSHIP_TYPES = new Set([
     'IFCRELCONNECTSPATHELEMENTS', 'IFCRELCONNECTSELEMENTS',
     'IFCRELCONNECTSPORTTOELEMENT', 'IFCRELCONNECTSPORTS',
     'IFCRELSPACEBOUNDARY',
-    'IFCRELASSIGNSTOGROUP', 'IFCRELASSIGNSTOPRODUCT',
+    // IfcRelAssignsToGroupByFactor is a subtype of IfcRelAssignsToGroup
+    // (adds a proportional Factor attribute, e.g. zone occupancy share) and
+    // is written to STEP with its own distinct entity keyword — it does not
+    // match the 'IFCRELASSIGNSTOGROUP' string, so it needs its own entry or
+    // every membership assigned through it is silently invisible.
+    'IFCRELASSIGNSTOGROUP', 'IFCRELASSIGNSTOGROUPBYFACTOR', 'IFCRELASSIGNSTOPRODUCT',
     'IFCRELREFERENCEDINSPATIALSTRUCTURE',
 ]);
 
@@ -93,6 +98,9 @@ export const REL_TYPE_MAP: Record<string, RelationshipType> = {
     'IFCRELCONNECTSPORTS': RelationshipType.ConnectsPorts,
     'IFCRELSPACEBOUNDARY': RelationshipType.SpaceBoundary,
     'IFCRELASSIGNSTOGROUP': RelationshipType.AssignsToGroup,
+    // Subtype of IfcRelAssignsToGroup (adds a Factor); same RelatingGroup /
+    // RelatedObjects membership semantics, so it shares the same edge type.
+    'IFCRELASSIGNSTOGROUPBYFACTOR': RelationshipType.AssignsToGroup,
     'IFCRELASSIGNSTOPRODUCT': RelationshipType.AssignsToProduct,
     'IFCRELREFERENCEDINSPATIALSTRUCTURE': RelationshipType.ReferencedInSpatialStructure,
 };
@@ -104,6 +112,8 @@ export const QUANTITY_TYPE_MAP: Record<string, QuantityType> = {
     'IFCQUANTITYCOUNT': QuantityType.Count,
     'IFCQUANTITYWEIGHT': QuantityType.Weight,
     'IFCQUANTITYTIME': QuantityType.Time,
+    // IFC4X3 added IfcQuantityNumber; older schemas never emit it.
+    'IFCQUANTITYNUMBER': QuantityType.Number,
 };
 
 // Types needed for spatial hierarchy (small subset)
@@ -132,7 +142,11 @@ export const HIERARCHY_REL_TYPES = new Set([
     // themselves were parsed.
     'IFCRELCONNECTSPORTTOELEMENT', 'IFCRELCONNECTSPORTS',
     'IFCRELSPACEBOUNDARY',
-    'IFCRELASSIGNSTOGROUP', 'IFCRELASSIGNSTOPRODUCT',
+    // IfcRelAssignsToGroupByFactor is a distinct STEP keyword (subtype of
+    // IfcRelAssignsToGroup); omitting it here means it never reaches
+    // relationshipRefs / extractRelFast, so every group/zone/system
+    // membership assigned through it is silently dropped.
+    'IFCRELASSIGNSTOGROUP', 'IFCRELASSIGNSTOGROUPBYFACTOR', 'IFCRELASSIGNSTOPRODUCT',
     'IFCRELREFERENCEDINSPATIALSTRUCTURE',
 ]);
 
@@ -158,6 +172,7 @@ export const PROPERTY_ENTITY_TYPES = new Set([
     'IFCPROPERTYLISTVALUE', 'IFCPROPERTYREFERENCEVALUE',
     'IFCQUANTITYLENGTH', 'IFCQUANTITYAREA', 'IFCQUANTITYVOLUME',
     'IFCQUANTITYCOUNT', 'IFCQUANTITYWEIGHT', 'IFCQUANTITYTIME',
+    'IFCQUANTITYNUMBER',
 ]);
 
 export const PROPERTY_CONTAINER_TYPES = new Set([

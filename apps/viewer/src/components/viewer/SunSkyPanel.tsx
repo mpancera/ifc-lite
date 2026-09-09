@@ -25,9 +25,12 @@ import { useDraggablePanel } from '@/hooks/useDraggablePanel';
 import { cn } from '@/lib/utils';
 import type { CesiumDataSource } from '@/store/slices/cesiumSlice';
 import { CustomBasemapEditor } from './CustomBasemapEditor';
+import { CustomTilesetEditor } from './CustomTilesetEditor';
 import type { SolarSweepMode } from '@/store/slices/solarSlice';
 import { LIGHTING_PRESETS, LIGHTING_PRESET_ORDER, isLightingPresetId } from '@/lib/lighting-presets';
 import { LightingTrimControls } from './LightingTrimControls';
+import { ShadowControls } from './ShadowControls';
+import { SunTimeControls } from './SunTimeControls';
 import { posthog } from '@/lib/analytics';
 import {
   solarDisplayOffsetMinutes,
@@ -42,6 +45,7 @@ const CONTEXT_SOURCES: Array<{ value: CesiumDataSource; label: string; hint: str
   { value: 'osm-buildings', label: 'OSM Buildings', hint: 'Extruded footprints over the satellite base map' },
   { value: 'google-photorealistic', label: 'Photorealistic', hint: 'Google 3D Tiles — textured real-world context' },
   { value: 'custom', label: 'Custom (XYZ)', hint: 'Your own XYZ/TMS tile URL template' },
+  { value: 'custom-3dtiles', label: 'Custom (3D Tiles)', hint: 'Your own 3D Tiles tileset URL (1.0 or 1.1)' },
 ];
 
 const SWEEP_MODES: Array<{ value: SolarSweepMode; label: string; hint: string }> = [
@@ -162,6 +166,7 @@ export function SunSkyPanel() {
                 </select>
               </label>
               {dataSource === 'custom' && <CustomBasemapEditor />}
+              {dataSource === 'custom-3dtiles' && <CustomTilesetEditor />}
             </>
           ) : (
             <label className="flex flex-col gap-0.5">
@@ -185,6 +190,14 @@ export function SunSkyPanel() {
           {/* WebGPU shading trims (exposure + light hardness + terminator
               softness) — hidden in world-context mode, where Cesium lights. */}
           {!cesiumEnabled && <LightingTrimControls />}
+
+          {/* Sun cast shadows (#2670) — standalone WebGPU only; Cesium casts
+              its own in world-context. */}
+          {!cesiumEnabled && <ShadowControls />}
+
+          {/* Manual time-of-day sun (#2670) for models without georeference —
+              the real study (below, when georeferenced) overrides it. */}
+          {!cesiumEnabled && <SunTimeControls />}
 
           {/* Sun study — needs a georeferenced model for the real sun */}
           {cesiumAvailable && (

@@ -33,15 +33,33 @@ const ENTITY_INFO_BY_UPPER: Map<string, IfcEntityInfo> = (() => {
 // authoring tools emit the leaf. Resolving the alias to its closest
 // schema-known supertype lets the inheritance walk reach IfcProduct.
 //
-// Mirrors `rust/core/src/legacy_entities.rs` so the two sides stay in
-// lockstep — if you add a row here, add the matching Rust entry too.
-const ENTITY_NAME_ALIASES: Record<string, string> = {
+// Exported from this module (not from the package index) so
+// `query-backend-maps.test.ts` can pin every row against the DESCENDANT
+// direction: `@ifc-lite/data`'s `expandTypeNamesToDescendants` carries its own
+// copy of these rows — it cannot import this one, since the dependency runs
+// the other way — and a row honoured walking up but not walking down means
+// `byType('IfcGeotechnicalStratum')` answers zero on a file full of
+// IFCSOLIDSTRATUM records. That test is the link between the two copies.
+//
+// `rust/core/src/legacy_entities.rs` is the third home, on the other side of
+// the language boundary — if you add a row here, add the matching Rust entry
+// too.
+export const ENTITY_NAME_ALIASES: Record<string, string> = {
     // IFC4.3 stratum subtypes (issue #860) — schema only has the abstract
     // `IfcGeotechnicalStratum`, real models emit one of these three leaves
     // with a PredefinedType pinned (SOLID / VOID / WATER).
     IFCSOLIDSTRATUM: 'IfcGeotechnicalStratum',
     IFCVOIDSTRATUM: 'IfcGeotechnicalStratum',
     IFCWATERSTRATUM: 'IfcGeotechnicalStratum',
+    // There was a fourth row here, `IFCELECTRICALDISTRIBUTIONPOINT`. The
+    // IFC2X3 entity is `IfcElectricDistributionPoint` — no "AL" — so the key
+    // named nothing and the row could never fire. Removed rather than
+    // respelled (#3172): the correctly spelled name IS in `ENTITIES_IFC2X3`,
+    // so `ENTITY_INFO_BY_UPPER` already resolves it and an alias would be a
+    // second, shadowing answer. This table's mandate is narrower than
+    // `legacy_entities.rs`'s: only names absent from ALL THREE bundled
+    // tables belong here, which is why the five IFC2X3 products that fix
+    // added on the Rust side have no row here either.
 };
 
 /**
@@ -52,8 +70,9 @@ const ENTITY_NAME_ALIASES: Record<string, string> = {
  * (the STEP exporter's enum-slot resolution) have to canonicalize the SAME way
  * {@link getAttributeNamesAcrossSchemas} does, or their indices refer to a
  * different attribute list than the names they are indices into. Copying the
- * table into another package would give it a third home — this one and
- * `rust/core/src/legacy_entities.rs` are already two.
+ * table into another package would give it a further home — this one,
+ * `@ifc-lite/data`'s descendant-direction copy and
+ * `rust/core/src/legacy_entities.rs` are already three.
  */
 export function resolveEntityNameAlias(type: string): string {
     return ENTITY_NAME_ALIASES[type.toUpperCase()] ?? type;
@@ -165,7 +184,12 @@ export function getAttributeNamesAcrossSchemas(type: string): string[] {
  *
  * Still a real guard, not a pass-through: a typo (`IfcWal`), a vendor extension
  * and an EXPRESS defined type (`IfcLengthMeasure`, `IfcArcIndex`) are all
- * rejected.
+ * rejected. So are `Object.prototype` member names (`constructor`, `toString`,
+ * `__proto__`, ...): the union lookup is a `Map`, and the pin fallback's
+ * own-property test — added in #3063/#3069, replacing an `in` that walked the
+ * prototype chain and answered `true` for every one of them — keeps the second
+ * lookup from re-admitting them. Callers of this predicate (`ofType()`,
+ * `addEntity`) rely on that; the guard is only as good as `isKnownEntity`.
  *
  * Known-ness, not instantiability: abstract supertypes (`IfcProduct`,
  * `IfcRoot`) answer `true`, as they always have — that is a different
@@ -253,3 +277,27 @@ export function normalizeIfcTypeName(type: string): string {
     // Unknown to registry — preserve as-is (could be a vendor extension).
     return type;
 }
+
+/**
+ * Is this class one an unfiltered entity query should answer with?
+ *
+ * `IfcObjectDefinition` is the exact line: it covers products, type objects,
+ * groups and systems, and `IfcContext`, and excludes the other two `IfcRoot`
+ * branches — `IfcPropertyDefinition` and `IfcRelationship`. Type objects are
+ * then held back, so an unfiltered query answers with occurrences.
+ *
+ * Keying on `IfcTypeEnumFromString` instead — as the CLI and MCP backends both
+ * did — gated on a curated subset of the schema, so every class outside it was
+ * dropped from the result with nothing to say so: on an MEP model, every
+ * `IfcAirTerminal`, `IfcDuctFitting` and `IfcDistributionPort`.
+ *
+ * `IFC_ENTITY_NAMES` is not the oracle either: it carries all ~880 classes, so
+ * keying on "is a known IFC name" floods the same query with every
+ * `IfcCartesianPoint` in the file.
+ */
+export function isQueryableObjectType(type: string): boolean {
+    const chain = getInheritanceChain(type);
+    if (!chain.includes('IfcObjectDefinition')) return false;
+    return !chain.includes('IfcTypeObject');
+}
+

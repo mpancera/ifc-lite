@@ -18,6 +18,7 @@ export type { IfcZipContents } from './ifczip.js';
 export { StepTokenizer } from './tokenizer.js';
 export { EntityIndexBuilder } from './entity-index.js';
 export { EntityExtractor } from './entity-extractor.js';
+export { STEP_TRIVIA } from './step-trivia.js';
 // The source accessor (#2183). Exported because the byte-range readers in
 // @ifc-lite/export, @ifc-lite/cli and the viewer now accept either shape, and
 // `IfcDataStore.source` is on its way to this type — so it is public surface
@@ -51,11 +52,19 @@ export { CompactEntityIndex, CompactEntityIndexBuilder, buildCompactEntityIndex 
 export { scanIfcEntities } from './entity-scanner.js';
 export type { EntityScanPath, EntityScanResult, PreScannedEntityIndex, WasmScanApi } from './entity-scanner.js';
 export { REL_TYPE_MAP, RELATIONSHIP_TYPES, isIfcTypeLikeEntity } from './columnar-parser-indexes.js';
+export { IFC_SUBTYPES, expandTypes, QUERY_REL_TYPE_MAP } from './query-backend-maps.js';
 export { PropertyExtractor } from './property-extractor.js';
 export { QuantityExtractor } from './quantity-extractor.js';
 export { RelationshipExtractor } from './relationship-extractor.js';
 export { SpatialHierarchyBuilder } from './spatial-hierarchy-builder.js';
-export { extractLengthUnitScale, describeLengthUnit, describeAllUnits, type DeclaredUnit } from './unit-extractor.js';
+export {
+  extractLengthUnitScale,
+  resolveEntityLengthUnitScale,
+  resolveOwningIfcProjectId,
+  describeLengthUnit,
+  describeAllUnits,
+  type DeclaredUnit,
+} from './unit-extractor.js';
 export {
   extractProjectUnits,
   measureUnit,
@@ -63,7 +72,10 @@ export {
   type ResolvedUnit,
   type MeasureUnit,
 } from './project-units.js';
-export { ColumnarParser, type IfcDataStore, type EntityByIdIndex, extractPropertiesOnDemand, extractQuantitiesOnDemand, extractEntityAttributesOnDemand, attachOnDemandTag, extractAllEntityAttributes, getRawNamedAttributes, extractRootAttributesFromEntity, extractClassificationsOnDemand, extractClassificationSystemsOnDemand, extractMaterialsOnDemand, extractAllMaterialsOnDemand, extractMaterialPropertiesOnDemand, extractMaterialPropertiesForMaterialId, resolveMaterialDefId, resolveAllMaterialDefIds, collectMaterialLeaves, buildMaterialUsageIndex, getMaterialDisplay, extractTypePropertiesOnDemand, extractTypeEntityOwnProperties, extractTypeQuantitiesOnDemand, mergeInheritedPropertySets, extractDocumentsOnDemand, extractRelationshipsOnDemand, extractGroupMembersOnDemand, extractGeoreferencingOnDemand, type ClassificationInfo, type MaterialInfo, type MaterialLayerInfo, type MaterialProfileInfo, type MaterialConstituentInfo, type MaterialPsetGroup, type MaterialLeaf, type MaterialUsage, type TypePropertyInfo, type TypeQuantityInfo, type DocumentInfo, type EntityRelationships, type GroupMember } from './columnar-parser.js';
+export { quantitySiScale } from './quantity-collect.js';
+export { scaleMeasureValue, scaledPropertyValue, roundToScale } from './measure-unit-scale.js';
+export { attachOnDemandTag } from './on-demand-tag.js';
+export { ColumnarParser, type IfcDataStore, type EntityByIdIndex, extractPropertiesOnDemand, extractQuantitiesOnDemand, extractEntityAttributesOnDemand, extractAllEntityAttributes, getRawNamedAttributes, extractRootAttributesFromEntity, extractClassificationsOnDemand, extractClassificationSystemsOnDemand, extractMaterialsOnDemand, extractAllMaterialsOnDemand, extractMaterialPropertiesOnDemand, extractMaterialPropertiesForMaterialId, resolveMaterialDefId, resolveAllMaterialDefIds, collectMaterialLeaves, buildMaterialUsageIndex, getMaterialDisplay, extractTypePropertiesOnDemand, extractTypeEntityOwnProperties, extractTypeQuantitiesOnDemand, mergeInheritedPropertySets, mergeInheritedQuantitySets, extractDocumentsOnDemand, extractRelationshipsOnDemand, extractGroupMembersOnDemand, extractGeoreferencingOnDemand, type ClassificationInfo, type ClassificationSystemNames, type MaterialInfo, type MaterialLayerInfo, type MaterialProfileInfo, type MaterialConstituentInfo, type MaterialPsetGroup, type MaterialLeaf, type MaterialUsage, type TypePropertyInfo, type TypeQuantityInfo, type DocumentInfo, type EntityRelationships, type GroupMember } from './columnar-parser.js';
 export type { IfcStoreBase, IfcSourceHeader, SpatialHierarchy, EntityTable } from '@ifc-lite/data';
 export { parseSourceHeader } from './source-header.js';
 export { attachDataStoreAccessors, type IfcStoreData } from './data-store-accessors.js';
@@ -176,15 +188,15 @@ export * from './types.js';
 // (`…ForEntityInIfc4Pin`), leaving the union walker the plain name, so the easy
 // choice is the safe one. That is a rename across every consumer and does not
 // belong in a fix PR; it needs its own.
-export { getAttributeNames, getAttributeNamesAcrossSchemas, getAttributeNameAt, isKnownType, isInstantiable, normalizeIfcTypeName, resolveEntityNameAlias, getInheritanceChain as getInheritanceChainAcrossSchemas } from './ifc-schema.js';
+export { getAttributeNames, getAttributeNamesAcrossSchemas, getAttributeNameAt, isKnownType, isInstantiable, isQueryableObjectType, normalizeIfcTypeName, resolveEntityNameAlias, getInheritanceChain as getInheritanceChainAcrossSchemas } from './ifc-schema.js';
 
 import type { IfcEntity, ParseResult } from './types.js';
 import { EntityIndexBuilder } from './entity-index.js';
 import { EntityExtractor } from './entity-extractor.js';
 import { PropertyExtractor } from './property-extractor.js';
 import { RelationshipExtractor } from './relationship-extractor.js';
-import { ColumnarParser, type IfcDataStore } from './columnar-parser.js';
-import { scanIfcEntities, type PreScannedEntityIndex, type WasmScanApi } from './entity-scanner.js';
+import { parseColumnarInput, type IfcDataStore } from './columnar-parser.js';
+import { scanIfcEntities, scanColumnarEntities, type PreScannedEntityIndex, type WasmScanApi } from './entity-scanner.js';
 
 export interface ParseOptions {
   onProgress?: (progress: { phase: string; percent: number }) => void;
@@ -202,10 +214,9 @@ export interface ParseOptions {
   /**
    * Pre-built entity index from another worker (typically the streaming
    * geometry pre-pass). When supplied, `parseColumnar` skips both the
-   * worker-based and WASM scans and synthesizes `EntityRef[]` from the
-   * column arrays directly — saving ~10 s on 1 GB / 14 M-entity files
-   * where the parser would otherwise duplicate the pre-pass scan under
-   * heavy WASM contention with the geometry workers.
+   * worker-based and WASM scans and retains the numeric columns through
+   * entity categorization. Only records needed for metadata extraction
+   * materialize EntityRefs; every record remains addressable in the store.
    */
   preScannedEntityIndex?: PreScannedEntityIndex;
 }
@@ -290,12 +301,11 @@ export class IfcParser {
     buffer: ArrayBuffer | SharedArrayBuffer,
     options: ParseOptions = {},
   ): Promise<IfcDataStore> {
-    const { entityRefs, processed, elapsedMs, scanPath } = await scanIfcEntities(buffer, options);
+    const { entityRefs, entityColumns, processed, elapsedMs, scanPath } = await scanColumnarEntities(buffer, options);
     console.log(`[IfcParser] Fast scan: ${processed} entities in ${elapsedMs.toFixed(0)}ms (path=${scanPath})`);
 
     // Build columnar structures with on-demand property extraction
-    const columnarParser = new ColumnarParser();
-    const dataStore = await columnarParser.parseLite(buffer, entityRefs, options);
+    const dataStore = await parseColumnarInput(buffer, entityColumns ?? entityRefs, options);
     return dataStore;
   }
 }

@@ -71,6 +71,7 @@ import { DrawingSettingsPanel } from './DrawingSettingsPanel';
 import { DxfUnderlayPanel } from './DxfUnderlayPanel';
 import { TextAnnotationEditor } from './TextAnnotationEditor';
 import { useDrawingGeneration } from '@/hooks/useDrawingGeneration';
+import type { CachedSheetTransform } from '@/lib/drawing/sheet-geometry-key';
 import { useViewControls } from '@/hooks/useViewControls';
 import { useMeasure2D } from '@/hooks/useMeasure2D';
 import { useAnnotation2D } from '@/hooks/useAnnotation2D';
@@ -261,9 +262,7 @@ export function PlanView({
   }, []);
 
   const containerRef = useRef<HTMLDivElement>(null);
-  const cachedSheetTransformRef = useRef<{
-    translateX: number; translateY: number; scaleFactor: number;
-  } | null>(null);
+  const cachedSheetTransformRef = useRef<CachedSheetTransform | null>(null);
 
   const { combinedHiddenIds, combinedIsolatedIds } = useCombinedVisibilityIds();
   const colorKeys = useDrawingColorKeys(modelIdToIndex);
@@ -737,6 +736,7 @@ export function PlanView({
     computedIsolatedIds,
     models,
     panelVisible: generationActive,
+    activeTool,
     drawing,
     setDrawing,
     setDrawingStatus: setStatus,
