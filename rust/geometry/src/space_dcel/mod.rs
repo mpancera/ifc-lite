@@ -326,6 +326,58 @@ impl SpacePlate {
         plate
     }
 
+    /// The line an exterior wall's OUTSIDE face draws around a storey — the
+    /// outer contour of the wall footprints, taken as one.
+    ///
+    /// Not their convex hull. A hull can only describe a convex building, and
+    /// the moment a plan has a courtyard, a wing, or any re-entrant corner, the
+    /// hull spans the gap: a gross floor area measured on it counts the ground
+    /// BETWEEN the wings as floor. On an L-shaped plan that is not a rounding
+    /// error, it is the notch.
+    ///
+    /// The contour is already implied by the same arrangement the rooms come
+    /// from — the unbounded face is bounded by exactly this line, and by
+    /// nothing else — so it is read off there rather than reconstructed. The
+    /// exterior winds CW; the result is handed back CCW, first vertex not
+    /// repeated.
+    ///
+    /// Detached wall clusters each get their own unbounded face; the largest
+    /// is returned, so an outbuilding modelled apart from the main structure is
+    /// not included. Empty when the walls enclose nothing.
+    pub fn wall_union_outline(rects: &[[[f64; 2]; 4]], snap: f64) -> Vec<[f64; 2]> {
+        let mut edges: Vec<InputSegment> = Vec::with_capacity(rects.len() * 4);
+        for (wi, r) in rects.iter().enumerate() {
+            for i in 0..4 {
+                edges.push(InputSegment::new(r[i], r[(i + 1) % 4], Some(wi as u32)));
+            }
+        }
+        // `min_area = 0`: nothing here is a room, and folding small CCW faces
+        // into "outer" would put them in the running for the contour.
+        let plate = Self::from_arrangement(Arrangement::resolve(&edges, snap), 0.0);
+        let mut best: Option<(f64, Vec<[f64; 2]>)> = None;
+        for i in 0..plate.faces.len() {
+            let f = FaceId(i as u32);
+            if !plate.faces[i].is_outer {
+                continue;
+            }
+            let cycle: Vec<HalfEdgeId> = plate.face_half_edges(f).collect();
+            if cycle.len() < 3 {
+                continue;
+            }
+            let signed = plate.signed_area_of_cycle(&cycle);
+            if signed > 0.0 {
+                continue; // CCW: an interior face, not an unbounded one
+            }
+            let area = signed.abs();
+            if best.as_ref().is_none_or(|(a, _)| area > *a) {
+                let mut outline = plate.face_outline(f);
+                outline.reverse();
+                best = Some((area, outline));
+            }
+        }
+        best.map(|(_, o)| o).unwrap_or_default()
+    }
+
     fn from_arrangement(arr: Arrangement, min_area: f64) -> Self {
         let mut plate = SpacePlate {
             vertices: arr

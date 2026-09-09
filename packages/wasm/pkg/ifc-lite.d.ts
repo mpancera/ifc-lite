@@ -1419,14 +1419,6 @@ export class SpacePlateHandle {
      * Nearest live vertex id to `(x, y)` within `tol`, or `undefined`.
      */
     findVertexNear(x: number, y: number, tol: number): number | undefined;
-    /**
-     * FACE-BASED build: rooms are the gaps between wall footprint rectangles.
-     * `rectCoords` is flat `[x0, y0, x1, y1, x2, y2, x3, y3, …]` — 8 f64 per wall
-     * (its 4 plan-rectangle corners, CCW). A bounded arrangement face is a room
-     * only if its centroid is outside every rectangle (a gap, not a wall
-     * interior). The room outline IS the net (inner-face) area; `gapBoundary`
-     * gives the centre axis (½ thickness) and the gross outer face.
-     */
     static fromWallRects(rect_coords: Float64Array, snap_tolerance: number, min_area: number): SpacePlateHandle;
     /**
      * Face-based gap-room boundary as flat `[x0, y0, …]`: each edge pushed
@@ -1517,6 +1509,19 @@ export class SpacePlateHandle {
      * Returns the kept face and the new face.
      */
     splitFace(face: number, va: number, vb: number, source: number): any;
+    /**
+     * FACE-BASED build: rooms are the gaps between wall footprint rectangles.
+     * `rectCoords` is flat `[x0, y0, x1, y1, x2, y2, x3, y3, …]` — 8 f64 per wall
+     * (its 4 plan-rectangle corners, CCW). A bounded arrangement face is a room
+     * only if its centroid is outside every rectangle (a gap, not a wall
+     * interior). The room outline IS the net (inner-face) area; `gapBoundary`
+     * gives the centre axis (½ thickness) and the gross outer face.
+     * The outer contour of a storey's wall footprints, as flat `[x0, y0, …]`
+     * CCW — the line the exterior walls' outside faces draw. Empty when the
+     * walls enclose nothing. This is the storey's gross outline; a convex hull
+     * of the same corners spans every notch and courtyard instead.
+     */
+    static wallUnionOutline(rect_coords: Float64Array, snap_tolerance: number): Float64Array;
     /**
      * Number of live rooms.
      */
@@ -2159,6 +2164,7 @@ export interface InitOutput {
     readonly spaceplatehandle_snapshot: (a: number, b: number) => void;
     readonly spaceplatehandle_splitEdge: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly spaceplatehandle_splitFace: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly spaceplatehandle_wallUnionOutline: (a: number, b: number, c: number, d: number) => void;
     readonly splitMeshByZones: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => number;
     readonly symboliccircle_centerX: (a: number) => number;
     readonly symboliccircle_centerY: (a: number) => number;

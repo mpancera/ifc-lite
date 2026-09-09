@@ -41,7 +41,7 @@ import { OptionsPopover, HelpPopover } from './space-sketch/SpaceSketchPopovers'
 import { SpaceSketchReopenPill } from './space-sketch/SpaceSketchReopenPill';
 import { useSpaceGhostPreview, type GhostSpec } from './space-sketch/useSpaceGhostPreview';
 import { useSpaceSceneFraming } from './space-sketch/useSpaceSceneFraming';
-import { exteriorPerimeter, perimeterWalls } from './space-sketch/storey-footprint';
+import { exteriorPerimeter, perimeterWalls, storeyContour } from './space-sketch/storey-footprint';
 import { useSpacePlateSessions } from './space-sketch/useSpacePlateSessions';
 import { useSpaceViewport } from './space-sketch/useSpaceViewport';
 import { useSpaceSketchKeys } from './space-sketch/useSpaceSketchKeys';
@@ -545,8 +545,11 @@ export function SpaceSketchOverlay() {
       const rects = wallRectsFromMeshes(
         storeyMeshes, geometryResult?.coordinateInfo, st.elev, floorToFloor(sid),
       );
-      const hull = exteriorPerimeter(rects);
-      return hull.length >= 3 ? hull : null;
+      // The GROSS outline, and only the real one: this figure is written to an
+      // IfcSpace as the storey's area and nobody re-measures it, so a hull that
+      // spans a courtyard would be wrong in a direction the file cannot show.
+      // No contour → no storey space, which is a gap somebody notices.
+      return storeyContour(rects);
     }, [storeys, geometryResult, floorToFloor]),
     storeyNaming: useCallback((sid: number) => {
       const st = storeys.find((x) => x.id === sid);
@@ -642,7 +645,12 @@ export function SpaceSketchOverlay() {
     const elev = storeys.find((s) => s.id === storeyId)?.elev ?? 0;
     const rects = wallRectsFromMeshes(meshes, geometryResult?.coordinateInfo, elev, floorToFloor(storeyId));
     if (!rects.length) { setStatus(`No walls found on this storey to outline.`); return; }
-    const hull = exteriorPerimeter(rects);
+    // Here the hull IS survivable — the result is a room drawn on screen that
+    // the user can drag or discard — so it stands in when the contour cannot be
+    // had, and says so rather than pretending.
+    const contour = storeyContour(rects);
+    const hull = contour ?? exteriorPerimeter(rects);
+    if (!contour) setStatus('Outer contour unavailable — using the convex hull, which spans any notch. Check the shape before confirming.');
     const walls = perimeterWalls(hull);
     if (!walls) { setStatus('Could not build a footprint outline from these walls.'); return; }
     // Everything that could fail has passed, so the next step really does replace

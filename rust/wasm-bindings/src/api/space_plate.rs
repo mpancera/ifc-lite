@@ -101,6 +101,19 @@ impl SpacePlateHandle {
     /// only if its centroid is outside every rectangle (a gap, not a wall
     /// interior). The room outline IS the net (inner-face) area; `gapBoundary`
     /// gives the centre axis (½ thickness) and the gross outer face.
+    /// The outer contour of a storey's wall footprints, as flat `[x0, y0, …]`
+    /// CCW — the line the exterior walls' outside faces draw. Empty when the
+    /// walls enclose nothing. This is the storey's gross outline; a convex hull
+    /// of the same corners spans every notch and courtyard instead.
+    #[wasm_bindgen(js_name = wallUnionOutline)]
+    pub fn wall_union_outline(rect_coords: &[f64], snap_tolerance: f64) -> Result<Vec<f64>, JsValue> {
+        let rects = build_wall_rects(rect_coords).map_err(|e| JsValue::from_str(&e))?;
+        Ok(SpacePlate::wall_union_outline(&rects, snap_tolerance)
+            .into_iter()
+            .flat_map(|p| [p[0], p[1]])
+            .collect())
+    }
+
     #[wasm_bindgen(js_name = fromWallRects)]
     pub fn from_wall_rects(rect_coords: &[f64], snap_tolerance: f64, min_area: f64) -> Result<SpacePlateHandle, JsValue> {
         let rects = build_wall_rects(rect_coords).map_err(|e| JsValue::from_str(&e))?;

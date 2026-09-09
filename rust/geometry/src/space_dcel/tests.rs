@@ -1438,3 +1438,44 @@
             "the inner corner did not follow its anchor: {before:?} → {after:?}",
         );
     }
+
+    #[test]
+    fn the_storey_contour_follows_an_l_plan_rather_than_spanning_its_notch() {
+        // An L: a 10×10 block with the top-right 6×6 quarter absent. Walls
+        // 0.2 thick, drawn along the L's own outline, so the true outer contour
+        // encloses 10×10 − 6×6 = 64 m² plus the wall band. A convex hull would
+        // cut straight across the notch and claim the whole 10×10 square — on a
+        // wing-and-courtyard plan the difference IS the building.
+        let w = 0.1; // half thickness
+        let wall = |x0: f64, y0: f64, x1: f64, y1: f64| -> [[f64; 2]; 4] {
+            // Axis-aligned wall band from (x0,y0) to (x1,y1), `w` to each side.
+            if (y1 - y0).abs() < 1e-9 {
+                [[x0 - w, y0 - w], [x1 + w, y0 - w], [x1 + w, y0 + w], [x0 - w, y0 + w]]
+            } else {
+                [[x0 - w, y0 - w], [x0 + w, y0 - w], [x0 + w, y1 + w], [x0 - w, y1 + w]]
+            }
+        };
+        let rects = vec![
+            wall(0.0, 0.0, 10.0, 0.0),  // bottom
+            wall(10.0, 0.0, 10.0, 4.0), // right, short
+            wall(4.0, 4.0, 10.0, 4.0),  // the notch's underside
+            wall(4.0, 4.0, 4.0, 10.0),  // the notch's side
+            wall(0.0, 10.0, 4.0, 10.0), // top, short
+            wall(0.0, 0.0, 0.0, 10.0),  // left
+        ];
+        let outline = SpacePlate::wall_union_outline(&rects, 0.05);
+        assert!(outline.len() >= 6, "an L needs at least six corners, got {}", outline.len());
+        let area = polygon_area(&outline).abs();
+        // The contour runs on the walls' OUTER faces, so it is the L plus the
+        // 0.2 band — comfortably under the hull's 10.2 × 10.2 = 104.
+        assert!(
+            (60.0..80.0).contains(&area),
+            "contour area {area} is not the L's; the hull would be ~104",
+        );
+        // And it must actually reach into the notch: some corner has to sit near
+        // the re-entrant point (4, 4), which no hull vertex ever does.
+        assert!(
+            outline.iter().any(|p| (p[0] - 4.0).abs() < 0.3 && (p[1] - 4.0).abs() < 0.3),
+            "no corner near the re-entrant corner in {outline:?}",
+        );
+    }
