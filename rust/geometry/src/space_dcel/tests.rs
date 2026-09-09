@@ -1283,3 +1283,74 @@
             );
         }
     }
+
+    // ─── A face narrower than the walls around it ───
+
+    /// A centreline plate: one `width` × 8 m room whose bounding walls are
+    /// `2 × half` thick. Below `width = 2 × half` the room has no inside.
+    fn corridor_plate(width: f64, half: f64) -> SpacePlate {
+        let pts = [[0.0, 0.0], [8.0, 0.0], [8.0, width], [0.0, width]];
+        let segs: Vec<InputSegment> = (0..4)
+            .map(|i| {
+                InputSegment::new(pts[i], pts[(i + 1) % 4], Some(i as u32)).with_half_thickness(half)
+            })
+            .collect();
+        SpacePlate::build(&segs, BuildOptions::default())
+    }
+
+    #[test]
+    fn an_inset_that_turns_the_ring_inside_out_is_refused() {
+        // 0.30 m of room between walls half a metre thick: each long face is
+        // pushed 0.25 m in, so they swap sides and the ring comes back the
+        // other way round. Its AREA is unremarkable — 1.5 m², comfortably less
+        // than the 2.4 m² centreline — which is why a magnitude test waved it
+        // through and the room was drawn, measured and baked as 1.5 m² of what
+        // is solid wall.
+        let plate = corridor_plate(0.30, 0.25);
+        let room = plate.rooms().next().expect("the corridor is a face");
+        let centre = plate.face_outline(room);
+        assert_eq!(
+            plate.net_outline(room, true),
+            centre,
+            "an inverted inset must be refused, not returned as the room",
+        );
+        // The fixture has to keep failing the way the old guard failed, or this
+        // test stops standing for anything.
+        let inverted = 8.0 * 0.30 - 2.0 * 0.25 * 8.0; // negative width → the flip
+        assert!(inverted < 0.0, "fixture is no longer narrower than its walls");
+    }
+
+    #[test]
+    fn a_room_wider_than_its_walls_still_insets() {
+        // The other side of the same line: 0.60 m between the same walls leaves
+        // 0.10 m of room, and that must survive — the guard is about the sign of
+        // the result, not about being cautious near it.
+        let plate = corridor_plate(0.60, 0.25);
+        let room = plate.rooms().next().expect("the corridor is a face");
+        let net = plate.net_outline(room, true);
+        assert_ne!(net, plate.face_outline(room), "a valid inset must not fall back");
+        assert!((polygon_area(&net).abs() - 0.75).abs() < 1e-6, "net area {}", polygon_area(&net).abs());
+    }
+
+    #[test]
+    fn a_face_with_no_inside_is_not_carried_as_a_room() {
+        // `lacks_interior` is what keeps such a face from reaching the user as a
+        // room to find and delete by hand.
+        let hollow = corridor_plate(0.30, 0.25);
+        for face in hollow.rooms() {
+            assert!(
+                hollow.lacks_interior(face, 0.3),
+                "a corridor narrower than its walls has no interior",
+            );
+        }
+        let healthy = corridor_plate(2.0, 0.25);
+        let room = healthy.rooms().next().expect("the corridor is a face");
+        assert!(!healthy.lacks_interior(room, 0.3), "a 1.5 m wide room does have an interior");
+        // And the cut is on the area left INSIDE, not on the face: the same
+        // healthy room fails a threshold above its net area, not above its axis
+        // area (1.5 × 8 = 12 m² on the axis, 1.5 m² × … inside).
+        assert!(
+            healthy.lacks_interior(room, polygon_area(&healthy.net_outline(room, true)).abs() + 1.0),
+            "the threshold must be read against the net outline",
+        );
+    }

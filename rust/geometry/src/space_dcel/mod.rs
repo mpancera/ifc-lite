@@ -310,7 +310,20 @@ impl SpacePlate {
         }
         // The returned plate has no `wall_rects`, so `is_room` defaults to every
         // bounded face — exactly the lifted axis rooms.
-        Self::from_arrangement(Arrangement::resolve(&axis_edges, options.snap_tolerance), options.min_area)
+        let mut plate =
+            Self::from_arrangement(Arrangement::resolve(&axis_edges, options.snap_tolerance), options.min_area);
+        // Stage 1 dropped small GAPS; this drops faces that have no inside once
+        // they are back on the axis. The two are not the same cut: a gap that
+        // clears `min_area` can lift to an axis ring whose inward offset leaves
+        // nothing, because the lift mitres and bevels corners and the offset
+        // back does not undo that. Such a face was surfacing as a room with an
+        // area measured on the wall it sits in — a 0.24 m² "room" the user then
+        // has to find and delete by hand.
+        let hollow: Vec<FaceId> = plate.rooms().filter(|&f| plate.lacks_interior(f, options.min_area)).collect();
+        for f in hollow {
+            plate.faces[f.0 as usize].is_room = false;
+        }
+        plate
     }
 
     fn from_arrangement(arr: Arrangement, min_area: f64) -> Self {
@@ -1116,14 +1129,28 @@ impl SpacePlate {
     /// when no offset applies, a corner is degenerate, or an inset would invert
     /// the polygon — so the result is always a sane ring.
     pub fn net_outline(&self, face: FaceId, inset: bool) -> Vec<[f64; 2]> {
+        let Some((centre, verts)) = self.offset_ring(face, inset) else {
+            return self.face_outline(face);
+        };
+        Self::usable_offset(&centre, verts, inset).unwrap_or(centre)
+    }
+
+    /// The offset ring and the centreline it came from, before any judgement is
+    /// passed on it. `None` only when the face cannot be offset at all.
+    ///
+    /// Split out so the ring is computed ONCE and read twice: `net_outline`
+    /// wants a shape to draw, `lacks_interior` wants to know whether the face
+    /// has an inside. Two callers deriving that from two different pieces of
+    /// arithmetic is how a room ends up drawn one way and measured another.
+    fn offset_ring(&self, face: FaceId, inset: bool) -> Option<(Vec<[f64; 2]>, Vec<[f64; 2]>)> {
         let centre = self.face_outline(face);
         let n = centre.len();
         if n < 3 {
-            return centre;
+            return None;
         }
         let cycle: Vec<HalfEdgeId> = self.face_half_edges(face).collect();
         if cycle.len() != n {
-            return centre; // outline / cycle mismatch (e.g. a hole) — don't guess
+            return None; // outline / cycle mismatch (e.g. a hole) — don't guess
         }
         let sign = if inset { 1.0 } else { -1.0 };
         // Per edge: a point on its offset line + the edge's unit direction.
@@ -1134,7 +1161,7 @@ impl SpacePlate {
             let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
             let l = (dx * dx + dy * dy).sqrt();
             if l < EPS {
-                return centre;
+                return None;
             }
             let (ux, uy) = (dx / l, dy / l);
             let mut half = self.half_edges[cycle[i].0 as usize].half_thickness;
@@ -1189,15 +1216,31 @@ impl SpacePlate {
             // the inset boundary instead of poking back to the centreline.
             verts.push(hit.unwrap_or_else(|| project(centre[i], cp, cd)));
         }
+        Some((centre, verts))
+    }
+
+    /// The offset ring if it is a shape a room can be, else `None`.
+    ///
+    /// The inversion test is on the SIGN of the area, not its size. A ring that
+    /// turns inside out — the two long faces of a corridor narrower than the
+    /// walls beside it cross, and the boundary comes back the other way round —
+    /// has a perfectly ordinary POSITIVE area once you take the absolute value,
+    /// smaller than the centreline's, which is exactly what a healthy inset
+    /// looks like to a magnitude test. Measured: a 0.30 m corridor between
+    /// 0.50 m walls offered 1.5 m² of "room" that is entirely wall.
+    fn usable_offset(centre: &[[f64; 2]], verts: Vec<[f64; 2]>, inset: bool) -> Option<Vec<[f64; 2]>> {
         if verts.iter().any(|v| !v[0].is_finite() || !v[1].is_finite()) {
-            return centre;
+            return None;
         }
-        let got = polygon_area(&verts).abs();
-        if got <= EPS {
-            return centre;
+        let signed = polygon_area(&verts);
+        if signed.abs() <= EPS {
+            return None;
         }
-        if inset && got > polygon_area(&centre).abs() + 1e-6 {
-            return centre; // the inset inverted the polygon — keep the centreline
+        if signed.signum() != polygon_area(centre).signum() {
+            return None; // turned inside out
+        }
+        if inset && signed.abs() > polygon_area(centre).abs() + 1e-6 {
+            return None; // an inset that grew is not an inset
         }
         // A ring that crosses itself passes every test above: it is finite, it
         // has area, and folding one lobe back over another only makes that area
@@ -1206,9 +1249,33 @@ impl SpacePlate {
         // differently — so hand back the centreline rather than a shape whose
         // meaning depends on who measures it.
         if !is_simple_polygon(&verts) {
-            return centre;
+            return None;
         }
-        verts
+        Some(verts)
+    }
+
+    /// Whether `face` has no inside of its own: the inward offset turns it
+    /// inside out, or leaves less than `min_area`.
+    ///
+    /// A gap narrower than the walls that bound it is not a small room, it is
+    /// wall — but it reaches this point looking like a room, because the gap
+    /// area that stage 1 filtered on is measured before the lift to the axis
+    /// and the offset back, and that round trip does not return where it
+    /// started. Judging it on the outline the user is actually shown, and that
+    /// the bake actually writes, is the only place the two agree.
+    fn lacks_interior(&self, face: FaceId, min_area: f64) -> bool {
+        let Some((centre, verts)) = self.offset_ring(face, true) else {
+            return true;
+        };
+        let signed = polygon_area(&verts);
+        // Turned inside out, vanished, or not a number: no inside.
+        if !signed.is_finite() || signed.abs() <= EPS || signed.signum() != polygon_area(&centre).signum() {
+            return true;
+        }
+        // A ring that only fails the SIMPLE test still HAS an inside — it is the
+        // corner arithmetic that is wrong, not the room — so it is judged on its
+        // area like any other and kept.
+        signed.abs() < min_area
     }
 
     /// FACE-BASED boundary of a gap room: the gap outline IS the net (inner-face)
