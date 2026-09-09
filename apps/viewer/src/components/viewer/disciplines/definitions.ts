@@ -44,6 +44,7 @@ import {
   Droplets,
   Factory,
   FileDiff,
+  FilePlus2,
   Flame,
   FolderOpen,
   Footprints,
@@ -51,6 +52,7 @@ import {
   KeyRound,
   Library,
   ListChecks,
+  LogOut,
   PackageCheck,
   Palette,
   PenLine,
@@ -61,7 +63,9 @@ import {
   ShieldAlert,
   ShieldCheck,
   Spline,
+  Stamp,
   Thermometer,
+  Type,
   Wand2,
   Waypoints,
   Wind,
@@ -103,6 +107,22 @@ interface ItemBase {
   /** Disabled until a model is loaded. Off by default: most settings and
    *  every role work on an empty scene. */
   needsModel?: boolean;
+  /**
+   * A further condition, greyed out when false.
+   *
+   * Exists for the items that only mean something in one view: writing the
+   * plan's marks into the model needs the plan on screen, because the code
+   * that does it lives there. Without the guard the click would raise a
+   * request nothing consumes, and it would then fire on entering plan mode
+   * minutes later — a delayed write nobody asked for.
+   */
+  enabled?: (s: ViewerState) => boolean;
+  /**
+   * The item WRITES to the model, so it also needs edit rights and an
+   * authoring role. The store refuses such a write anyway; this is what makes
+   * the refusal visible before the click rather than after it.
+   */
+  needsAuthor?: boolean;
 }
 
 /** A dialog that mounts its own trigger: `<Dialog trigger={…} />`. The
@@ -241,6 +261,71 @@ export const DISCIPLINE_TABS: readonly DisciplineTab[] = [
             tooltip: 'Was am Referenzmodell angefasst wurde: Element, Feld, vorher und nachher',
             icon: FileDiff,
             needsModel: true,
+          },
+        ],
+      },
+      {
+        // What the plan drew, written into the model as `IfcAnnotation`.
+        //
+        // Here rather than on the plan's own tool strip, and here rather than
+        // on a trade register: a room label is a room label whichever
+        // discipline drew it. That move is also what lets the strip promise
+        // something simple — nothing drawn there reaches the model until one
+        // of these buttons says so.
+        //
+        // Four buttons rather than one menu with four entries: each is one
+        // decision with its own scope, and a second run replaces what the
+        // first wrote rather than doubling it. Only meaningful with the plan
+        // on screen, because the writer needs the storey, the marks and the
+        // current scale.
+        label: 'Annotations',
+        items: [
+          {
+            id: 'commitSelectedMark',
+            kind: 'action',
+            label: 'Marke übernehmen',
+            ribbonLabel: 'Marke über\u00ADnehmen',
+            tooltip: 'Die gewählte Marke als IfcAnnotation ins Modell übernehmen — die Marke selbst bleibt, wo sie ist',
+            icon: FilePlus2,
+            needsModel: true,
+            needsAuthor: true,
+            enabled: (s) => s.viewMode === '2d',
+            run: (s) => s.requestPlanCommit('selectedMark'),
+          },
+          {
+            id: 'commitRoomLabels',
+            kind: 'action',
+            label: 'Raumbeschriftung',
+            ribbonLabel: 'Raum\u00ADbeschriftung',
+            tooltip: 'Raumname und Fläche als IfcAnnotation ins Modell schreiben; die Texthöhe folgt dem eingestellten Massstab',
+            icon: Type,
+            needsModel: true,
+            needsAuthor: true,
+            enabled: (s) => s.viewMode === '2d',
+            run: (s) => s.requestPlanCommit('roomLabel'),
+          },
+          {
+            id: 'commitDoorLabels',
+            kind: 'action',
+            label: 'Türbeschriftung',
+            ribbonLabel: 'Tür\u00ADbeschriftung',
+            tooltip: 'Türnummern und -masse als IfcAnnotation ins Modell schreiben',
+            icon: DoorClosed,
+            needsModel: true,
+            needsAuthor: true,
+            enabled: (s) => s.viewMode === '2d',
+            run: (s) => s.requestPlanCommit('doorLabel'),
+          },
+          {
+            id: 'commitOpeningSymbols',
+            kind: 'action',
+            label: 'Plangrafik',
+            tooltip: 'Tür- und Fenstersymbole als IfcAnnotation ins Modell schreiben',
+            icon: Shapes,
+            needsModel: true,
+            needsAuthor: true,
+            enabled: (s) => s.viewMode === '2d',
+            run: (s) => s.requestPlanCommit('openingSymbol'),
           },
         ],
       },
@@ -493,6 +578,35 @@ export const DISCIPLINE_TABS: readonly DisciplineTab[] = [
             needsModel: true,
             read: (s) => s.showSpaceGraph,
             write: (s, next) => s.setShowSpaceGraph(next),
+          },
+          {
+            // Moved off the plan's own tool strip: it is a fire-safety
+            // instrument, not a drawing aid, and it reads the SpatialGraph
+            // above rather than the marks beside it.
+            id: 'escapeRouteTool',
+            kind: 'toggle',
+            label: 'Fluchtweg',
+            tooltip: 'Fluchtweg zeichnen: Start klicken, dann Ziel — der Weg folgt Räumen und Türen. Nur im Grundriss',
+            icon: LogOut,
+            needsModel: true,
+            enabled: (s) => s.viewMode === '2d',
+            read: (s) => s.annotation2DActiveTool === 'escape-route',
+            write: (s, next) => s.setAnnotation2DActiveTool(next ? 'escape-route' : 'none'),
+          },
+          {
+            // Its own entry rather than part of the label commits: routes carry
+            // their own markers, and somebody committing labels must not have
+            // their routes rewritten as a side effect.
+            id: 'commitEscapeRoutes',
+            kind: 'action',
+            label: 'Fluchtwege übernehmen',
+            ribbonLabel: 'Flucht\u00ADwege',
+            tooltip: 'Die gezeichneten Fluchtwege als IfcAnnotation ins Modell schreiben; ein zweiter Lauf ersetzt den ersten',
+            icon: Stamp,
+            needsModel: true,
+            needsAuthor: true,
+            enabled: (s) => s.viewMode === '2d',
+            run: (s) => s.requestPlanCommit('escapeRoutes'),
           },
         ],
       },

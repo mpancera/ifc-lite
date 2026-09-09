@@ -44,7 +44,7 @@ export function productViewports(
       width: view.placement.width,
       height: view.placement.height,
       scaleDenominator: view.scaleDenominator,
-      rotation: effectiveViewRotation(view, product.rotation, projectRotation),
+      rotation: effectiveViewRotation(view, projectRotation),
     })),
   );
 }
@@ -85,7 +85,7 @@ export function applyProductToSheet(
       // turned to the approach direction this is what makes the arrow sit at
       // an angle — which is the convention, not a defect.
       rotation: northArrowDegrees(
-        effectiveViewRotation(principal, product.rotation, projectRotation),
+        effectiveViewRotation(principal, projectRotation),
       ),
     },
   };

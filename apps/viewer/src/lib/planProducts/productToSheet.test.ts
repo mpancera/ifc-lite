@@ -41,9 +41,8 @@ describe('productViewports', () => {
     assert.equal(productViewports(lageplan, sheet(), 0)[0].title, 'Übersicht Situation');
   });
 
-  it('hands the product’s rotation down to views that have none', () => {
-    const turned = { ...lageplan, rotation: 1.2 };
-    for (const view of productViewports(turned, sheet(), 0)) {
+  it('hands the project’s rotation down to views that have none', () => {
+    for (const view of productViewports(lageplan, sheet(), 1.2)) {
       assert.equal(view.rotation, 1.2);
     }
   });
@@ -52,7 +51,6 @@ describe('productViewports', () => {
     // The inset case, resolved here rather than in the renderer.
     const withInset = {
       ...lageplan,
-      rotation: 1.2,
       sheet: {
         ...lageplan.sheet,
         views: [
@@ -61,12 +59,12 @@ describe('productViewports', () => {
         ],
       },
     };
-    const views = productViewports(withInset, sheet(), 0);
+    const views = productViewports(withInset, sheet(), 1.2);
     assert.equal(views[0].rotation, 1.2);
     assert.equal(views[1].rotation, 0);
   });
 
-  it('falls through to the project when the product has no angle', () => {
+  it('takes the project’s angle when no view states one', () => {
     assert.equal(productViewports(brandschutz, sheet(), 0.7)[0].rotation, 0.7);
   });
 });
@@ -94,8 +92,7 @@ describe('applyProductToSheet', () => {
   it('points the north arrow against the rotation', () => {
     // Turned 90° anticlockwise, north ends up pointing to the right of the
     // sheet, so the arrow is drawn at -90°.
-    const turned = { ...lageplan, rotation: Math.PI / 2 };
-    const applied = applyProductToSheet(sheet(), turned, 0);
+    const applied = applyProductToSheet(sheet(), lageplan, Math.PI / 2);
     assert.ok(Math.abs(applied.northArrow.rotation - -90) < 1e-9);
   });
 

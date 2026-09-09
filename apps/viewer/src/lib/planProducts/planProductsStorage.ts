@@ -13,10 +13,6 @@
  *   lists and lenses that `scopedStorage` documents as deliberately global.
  *   Scoping these to a project would make somebody's own drawing definitions
  *   vanish when they open the next building.
- * - **A product's rotation belongs to ONE building.** The approach direction
- *   of a Feuerwehrlageplan is a fact about this plot and means nothing on the
- *   next one. Kept global it would be worse than absent: the next project
- *   would open turned to a neighbour's driveway, which looks deliberate.
  *
  * Getting that split wrong in either direction produces a bug nobody reports,
  * because both failures look like a setting somebody else changed.
@@ -30,8 +26,6 @@ import { isPlacementValid, type ProductSheet } from './productSheet.js';
 
 /** Custom product definitions. Global — see the module note. */
 const PRODUCTS_KEY = 'ifc-lite:plan-products';
-/** Per-product rotation, in radians. Project-scoped. */
-const ROTATIONS_KEY = 'ifc-lite:plan-product-rotations';
 /** Which product the plan is currently drawn as. Project-scoped. */
 const ACTIVE_KEY = 'ifc-lite:plan-product-active';
 
@@ -81,7 +75,6 @@ export function parseProducts(payload: unknown): PlanProduct[] {
       // Planprodukte panel, and `productDrawsClass` folds case when matching.
       classes,
       symbolSet: typeof record.symbolSet === 'string' && record.symbolSet ? record.symbolSet : null,
-      rotation: null,
       sheet,
     });
   }
@@ -180,62 +173,6 @@ export function saveProducts(products: readonly PlanProduct[]): void {
   store.setItem(PRODUCTS_KEY, JSON.stringify(custom));
 }
 
-/**
- * The rotation each product is turned to in THIS project, in radians.
- *
- * A product with no entry is not turned — which is different from being turned
- * to zero, and is why the caller gets a map with the product missing rather
- * than a map full of zeroes.
- */
-export function loadProductRotations(project: ProjectKey | null): Record<string, number> {
-  const raw = readScoped(ROTATIONS_KEY, project);
-  if (raw === null) return {};
-
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null) return {};
-
-    const rotations: Record<string, number> = {};
-    for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
-      // A NaN angle turns every coordinate in the drawing into NaN and the
-      // page comes up blank with nothing saying why — the same trap
-      // `loadPlanRotation` guards.
-      if (typeof value === 'number' && Number.isFinite(value)) rotations[id] = value;
-    }
-    return rotations;
-  } catch (error) {
-    console.warn(`[plan] ignoring malformed product rotations in ${ROTATIONS_KEY}`, error);
-    return {};
-  }
-}
-
-/**
- * Turn one product, or straighten it again.
- *
- * Zero is stored as absence, following `savePlanRotation`: a product that was
- * straightened should read like one that was never turned, rather than
- * leaving behind a row that says nothing.
- */
-export function saveProductRotation(
-  project: ProjectKey | null,
-  productId: string,
-  radians: number | null,
-): void {
-  const rotations = loadProductRotations(project);
-
-  if (radians === null || !Number.isFinite(radians) || radians === 0) {
-    delete rotations[productId];
-  } else {
-    rotations[productId] = radians;
-  }
-
-  if (Object.keys(rotations).length === 0) {
-    clearScoped(ROTATIONS_KEY, project);
-    return;
-  }
-  writeScoped(ROTATIONS_KEY, project, JSON.stringify(rotations));
-}
-
 /** Which product this project was last drawn as, if any. */
 export function loadActiveProductId(project: ProjectKey | null): string | null {
   const raw = readScoped(ACTIVE_KEY, project);
@@ -251,18 +188,3 @@ export function saveActiveProductId(project: ProjectKey | null, productId: strin
   writeScoped(ACTIVE_KEY, project, productId.trim());
 }
 
-/**
- * A product with this project's rotation folded in.
- *
- * The definition is a template and carries no angle; the angle is a fact about
- * the building. Callers want the two together, and doing it here means no
- * caller can forget to.
- */
-export function withProjectRotation(
-  product: PlanProduct,
-  rotations: Record<string, number>,
-): PlanProduct {
-  const rotation = rotations[product.id];
-  if (typeof rotation !== 'number' || !Number.isFinite(rotation)) return product;
-  return { ...product, rotation };
-}

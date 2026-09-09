@@ -26,6 +26,26 @@ export type Drawing2DStatus = 'idle' | 'generating' | 'ready' | 'error';
 // `hooks/useEscapeRouteTool.ts`.
 export type Annotation2DTool = 'none' | 'measure' | 'polygon-area' | 'text' | 'cloud' | 'escape-route';
 
+/**
+ * One thing the plan should write into the model as `IfcAnnotation`.
+ *
+ * The buttons that ask for it live in the discipline registers (Data ▸
+ * Annotations, Fire ▸ Escape), while the code that can actually do it lives in
+ * `PlanView` — it needs the storey, the drawn marks and the current scale,
+ * none of which the ribbon has. So the register RAISES a request and the plan
+ * consumes it, the same consumed-once handoff the IDS run uses.
+ *
+ * Deliberately one scope per request rather than a list: every entry in those
+ * registers is one button, and a run that quietly also rewrote something else
+ * is exactly what the old menu's separators were guarding against.
+ */
+export type PlanCommitScope =
+  | 'selectedMark'
+  | 'roomLabel'
+  | 'doorLabel'
+  | 'openingSymbol'
+  | 'escapeRoutes';
+
 /** Point in 2D drawing coordinates */
 export interface Point2D {
   x: number;
@@ -226,6 +246,8 @@ export interface Drawing2DState {
   // Annotation Tool System
   /** Active annotation tool (none = pan mode) */
   annotation2DActiveTool: Annotation2DTool;
+  /** What a discipline register asked the plan to write into the model. */
+  planCommitRequest: PlanCommitScope | null;
   /** Current cursor position in drawing coords for preview rendering */
   annotation2DCursorPos: Point2D | null;
 
@@ -300,6 +322,8 @@ export interface Drawing2DSlice extends Drawing2DState {
   // Annotation Tool Actions
   /** Set active annotation tool (also manages measure2DMode for backward compat) */
   setAnnotation2DActiveTool: (tool: Annotation2DTool) => void;
+  /** Raise the request, or clear it once the plan has taken it. */
+  requestPlanCommit: (scope: PlanCommitScope | null) => void;
   /** Update cursor position for annotation previews */
   setAnnotation2DCursorPos: (pos: Point2D | null) => void;
 
@@ -430,6 +454,7 @@ export const getDefaultDrawing2DState = (): Drawing2DState => ({
   // Annotation tools
   annotation2DActiveTool: 'none',
   annotation2DCursorPos: null,
+  planCommitRequest: null,
   polygonArea2DPoints: [],
   polygonArea2DResults: [],
   textAnnotations2D: [],
@@ -648,6 +673,8 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
   // ═══════════════════════════════════════════════════════════════════════
   // ANNOTATION TOOL ACTIONS
   // ═══════════════════════════════════════════════════════════════════════
+
+  requestPlanCommit: (planCommitRequest) => set({ planCommitRequest }),
 
   setAnnotation2DActiveTool: (tool) => {
     const state = get();

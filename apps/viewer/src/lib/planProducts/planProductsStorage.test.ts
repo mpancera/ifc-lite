@@ -7,8 +7,7 @@ import assert from 'node:assert/strict';
 import type { ProjectKey } from '@ifc-lite/project';
 import {
   parseProducts, loadProducts, saveProducts,
-  loadProductRotations, saveProductRotation,
-  loadActiveProductId, saveActiveProductId, withProjectRotation,
+  loadActiveProductId, saveActiveProductId,
 } from './planProductsStorage.js';
 import {
   BUILT_IN_PRODUCTS, BRANDSCHUTZKONZEPT_ID, FEUERWEHRLAGEPLAN_ID, copyProduct,
@@ -143,58 +142,6 @@ describe('loadProducts / saveProducts', () => {
   });
 });
 
-describe('product rotations', () => {
-  it('keeps one project’s approach direction out of the next project', () => {
-    // The failure this prevents is worse than a missing value: the next
-    // building would open turned to a neighbour's driveway, looking deliberate.
-    saveProductRotation(PROJECT_A, FEUERWEHRLAGEPLAN_ID, 1.2);
-
-    assert.equal(loadProductRotations(PROJECT_A)[FEUERWEHRLAGEPLAN_ID], 1.2);
-    assert.equal(loadProductRotations(PROJECT_B)[FEUERWEHRLAGEPLAN_ID], undefined);
-  });
-
-  it('lets two products in ONE project hold different angles', () => {
-    // The whole reason the rotation moved off the project: north for the
-    // concept plan, approach direction for the Lageplan, at the same time.
-    saveProductRotation(PROJECT_A, FEUERWEHRLAGEPLAN_ID, 1.2);
-    saveProductRotation(PROJECT_A, BRANDSCHUTZKONZEPT_ID, 0.3);
-
-    const rotations = loadProductRotations(PROJECT_A);
-    assert.equal(rotations[FEUERWEHRLAGEPLAN_ID], 1.2);
-    assert.equal(rotations[BRANDSCHUTZKONZEPT_ID], 0.3);
-  });
-
-  it('stores a straightened product as absent, not as zero', () => {
-    saveProductRotation(PROJECT_A, FEUERWEHRLAGEPLAN_ID, 1.2);
-    saveProductRotation(PROJECT_A, FEUERWEHRLAGEPLAN_ID, 0);
-
-    assert.equal(FEUERWEHRLAGEPLAN_ID in loadProductRotations(PROJECT_A), false);
-  });
-
-  it('clearing the last rotation leaves nothing behind', () => {
-    saveProductRotation(PROJECT_A, FEUERWEHRLAGEPLAN_ID, 1.2);
-    saveProductRotation(PROJECT_A, FEUERWEHRLAGEPLAN_ID, null);
-
-    assert.deepEqual(loadProductRotations(PROJECT_A), {});
-  });
-
-  it('ignores a NaN angle rather than blanking the drawing', () => {
-    globalThis.localStorage.setItem(
-      'ifc-lite:plan-product-rotations:projekt-a',
-      JSON.stringify({ [FEUERWEHRLAGEPLAN_ID]: 'schräg', [BRANDSCHUTZKONZEPT_ID]: 0.4 }),
-    );
-    const rotations = loadProductRotations(PROJECT_A);
-    assert.equal(rotations[FEUERWEHRLAGEPLAN_ID], undefined);
-    assert.equal(rotations[BRANDSCHUTZKONZEPT_ID], 0.4);
-  });
-
-  it('writes nothing at all without a project', () => {
-    // Following scopedStorage: there is no "unassigned" bucket, because a
-    // shared bucket is exactly how one project's data leaks into another.
-    saveProductRotation(null, FEUERWEHRLAGEPLAN_ID, 1.2);
-    assert.deepEqual(loadProductRotations(null), {});
-  });
-});
 
 describe('the active product', () => {
   it('is remembered per project', () => {
@@ -210,19 +157,3 @@ describe('the active product', () => {
   });
 });
 
-describe('withProjectRotation', () => {
-  it('folds this building’s angle onto the template', () => {
-    const lageplan = BUILT_IN_PRODUCTS.find((p) => p.id === FEUERWEHRLAGEPLAN_ID)!;
-    assert.equal(lageplan.rotation, null);
-
-    const turned = withProjectRotation(lageplan, { [FEUERWEHRLAGEPLAN_ID]: 1.2 });
-    assert.equal(turned.rotation, 1.2);
-    // The template itself is untouched — it is shared across projects.
-    assert.equal(lageplan.rotation, null);
-  });
-
-  it('leaves a product alone when this project never turned it', () => {
-    const lageplan = BUILT_IN_PRODUCTS.find((p) => p.id === FEUERWEHRLAGEPLAN_ID)!;
-    assert.equal(withProjectRotation(lageplan, {}).rotation, null);
-  });
-});

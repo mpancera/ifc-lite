@@ -100,10 +100,13 @@ describe('the shipped products', () => {
     assert.ok(!productDrawsClass(brandschutz, 'IfcBeam'));
   });
 
-  it('starts both products unturned, so neither guesses an angle', () => {
+  it('starts every view unturned, so nothing guesses an angle', () => {
     // Approach direction is a fact about a plot; nothing in code can know it.
-    assert.equal(brandschutz.rotation, null);
-    assert.equal(lageplan.rotation, null);
+    // Stated on the VIEWS because that is where an angle may be said at all —
+    // a product carries none.
+    for (const product of [brandschutz, lageplan]) {
+      for (const view of product.sheet.views) assert.equal(view.rotation, null);
+    }
   });
 });
 
@@ -172,29 +175,27 @@ describe('the Lageplan sheet', () => {
 });
 
 describe('effectiveViewRotation', () => {
-  it('lets the view overrule the product, which overrules the project', () => {
+  it('lets the view overrule the project', () => {
     // The inset that stays north-up beside a site plan turned to the approach.
-    assert.equal(effectiveViewRotation({ rotation: 0.5 }, 1.0, 2.0), 0.5);
-    assert.equal(effectiveViewRotation({ rotation: null }, 1.0, 2.0), 1.0);
-    assert.equal(effectiveViewRotation({ rotation: null }, null, 2.0), 2.0);
+    assert.equal(effectiveViewRotation({ rotation: 0.5 }, 2.0), 0.5);
+    assert.equal(effectiveViewRotation({ rotation: null }, 2.0), 2.0);
   });
 
   it('treats an explicit zero on the view as an opinion, not as absence', () => {
-    // "North up, whatever the product says" has to be expressible. If zero
-    // fell through to the product, an inset could not be pinned straight.
-    assert.equal(effectiveViewRotation({ rotation: 0 }, 1.0, 2.0), 0);
+    // "North up, whatever the project says" has to be expressible. If zero
+    // fell through, an inset could not be pinned straight beside a turned view.
+    assert.equal(effectiveViewRotation({ rotation: 0 }, 2.0), 0);
   });
 
-  it('falls all the way through to straight when nothing is set', () => {
-    assert.equal(effectiveViewRotation({ rotation: null }, null, 0), 0);
+  it('falls through to straight when nothing is set', () => {
+    assert.equal(effectiveViewRotation({ rotation: null }, 0), 0);
   });
 
   it('refuses a NaN angle instead of blanking the drawing', () => {
     // A NaN turns every coordinate into NaN and the page comes up empty with
     // nothing on screen saying why.
-    assert.equal(effectiveViewRotation({ rotation: NaN }, null, 0), 0);
-    assert.equal(effectiveViewRotation({ rotation: null }, NaN, 1.5), 1.5);
-    assert.equal(effectiveViewRotation({ rotation: null }, null, NaN), 0);
+    assert.equal(effectiveViewRotation({ rotation: NaN }, 0), 0);
+    assert.equal(effectiveViewRotation({ rotation: null }, NaN), 0);
   });
 });
 

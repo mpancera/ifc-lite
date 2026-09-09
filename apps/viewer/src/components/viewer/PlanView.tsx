@@ -1268,6 +1268,21 @@ export function PlanView({
     requestPlanExport(null);
   }, [planExportRequested, handleExportSVG, handleExportDXF, handlePrint, requestPlanExport]);
 
+  // Writing marks and labels into the model arrives the same way, from Data ▸
+  // Annotations and Fire ▸ Escape. The buttons had to leave the plan's own
+  // strip — nothing there may create model geometry any more — but the writers
+  // cannot follow them: they need the storey, the drawn marks and the current
+  // scale, and a register holds none of the three.
+  const planCommitRequest = useViewerStore((s) => s.planCommitRequest);
+  const requestPlanCommit = useViewerStore((s) => s.requestPlanCommit);
+  useEffect(() => {
+    if (!planCommitRequest) return;
+    if (planCommitRequest === 'selectedMark') commitSelectedAnnotation();
+    else if (planCommitRequest === 'escapeRoutes') commitEscapeRoutes();
+    else commitPlanAnnotations([planCommitRequest]);
+    requestPlanCommit(null);
+  }, [planCommitRequest, commitSelectedAnnotation, commitEscapeRoutes, commitPlanAnnotations, requestPlanCommit]);
+
   // Fit when the first drawing of this plan session arrives, and then leave the
   // view alone. Re-armed on the way out so reopening the plan frames it again.
   useEffect(() => {
@@ -2024,12 +2039,7 @@ export function PlanView({
           activeTool={annotation2DActiveTool}
           onSetTool={setAnnotation2DActiveTool}
           hasAnnotations={hasAnnotations}
-          canCommitAnnotation={selectedAnnotation2D !== null}
-          onCommitAnnotation={commitSelectedAnnotation}
           doorLabelCount={doorLabels.length}
-          onCommitPlanAnnotations={commitPlanAnnotations}
-          onCommitEscapeRoutes={commitEscapeRoutes}
-          escapeRouteCount={escapeRoutes2D.length}
           onClearAnnotations={() => { clearAllAnnotations2D(); clearMeasure2DResults(); }}
           pixelsPerMetre={viewTransform.scale}
           onSetScale={setPlanScale}

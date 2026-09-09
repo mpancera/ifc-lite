@@ -144,19 +144,24 @@ export const LAGEPLAN_SHEET: ProductSheet = {
 /**
  * The rotation a view is actually drawn at.
  *
- * Three levels, each falling through to the next: the view's own angle, else
- * the product's, else the project's. Written once here so that the canvas, the
- * print path and the DXF export cannot disagree about it — a drawing that
- * prints at a different angle than it displays is the kind of bug that reaches
- * the client before anybody notices.
+ * Two levels: the view's own angle, else the project's. Written once here so
+ * that the canvas, the print path and the DXF export cannot disagree about it —
+ * a drawing that prints at a different angle than it displays is the kind of
+ * bug that reaches the client before anybody notices.
+ *
+ * There was a third level between them, on the product. It went because a
+ * rotation is a fact about a LAYOUT, not about a document type: "turned to the
+ * approach direction" describes the site plan's own view on the sheet, and
+ * saying it on the product turned every view the product carries, including an
+ * inset that has no business turning. It also had no way in — nothing ever set
+ * it — so switching product straightened the plan instead, which read as the
+ * angle being forgotten.
  */
 export function effectiveViewRotation(
   view: Pick<ProductView, 'rotation'>,
-  productRotation: number | null,
   projectRotation: number,
 ): number {
   if (view.rotation !== null && Number.isFinite(view.rotation)) return view.rotation;
-  if (productRotation !== null && Number.isFinite(productRotation)) return productRotation;
   return Number.isFinite(projectRotation) ? projectRotation : 0;
 }
 

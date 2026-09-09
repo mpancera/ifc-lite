@@ -17,15 +17,13 @@
  * toggles, the second drawing is only ever reachable by remembering which
  * fifteen switches to flip, and nobody reproduces that twice the same way.
  *
- * # Why the rotation lives here and not on the project
- * `planRotationStore` remembers how a project's plan is turned, and for a
- * building plan that is right: north is north for everybody. A
- * Feuerwehrlageplan is turned to the APPROACH DIRECTION instead, so the north
- * arrow points off at an angle — that is the convention, not a mistake. Two
- * intentions over one building, and a single project-wide angle cannot hold
- * both: opening the second product would silently retune the first. So a
- * product may carry its own angle, and `null` means "whatever the project is
- * set to" — which keeps every existing plan behaving exactly as before.
+ * # Why a product carries no rotation
+ * A Feuerwehrlageplan is turned to the APPROACH DIRECTION rather than to
+ * north, and that is a convention rather than a mistake — but it describes the
+ * VIEW on the sheet, not the document type. Said on the product it turned
+ * every view the product carries, an inset that should stay north-up included.
+ * So the angle lives on the layout (`ProductView.rotation`) with the project's
+ * as the fallback, and a product states none.
  *
  * # What a product is NOT allowed to be
  * None of this is written into the IFC. A product is an opinion about how to
@@ -85,14 +83,6 @@ export interface PlanProduct {
    * nothing here depends on it existing yet.
    */
   readonly symbolSet: string | null;
-  /**
-   * The drawing's own rotation in radians, or `null` to follow the project.
-   *
-   * See the module note: `null` is not "zero", it is "no opinion". A product
-   * with no opinion inherits the project's angle and behaves like every plan
-   * did before products existed.
-   */
-  readonly rotation: number | null;
   /** Paper, scale and the views placed on it. */
   readonly sheet: ProductSheet;
 }
@@ -157,7 +147,6 @@ export const BUILT_IN_PRODUCTS: readonly PlanProduct[] = [
     symbolSet: BRANDSCHUTZKONZEPT_ID,
     // North up. A concept plan is read alongside the architect's drawings and
     // has to line up with them.
-    rotation: null,
     sheet: BRANDSCHUTZ_SHEET,
   },
   {
@@ -188,7 +177,6 @@ export const BUILT_IN_PRODUCTS: readonly PlanProduct[] = [
     // property of THIS building and nobody can guess it here. The author sets
     // it once, and from then on it belongs to this product rather than to the
     // project — see the module note.
-    rotation: null,
     sheet: LAGEPLAN_SHEET,
   },
   {
@@ -227,7 +215,6 @@ export const BUILT_IN_PRODUCTS: readonly PlanProduct[] = [
     symbolSet: WERKPLAN_BMA_ID,
     // North up, like the concept plan: a Werkplan is set out against the
     // architect's drawing on site.
-    rotation: null,
     sheet: BRANDSCHUTZ_SHEET,
   },
 ];

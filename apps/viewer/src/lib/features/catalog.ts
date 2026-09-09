@@ -433,14 +433,20 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
         origin: 'ifcedit',
       },
       {
-        name: 'Marke ins Modell übernehmen',
-        where: 'Werkzeugstreifen im Plan',
-        what: 'Eine gezeichnete Marke wird als IfcAnnotation Teil des Modells statt eine Notiz daneben.',
+        name: 'Marke übernehmen',
+        where: 'Data › Annotations › Marke übernehmen',
+        what: 'Eine gezeichnete Marke wird als IfcAnnotation Teil des Modells statt eine Notiz daneben. Im Register statt in der Planleiste, damit dort nichts steht, was ins Modell schreibt.',
+        origin: 'ifcedit',
+      },
+      {
+        name: 'Beschriftung übernehmen',
+        where: 'Data › Annotations › Raumbeschriftung',
+        what: 'Raumbeschriftung, Türbeschriftung und Plangrafik je einzeln als IfcAnnotation ins Modell schreiben; ein zweiter Lauf ersetzt den ersten.',
         origin: 'ifcedit',
       },
       {
         name: 'Plan drehen',
-        where: 'Werkzeugstreifen im Plan',
+        where: 'Nordpfeil oben rechts im Plan',
         what: 'Für orthogonales Arbeiten an einem schräg stehenden Gebäudeteil — der Plan dreht sich, das Modell nicht. Die Drehung wird pro Projekt gemerkt.',
         origin: 'ifcedit',
       },
@@ -590,8 +596,8 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
       },
       {
         name: 'Fluchtwege',
-        where: 'Werkzeugstreifen im Plan',
-        what: 'Fluchtwege im Grundriss zeichnen, kürzeste Wege über den SpatialGraph in Metern, und als IfcAnnotation ins Modell übernehmen.',
+        where: 'Fire › Escape › Fluchtweg',
+        what: 'Fluchtwege im Grundriss zeichnen, kürzeste Wege über den SpatialGraph in Metern, und daneben als IfcAnnotation ins Modell übernehmen.',
         origin: 'ifcedit',
       },
       {

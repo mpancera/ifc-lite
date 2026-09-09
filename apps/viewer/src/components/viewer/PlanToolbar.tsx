@@ -27,7 +27,7 @@ import {
   Box, Shapes, PenTool, FileText, ZoomIn, ZoomOut,
   Maximize2, Download, FileDown, Printer, RefreshCw, Ruler,
   Hexagon,
-  LogOut, Type, Cloud, Trash2, FilePlus2, Stamp,
+  Type, Cloud, Trash2, AlertTriangle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -42,7 +42,7 @@ import { PlanProductMenu } from './PlanProductMenu';
 import { ViewportToolStrip, ToolStripDivider, ToolStripButton } from './ViewportToolStrip';
 import { ASSUMED_LINING_THICKNESS } from '@/lib/plan/doorQuantities';
 import { scaleDenominator, formatScaleRatio, STANDARD_SCALES } from '@/lib/plan/planChrome';
-import type { PlanAnnotationKind } from '@/lib/plan/planAnnotations';
+
 
 export interface PlanToolbarProps {
   displayOptions: {
@@ -118,17 +118,8 @@ export interface PlanToolbarProps {
   onSetTool: (tool: Annotation2DTool) => void;
   hasAnnotations: boolean;
   onClearAnnotations: () => void;
-  /** True when a mark is selected and can be written into the model. */
-  canCommitAnnotation: boolean;
-  onCommitAnnotation: () => void;
   /** How many doors carry a mark — not every opening gets one. */
   doorLabelCount: number;
-  /** Write the plan's own writing and graphics into the model. */
-  onCommitPlanAnnotations: (kinds: readonly PlanAnnotationKind[]) => void;
-  /** Write the drawn escape routes into the model. */
-  onCommitEscapeRoutes: () => void;
-  /** How many routes are drawn, for the menu entry. */
-  escapeRouteCount: number;
 
   /** Screen pixels per drawing metre, for the scale readout. */
   pixelsPerMetre: number;
@@ -165,17 +156,55 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
     showDeviceMarks, onToggleDeviceMarks, deviceCount, deviceSymbolGap,
     productHiddenCount, productFilterOff, onToggleProductFilter,
     settingsOpen, onToggleSettings, dxfOpen, onToggleDxf,
-    activeTool, onSetTool, hasAnnotations, onClearAnnotations,
-    canCommitAnnotation, onCommitAnnotation, doorLabelCount, onCommitPlanAnnotations,
-    onCommitEscapeRoutes, escapeRouteCount,
+    activeTool, onSetTool, hasAnnotations, onClearAnnotations, doorLabelCount,
     pixelsPerMetre, onSetScale, onZoomIn, onZoomOut, onFitToView,
     onExportSVG, onExportDXF, onPrint, onRegenerate, busy, children,
   } = props;
 
   const scaleDenom = scaleDenominator(pixelsPerMetre);
 
+  /**
+   * What the door symbols had to assume, as a list rather than as chips.
+   *
+   * Each of these was its own coloured chip in the strip, and together they
+   * took more width than the tools did — on a narrow window they pushed the
+   * strip into a second row. They are consulted once, when a drawing looks
+   * wrong, so they belong behind one mark that says "there is something to
+   * read here" rather than in permanent residence.
+   *
+   * Still declared rather than hidden: a plan that quietly invents a frame
+   * width has every door opening a couple of centimetres wrong, and the badge
+   * carries the count so the fact is visible without opening anything.
+   */
+  const symbolNotes: { key: string; warn: boolean; label: string; text: string }[] = [];
+  if (showOpeningSymbols && assumedLinings > 0) {
+    symbolNotes.push({
+      key: 'lining',
+      warn: true,
+      label: `Rahmen ${Math.round(ASSUMED_LINING_THICKNESS * 100)} cm angenommen`,
+      text: assumedLinings === openingCount
+        ? `Keine Tür auf diesem Geschoss nennt eine Rahmenbreite (IfcDoorLiningProperties). Für alle ${assumedLinings} ist ${Math.round(ASSUMED_LINING_THICKNESS * 100)} cm angenommen — Öffnungsbogen und Durchgangsbreite beruhen darauf.`
+        : `${assumedLinings} von ${openingCount} Öffnungen nennen keine Rahmenbreite; für sie ist ${Math.round(ASSUMED_LINING_THICKNESS * 100)} cm angenommen.`,
+    });
+  }
+  if (showOpeningSymbols && doorsWithSymbol > 0) {
+    symbolNotes.push({
+      key: 'depth',
+      warn: wallMeasuredDepths !== doorsWithSymbol,
+      label: `Rahmentiefe aus der Wand: ${wallMeasuredDepths}/${doorsWithSymbol}`,
+      text: wallMeasuredDepths === doorsWithSymbol
+        ? `Die Rahmentiefe ist bei allen ${doorsWithSymbol} Türen aus der gezeichneten Wand gemessen — das ist die Wandstärke am Durchgang.`
+        : `Nur bei ${wallMeasuredDepths} von ${doorsWithSymbol} Türen ist die Rahmentiefe aus der gezeichneten Wand gemessen. Für die übrigen steht keine Wand im Schnitt zur Verfügung; dort zeigt der Rahmen die Tiefe der Zarge selbst (bzw. LiningDepth, falls das Modell sie nennt) — nicht die Wandstärke.`,
+    });
+  }
+  const openNotes = symbolNotes.filter((note) => note.warn).length;
+
   return (
-    <ViewportToolStrip testId="plan">
+    // Stops short of the plan's north arrow, which keeps the top-right corner
+    // the ViewCube holds in 3D. Without the inset the strip wrapped over it on
+    // a narrow window and the arrow — the one control that says how the plan
+    // is turned — was unreachable.
+    <ViewportToolStrip rightInset="right-24" testId="plan">
       {/* The way out of the mode comes first — it is the one control whose
           absence strands you, and it sits at the same end of the building's
           strip so switching does not move the switch. */}
@@ -360,45 +389,37 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
         </Tooltip>
       )}
 
-      {showOpeningSymbols && assumedLinings > 0 && (
-        // Declared, not hidden in a tooltip. On every model met so far this is
-        // the NORMAL case — no door states a lining thickness — and a plan that
-        // quietly invents one has door openings a couple of centimetres wrong
-        // everywhere without saying so. The number is stated too, because "5 cm"
-        // is checkable and "assumed" is not.
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span className="ml-0.5 rounded-sm border border-amber-500/40 bg-amber-500/10 px-1 text-[10px] leading-4 text-amber-700 dark:text-amber-300 tabular-nums">
-              Rahmen {Math.round(ASSUMED_LINING_THICKNESS * 100)} cm
-            </span>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" className="max-w-xs text-xs">
-            {assumedLinings === openingCount
-              ? `Keine Tür auf diesem Geschoss nennt eine Rahmenbreite (IfcDoorLiningProperties). Für alle ${assumedLinings} ist ${Math.round(ASSUMED_LINING_THICKNESS * 100)} cm angenommen — Öffnungsbogen und Durchgangsbreite beruhen darauf.`
-              : `${assumedLinings} von ${openingCount} Öffnungen nennen keine Rahmenbreite; für sie ist ${Math.round(ASSUMED_LINING_THICKNESS * 100)} cm angenommen.`}
-          </TooltipContent>
-        </Tooltip>
-      )}
-      {showOpeningSymbols && doorsWithSymbol > 0 && (
-        // Which source the frame DEPTH came from. Invisible in the drawing —
-        // a frame looks equally plausible whether it is the wall or the door
-        // reveal talking about itself — and only the wall is the wall.
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span className={`ml-0.5 rounded-sm border px-1 text-[10px] leading-4 tabular-nums ${
-              wallMeasuredDepths === doorsWithSymbol
-                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
-                : 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300'
-            }`}>
-              Wand {wallMeasuredDepths}/{doorsWithSymbol}
-            </span>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" className="max-w-xs text-xs">
-            {wallMeasuredDepths === doorsWithSymbol
-              ? `Die Rahmentiefe ist bei allen ${doorsWithSymbol} Türen aus der gezeichneten Wand gemessen — das ist die Wandstärke am Durchgang.`
-              : `Nur bei ${wallMeasuredDepths} von ${doorsWithSymbol} Türen ist die Rahmentiefe aus der gezeichneten Wand gemessen. Für die übrigen steht keine Wand im Schnitt zur Verfügung; dort zeigt der Rahmen die Tiefe der Zarge selbst (bzw. LiningDepth, falls das Modell sie nennt) — nicht die Wandstärke.`}
-          </TooltipContent>
-        </Tooltip>
+      {symbolNotes.length > 0 && (
+        <DropdownMenu>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="ml-0.5 h-6 gap-1 px-1"
+                  aria-label={`Hinweise zu den Türsymbolen (${symbolNotes.length})`}
+                >
+                  <AlertTriangle className={`h-3.5 w-3.5 ${openNotes > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground'}`} />
+                  <span className="text-[10px] leading-4 tabular-nums text-muted-foreground">{symbolNotes.length}</span>
+                </Button>
+              </DropdownMenuTrigger>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-xs">
+              Wovon die Türsymbole ausgehen — aufklappen
+            </TooltipContent>
+          </Tooltip>
+          <DropdownMenuContent align="center" className="max-w-sm">
+            {symbolNotes.map((note) => (
+              <div key={note.key} className="px-2 py-1.5">
+                <div className={`text-[11px] font-medium ${note.warn ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300'}`}>
+                  {note.label}
+                </div>
+                <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">{note.text}</p>
+              </div>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
       )}
 
       <Divider />
@@ -429,13 +450,9 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
       >
         <Hexagon className="h-4 w-4" />
       </ToolButton>
-      <ToolButton
-        active={activeTool === 'escape-route'}
-        onClick={() => onSetTool(activeTool === 'escape-route' ? 'none' : 'escape-route')}
-        title="Fluchtweg: Start klicken, dann Ziel — der Weg folgt Räumen und Türen"
-      >
-        <LogOut className="h-4 w-4" />
-      </ToolButton>
+      {/* The escape-route tool moved to Fire ▸ Escape: it is a fire-safety
+          instrument, not a drawing aid, and the strip keeps only the marks
+          that stay in the session. */}
       <ToolButton
         active={activeTool === 'text'}
         onClick={() => onSetTool(activeTool === 'text' ? 'none' : 'text')}
@@ -450,79 +467,17 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
       >
         <Cloud className="h-4 w-4" />
       </ToolButton>
-      {canCommitAnnotation && (
-        // Only offered with a mark selected, because it acts on THAT mark. The
-        // wording says what happens to it: the mark stays where it is and the
-        // model gains a copy, so this is never a one-way door.
-        <ToolButton onClick={onCommitAnnotation} title="Als IfcAnnotation ins Modell übernehmen (Markierung bleibt)">
-          <FilePlus2 className="h-4 w-4" />
-        </ToolButton>
-      )}
       {hasAnnotations && (
         <ToolButton onClick={onClearAnnotations} title="Alle Anmerkungen löschen">
           <Trash2 className="h-4 w-4" />
         </ToolButton>
       )}
 
-      <Divider />
-
-      {/* Committing the plan's OWN writing and graphics — a different act from
-          the button above, which commits one selected mark. A menu rather than
-          three buttons: it is one decision with three scopes, and none of them
-          is the everyday one. Replaces on a second run rather than doubling. */}
-      <DropdownMenu>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
-                <Stamp className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" className="max-w-xs text-xs">
-            Beschriftung und Plangrafik als IfcAnnotation ins Modell übernehmen.
-            Die Texthöhe richtet sich nach dem eingestellten Massstab; ein
-            zweiter Lauf ersetzt den ersten.
-          </TooltipContent>
-        </Tooltip>
-        <DropdownMenuContent align="center" className="text-xs">
-          <DropdownMenuItem
-            disabled={roomCount === 0}
-            onClick={() => onCommitPlanAnnotations(['roomLabel'])}
-          >
-            Raumbeschriftung übernehmen{roomCount > 0 ? ` (${roomCount})` : ''}
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            disabled={doorLabelCount === 0}
-            onClick={() => onCommitPlanAnnotations(['doorLabel'])}
-          >
-            Türbeschriftung übernehmen{doorLabelCount > 0 ? ` (${doorLabelCount})` : ''}
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            disabled={openingCount === 0}
-            onClick={() => onCommitPlanAnnotations(['openingSymbol'])}
-          >
-            Plangrafik übernehmen{openingCount > 0 ? ` (${openingCount})` : ''}
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          {/* Its own entry, not folded into "Alles übernehmen": routes carry
-              their own markers, and a person committing labels must not have
-              their routes rewritten as a side effect. */}
-          <DropdownMenuItem
-            disabled={escapeRouteCount === 0}
-            onClick={onCommitEscapeRoutes}
-          >
-            Fluchtwege übernehmen{escapeRouteCount > 0 ? ` (${escapeRouteCount})` : ''}
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem
-            disabled={roomCount + doorLabelCount + openingCount === 0}
-            onClick={() => onCommitPlanAnnotations(['roomLabel', 'doorLabel', 'openingSymbol'])}
-          >
-            Alles übernehmen
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {/* Writing marks, labels and plan graphics into the model as
+          IfcAnnotation moved to Data ▸ Annotations, and the escape routes to
+          Fire ▸ Escape. Nothing in this strip creates model geometry any more:
+          what is drawn here stays in the session until a discipline register
+          says otherwise. */}
 
       <Divider />
 

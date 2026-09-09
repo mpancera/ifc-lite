@@ -18,6 +18,7 @@
 import type { ReactElement } from 'react';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
+import { useMayAuthor } from '@/hooks/useMayAuthor';
 import { usePanelControls } from '@/hooks/usePanelControls';
 import { useWorkspacePanelControls } from '../toolbar/useWorkspacePanelControls';
 import type { DisciplineItem } from './definitions';
@@ -43,6 +44,12 @@ export function DisciplineItemButton({ item, render }: DisciplineItemButtonProps
   // is the single-user case and always editable. Same rule as the Author tab.
   const collabRole = useViewerStore((s) => s.collabRole);
   const canEditInSession = collabRole === null || collabRole === 'editor' || collabRole === 'admin';
+  // The ROLE's answer, separate from the session's — a Viewer role may not
+  // author even where a shared session would allow it.
+  const mayAuthor = useMayAuthor();
+  // An item's own extra condition, read through the store so the control
+  // re-renders when the answer changes.
+  const extraEnabled = useViewerStore((s) => item.enabled?.(s) ?? true);
   const { isOpen, toggle } = usePanelControls();
   const { activeWorkspacePanels, handleToggleRightPanel } = useWorkspacePanelControls();
   // Toggles and actions read the store through their own selector, so the
@@ -54,35 +61,37 @@ export function DisciplineItemButton({ item, render }: DisciplineItemButtonProps
   });
 
   const modelMissing = (item.needsModel ?? false) && !hasModel;
+  const authorBlocked = (item.needsAuthor ?? false) && (!canEditInSession || !mayAuthor.allowed);
+  const blocked = modelMissing || !extraEnabled || authorBlocked;
 
   switch (item.kind) {
     case 'panel':
       return render({
         active: isOpen(item.panel),
-        disabled: modelMissing,
+        disabled: blocked,
         onClick: () => toggle(item.panel),
       });
     case 'tool':
       return render({
         active: activeWorkspacePanels.has(item.tool),
-        disabled: modelMissing || !canEditInSession,
+        disabled: blocked || !canEditInSession,
         onClick: () => handleToggleRightPanel(item.tool),
       });
     case 'toggle':
       return render({
         active: latched,
-        disabled: modelMissing,
+        disabled: blocked,
         onClick: () => item.write(useViewerStore.getState(), !latched),
       });
     case 'action':
       return render({
         active: latched,
-        disabled: modelMissing,
+        disabled: blocked,
         onClick: () => item.run(useViewerStore.getState()),
       });
     case 'dialog': {
       const Dialog = item.Dialog;
-      return <Dialog trigger={render({ active: false, disabled: modelMissing, onClick: noop })} />;
+      return <Dialog trigger={render({ active: false, disabled: blocked, onClick: noop })} />;
     }
   }
 }

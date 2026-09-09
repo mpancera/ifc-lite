@@ -161,15 +161,6 @@ export interface ViewModeSlice {
   setPlanProductClassFilterOff: (off: boolean) => void;
   setPlanShowZoneOutlines: (show: boolean) => void;
   setPlanRotation: (radians: number) => void;
-  /**
-   * Set the displayed angle WITHOUT deciding where it is remembered.
-   *
-   * For the plan-products slice, which owns that decision: it has already
-   * stored the angle against a product, and letting `setPlanRotation` run
-   * would write it to the project as well — where the other product would
-   * then inherit it, which is the exact collision products exist to prevent.
-   */
-  setPlanRotationForProduct: (radians: number) => void;
   setPlanRotationPicking: (picking: boolean) => void;
   /**
    * Adopt the rotation stored for the current project, once per project.
@@ -235,27 +226,19 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
     if (!Number.isFinite(radians)) return;
     set({ planRotation: radians, planRotationPicking: false });
 
-    // Where the angle is remembered depends on what is being drawn. With a
-    // plan product active the angle belongs to THAT drawing — a
-    // Feuerwehrlageplan is turned to the approach direction, and the concept
-    // plan beside it must not inherit that. With no product active this is an
-    // ordinary plan and the angle belongs to the project, exactly as before
-    // products existed.
+    // The angle belongs to the PROJECT. It used to go to the active plan
+    // product instead, which made turning the plan an edit to the document
+    // type: switching product then straightened the drawing, and the turn
+    // looked forgotten. An angle that differs per drawing is a fact about that
+    // drawing's LAYOUT — `ProductView.rotation`, set where the views are laid
+    // out — not about the product.
     //
-    // Either way it is never written into the model. The building keeps the
-    // orientation it was modelled with; this records only that somebody chose
-    // to look at it straight while working.
-    if (get().activePlanProductId !== null) {
-      get().setActivePlanProductRotation(radians);
-      return;
-    }
+    // It is never written into the model. The building keeps the orientation
+    // it was modelled with; this records only that somebody chose to look at
+    // it straight while working.
     savePlanRotation(get().currentProjectKey(), radians);
   },
 
-  setPlanRotationForProduct: (radians) => {
-    if (!Number.isFinite(radians)) return;
-    set({ planRotation: radians, planRotationPicking: false });
-  },
 
   setPlanRotationPicking: (planRotationPicking) => set({ planRotationPicking }),
 
