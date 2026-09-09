@@ -34,9 +34,9 @@ import {
 } from '@/lib/geo/map-webgl-support';
 import { posthog } from '@/lib/analytics';
 import {
-  EXTERNAL_ENDPOINTS,
+  EXTERNAL_SOURCES,
   externalRequestsAllowed,
-  setExternalRequestsAllowed,
+  setExternalRequestAllowed,
 } from '@/lib/privacy/externalRequests';
 import { addFootprintToMap, removeFootprintFromMap } from './location-map-footprint';
 import { geocodeSearch, type GeocodeResult } from './location-map-geocode';
@@ -396,7 +396,7 @@ export function LocationMap({
       // the building's real-world position — so drawing it is itself an
       // outbound disclosure. Gate before MapLibre is constructed, not at the
       // network layer, so nothing is requested at all.
-      if (!externalRequestsAllowed()) {
+      if (!externalRequestsAllowed('basemap')) {
         setMapUnavailable('external_requests_off');
         setMapState('idle');
         return;
@@ -762,10 +762,10 @@ export function LocationMap({
               </span>
               {mapUnavailable === 'external_requests_off' && (
                 <button
-                  onClick={() => { setExternalRequestsAllowed(true); setMapUnavailable(null); }}
+                  onClick={() => { setExternalRequestAllowed('basemap', true); setMapUnavailable(null); }}
                   className="mt-1 text-[10px] text-zinc-600 dark:text-zinc-300 underline underline-offset-2 hover:text-zinc-900 dark:hover:text-zinc-100"
                 >
-                  Show map (contacts {EXTERNAL_ENDPOINTS[0].host})
+                  Show map (contacts {EXTERNAL_SOURCES.find((s) => s.id === 'basemap')?.hosts[0]})
                 </button>
               )}
             </div>

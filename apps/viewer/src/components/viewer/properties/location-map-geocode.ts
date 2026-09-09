@@ -29,7 +29,7 @@ export async function geocodeSearch(query: string): Promise<GeocodeResult[]> {
   // by someone planning a building says as much as a coordinate would.
   // Gated at the request, not at the caller, so no second call site can
   // bypass it.
-  if (!externalRequestsAllowed()) return [];
+  if (!externalRequestsAllowed('geocode')) return [];
   try {
     const q = encodeURIComponent(query.trim());
     const resp = await fetch(

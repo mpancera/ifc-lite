@@ -253,7 +253,7 @@ async function fetchProj4Def(epsgCode: string): Promise<string | null> {
   // Milder than the position endpoints — an EPSG code narrows a project to a
   // region, not a site — but still an outbound request, and the bundled index
   // already covers 7000+ codes, so this only ever fires for exotic ones.
-  if (!externalRequestsAllowed()) return null;
+  if (!externalRequestsAllowed('epsg')) return null;
   try {
     const resp = await fetch(`https://epsg.io/${epsgCode}.proj4`);
     if (!resp.ok) return null;
@@ -760,7 +760,7 @@ export async function queryTerrainElevation(latLon: LatLon): Promise<number | nu
   // The request parameters ARE the building's position, so this is an outbound
   // disclosure of exactly the thing a project may not want disclosed. Callers
   // already handle `null` as "unknown elevation".
-  if (!externalRequestsAllowed()) return null;
+  if (!externalRequestsAllowed('elevation')) return null;
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 5000);

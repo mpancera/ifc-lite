@@ -107,7 +107,7 @@ export const swissParcelSource: ParcelSource = {
 
     // Asked before anything leaves: the E-GRID alone names the plot, so the
     // request is itself the disclosure this gate exists for.
-    if (!externalRequestsAllowed()) return { ok: false, reason: 'external-requests-disabled' };
+    if (!externalRequestsAllowed('parcel')) return { ok: false, reason: 'external-requests-disabled' };
 
     const query = new URLSearchParams({
       layer: 'ch.kantone.cadastralwebmap-farbe',

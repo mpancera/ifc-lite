@@ -63,7 +63,7 @@ export async function syncClassCatalog(
   // and this is a request outside itself. Asked here rather than assumed:
   // somebody who turned that off did so on purpose, and a catalogue sync is
   // not the exception that gets to ignore it.
-  if (!externalRequestsAllowed()) {
+  if (!externalRequestsAllowed('catalog')) {
     return {
       ok: false,
       error: 'Externe Anfragen sind blockiert. Unter Datei → Datenschutz freigeben.',

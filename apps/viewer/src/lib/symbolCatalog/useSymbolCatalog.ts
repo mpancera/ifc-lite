@@ -180,7 +180,7 @@ export async function syncSymbolCatalog(
   // The app has a setting for whether it may talk to anything outside itself,
   // and this is a request outside itself — several, in fact. Somebody who
   // turned that off did so on purpose.
-  if (!externalRequestsAllowed()) {
+  if (!externalRequestsAllowed('catalog')) {
     return {
       ok: false,
       error: 'Externe Anfragen sind blockiert. Unter Datei → Datenschutz freigeben.',

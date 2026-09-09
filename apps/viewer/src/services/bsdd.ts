@@ -97,7 +97,7 @@ async function fetchJson<T>(url: string): Promise<T> {
   // planned. Unlike the map, nothing here fires on its own; it takes an
   // explicit lookup. Gated all the same, so the guarantee is "no third party",
   // not "no third party except the ones that felt harmless".
-  if (!externalRequestsAllowed()) {
+  if (!externalRequestsAllowed('bsdd')) {
     throw new Error(
       'bSDD lookups are off: external requests are disabled. Enable them under Data › Workspace › Data privacy.',
     );

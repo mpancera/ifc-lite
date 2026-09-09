@@ -703,7 +703,7 @@ export const FEATURE_SECTIONS: FeatureSection[] = [
       {
         name: 'Datenschutz-Gate',
         where: 'Data › Workspace › Data privacy',
-        what: 'Ein einziger Schalter vor allen ausgehenden Anfragen — Kartenkacheln, Geländehöhe, Ortssuche, EPSG, bSDD. Aus, bis er eingeschaltet wird, und im Zweifel aus.',
+        what: 'Ein Schalter je Quelle — Kartenkacheln, Geländehöhe, Parzelle, Ortssuche, EPSG, bSDD, Kataloge — dazu einer für alle auf einmal. Aus, bis er eingeschaltet wird, und eine neu dazukommende Quelle ist wieder aus. Die drei, die die Gebäudeposition mitsenden, sind als solche markiert.',
         origin: 'ifcedit',
       },
       {
