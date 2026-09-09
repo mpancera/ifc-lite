@@ -1184,6 +1184,24 @@ impl SpacePlate {
         self.net_outline_with_anchors(face, inset).0
     }
 
+    /// Position of a live vertex, or `None` once it is gone.
+    pub fn vertex_pos(&self, v: VertexId) -> Option<[f64; 2]> {
+        self.vertices.get(v.0 as usize).filter(|x| x.alive).map(|x| x.pos)
+    }
+
+    /// The vertex ids of `face`'s centreline outline, in the order
+    /// `face_outline` returns the points.
+    ///
+    /// The same pairing `net_outline_with_anchors` gives for an offset ring,
+    /// for the ring that needs no offset. Recovering it by asking which vertex
+    /// lies nearest a point is a float comparison at a tolerance nobody can
+    /// pick well: too tight and it silently finds nothing.
+    pub fn face_outline_anchors(&self, face: FaceId) -> Vec<u32> {
+        self.face_half_edges(face)
+            .map(|h| self.half_edges[h.0 as usize].origin.0)
+            .collect()
+    }
+
     /// The boundary outline, and for each of its corners the AXIS vertex that
     /// corner hangs off.
     ///
@@ -1238,6 +1256,9 @@ impl SpacePlate {
             anchor: [f64; 2],
             dir: [f64; 2],
             half: f64,
+            /// How far, and which way, this edge was moved. The bevel below
+            /// needs it to place a corner that no intersection can place.
+            disp: [f64; 2],
         }
         let mut edges: Vec<OffsetEdge> = Vec::with_capacity(n);
         for i in 0..n {
@@ -1260,7 +1281,8 @@ impl SpacePlate {
             }
             let off = sign * half;
             // Inward normal of a CCW outline is to the left of a→b: (-uy, ux).
-            edges.push(OffsetEdge { anchor: [a[0] - uy * off, a[1] + ux * off], dir: [ux, uy], half });
+            let disp = [-uy * off, ux * off];
+            edges.push(OffsetEdge { anchor: [a[0] + disp[0], a[1] + disp[1]], dir: [ux, uy], half, disp });
         }
 
         /// Foot of the perpendicular from `q` onto the line `(p, d)` (`d` unit).
@@ -1321,13 +1343,29 @@ impl SpacePlate {
                     first[k] = verts.len() - 1;
                     continue;
                 }
-                let hit = line_intersection(pp, [pp[0] + pd[0], pp[1] + pd[1]], cp, [cp[0] + cd[0], cp[1] + cd[1]]);
+                // Two edges that meet at a shallow angle have offset lines that
+                // meet a long way off — the miter runs away, and the corner it
+                // produces is nowhere near the corner it stands for. That is
+                // tolerable in a static outline and NOT tolerable under a drag:
+                // as a node moves, an edge crossing the swallow threshold makes
+                // its neighbours meet directly, and if the miter is unclamped
+                // the corner jumps hundreds of times the distance the node
+                // moved. Measured on a real plan: an 18 px drag threw a corner
+                // 481 px. Clamp it to a bevel — the original corner carried out
+                // by the mean of its two edges' offsets — so the outline can
+                // only ever move as far as the offsets themselves.
+                const MITER_LIMIT: f64 = 4.0;
+                let bevel = [
+                    corner[0] + 0.5 * (edges[prev].disp[0] + edges[cur].disp[0]),
+                    corner[1] + 0.5 * (edges[prev].disp[1] + edges[cur].disp[1]),
+                ];
+                let limit = MITER_LIMIT * edges[prev].half.max(edges[cur].half) + EPS;
+                let hit = line_intersection(pp, [pp[0] + pd[0], pp[1] + pd[1]], cp, [cp[0] + cd[0], cp[1] + cd[1]])
+                    .filter(|m| (m[0] - corner[0]).hypot(m[1] - corner[1]) <= limit);
                 // Parallel offset lines (a collinear node, e.g. a mid-wall split,
                 // or two edges of equal thickness in a straight run) don't
-                // intersect — drop the corner onto the current offset line so it
-                // sits flush on the inset boundary instead of poking back to the
-                // centreline.
-                verts.push(hit.unwrap_or_else(|| project(corner, cp, cd)));
+                // intersect at all; the bevel serves them too.
+                verts.push(hit.unwrap_or(bevel));
                 anchors.push(self.half_edges[cycle[cur].0 as usize].origin.0);
                 last[(k + m - 1) % m] = verts.len() - 1;
                 first[k] = verts.len() - 1;

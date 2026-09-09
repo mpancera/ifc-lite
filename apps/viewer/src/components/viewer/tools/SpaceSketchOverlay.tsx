@@ -30,7 +30,7 @@ import { pointerButton, isRemoveModifier } from '@/lib/space-interaction';
 import { type Room, type Boundary } from '@/lib/space-plate-session';
 import { wallRectsFromMeshes, type WallRect } from '@/lib/wall-rects-from-meshes';
 import {
-  polyArea, uniqueVerts, distToSeg, projectOnSeg, pointInPoly, centroid,
+  polyArea, distToSeg, projectOnSeg, pointInPoly, centroid,
   sX, sY, wX, wY, PAD, type Pt,
 } from '@/lib/space-sketch-geometry';
 import { type BoundaryMode } from '@ifc-lite/create';
@@ -725,6 +725,32 @@ export function SpaceSketchOverlay() {
   const axisPosRef = useRef(axisPos);
   axisPosRef.current = axisPos;
 
+  /**
+   * Everything worth snapping to on the plate: the inner corners AND the axis
+   * nodes.
+   *
+   * Both, because they answer different questions. The inner corner is where a
+   * room is supposed to reach. The axis node is where the walls themselves
+   * meet — at a T-junction it is the middle of the head of the T, which is the
+   * one point in that whole detail with a defensible position, and no inner
+   * corner sits there. Offering only the corners lost it.
+   */
+  const snapVerts = useMemo(() => {
+    const out: Pt[] = [];
+    const seen = new Set<string>();
+    const add = (p: Pt) => {
+      const key = `${p[0].toFixed(4)},${p[1].toFixed(4)}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(p);
+    };
+    for (const h of handles) add(h.pos);
+    for (const p of axisPos.values()) add(p);
+    return out;
+  }, [handles, axisPos]);
+  const snapVertsRef = useRef(snapVerts);
+  snapVertsRef.current = snapVerts;
+
   const nearestHandle = useCallback((wx: number, wy: number): { pos: Pt; anchor: number } | null => {
     let best: { pos: Pt; anchor: number } | null = null;
     let bestD = PICK_PX / fitRef.current.scale;
@@ -1007,7 +1033,7 @@ export function SpaceSketchOverlay() {
       setHover(null); setDeleteHover(null); setSplitHover(null);
       setAlignGuides({ vRef: null, hRef: null });
       const tol = PICK_PX / fitRef.current.scale;
-      const snap = snapPoint([wx, wy], { vertices: uniqueVerts(rooms), segments: buildingSegmentsRef.current, tol });
+      const snap = snapPoint([wx, wy], { vertices: snapVertsRef.current, segments: buildingSegmentsRef.current, tol });
       setSnapKind(snap.kind); setSnapPos(snap.kind === 'none' ? null : snap.pt);
       if (rectStartRef.current) {
         setRectPreview(rectCornersFrom(rectStartRef.current, snap.pt, m.shift));
@@ -1048,7 +1074,7 @@ export function SpaceSketchOverlay() {
     if (drawPts.length > 0) {
       const tol = PICK_PX / fitRef.current.scale;
       const anchor = drawPts[drawPts.length - 1];
-      const snap = snapPoint([wx, wy], { vertices: uniqueVerts(rooms), segments: buildingSegmentsRef.current, tol, ortho: m.shift, anchor });
+      const snap = snapPoint([wx, wy], { vertices: snapVertsRef.current, segments: buildingSegmentsRef.current, tol, ortho: m.shift, anchor });
       let pt = snap.pt;
       // Axis-align to the drawn corners only when NOT holding Shift — under Shift
       // the ortho constraint is authoritative and alignToAxes (which snaps X and Y
@@ -1111,7 +1137,7 @@ export function SpaceSketchOverlay() {
     // Empty space → draw a room (or Shift = pan; hide the draw dot then).
     setHover(null); setDeleteHover(null); setSplitHover(null); setAlignGuides({ vRef: null, hRef: null });
     const tol = PICK_PX / fitRef.current.scale;
-    const snap = snapPoint([wx, wy], { vertices: uniqueVerts(rooms), segments: buildingSegmentsRef.current, tol });
+    const snap = snapPoint([wx, wy], { vertices: snapVertsRef.current, segments: buildingSegmentsRef.current, tol });
     setDrawCursor(m.shift ? null : snap.pt); setSnapKind(snap.kind);
     setIntent(m.shift ? { text: 'Pan', tone: 'pan' } : { text: 'Draw room', tone: 'draw' });
   }, [drawPts, splitPick, rooms, pickEdge, pickVertex, nearestVertPos, resolveSplitTarget, refreshRooms, drawMode, rectCornersFrom]);
@@ -1283,7 +1309,7 @@ export function SpaceSketchOverlay() {
     // 0. Rectangle tool (modal): first click sets a corner, second commits the
     // room. Drag/cut/draw are suspended while it's active.
     if (drawMode === 'rect' && !mod) {
-      const snap = snapPoint([wx, wy], { vertices: uniqueVerts(rooms), segments: buildingSegmentsRef.current, tol });
+      const snap = snapPoint([wx, wy], { vertices: snapVertsRef.current, segments: buildingSegmentsRef.current, tol });
       if (rectStartRef.current == null) {
         rectStartRef.current = snap.pt;
         setRectPreview(null);
@@ -1297,7 +1323,7 @@ export function SpaceSketchOverlay() {
     // 1. Drawing in progress → add a corner (or close on the first dot).
     if (drawPts.length > 0) {
       const anchor = drawPts[drawPts.length - 1];
-      const snap = snapPoint([wx, wy], { vertices: uniqueVerts(rooms), segments: buildingSegmentsRef.current, tol, ortho: e.shiftKey, anchor });
+      const snap = snapPoint([wx, wy], { vertices: snapVertsRef.current, segments: buildingSegmentsRef.current, tol, ortho: e.shiftKey, anchor });
       // Under Shift the ortho point is authoritative; only axis-align when free.
       const p = snap.kind === 'none' && !e.shiftKey ? alignToAxes(snap.pt, drawPts, tol).pt : snap.pt;
       setAlignGuides({ vRef: null, hRef: null });
@@ -1339,12 +1365,19 @@ export function SpaceSketchOverlay() {
       // walls meeting there keep their direction — the corner drifts only as
       // they rotate, and it is redrawn every frame, so what you aim at is what
       // you get.
-      const nodePos = axisPosRef.current.get(v) ?? start;
-      dragOffsetRef.current = [start[0] - nodePos[0], start[1] - nodePos[1]];
+      // Asked for outright. Deriving it by looking the node up by position
+      // silently returned NOTHING for most nodes, and the `?? start` behind it
+      // turned that into a zero offset — so the pointer carried the AXIS node
+      // while the hand was on the corner, and the room slid out from under it
+      // by half a wall. A missing answer has to look missing.
+      const nodePos = session.vertexPos(v);
+      dragOffsetRef.current = nodePos ? [start[0] - nodePos[0], start[1] - nodePos[1]] : [0, 0];
       session.beginDrag(); // pre-drag snapshot; committed on drop, reverted on cancel
-      otherVertsRef.current = handlesRef.current
-        .filter((h) => Math.hypot(h.pos[0] - start[0], h.pos[1] - start[1]) > 1e-6)
-        .map((h) => h.pos);
+      // Neither the grabbed corner nor the node under it are targets for
+      // themselves.
+      const self2: Pt[] = nodePos ? [start, nodePos] : [start];
+      otherVertsRef.current = snapVertsRef.current
+        .filter((p) => self2.every((q) => Math.hypot(p[0] - q[0], p[1] - q[1]) > 1e-6));
       svgRef.current?.setPointerCapture(e.pointerId);
       return;
     }
@@ -1376,7 +1409,7 @@ export function SpaceSketchOverlay() {
       svgRef.current?.setPointerCapture(e.pointerId);
       return;
     }
-    const snap = snapPoint([wx, wy], { vertices: uniqueVerts(rooms), segments: buildingSegmentsRef.current, tol });
+    const snap = snapPoint([wx, wy], { vertices: snapVertsRef.current, segments: buildingSegmentsRef.current, tol });
     drawRedoRef.current = [];
     setDrawPts([snap.pt]);
     setStatus('Drawing — click to add corners · Enter / double-click / first dot to close · Shift = straight.');

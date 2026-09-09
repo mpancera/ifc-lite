@@ -1356,16 +1356,19 @@
     }
 
     #[test]
-    fn an_edge_the_offset_swallows_is_dropped_rather_than_reversed() {
+    fn no_corner_travels_further_than_the_offset_that_moved_it() {
         // Two walls in line but of different thickness leave a short step in the
         // AXIS between them — 0.10 m here, against offsets of 0.10 and 0.30.
-        // The step is shorter than the offset that has to cross it, so its two
-        // corners change places and the edge comes back pointing the other way,
-        // which is what crossed the ring. Nearly-collinear neighbours make it
-        // worse, not better: their offset lines are near-parallel, so the
-        // corners land far along the step rather than near it. Real plans are
-        // full of these — measured on a museum floor, seven of twenty-one rooms
-        // had one, and every one of them was demoted to its wall axis.
+        // Shorter than the offset that has to cross it, with near-collinear
+        // neighbours whose offset lines run almost parallel, so their
+        // intersection is a long way from the corner it stands for.
+        //
+        // The bound is what makes the tool usable, not just the picture right.
+        // The outline is recomputed every frame of a drag; without a clamp a
+        // corner is free to fly off as the geometry crosses a threshold, and
+        // the room appears to tear. Measured on a real plan before this: an
+        // 18-pixel drag threw a corner 481 pixels, and the planner reported it
+        // as the room distorting under the pointer.
         let pts = [
             [0.0, 0.0], [5.0, 0.0], [5.1, 0.002], [10.0, 0.004], [10.0, 4.0], [0.0, 4.0],
         ];
@@ -1382,18 +1385,18 @@
         let net = plate.net_outline(room, true);
 
         assert!(is_simple_polygon(&net), "net outline crosses itself: {net:?}");
-        // The point of repairing a corner is that the ROOM keeps its inset. A
-        // room handed back on its axis is the failure this replaced, and it
-        // bakes that way — `OuterCurve` is this outline.
         assert_ne!(net, centre, "the room must not be demoted to its wall axis");
-        // And the repair has to have actually run, or the fixture is not
-        // exercising it and the test would survive its removal.
-        assert!(
-            net.len() < centre.len(),
-            "expected the swallowed edge to be dropped: {} corners in, {} out",
-            centre.len(),
-            net.len(),
-        );
+        // Every corner has to stay within reach of the ring it came from. The
+        // clamp is 4× the thickest offset at the corner; 0.30 here, so no
+        // corner may sit further than ~1.2 m from ANY centreline corner.
+        let bound = 4.0 * 0.30 + 1e-6;
+        for p in &net {
+            let near = centre
+                .iter()
+                .map(|c| ((c[0] - p[0]).powi(2) + (c[1] - p[1]).powi(2)).sqrt())
+                .fold(f64::INFINITY, f64::min);
+            assert!(near <= bound, "corner {p:?} sits {near} from the outline, bound {bound}");
+        }
         assert!(polygon_area(&net).abs() < polygon_area(&centre).abs(), "an inset must shrink");
     }
 

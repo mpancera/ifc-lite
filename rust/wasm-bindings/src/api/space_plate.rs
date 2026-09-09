@@ -202,6 +202,18 @@ impl SpacePlateHandle {
         self.inner.net_outline_with_anchors(FaceId(face), inset).1
     }
 
+    /// Position `[x, y]` of a live vertex, or `undefined` once it is gone.
+    #[wasm_bindgen(js_name = vertexPos)]
+    pub fn vertex_pos(&self, v: u32) -> Option<Vec<f64>> {
+        self.inner.vertex_pos(VertexId(v)).map(|p| vec![p[0], p[1]])
+    }
+
+    /// Vertex ids of the face's centreline outline, in `faceOutline` order.
+    #[wasm_bindgen(js_name = faceOutlineAnchors)]
+    pub fn face_outline_anchors(&self, face: u32) -> Vec<u32> {
+        self.inner.face_outline_anchors(FaceId(face))
+    }
+
     /// Nearest live vertex id to `(x, y)` within `tol`, or `undefined`.
     #[wasm_bindgen(js_name = findVertexNear)]
     pub fn find_vertex_near(&self, x: f64, y: f64, tol: f64) -> Option<u32> {

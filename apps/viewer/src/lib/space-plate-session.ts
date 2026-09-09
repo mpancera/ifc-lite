@@ -228,15 +228,21 @@ export class SpacePlateSession {
     if (!this.handle) return [];
     if (boundary === 'center') {
       const outline = this.boundaryOutline(face, 'center');
-      return outline.map((pos) => ({
-        pos,
-        anchor: this.handle!.findVertexNear(pos[0], pos[1], 1e-6) ?? -1,
-      })).filter((h) => h.anchor >= 0);
+      const anchors = this.handle.faceOutlineAnchors(face);
+      if (anchors.length !== outline.length) return [];
+      return outline.map((pos, i) => ({ pos, anchor: anchors[i] }));
     }
     const pts = flatToPts(this.handle.netOutline(face, boundary === 'inner'));
     const anchors = this.handle.netOutlineAnchors(face, boundary === 'inner');
     if (anchors.length !== pts.length) return [];
     return pts.map((pos, i) => ({ pos, anchor: anchors[i] }));
+  }
+
+  /** Where a node actually is. Asked directly rather than looked up by
+   *  position, because a caller that misses gets no answer AND no signal. */
+  vertexPos(v: number): [number, number] | null {
+    const p = this.handle?.vertexPos(v);
+    return p && p.length >= 2 ? [p[0], p[1]] : null;
   }
 
   neighborAcross(edge: number): number | undefined { return this.handle?.neighborAcross(edge); }

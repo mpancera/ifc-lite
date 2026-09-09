@@ -1416,6 +1416,10 @@ export class SpacePlateHandle {
      */
     faceOutline(face: number): Float64Array;
     /**
+     * Vertex ids of the face's centreline outline, in `faceOutline` order.
+     */
+    faceOutlineAnchors(face: number): Uint32Array;
+    /**
      * Nearest live vertex id to `(x, y)` within `tol`, or `undefined`.
      */
     findVertexNear(x: number, y: number, tol: number): number | undefined;
@@ -1509,6 +1513,10 @@ export class SpacePlateHandle {
      * Returns the kept face and the new face.
      */
     splitFace(face: number, va: number, vb: number, source: number): any;
+    /**
+     * Position `[x, y]` of a live vertex, or `undefined` once it is gone.
+     */
+    vertexPos(v: number): Float64Array | undefined;
     /**
      * FACE-BASED build: rooms are the gaps between wall footprint rectangles.
      * `rectCoords` is flat `[x0, y0, x1, y1, x2, y2, x3, y3, …]` — 8 f64 per wall
@@ -2148,6 +2156,7 @@ export interface InitOutput {
     readonly spaceplatehandle_duplicate: (a: number) => number;
     readonly spaceplatehandle_faceArea: (a: number, b: number) => number;
     readonly spaceplatehandle_faceOutline: (a: number, b: number, c: number) => void;
+    readonly spaceplatehandle_faceOutlineAnchors: (a: number, b: number, c: number) => void;
     readonly spaceplatehandle_findVertexNear: (a: number, b: number, c: number, d: number) => number;
     readonly spaceplatehandle_fromWallRects: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly spaceplatehandle_gapBoundary: (a: number, b: number, c: number, d: number) => void;
@@ -2164,6 +2173,7 @@ export interface InitOutput {
     readonly spaceplatehandle_snapshot: (a: number, b: number) => void;
     readonly spaceplatehandle_splitEdge: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly spaceplatehandle_splitFace: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly spaceplatehandle_vertexPos: (a: number, b: number, c: number) => void;
     readonly spaceplatehandle_wallUnionOutline: (a: number, b: number, c: number, d: number) => void;
     readonly splitMeshByZones: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => number;
     readonly symboliccircle_centerX: (a: number) => number;
