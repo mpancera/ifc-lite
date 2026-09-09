@@ -16,10 +16,15 @@
  * A run hangs off a line controller. Click one first and it is used; start on
  * a detector instead and one is created at the first device, because a run
  * without a head has nothing to number from and nothing to report to.
+ *
+ * That fallback is a rescue, not the intended path — the module it invents
+ * sits wherever the first detector happens to be. `Linienmodule je Zone` is
+ * the intended path: one module per Auslösezone before any cable is drawn, so
+ * every run starts by clicking a module that is already where it belongs.
  */
 
 import { useEffect } from 'react';
-import { Cable, RotateCcw, X } from 'lucide-react';
+import { Cable, CircuitBoard, RotateCcw, X } from 'lucide-react';
 import { toast } from '@/components/ui/toast';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -36,6 +41,7 @@ export function WiringPanel({ onClose }: WiringPanelProps) {
   const popWiringPick = useViewerStore((s) => s.popWiringPick);
   const clearWiring = useViewerStore((s) => s.clearWiring);
   const wireCircuit = useViewerStore((s) => s.wireCircuit);
+  const ensureLineControllers = useViewerStore((s) => s.ensureLineControllers);
   const setActiveTool = useViewerStore((s) => s.setActiveTool);
   const models = useViewerStore((s) => s.models);
 
@@ -98,6 +104,33 @@ export function WiringPanel({ onClose }: WiringPanelProps) {
     clearWiring();
   };
 
+  // Preparation, not drawing: it touches no pick and can be run again at any
+  // point — a zone that got its module on the first pass is left alone, so a
+  // second click after new zones were painted only fills the gaps.
+  const prepare = () => {
+    if (!activeModelId) return;
+    const result = ensureLineControllers(activeModelId);
+    if ('error' in result) {
+      toast.error(result.error);
+      return;
+    }
+    const { created, skipped, zonesWithoutRoom } = result;
+    const stragglers = zonesWithoutRoom > 0
+      ? `${zonesWithoutRoom} Zone${zonesWithoutRoom === 1 ? '' : 'n'} ohne Raum übersprungen`
+      : null;
+    // Nothing was written — say so rather than dressing a no-op as success.
+    if (created === 0) {
+      toast.info(stragglers
+        ? `Nichts angelegt · ${stragglers}`
+        : `Jede Auslösezone hat schon ein Linienmodul (${skipped}).`);
+      return;
+    }
+    const parts = [`${created} Linienmodul${created === 1 ? '' : 'e'} angelegt`];
+    if (skipped > 0) parts.push(`${skipped} bereits vorhanden`);
+    if (stragglers) parts.push(stragglers);
+    toast.success(parts.join(' · '));
+  };
+
   return (
     <div className="flex h-full flex-col text-xs">
       <div className="flex items-center gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
@@ -116,6 +149,20 @@ export function WiringPanel({ onClose }: WiringPanelProps) {
         gibt es keines, wird eines angelegt. Nochmal auf den Startpunkt schliesst
         den Ring. <span className="font-mono">Backspace</span> nimmt den letzten
         Klick zurück, <span className="font-mono">Esc</span> verwirft den Lauf.
+      </div>
+
+      <div className="border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 w-full text-[11px]"
+          disabled={!activeModelId}
+          onClick={prepare}
+          title="Je Auslösezone ein Linienmodul im ersten Raum der Zone — Zonen, die schon eines haben, bleiben unberührt"
+        >
+          <CircuitBoard className="mr-1 h-3 w-3" />
+          Linienmodule je Zone
+        </Button>
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
