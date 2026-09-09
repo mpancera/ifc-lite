@@ -66,7 +66,7 @@ export interface UseSpacePlateSessions {
    * overlay was unmounted while it was suspended. Rejects if the build itself
    * throws — the caller reports that to the user.
    */
-  buildPlate: (rects: WallRect[], storey: number | null, snapTol: number) => Promise<Room[] | null>;
+  buildPlate: (rects: WallRect[], storey: number | null, snapTol: number, footprints?: boolean) => Promise<Room[] | null>;
   /**
    * Allocate + register `storey`'s plate and build `rects` into it, for the
    * derive-all path (which walks every storey in one synchronous loop rather
@@ -74,7 +74,7 @@ export interface UseSpacePlateSessions {
    * disposing and unregistering the half-built session, so the storey is
    * retryable rather than stuck holding a plate nothing will free.
    */
-  buildStoreyPlate: (storey: number, rects: WallRect[], snapTol: number) => Room[];
+  buildStoreyPlate: (storey: number, rects: WallRect[], snapTol: number, footprints?: boolean) => Room[];
   /**
    * Resolves once the space wasm is usable — the same touch point `buildPlate`
    * uses, so the overlay reaches wasm in exactly one place and derive-all is
@@ -98,6 +98,7 @@ export function useSpacePlateSessions(deps: PlateDeps = defaultPlateDeps): UseSp
     rects: WallRect[],
     storey: number | null,
     snapTol: number,
+    footprints = false,
   ): Promise<Room[] | null> => {
     // Re-entrancy guard: a rapid rebuild (snap slider) must not let an older
     // async build free/replace the plate a newer one is using — that races the
@@ -115,19 +116,21 @@ export function useSpacePlateSessions(deps: PlateDeps = defaultPlateDeps): UseSp
     );
     if (!session) return null;
     sessionRef.current = session;
-    const { rooms } = session.buildFromRects(
-      flattenWallRects(rects.map((r) => r.corners)), snapTol, CORNER_WELD_SPAN,
-    );
+    const flat = flattenWallRects(rects.map((r) => r.corners));
+    const { rooms } = footprints
+      ? session.buildFromFootprints(flat)
+      : session.buildFromRects(flat, snapTol, CORNER_WELD_SPAN);
     return rooms;
   }, []);
 
-  const buildStoreyPlate = useCallback((storey: number, rects: WallRect[], snapTol: number): Room[] => {
+  const buildStoreyPlate = useCallback((storey: number, rects: WallRect[], snapTol: number, footprints = false): Room[] => {
     const session = depsRef.current.createSession();
     let rooms: Room[];
     try {
-      ({ rooms } = session.buildFromRects(
-        flattenWallRects(rects.map((r) => r.corners)), snapTol, CORNER_WELD_SPAN,
-      ));
+      const flat = flattenWallRects(rects.map((r) => r.corners));
+      ({ rooms } = footprints
+        ? session.buildFromFootprints(flat)
+        : session.buildFromRects(flat, snapTol, CORNER_WELD_SPAN));
     } catch (e) {
       // A storey that exceeds the arrangement input cap (or otherwise fails to
       // build) must not leave a half-built draft behind. Dispose the plate we

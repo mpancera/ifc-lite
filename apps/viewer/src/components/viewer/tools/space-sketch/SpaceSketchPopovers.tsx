@@ -15,6 +15,9 @@ export interface OptionsPopoverProps {
   onEmitGfa: (v: boolean) => void;
   /** Confirm every storey with a draft, not only the one on screen. */
   bakeAllStoreys: boolean;
+  /** Derive rooms as the holes the walls leave, by one union. */
+  footprintRooms: boolean;
+  onToggleFootprintRooms: () => void;
   onBakeAllStoreys: (v: boolean) => void;
   /** Whether this derive carried wall thickness — without it only `center` works. */
   hasWallData: boolean;
@@ -33,6 +36,7 @@ export interface OptionsPopoverProps {
 export function OptionsPopover(props: OptionsPopoverProps) {
   const {
     boundaryMode, onBoundaryMode, emitGfa, onEmitGfa, bakeAllStoreys, onBakeAllStoreys,
+    footprintRooms, onToggleFootprintRooms,
     hasWallData, snapDelta, usedTol, snapDisabled,
     onSnap, snapTol, showBuilding, onToggleBuilding, showDiagnostics, onToggleDiagnostics,
   } = props;
@@ -103,6 +107,17 @@ export function OptionsPopover(props: OptionsPopoverProps) {
       <label className="flex cursor-pointer items-center justify-between">
         <span className="text-foreground">Leak diagnostics</span>
         <input type="checkbox" className="accent-primary" checked={showDiagnostics} disabled={!hasWallData} onChange={onToggleDiagnostics} />
+      </label>
+      <label className="flex cursor-pointer items-start justify-between gap-3">
+        <span className="text-foreground">
+          Rooms from wall footprints
+          <span className="mt-0.5 block text-[10px] leading-tight text-muted-foreground">
+            One union: the room shown is the room baked. No shared edges — a
+            corner drag moves one room.
+          </span>
+        </span>
+        <input type="checkbox" className="mt-0.5 accent-primary" checked={footprintRooms}
+          disabled={!hasWallData} onChange={onToggleFootprintRooms} />
       </label>
     </div>
   );

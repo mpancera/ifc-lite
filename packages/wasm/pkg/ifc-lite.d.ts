@@ -1423,6 +1423,17 @@ export class SpacePlateHandle {
      * Nearest live vertex id to `(x, y)` within `tol`, or `undefined`.
      */
     findVertexNear(x: number, y: number, tol: number): number | undefined;
+    /**
+     * Rooms as the HOLES the walls leave — one union, no axis, no offset.
+     *
+     * Takes the same flat wall-rectangle coordinates as `fromWallRects` and
+     * returns a plate whose faces ARE the rooms' inner faces, so what is
+     * drawn, measured and baked is one ring rather than three derivations of
+     * one. `close` grows each footprint before the union so hairline gaps
+     * between wall rectangles cannot leak: a union is exact, and an exact
+     * union flows through a gap the way a paint bucket does.
+     */
+    static fromWallFootprints(rect_coords: Float64Array, close: number, min_area: number, snap_tolerance: number): SpacePlateHandle;
     static fromWallRects(rect_coords: Float64Array, snap_tolerance: number, min_area: number): SpacePlateHandle;
     /**
      * Face-based gap-room boundary as flat `[x0, y0, …]`: each edge pushed
@@ -2158,6 +2169,7 @@ export interface InitOutput {
     readonly spaceplatehandle_faceOutline: (a: number, b: number, c: number) => void;
     readonly spaceplatehandle_faceOutlineAnchors: (a: number, b: number, c: number) => void;
     readonly spaceplatehandle_findVertexNear: (a: number, b: number, c: number, d: number) => number;
+    readonly spaceplatehandle_fromWallFootprints: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly spaceplatehandle_fromWallRects: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly spaceplatehandle_gapBoundary: (a: number, b: number, c: number, d: number) => void;
     readonly spaceplatehandle_mergeFaces: (a: number, b: number, c: number) => void;

@@ -1482,3 +1482,66 @@
             "no corner near the re-entrant corner in {outline:?}",
         );
     }
+
+    // ─── Rooms as the holes of the walls ───
+
+    const CLOSE: f64 = 0.005;
+
+    #[test]
+    fn a_room_is_the_hole_its_walls_leave() {
+        // The 4×3 room boxed by four 0.2 m walls. Its INNER face is 3.8×2.8 =
+        // 10.64 — read straight off the union, not offset back from an axis.
+        let rects = vec![
+            [[-0.1, -0.1], [4.1, -0.1], [4.1, 0.1], [-0.1, 0.1]],
+            [[-0.1, 2.9], [4.1, 2.9], [4.1, 3.1], [-0.1, 3.1]],
+            [[-0.1, -0.1], [0.1, -0.1], [0.1, 3.1], [-0.1, 3.1]],
+            [[3.9, -0.1], [4.1, -0.1], [4.1, 3.1], [3.9, 3.1]],
+        ];
+        let rooms = SpacePlate::rooms_from_wall_footprints(&rects, CLOSE, 0.3);
+        assert_eq!(rooms.len(), 1, "four walls leave one hole");
+        let area = polygon_area(&rooms[0]).abs();
+        // `close` grows each wall inward by 5 mm too, so the room is that much
+        // smaller on each of its four sides: 3.79 × 2.79.
+        let want = (3.8 - 2.0 * CLOSE) * (2.8 - 2.0 * CLOSE);
+        assert!((area - want).abs() < 1e-6, "net area {area}, want {want}");
+        assert!(polygon_area(&rooms[0]) > 0.0, "rings come back CCW");
+    }
+
+    #[test]
+    fn the_cases_that_broke_the_offset_path_are_not_cases_here() {
+        // Every one of these needed its own repair on the axis path: an L needs
+        // an interior point that is in it, a stub wall needs its end capped, a
+        // thickness step leaves an edge the offset swallows. A union has no
+        // opinion about any of them — they are just holes.
+        for (name, rects, want) in [
+            ("L-shaped corridor", l_corridor_rects(), 1usize),
+            ("room with a stub wall standing in it", free_end_rects(), 1),
+        ] {
+            let rooms = SpacePlate::rooms_from_wall_footprints(&rects, CLOSE, 0.3);
+            assert_eq!(rooms.len(), want, "{name}: expected {want} room(s), got {}", rooms.len());
+            assert!(is_simple_polygon(&rooms[0]), "{name}: ring crosses itself");
+        }
+        // The stub room wraps the wall standing in it, so it has more corners
+        // than a box — and it is ONE room, not two.
+        let stub = &SpacePlate::rooms_from_wall_footprints(&free_end_rects(), CLOSE, 0.3)[0];
+        assert!(stub.len() >= 8, "the stub has to be cut out of the ring, got {} corners", stub.len());
+    }
+
+    #[test]
+    fn a_plate_built_from_room_rings_needs_no_offset_to_show_them() {
+        let rects = vec![
+            [[-0.1, -0.1], [4.1, -0.1], [4.1, 0.1], [-0.1, 0.1]],
+            [[-0.1, 2.9], [4.1, 2.9], [4.1, 3.1], [-0.1, 3.1]],
+            [[-0.1, -0.1], [0.1, -0.1], [0.1, 3.1], [-0.1, 3.1]],
+            [[3.9, -0.1], [4.1, -0.1], [4.1, 3.1], [3.9, 3.1]],
+        ];
+        let rooms = SpacePlate::rooms_from_wall_footprints(&rects, CLOSE, 0.3);
+        let plate = SpacePlate::build_from_room_rings(&rooms, BuildOptions::default());
+        assert_eq!(plate.room_count(), 1);
+        let face = plate.rooms().next().unwrap();
+        // What is drawn, what is measured and what is baked are the SAME ring.
+        assert_eq!(plate.net_outline(face, true), plate.face_outline(face));
+        assert_eq!(plate.net_outline(face, false), plate.face_outline(face));
+        let a = plate.face_area(face).abs();
+        assert!((a - polygon_area(&rooms[0]).abs()).abs() < 1e-6, "plate area {a}");
+    }

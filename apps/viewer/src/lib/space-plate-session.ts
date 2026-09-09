@@ -194,6 +194,34 @@ export class SpacePlateSession {
     return { rooms: this.rooms() };
   }
 
+  /**
+   * Rooms as the HOLES the walls leave — one union, no axis, no offset.
+   *
+   * The plate's faces ARE the inner faces, so `boundaryOutline` in every mode
+   * is the same ring: what is drawn, what is measured and what is baked stop
+   * being three derivations of one another. The offset repairs the other path
+   * needs — mitre clamps, swallowed edges, inverted rings, the fall back to the
+   * axis — have nothing to do here, because there is no offset.
+   *
+   * What it gives up is adjacency: rooms do not share edges, so dragging a
+   * corner moves one room. Moving a wall so that both its rooms follow is the
+   * wall's job in this model, not a shared node's.
+   */
+  buildFromFootprints(
+    rectCoords: Float64Array,
+    close = 0.005,
+    minArea = 0.3,
+    snapTolerance = 0.001,
+  ): { rooms: Room[] } {
+    const handle = SpacePlateHandle.fromWallFootprints(rectCoords, close, minArea, snapTolerance);
+    this.discardPending();
+    this.disposeHandle();
+    this.clearHistory();
+    this.handle = handle;
+    this.dirty = false;
+    return { rooms: this.rooms() };
+  }
+
   // ───────────────────────────── reads ─────────────────────────────
 
   rooms(): Room[] { return this.handle ? (this.handle.snapshot() as Room[]) : []; }

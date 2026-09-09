@@ -177,6 +177,21 @@ export function SpaceSketchOverlay() {
   const [status, setStatus] = useState('Pick a storey to derive rooms from its walls.');
   const [showBuilding, setShowBuilding] = useState(true);
   const [showDiagnostics, setShowDiagnostics] = useState(false); // Issue 7 — leak diagnostics
+  /**
+   * Derive rooms as the HOLES the walls leave, by one union, instead of
+   * arranging the gaps and lifting them to the wall axis.
+   *
+   * Off by default because it trades adjacency away: its rooms do not share
+   * edges, so dragging a corner moves one room. What it buys is that the ring
+   * shown IS the ring baked — no offset, and so none of the offset's failures.
+   */
+  const [footprintRooms, setFootprintRooms] = useState(false);
+  // Read through a ref, the way `snapTolRef` is: `buildFrom` is a `useCallback`
+  // whose identity several effects depend on, so adding this to its deps would
+  // churn them — and capturing the value instead would silently derive with
+  // the setting the tool opened with.
+  const footprintRoomsRef = useRef(footprintRooms);
+  footprintRoomsRef.current = footprintRooms;
   // The room outline and its nodes are always edited on the wall CENTRELINE —
   // that is the topology. What this picks is the boundary the room is DRAWN
   // and EMITTED at: `inner` = the net faces, `outer` = the gross ones,
@@ -379,7 +394,7 @@ export function SpaceSketchOverlay() {
     lastBuildRef.current = { rects, label, storey };
     try {
       const snapTol = snapTolRef.current ?? 0.05;
-      const snap = await buildPlate(rects, storey, snapTol);
+      const snap = await buildPlate(rects, storey, snapTol, footprintRoomsRef.current);
       if (!snap) return; // superseded by a newer build, or the overlay is gone
       setUsedTol(snapTol);
       // Frame the rooms when any were detected, otherwise frame the walls so a
@@ -603,7 +618,7 @@ export function SpaceSketchOverlay() {
       const rects = wallRectsFromMeshes(meshes, coord, st.elev, floorToFloor(st.id));
       if (!rects.length) continue;
       try {
-        const rooms = buildStoreyPlate(st.id, rects, snapTol);
+        const rooms = buildStoreyPlate(st.id, rects, snapTol, footprintRoomsRef.current);
         const name = ifcDataStore.entities.getName(st.id) || `Storey #${st.id}`;
         buildsRef.current.set(st.id, {
           rects, label: name,
@@ -1555,7 +1570,9 @@ export function SpaceSketchOverlay() {
         const disp = sessionRef.current?.boundaryOutline(r.face, boundaryMode) ?? r.outline;
         return {
           disp,
-          unbounded: disp === r.outline || polyArea(disp) === polyArea(r.outline),
+          unbounded: footprintRooms
+            ? false
+            : disp === r.outline || polyArea(disp) === polyArea(r.outline),
           discarded: isDiscarded,
         };
       });
@@ -1563,7 +1580,13 @@ export function SpaceSketchOverlay() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rooms, boundaryMode, hist, derivedStorey, discardTick],
   );
-  const unboundedCount = boundaryMode === 'center' ? 0 : boundaryInfo.filter((b) => b.unbounded).length;
+  // "unchanged by inner" means the offset refused and the room fell back to its
+  // axis — a real warning on the axis path. On the footprint path the ring IS
+  // the inner face, so no offset applies and every room is "unchanged" by
+  // construction. Reporting that would be crying wolf about the normal case.
+  const unboundedCount = boundaryMode === 'center' || footprintRooms
+    ? 0
+    : boundaryInfo.filter((b) => b.unbounded).length;
 
   // Issue 7 — leak diagnostics: classify each derive wall segment as bounding
   // (its centreline lies along a room edge) vs non-bounding (a stray/leaked wall
@@ -1701,6 +1724,21 @@ export function SpaceSketchOverlay() {
           onToggleBuilding={() => setShowBuilding((v) => !v)}
           showDiagnostics={showDiagnostics}
           onToggleDiagnostics={() => setShowDiagnostics((v) => !v)}
+          footprintRooms={footprintRooms}
+          onToggleFootprintRooms={() => {
+            // Sessions are cached per storey, so flipping this changes nothing
+            // until something rebuilds. Rebuild the storey on screen at once,
+            // or the switch looks broken.
+            footprintRoomsRef.current = !footprintRoomsRef.current;
+            setFootprintRooms(footprintRoomsRef.current);
+            const lb = lastBuildRef.current;
+            if (lb) {
+              sessionsRef.current.get(lb.storey ?? -1)?.dispose();
+              sessionsRef.current.delete(lb.storey ?? -1);
+              sessionRef.current = null;
+              void buildFrom(lb.rects, lb.label, lb.storey);
+            }
+          }}
         />
       )}
       {helpOpen && <HelpPopover />}

@@ -114,6 +114,27 @@ impl SpacePlateHandle {
             .collect())
     }
 
+    /// Rooms as the HOLES the walls leave — one union, no axis, no offset.
+    ///
+    /// Takes the same flat wall-rectangle coordinates as `fromWallRects` and
+    /// returns a plate whose faces ARE the rooms' inner faces, so what is
+    /// drawn, measured and baked is one ring rather than three derivations of
+    /// one. `close` grows each footprint before the union so hairline gaps
+    /// between wall rectangles cannot leak: a union is exact, and an exact
+    /// union flows through a gap the way a paint bucket does.
+    #[wasm_bindgen(js_name = fromWallFootprints)]
+    pub fn from_wall_footprints(
+        rect_coords: &[f64],
+        close: f64,
+        min_area: f64,
+        snap_tolerance: f64,
+    ) -> Result<SpacePlateHandle, JsValue> {
+        let rects = build_wall_rects(rect_coords).map_err(|e| JsValue::from_str(&e))?;
+        let rooms = SpacePlate::rooms_from_wall_footprints(&rects, close, min_area);
+        let opts = resolve_build_options(snap_tolerance, min_area);
+        Ok(SpacePlateHandle { inner: SpacePlate::build_from_room_rings(&rooms, opts) })
+    }
+
     #[wasm_bindgen(js_name = fromWallRects)]
     pub fn from_wall_rects(rect_coords: &[f64], snap_tolerance: f64, min_area: f64) -> Result<SpacePlateHandle, JsValue> {
         let rects = build_wall_rects(rect_coords).map_err(|e| JsValue::from_str(&e))?;
