@@ -7,8 +7,16 @@
  * room vertices and drawing new room corners, so every node behaves the same.
  *
  * Candidates, in priority order (nearest within `tol` wins per tier):
- *   1. Corners — room vertices + building-line endpoints.
- *   2. On-wall — projection onto the nearest building segment.
+ *   1. Corners — room vertices, building-line endpoints, and WALL ENDS.
+ *   2. Perpendicular — the foot of the perpendicular from `anchor` onto a wall
+ *      axis, so a wall can be carried to its neighbour at a right angle.
+ *   3. On-wall — projection onto the nearest building segment.
+ *
+ * A wall end is the middle of the wall's end face — the point its axis stops
+ * at. It is the one position on a free-standing wall end that is defensible,
+ * and until now it was unreachable: a wall that bounds no room has no node in
+ * the plate, so there was nothing there to snap to even though the wall is
+ * plainly on screen.
  * Both work in the room (model-metre) frame, the same frame the underlay lines
  * and room outlines already live in.
  *
@@ -20,13 +28,17 @@
 
 export type Pt = [number, number];
 
-export type SnapKind = 'vertex' | 'line' | 'none';
+export type SnapKind = 'vertex' | 'wallEnd' | 'perp' | 'line' | 'none';
 
 export interface SnapOptions {
   /** Corner targets — existing room vertices. */
   vertices?: ReadonlyArray<Pt>;
   /** Building wall lines (room frame); endpoints snap as corners, bodies as on-wall. */
   segments?: ReadonlyArray<readonly [Pt, Pt]>;
+  /** Wall ENDS — the middle of each wall's end face, i.e. where its axis stops. */
+  axisEnds?: ReadonlyArray<Pt>;
+  /** Wall axes to drop a perpendicular onto, from `anchor`. */
+  perpLines?: ReadonlyArray<readonly [Pt, Pt]>;
   /** Snap radius in world (metre) units. */
   tol: number;
   /** Constrain to horizontal/vertical from `anchor` before snapping. */
@@ -121,23 +133,48 @@ function snapAlongOrtho(
 }
 
 export function snapPoint(p: Pt, opts: SnapOptions): SnapResult {
-  const { vertices = [], segments = [], tol, ortho = false, anchor = null } = opts;
+  const { vertices = [], segments = [], axisEnds = [], perpLines = [], tol, ortho = false, anchor = null } = opts;
   // Shift held → ortho dominates: snap only along the straight line.
   if (ortho && anchor) return snapAlongOrtho(p, anchor, vertices, segments, tol);
   const base: Pt = [p[0], p[1]];
 
-  // 1. Corner snap — room vertices + segment endpoints. Scalar trackers (not a
-  // `Pt | null`) so TS control-flow doesn't narrow the accumulator to `never`.
+  // 1. Corner snap — room vertices, segment endpoints, wall ends. Scalar
+  // trackers (not a `Pt | null`) so TS control-flow doesn't narrow the
+  // accumulator to `never`.
   let bestX = 0, bestY = 0, bestD = tol, foundCorner = false;
-  const consider = (qx: number, qy: number) => {
+  let cornerKind: SnapKind = 'vertex';
+  const consider = (qx: number, qy: number, kind: SnapKind) => {
     const d = Math.hypot(qx - base[0], qy - base[1]);
-    if (d < bestD) { bestD = d; bestX = qx; bestY = qy; foundCorner = true; }
+    if (d < bestD) { bestD = d; bestX = qx; bestY = qy; foundCorner = true; cornerKind = kind; }
   };
-  for (const q of vertices) consider(q[0], q[1]);
-  for (const seg of segments) { consider(seg[0][0], seg[0][1]); consider(seg[1][0], seg[1][1]); }
-  if (foundCorner) return { pt: [bestX, bestY], kind: 'vertex' };
+  // Wall ends first, so that where one coincides with a room corner the more
+  // specific name is the one reported.
+  for (const q of axisEnds) consider(q[0], q[1], 'wallEnd');
+  for (const q of vertices) consider(q[0], q[1], 'vertex');
+  for (const seg of segments) { consider(seg[0][0], seg[0][1], 'vertex'); consider(seg[1][0], seg[1][1], 'vertex'); }
+  if (foundCorner) return { pt: [bestX, bestY], kind: cornerKind };
 
-  // 2. On-wall snap — nearest segment projection.
+  // 2. Perpendicular from the anchor onto a wall axis — how a wall is carried
+  // across to the one it should meet. The foot is taken on the INFINITE line:
+  // the whole point is to reach an axis the wall stops short of, and clamping
+  // to the drawn extent would refuse exactly that.
+  if (anchor) {
+    let pX = 0, pY = 0, pD = tol, foundPerp = false;
+    for (const line of perpLines) {
+      const dx = line[1][0] - line[0][0], dy = line[1][1] - line[0][1];
+      const len2 = dx * dx + dy * dy;
+      if (len2 < 1e-12) continue;
+      const t = ((anchor[0] - line[0][0]) * dx + (anchor[1] - line[0][1]) * dy) / len2;
+      const fx = line[0][0] + t * dx, fy = line[0][1] + t * dy;
+      // The foot must not be the anchor itself — that is not a direction.
+      if (Math.hypot(fx - anchor[0], fy - anchor[1]) < 1e-6) continue;
+      const d = Math.hypot(fx - base[0], fy - base[1]);
+      if (d < pD) { pD = d; pX = fx; pY = fy; foundPerp = true; }
+    }
+    if (foundPerp) return { pt: [pX, pY], kind: 'perp' };
+  }
+
+  // 3. On-wall snap — nearest segment projection.
   let projX = 0, projY = 0, projD = tol, foundLine = false;
   for (const seg of segments) {
     const q = projectOnSeg(base, seg[0], seg[1]);
@@ -146,6 +183,6 @@ export function snapPoint(p: Pt, opts: SnapOptions): SnapResult {
   }
   if (foundLine) return { pt: [projX, projY], kind: 'line' };
 
-  // 3. No snap — the ortho-adjusted (or raw) point.
+  // 4. No snap — the ortho-adjusted (or raw) point.
   return { pt: base, kind: 'none' };
 }

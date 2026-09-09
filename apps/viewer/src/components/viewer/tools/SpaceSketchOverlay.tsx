@@ -111,6 +111,9 @@ export function SpaceSketchOverlay() {
   const dragOffsetRef = useRef<Pt>([0, 0]);
   /** The room whose corner is being dragged. */
   const dragFaceRef = useRef<number | null>(null);
+  /** Where the node sat when it was grabbed — the reference the correction
+   *  below is not allowed to wander far from. */
+  const dragNodeStartRef = useRef<Pt | null>(null);
   const draggedRef = useRef(false);
   const panningRef = useRef(false); // Issue 4: middle-mouse / empty-drag panning
   // While drawing, Undo pops the last placed point onto this stack and Redo
@@ -1085,7 +1088,26 @@ export function SpaceSketchOverlay() {
             return !best || d < best.d ? { pos: h.pos as Pt, d } : best;
           }, null)?.pos ?? null;
       };
-      let guess: Pt = [snap.pt[0] - dragOffsetRef.current[0], snap.pt[1] - dragOffsetRef.current[1]];
+      // A node is SHARED. Chasing the grabbed corner onto the pointer is only
+      // worth doing while the node stays near where translating it plainly
+      // would put it — every millimetre beyond that is paid by the rooms on
+      // its other sides, which nobody is watching. So the correction gets a
+      // leash, sized by the offset at this corner (roughly the wall's own
+      // half-thickness) and never smaller than a few centimetres. A corner two
+      // centimetres off its mark is a rounding error; a neighbour torn open is
+      // not, and it is the neighbour that goes unnoticed until the bake.
+      const nodeStart = dragNodeStartRef.current;
+      const plain: Pt = nodeStart
+        ? [nodeStart[0] + (snap.pt[0] - (dragStartRef.current?.[0] ?? snap.pt[0])),
+           nodeStart[1] + (snap.pt[1] - (dragStartRef.current?.[1] ?? snap.pt[1]))]
+        : [snap.pt[0] - dragOffsetRef.current[0], snap.pt[1] - dragOffsetRef.current[1]];
+      const leash = 2 * Math.hypot(dragOffsetRef.current[0], dragOffsetRef.current[1]) + 0.05;
+      const rein = (q: Pt): Pt => {
+        const dx = q[0] - plain[0], dy = q[1] - plain[1];
+        const d = Math.hypot(dx, dy);
+        return d <= leash ? q : [plain[0] + (dx / d) * leash, plain[1] + (dy / d) * leash];
+      };
+      let guess: Pt = rein([snap.pt[0] - dragOffsetRef.current[0], snap.pt[1] - dragOffsetRef.current[1]]);
       session.dragTo(vid, guess[0], guess[1]);
       let bestGuess = guess;
       let bestErr = Infinity;
@@ -1104,7 +1126,7 @@ export function SpaceSketchOverlay() {
         const err = Math.hypot(ex, ey);
         if (err < bestErr) { bestErr = err; bestGuess = guess; }
         if (err < 1e-4) break;
-        guess = [guess[0] + 0.5 * ex, guess[1] + 0.5 * ey];
+        guess = rein([guess[0] + 0.5 * ex, guess[1] + 0.5 * ey]);
         session.dragTo(vid, guess[0], guess[1]);
       }
       const finalCorner = cornerNow();
@@ -1427,6 +1449,7 @@ export function SpaceSketchOverlay() {
       // by half a wall. A missing answer has to look missing.
       const nodePos = session.vertexPos(v);
       dragOffsetRef.current = nodePos ? [start[0] - nodePos[0], start[1] - nodePos[1]] : [0, 0];
+      dragNodeStartRef.current = nodePos;
       session.beginDrag(); // pre-drag snapshot; committed on drop, reverted on cancel
       // Neither the grabbed corner nor the node under it are targets for
       // themselves.
