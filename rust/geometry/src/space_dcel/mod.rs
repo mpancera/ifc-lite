@@ -1153,8 +1153,17 @@ impl SpacePlate {
             return None; // outline / cycle mismatch (e.g. a hole) — don't guess
         }
         let sign = if inset { 1.0 } else { -1.0 };
-        // Per edge: a point on its offset line + the edge's unit direction.
-        let mut lines: Vec<([f64; 2], [f64; 2])> = Vec::with_capacity(n);
+
+        // One offset LINE per boundary edge — anchor, unit direction, and the
+        // half-thickness it was moved by. Corners are read off these lines
+        // rather than carried as points, because an offset corner is the
+        // intersection of its two edges and nothing else.
+        struct OffsetEdge {
+            anchor: [f64; 2],
+            dir: [f64; 2],
+            half: f64,
+        }
+        let mut edges: Vec<OffsetEdge> = Vec::with_capacity(n);
         for i in 0..n {
             let a = centre[i];
             let b = centre[(i + 1) % n];
@@ -1175,50 +1184,86 @@ impl SpacePlate {
             }
             let off = sign * half;
             // Inward normal of a CCW outline is to the left of a→b: (-uy, ux).
-            lines.push(([a[0] - uy * off, a[1] + ux * off], [ux, uy]));
+            edges.push(OffsetEdge { anchor: [a[0] - uy * off, a[1] + ux * off], dir: [ux, uy], half });
         }
+
         /// Foot of the perpendicular from `q` onto the line `(p, d)` (`d` unit).
         fn project(q: [f64; 2], p: [f64; 2], d: [f64; 2]) -> [f64; 2] {
             let t = (q[0] - p[0]) * d[0] + (q[1] - p[1]) * d[1];
             [p[0] + t * d[0], p[1] + t * d[1]]
         }
-        let mut verts: Vec<[f64; 2]> = Vec::with_capacity(n + 2);
-        for i in 0..n {
-            let pj = (i + n - 1) % n;
-            let (pp, pd) = lines[pj];
-            let (cp, cd) = lines[i];
-            // A wall that ends free inside a room is a SPUR: the face walks out
-            // along its axis and back, so the two edges meeting at the tip are
-            // antiparallel and their offset lines are parallel — one on each
-            // flank, a wall thickness apart. There is no corner to intersect
-            // here; there is an END to cap, and it needs two vertices where
-            // every other corner needs one. Emitting one collapsed the tip onto
-            // a single flank and the outline cut diagonally across the wall
-            // from the far flank's base — the "diagonally sliced wall end".
-            //
-            // The cap sits at the wall's real end, `half` beyond the axis tip
-            // (the axis stops half a thickness short so the end squares off),
-            // which for the gross outline means half short of it instead —
-            // hence `sign`.
-            if pd[0] * cd[0] + pd[1] * cd[1] < -1.0 + 1e-9 {
-                let half = self.half_edges[cycle[pj].0 as usize]
-                    .half_thickness
-                    .max(self.half_edges[cycle[i].0 as usize].half_thickness);
-                let tip = [centre[i][0] + sign * half * pd[0], centre[i][1] + sign * half * pd[1]];
-                verts.push(project(tip, pp, pd));
-                verts.push(project(tip, cp, cd));
-                continue;
-            }
-            let hit = line_intersection(pp, [pp[0] + pd[0], pp[1] + pd[1]], cp, [cp[0] + cd[0], cp[1] + cd[1]]);
-            // Parallel offset lines (a collinear node, e.g. a mid-wall split, or
-            // two edges of equal thickness in a straight run) don't intersect —
-            // drop the corner onto the current offset line so it sits flush on
-            // the inset boundary instead of poking back to the centreline.
-            verts.push(hit.unwrap_or_else(|| project(centre[i], cp, cd)));
-        }
-        Some((centre, verts))
-    }
 
+        // An edge SHORTER than the offset is swallowed by it: its two corners
+        // cross over and the edge comes back reversed, which is what turns an
+        // otherwise sane ring into a crossed one. Real plans are full of these —
+        // a 0.10 m step where two walls of different thickness meet in line, a
+        // 0.14 m jog at a T-junction. The edge does not survive the offset in
+        // any meaningful sense, so drop it and let its neighbours meet directly.
+        // Each pass drops at least one, so the loop is bounded by `n`.
+        let mut active: Vec<usize> = (0..n).collect();
+        for _ in 0..n {
+            if active.len() < 3 {
+                return None;
+            }
+            let m = active.len();
+            let mut verts: Vec<[f64; 2]> = Vec::with_capacity(m + 2);
+            let mut first: Vec<usize> = vec![0; m];
+            let mut last: Vec<usize> = vec![0; m];
+            for k in 0..m {
+                let prev = active[(k + m - 1) % m];
+                let cur = active[k];
+                let (pp, pd) = (edges[prev].anchor, edges[prev].dir);
+                let (cp, cd) = (edges[cur].anchor, edges[cur].dir);
+                let corner = centre[cur];
+                // A wall that ends free inside a room is a SPUR: the face walks
+                // out along its axis and back, so the two edges meeting at the
+                // tip are antiparallel and their offset lines are parallel —
+                // one on each flank, a wall thickness apart. There is no corner
+                // to intersect here; there is an END to cap, and it needs two
+                // vertices where every other corner needs one. Emitting one
+                // collapsed the tip onto a single flank and the outline cut
+                // diagonally across the wall from the far flank's base.
+                //
+                // The cap sits at the wall's real end, `half` beyond the axis
+                // tip (the axis stops half a thickness short so the end squares
+                // off), which for the gross outline means half short of it
+                // instead — hence `sign`.
+                if pd[0] * cd[0] + pd[1] * cd[1] < -1.0 + 1e-9 {
+                    let half = edges[prev].half.max(edges[cur].half);
+                    let tip = [corner[0] + sign * half * pd[0], corner[1] + sign * half * pd[1]];
+                    verts.push(project(tip, pp, pd));
+                    last[(k + m - 1) % m] = verts.len() - 1;
+                    verts.push(project(tip, cp, cd));
+                    first[k] = verts.len() - 1;
+                    continue;
+                }
+                let hit = line_intersection(pp, [pp[0] + pd[0], pp[1] + pd[1]], cp, [cp[0] + cd[0], cp[1] + cd[1]]);
+                // Parallel offset lines (a collinear node, e.g. a mid-wall split,
+                // or two edges of equal thickness in a straight run) don't
+                // intersect — drop the corner onto the current offset line so it
+                // sits flush on the inset boundary instead of poking back to the
+                // centreline.
+                verts.push(hit.unwrap_or_else(|| project(corner, cp, cd)));
+                last[(k + m - 1) % m] = verts.len() - 1;
+                first[k] = verts.len() - 1;
+            }
+            let swallowed: Vec<usize> = (0..m)
+                .filter(|&k| {
+                    let a = verts[first[k]];
+                    let b = verts[last[k]];
+                    let d = edges[active[k]].dir;
+                    (b[0] - a[0]) * d[0] + (b[1] - a[1]) * d[1] < 0.0
+                })
+                .collect();
+            if swallowed.is_empty() {
+                return Some((centre, verts));
+            }
+            for &k in swallowed.iter().rev() {
+                active.remove(k);
+            }
+        }
+        None
+    }
     /// The offset ring if it is a shape a room can be, else `None`.
     ///
     /// The inversion test is on the SIGN of the area, not its size. A ring that

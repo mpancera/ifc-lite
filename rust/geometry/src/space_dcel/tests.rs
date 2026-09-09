@@ -1354,3 +1354,45 @@
             "the threshold must be read against the net outline",
         );
     }
+
+    #[test]
+    fn an_edge_the_offset_swallows_is_dropped_rather_than_reversed() {
+        // Two walls in line but of different thickness leave a short step in the
+        // AXIS between them — 0.10 m here, against offsets of 0.10 and 0.30.
+        // The step is shorter than the offset that has to cross it, so its two
+        // corners change places and the edge comes back pointing the other way,
+        // which is what crossed the ring. Nearly-collinear neighbours make it
+        // worse, not better: their offset lines are near-parallel, so the
+        // corners land far along the step rather than near it. Real plans are
+        // full of these — measured on a museum floor, seven of twenty-one rooms
+        // had one, and every one of them was demoted to its wall axis.
+        let pts = [
+            [0.0, 0.0], [5.0, 0.0], [5.1, 0.002], [10.0, 0.004], [10.0, 4.0], [0.0, 4.0],
+        ];
+        let halfs = [0.10, 0.30, 0.10, 0.10, 0.10, 0.10];
+        let segs: Vec<InputSegment> = (0..pts.len())
+            .map(|i| {
+                InputSegment::new(pts[i], pts[(i + 1) % pts.len()], Some(i as u32))
+                    .with_half_thickness(halfs[i])
+            })
+            .collect();
+        let plate = SpacePlate::build(&segs, BuildOptions { snap_tolerance: 0.001, min_area: 0.5 });
+        let room = plate.rooms().next().expect("the six walls bound one room");
+        let centre = plate.face_outline(room);
+        let net = plate.net_outline(room, true);
+
+        assert!(is_simple_polygon(&net), "net outline crosses itself: {net:?}");
+        // The point of repairing a corner is that the ROOM keeps its inset. A
+        // room handed back on its axis is the failure this replaced, and it
+        // bakes that way — `OuterCurve` is this outline.
+        assert_ne!(net, centre, "the room must not be demoted to its wall axis");
+        // And the repair has to have actually run, or the fixture is not
+        // exercising it and the test would survive its removal.
+        assert!(
+            net.len() < centre.len(),
+            "expected the swallowed edge to be dropped: {} corners in, {} out",
+            centre.len(),
+            net.len(),
+        );
+        assert!(polygon_area(&net).abs() < polygon_area(&centre).abs(), "an inset must shrink");
+    }
