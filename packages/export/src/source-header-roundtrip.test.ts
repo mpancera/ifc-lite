@@ -242,7 +242,7 @@ END-ISO-10303-21;`;
     const opts = { schema: 'IFC4', timeStamp: 'TS', filename: 'f.ifc' } as const;
     const authored = ['Löschung', 'Automation Primäranlagen'];
     const h1 = generateHeader({ ...opts, author: authored });
-    expect(h1).toContain("('L\\X\\F6schung','Automation Prim\\X\\E4ranlagen')");
+    expect(h1).toContain("('L\\X2\\00F6\\X0\\schung','Automation Prim\\X2\\00E4\\X0\\ranlagen')");
     // Nothing outside printable ASCII reaches the file.
     expect(h1.replace(/\n/g, '')).toMatch(/^[\x20-\x7E]*$/);
 
@@ -265,11 +265,10 @@ END-ISO-10303-21;`;
     // on every round trip (`C:\\temp`, `C:\\\\temp`, ...).
     const opts = { schema: 'IFC4', timeStamp: 'TS', filename: 'f.ifc' } as const;
     const h1 = generateHeader({ ...opts, author: ['C:\\temp'] });
-    // Stored as the ISO-10303-21 escape for U+005C, applied exactly once. (The
-    // writer used to emit the `\\` pair here; both forms read back as one
-    // backslash, but `\X\5C` is what `encodeIfcString` produces now that the
-    // escaper routes every non-plain-ASCII character through it.)
-    expect(h1).toContain("'C:\\X\\5Ctemp'");
+    // Stored as the doubled pair, applied exactly once. Both that and the
+    // `\X\5C` directive read back as one backslash; the pair is what the
+    // shared escaper emits, and what the Rust writer is pinned against.
+    expect(h1).toContain("'C:\\\\temp'");
 
     const p1 = parseSourceHeader(new TextEncoder().encode(h1));
     expect(p1!.author).toEqual(['C:\\temp']);
