@@ -179,6 +179,16 @@ impl SpacePlateHandle {
             .collect()
     }
 
+    /// For each corner `netOutline` returns, the id of the AXIS vertex it hangs
+    /// off — same length, same order. Lets the UI draw a handle on the inner
+    /// face and still drag the node the topology is built on, without having to
+    /// match the two by proximity at exactly the junctions where that guess
+    /// goes wrong.
+    #[wasm_bindgen(js_name = netOutlineAnchors)]
+    pub fn net_outline_anchors(&self, face: u32, inset: bool) -> Vec<u32> {
+        self.inner.net_outline_with_anchors(FaceId(face), inset).1
+    }
+
     /// Nearest live vertex id to `(x, y)` within `tol`, or `undefined`.
     #[wasm_bindgen(js_name = findVertexNear)]
     pub fn find_vertex_near(&self, x: f64, y: f64, tol: f64) -> Option<u32> {

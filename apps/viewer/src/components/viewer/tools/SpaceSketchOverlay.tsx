@@ -106,6 +106,9 @@ export function SpaceSketchOverlay() {
   const dragRef = useRef<number | null>(null);
   const dragStartRef = useRef<Pt | null>(null);
   const otherVertsRef = useRef<Pt[]>([]);
+  /** Handle position minus its axis node, frozen when the drag starts. The
+   *  user aims the CORNER; the node has to arrive where the corner needs it. */
+  const dragOffsetRef = useRef<Pt>([0, 0]);
   const draggedRef = useRef(false);
   const panningRef = useRef(false); // Issue 4: middle-mouse / empty-drag panning
   // While drawing, Undo pops the last placed point onto this stack and Redo
@@ -671,18 +674,66 @@ export function SpaceSketchOverlay() {
     if (snapDeltaTimerRef.current) clearTimeout(snapDeltaTimerRef.current);
   }, []);
 
-  const pickVertex = useCallback((wx: number, wy: number): number | null => {
-    return sessionRef.current?.findVertexNear(wx, wy, PICK_PX / fitRef.current.scale) ?? null;
-  }, []);
+  /**
+   * The grab points, on the boundary the user is LOOKING at.
+   *
+   * The nodes are on the wall axis, because that is where a junction is shared
+   * and where moving one keeps the rooms meeting. But nobody knows a room by
+   * its axis — they know where its wall face is, and that is where the model's
+   * own snap points are too. So the handle sits on the corner and carries the
+   * node it drags, and every pick below goes through this one list rather than
+   * hit-testing the axis directly: click what you see.
+   */
+  const handles = useMemo(() => {
+    const session = sessionRef.current;
+    if (!session) return [] as { pos: Pt; anchor: number }[];
+    const out: { pos: Pt; anchor: number }[] = [];
+    const seen = new Set<string>();
+    for (const r of rooms) {
+      for (const h of session.boundaryHandles(r.face, boundaryMode)) {
+        const key = `${h.pos[0].toFixed(4)},${h.pos[1].toFixed(4)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ pos: h.pos as Pt, anchor: h.anchor });
+      }
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rooms, boundaryMode, pendingTick]);
+  const handlesRef = useRef(handles);
+  handlesRef.current = handles;
 
-  const nearestVertPos = useCallback((wx: number, wy: number): Pt | null => {
-    let best: Pt | null = null, bestD = PICK_PX / fitRef.current.scale;
-    for (const r of rooms) for (const p of r.outline) {
-      const d = Math.hypot(p[0] - wx, p[1] - wy);
-      if (d < bestD) { bestD = d; best = p; }
+  /** Axis position per node id — the other half of the handle's offset. */
+  const axisPos = useMemo(() => {
+    const session = sessionRef.current;
+    const map = new Map<number, Pt>();
+    if (!session) return map;
+    for (const r of rooms) {
+      for (const h of session.boundaryHandles(r.face, 'center')) map.set(h.anchor, h.pos as Pt);
+    }
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rooms, pendingTick]);
+  const axisPosRef = useRef(axisPos);
+  axisPosRef.current = axisPos;
+
+  const nearestHandle = useCallback((wx: number, wy: number): { pos: Pt; anchor: number } | null => {
+    let best: { pos: Pt; anchor: number } | null = null;
+    let bestD = PICK_PX / fitRef.current.scale;
+    for (const h of handlesRef.current) {
+      const d = Math.hypot(h.pos[0] - wx, h.pos[1] - wy);
+      if (d < bestD) { bestD = d; best = h; }
     }
     return best;
-  }, [rooms]);
+  }, []);
+
+  const pickVertex = useCallback((wx: number, wy: number): number | null => {
+    return nearestHandle(wx, wy)?.anchor ?? null;
+  }, [nearestHandle]);
+
+  const nearestVertPos = useCallback((wx: number, wy: number): Pt | null => {
+    return nearestHandle(wx, wy)?.pos ?? null;
+  }, [nearestHandle]);
 
   const pickEdge = useCallback((wx: number, wy: number): { face: number; edge: number; a: Pt; b: Pt } | null => {
     const session = sessionRef.current;
@@ -977,7 +1028,8 @@ export function SpaceSketchOverlay() {
       setSnapPos(snap.kind === 'none' ? null : snap.pt);
       setSnapKind(snap.kind);
       setIntent({ text: snap.kind === 'line' ? 'Move onto wall' : snap.kind === 'vertex' ? 'Move onto corner' : m.shift ? 'Move (straight)' : 'Move node', tone: 'move' });
-      session.dragTo(vid, snap.pt[0], snap.pt[1]);
+      const off = dragOffsetRef.current;
+      session.dragTo(vid, snap.pt[0] - off[0], snap.pt[1] - off[1]);
       refreshRooms();
       return;
     }
@@ -1268,14 +1320,23 @@ export function SpaceSketchOverlay() {
     if (mod) { removeAtPoint(wx, wy); return; }
 
     // 3. Over a node → drag it.
-    const v = pickVertex(wx, wy);
-    if (v != null) {
-      const start = nearestVertPos(wx, wy);
+    const grabbed = nearestHandle(wx, wy);
+    const v = grabbed?.anchor ?? null;
+    if (v != null && grabbed) {
+      const start = grabbed.pos;
       dragRef.current = v; dragStartRef.current = start; draggedRef.current = false;
+      // Where the handle sits relative to the node it drags. Frozen for the
+      // gesture: the pointer aims the CORNER, so the node is placed offset from
+      // it and the corner lands where the user pointed. Exact as long as the
+      // walls meeting there keep their direction — the corner drifts only as
+      // they rotate, and it is redrawn every frame, so what you aim at is what
+      // you get.
+      const nodePos = axisPosRef.current.get(v) ?? start;
+      dragOffsetRef.current = [start[0] - nodePos[0], start[1] - nodePos[1]];
       session.beginDrag(); // pre-drag snapshot; committed on drop, reverted on cancel
-      otherVertsRef.current = start
-        ? uniqueVerts(rooms).filter((p) => Math.hypot(p[0] - start[0], p[1] - start[1]) > 1e-6)
-        : uniqueVerts(rooms);
+      otherVertsRef.current = handlesRef.current
+        .filter((h) => Math.hypot(h.pos[0] - start[0], h.pos[1] - start[1]) > 1e-6)
+        .map((h) => h.pos);
       svgRef.current?.setPointerCapture(e.pointerId);
       return;
     }
@@ -1534,6 +1595,7 @@ export function SpaceSketchOverlay() {
         gridLines={gridLines}
         underlay={underlayEls}
         rooms={rooms}
+        handles={handles}
         boundaryInfo={boundaryInfo}
         boundaryMode={boundaryMode}
         mergeFaces={mergeRooms}

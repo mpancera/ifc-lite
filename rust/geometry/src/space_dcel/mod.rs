@@ -1129,10 +1129,34 @@ impl SpacePlate {
     /// when no offset applies, a corner is degenerate, or an inset would invert
     /// the polygon — so the result is always a sane ring.
     pub fn net_outline(&self, face: FaceId, inset: bool) -> Vec<[f64; 2]> {
-        let Some((centre, verts)) = self.offset_ring(face, inset) else {
-            return self.face_outline(face);
+        self.net_outline_with_anchors(face, inset).0
+    }
+
+    /// The boundary outline, and for each of its corners the AXIS vertex that
+    /// corner hangs off.
+    ///
+    /// The user is shown the inner face and should be able to grab it, but the
+    /// topology lives on the axis — an axis node is shared by every room that
+    /// meets there, and moving it is what keeps them meeting. So the handle is
+    /// drawn on the corner and drags the node. Without this pairing the two
+    /// have to be matched by proximity, which is a guess at exactly the
+    /// junctions where it matters most.
+    pub fn net_outline_with_anchors(&self, face: FaceId, inset: bool) -> (Vec<[f64; 2]>, Vec<u32>) {
+        let fallback = || {
+            (
+                self.face_outline(face),
+                self.face_half_edges(face)
+                    .map(|h| self.half_edges[h.0 as usize].origin.0)
+                    .collect(),
+            )
         };
-        Self::usable_offset(&centre, verts, inset).unwrap_or(centre)
+        let Some((centre, verts, anchors)) = self.offset_ring(face, inset) else {
+            return fallback();
+        };
+        match Self::usable_offset(&centre, verts, inset) {
+            Some(ring) => (ring, anchors),
+            None => fallback(),
+        }
     }
 
     /// The offset ring and the centreline it came from, before any judgement is
@@ -1142,7 +1166,7 @@ impl SpacePlate {
     /// wants a shape to draw, `lacks_interior` wants to know whether the face
     /// has an inside. Two callers deriving that from two different pieces of
     /// arithmetic is how a room ends up drawn one way and measured another.
-    fn offset_ring(&self, face: FaceId, inset: bool) -> Option<(Vec<[f64; 2]>, Vec<[f64; 2]>)> {
+    fn offset_ring(&self, face: FaceId, inset: bool) -> Option<(Vec<[f64; 2]>, Vec<[f64; 2]>, Vec<u32>)> {
         let centre = self.face_outline(face);
         let n = centre.len();
         if n < 3 {
@@ -1207,6 +1231,11 @@ impl SpacePlate {
             }
             let m = active.len();
             let mut verts: Vec<[f64; 2]> = Vec::with_capacity(m + 2);
+            // The axis vertex each emitted corner hangs off, so the UI can put a
+            // handle on the inner face and still drag the node the topology is
+            // built on. A dropped edge leaves its vertex without a handle, which
+            // is right: it no longer bounds the room the user can see.
+            let mut anchors: Vec<u32> = Vec::with_capacity(m + 2);
             let mut first: Vec<usize> = vec![0; m];
             let mut last: Vec<usize> = vec![0; m];
             for k in 0..m {
@@ -1231,9 +1260,12 @@ impl SpacePlate {
                 if pd[0] * cd[0] + pd[1] * cd[1] < -1.0 + 1e-9 {
                     let half = edges[prev].half.max(edges[cur].half);
                     let tip = [corner[0] + sign * half * pd[0], corner[1] + sign * half * pd[1]];
+                    let anchor = self.half_edges[cycle[cur].0 as usize].origin.0;
                     verts.push(project(tip, pp, pd));
+                    anchors.push(anchor);
                     last[(k + m - 1) % m] = verts.len() - 1;
                     verts.push(project(tip, cp, cd));
+                    anchors.push(anchor);
                     first[k] = verts.len() - 1;
                     continue;
                 }
@@ -1244,6 +1276,7 @@ impl SpacePlate {
                 // sits flush on the inset boundary instead of poking back to the
                 // centreline.
                 verts.push(hit.unwrap_or_else(|| project(corner, cp, cd)));
+                anchors.push(self.half_edges[cycle[cur].0 as usize].origin.0);
                 last[(k + m - 1) % m] = verts.len() - 1;
                 first[k] = verts.len() - 1;
             }
@@ -1256,7 +1289,7 @@ impl SpacePlate {
                 })
                 .collect();
             if swallowed.is_empty() {
-                return Some((centre, verts));
+                return Some((centre, verts, anchors));
             }
             for &k in swallowed.iter().rev() {
                 active.remove(k);
@@ -1309,7 +1342,7 @@ impl SpacePlate {
     /// started. Judging it on the outline the user is actually shown, and that
     /// the bake actually writes, is the only place the two agree.
     fn lacks_interior(&self, face: FaceId, min_area: f64) -> bool {
-        let Some((centre, verts)) = self.offset_ring(face, true) else {
+        let Some((centre, verts, _)) = self.offset_ring(face, true) else {
             return true;
         };
         let signed = polygon_area(&verts);

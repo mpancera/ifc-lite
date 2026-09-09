@@ -12,7 +12,7 @@
  */
 
 import type { Room } from '@/lib/space-plate-session';
-import { sX, sY, centroid, polyArea, uniqueVerts, type Fit, type Pt } from '@/lib/space-sketch-geometry';
+import { sX, sY, centroid, polyArea, type Fit, type Pt } from '@/lib/space-sketch-geometry';
 import type { SnapKind } from '@/lib/space-snap';
 import type { BoundaryMode } from '@ifc-lite/create';
 import type { Hover, SplitTarget, Intent, IntentTone } from './types';
@@ -55,6 +55,8 @@ export interface SpaceSketchCanvasProps {
   gridLines: GridLine[];
   underlay: React.ReactNode;
   rooms: Room[];
+  /** The grab points, on the boundary being displayed — see the overlay. */
+  handles: { pos: Pt; anchor: number }[];
   boundaryInfo: BoundaryInfo[];
   boundaryMode: BoundaryMode;
   mergeFaces: Set<number> | null;
@@ -82,7 +84,7 @@ export interface SpaceSketchCanvasProps {
 
 export function SpaceSketchCanvas(props: SpaceSketchCanvasProps) {
   const {
-    svgRef, width, height, cursor, fit: f, gridLines, underlay, rooms, boundaryInfo,
+    svgRef, width, height, cursor, fit: f, gridLines, underlay, rooms, handles, boundaryInfo,
     boundaryMode, mergeFaces, diagnostics, hover, splitPick, previewEnd, splitHover,
     snapPos, snapKind, drawPts, drawCursor, rectPreview, alignGuides, deleteHover, intent,
     onPointerDown, onPointerMove, onPointerUp, onDoubleClick, onContextMenu, onPointerLeave,
@@ -124,9 +126,13 @@ export function SpaceSketchCanvas(props: SpaceSketchCanvasProps) {
           const area = boundaryMode === 'center' ? r.area : polyArea(disp);
           return (
             <g key={r.face}>
+              {/* The wall axis, kept as scaffolding: it is where the topology
+                  lives and it tells you which rooms share a junction, but it is
+                  not the room. Faint enough to read past, not so faint it is
+                  gone — the room itself is the solid line. */}
               {boundaryMode !== 'center' && (
                 <polygon points={r.outline.map((p) => `${sX(f, p[0])},${sY(f, p[1])}`).join(' ')}
-                  fill="none" stroke={color} strokeOpacity={0.25} strokeDasharray="3 3" strokeWidth={1} />
+                  fill="none" stroke={color} strokeOpacity={0.12} strokeDasharray="2 4" strokeWidth={0.75} />
               )}
               {/* A discarded room keeps its shape — the author is not editing
                   the drawing, only deciding what leaves it — but goes grey and
@@ -253,11 +259,17 @@ export function SpaceSketchCanvas(props: SpaceSketchCanvasProps) {
           </g>
         )}
 
-        {uniqueVerts(rooms).map((p, i) => {
-          const isHover = hover?.kind === 'vertex' && Math.abs(hover.pos[0] - p[0]) < EPS && Math.abs(hover.pos[1] - p[1]) < EPS;
+        {/* Handles sit on the boundary being shown, not on the axis: you grab
+            the corner you can see. Small and quiet until the pointer is on one,
+            so a plan reads as rooms rather than as a field of dots. */}
+        {handles.map((h, i) => {
+          const isHover = hover?.kind === 'vertex'
+            && Math.abs(hover.pos[0] - h.pos[0]) < EPS && Math.abs(hover.pos[1] - h.pos[1]) < EPS;
           return (
-            <circle key={i} cx={sX(f, p[0])} cy={sY(f, p[1])} r={isHover ? 6 : 4}
-              fill={isHover ? '#fbbf24' : '#fff'} stroke="#334155" strokeWidth={1.5} pointerEvents="none" />
+            <circle key={i} cx={sX(f, h.pos[0])} cy={sY(f, h.pos[1])} r={isHover ? 6 : 2.5}
+              fill={isHover ? '#fbbf24' : '#fff'} stroke="#334155"
+              strokeWidth={isHover ? 1.5 : 1} strokeOpacity={isHover ? 1 : 0.5}
+              pointerEvents="none" />
           );
         })}
 

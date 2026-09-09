@@ -1455,6 +1455,14 @@ export class SpacePlateHandle {
      */
     netOutline(face: number, inset: boolean): Float64Array;
     /**
+     * For each corner `netOutline` returns, the id of the AXIS vertex it hangs
+     * off — same length, same order. Lets the UI draw a handle on the inner
+     * face and still drag the node the topology is built on, without having to
+     * match the two by proximity at exactly the junctions where that guess
+     * goes wrong.
+     */
+    netOutlineAnchors(face: number, inset: boolean): Uint32Array;
+    /**
      * Build a plate from flat wall-axis segments.
      *
      * `segCoords`: `[ax, ay, bx, by, …]` (length a multiple of 4).
@@ -2141,6 +2149,7 @@ export interface InitOutput {
     readonly spaceplatehandle_mergeFaces: (a: number, b: number, c: number) => void;
     readonly spaceplatehandle_neighborAcross: (a: number, b: number) => number;
     readonly spaceplatehandle_netOutline: (a: number, b: number, c: number, d: number) => void;
+    readonly spaceplatehandle_netOutlineAnchors: (a: number, b: number, c: number, d: number) => void;
     readonly spaceplatehandle_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
     readonly spaceplatehandle_prune: (a: number) => number;
     readonly spaceplatehandle_removeEdge: (a: number, b: number, c: number) => void;

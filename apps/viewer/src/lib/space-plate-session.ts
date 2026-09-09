@@ -208,6 +208,37 @@ export class SpacePlateSession {
     return flatToPts(this.handle.netOutline(face, boundary === 'inner'));
   }
 
+  /**
+   * The boundary outline paired with, for each corner, the AXIS vertex it
+   * hangs off.
+   *
+   * The user is shown the inner face and grabs it there; the topology lives on
+   * the axis, where a node is shared by every room meeting at it and moving it
+   * is what keeps them meeting. The pairing comes from the offset itself
+   * rather than from matching the two rings by proximity, which is a guess
+   * exactly at the junctions where it matters — and after a swallowed edge is
+   * dropped, the two rings do not even have the same number of corners.
+   *
+   * `center` has no offset, so each corner IS its own axis node.
+   */
+  boundaryHandles(
+    face: number,
+    boundary: 'center' | 'inner' | 'outer',
+  ): { pos: [number, number]; anchor: number }[] {
+    if (!this.handle) return [];
+    if (boundary === 'center') {
+      const outline = this.boundaryOutline(face, 'center');
+      return outline.map((pos) => ({
+        pos,
+        anchor: this.handle!.findVertexNear(pos[0], pos[1], 1e-6) ?? -1,
+      })).filter((h) => h.anchor >= 0);
+    }
+    const pts = flatToPts(this.handle.netOutline(face, boundary === 'inner'));
+    const anchors = this.handle.netOutlineAnchors(face, boundary === 'inner');
+    if (anchors.length !== pts.length) return [];
+    return pts.map((pos, i) => ({ pos, anchor: anchors[i] }));
+  }
+
   neighborAcross(edge: number): number | undefined { return this.handle?.neighborAcross(edge); }
   boundingElements(face: number): Boundary[] {
     return this.handle ? (this.handle.boundingElements(face) as Boundary[]) : [];

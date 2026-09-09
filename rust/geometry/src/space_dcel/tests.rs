@@ -1396,3 +1396,45 @@
         );
         assert!(polygon_area(&net).abs() < polygon_area(&centre).abs(), "an inset must shrink");
     }
+
+    #[test]
+    fn every_inner_corner_names_the_axis_node_it_hangs_off() {
+        // A 4×3 room boxed by four 0.2 m walls. Each inner corner must name a
+        // LIVE axis vertex, and moving that vertex must move that corner — that
+        // pairing is the whole basis for a handle drawn on the inner face.
+        let rects = vec![
+            [[-0.1, -0.1], [4.1, -0.1], [4.1, 0.1], [-0.1, 0.1]],
+            [[-0.1, 2.9], [4.1, 2.9], [4.1, 3.1], [-0.1, 3.1]],
+            [[-0.1, -0.1], [0.1, -0.1], [0.1, 3.1], [-0.1, 3.1]],
+            [[3.9, -0.1], [4.1, -0.1], [4.1, 3.1], [3.9, 3.1]],
+        ];
+        let mut plate = SpacePlate::build_from_wall_rects(&rects, BuildOptions::default());
+        let room = plate.rooms().next().expect("the gap between the four walls");
+        let (inner, anchors) = plate.net_outline_with_anchors(room, true);
+        assert_eq!(inner.len(), anchors.len(), "one anchor per corner");
+        assert!(!inner.is_empty());
+
+        // Every anchor is a real, live vertex of this face.
+        let own: Vec<u32> = plate
+            .face_half_edges(room)
+            .map(|h| plate.half_edges[h.0 as usize].origin.0)
+            .collect();
+        for a in &anchors {
+            assert!(own.contains(a), "anchor {a} is not a vertex of this face");
+            assert!(plate.vertices[*a as usize].alive, "anchor {a} is dead");
+        }
+
+        // Drag the node one corner hangs off, and that corner must follow.
+        let which = 0usize;
+        let before = inner[which];
+        let node = anchors[which];
+        let pos = plate.vertices[node as usize].pos;
+        plate
+            .drag_vertex(VertexId(node), pos[0] - 0.5, pos[1] - 0.25)
+            .expect("dragging an axis node is allowed");
+        let after = plate.net_outline_with_anchors(room, true).0[which];
+        assert!(
+            (after[0] - before[0]).abs() > 1e-6 || (after[1] - before[1]).abs() > 1e-6,
+            "the inner corner did not follow its anchor: {before:?} → {after:?}",
+        );
+    }
