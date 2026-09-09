@@ -8,6 +8,9 @@
     "paths": {
       "@/*": ["./src/*"],
       "@ifc-lite/project": ["../../packages/project/src"],
+      "@ifc-lite/codegen": ["../../packages/codegen/src/schema-hierarchy"],
+      "@ifc-lite/codegen/ifc4": ["../../packages/codegen/generated/ifc4"],
+      "@ifc-lite/codegen/ifc4x3": ["../../packages/codegen/generated/ifc4x3"],
       "@ifc-lite/parser": ["../../packages/parser/src"],
       "@ifc-lite/parser/browser": ["../../packages/parser/src/browser"],
       "@ifc-lite/geometry": ["../../packages/geometry/src"],

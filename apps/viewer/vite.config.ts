@@ -276,6 +276,24 @@ export default defineConfig({
     alias: {
       '@': path.resolve(__dirname, './src'),
       '@ifc-lite/project': path.resolve(__dirname, '../../packages/project/src'),
+      // `@ifc-lite/codegen` is a BUILD-TIME tool whose package entry re-exports
+      // `generator.ts`, and that file imports `node:fs`. Two runtime packages
+      // (`export`'s lod0 generator, `ids`'s classification bridge) nonetheless
+      // import the root for one pure helper, `isProperSubtypeOfAny`. Resolved
+      // through node_modules that pulls the generator into the browser graph,
+      // where Vite's `node:fs` stub throws at import and the app never mounts.
+      //
+      // So the bare specifier is pointed at the one module those two want.
+      // `schema-hierarchy.ts` has no imports at all, which is what makes this
+      // safe rather than merely convenient — and it is the ONLY thing anything
+      // imports from the codegen root (verified across packages/ and apps/).
+      //
+      // The two generated-schema subpaths come first, as `parser/browser` does
+      // below: these keys are prefix-matched in order, so the root entry would
+      // otherwise swallow them. They are generated data with no imports.
+      '@ifc-lite/codegen/ifc4x3': path.resolve(__dirname, '../../packages/codegen/generated/ifc4x3'),
+      '@ifc-lite/codegen/ifc4': path.resolve(__dirname, '../../packages/codegen/generated/ifc4'),
+      '@ifc-lite/codegen': path.resolve(__dirname, '../../packages/codegen/src/schema-hierarchy.ts'),
       '@ifc-lite/parser/browser': path.resolve(__dirname, '../../packages/parser/src/browser.ts'),
       '@ifc-lite/parser': path.resolve(__dirname, '../../packages/parser/src'),
       '@ifc-lite/geometry': path.resolve(__dirname, '../../packages/geometry/src'),
