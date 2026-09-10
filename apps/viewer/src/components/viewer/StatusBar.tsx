@@ -29,6 +29,7 @@ export function StatusBar() {
   // The selection is assembled from four store fields and a bulk pick can land
   // in any of them, so "how many did I actually catch" was a question only the
   // next dialog could answer — after the click that used them.
+  const mutationVersion = useViewerStore((s) => s.mutationVersion);
   const selectedRefs = useSelectedEntityRefs();
   const clearEntitySelection = useViewerStore((s) => s.clearEntitySelection);
   const webgpu = useWebGPU();
@@ -130,7 +131,11 @@ export function StatusBar() {
       }
     }
     return count || stats.elements;
-  }, [selectedStoreys, ifcDataStore, models, stats.elements]);
+    // `mutationVersion`: `byStorey` is rewritten in place when an element is
+    // refiled, so the isolated count would keep reporting the storey as it was
+    // parsed — beside a viewport that has already dropped the element.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedStoreys, ifcDataStore, models, stats.elements, mutationVersion]);
 
   return (
     <div className="h-7 px-3 border-t bg-muted/30 flex items-center justify-between text-xs text-muted-foreground">
