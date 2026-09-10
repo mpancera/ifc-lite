@@ -74,6 +74,7 @@ import {
 } from 'lucide-react';
 import { AddElement, DemoFlows, IsometricView, TopView } from '@/icons';
 import type { RibbonTabId, ViewerState } from '@/store';
+import { selectedEntityRefs } from '@/store/selectedRefs';
 import type { WorkspacePanelId } from '@/lib/panels/registry';
 import { DISCIPLINE_ROLES, EDITOR_ROLE_ID, type DisciplineSystem } from '@/lib/roles/disciplineRoles';
 import { openDemoFlows } from '@/components/screenflow/DemoFlowsLauncher';
@@ -347,10 +348,7 @@ export const DISCIPLINE_TABS: readonly DisciplineTab[] = [
             icon: Layers,
             needsModel: true,
             needsAuthor: true,
-            enabled: (s) => {
-              const picked = s.selectedEntities.length > 0 || s.selectedEntity !== null;
-              return picked && s.activeStorey !== null;
-            },
+            enabled: (s) => selectedEntityRefs(s).length > 0 && s.activeStorey !== null,
             run: (s) => {
               // The destination is the ACTIVE storey rather than a dropdown:
               // choosing a storey is something the hierarchy already does, and
@@ -360,9 +358,11 @@ export const DISCIPLINE_TABS: readonly DisciplineTab[] = [
               // here — the edit itself does not go on the undo stack.
               const storey = s.activeStorey;
               if (!storey) { toast.error('Kein aktives Geschoss — im Baum eines anwählen.'); return; }
-              const picked = s.selectedEntities.length > 0
-                ? s.selectedEntities
-                : s.selectedEntity ? [s.selectedEntity] : [];
+              // Every selection channel, not just one: Ctrl-clicking six walls
+              // fills `selectedEntitiesSet` and leaves `selectedEntities`
+              // empty, so reading that array alone would refile the primary
+              // pick and report success over the other five.
+              const picked = selectedEntityRefs(s);
               const mine = picked.filter((e) => e.modelId === storey.modelId);
               if (mine.length === 0) {
                 toast.error('Auswahl und Geschoss gehören zu verschiedenen Modellen.');

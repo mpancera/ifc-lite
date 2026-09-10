@@ -36,7 +36,7 @@ import {
   ZONE_MEMBER_TYPES, describeZoneTargets, eligibleZoneMembers,
 } from '@/lib/ifcZones/selectionTargets';
 import type { ZoneInfo } from '@/lib/ifcZones/membership';
-import { stringToEntityRef } from '@/store/types';
+import { selectedEntityRefs } from '@/store/selectedRefs';
 
 /** A zone with no colour still needs something to show in the swatch. */
 const NO_COLOUR = 'transparent';
@@ -71,8 +71,9 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
   const selectedEntity = useViewerStore((s) => s.selectedEntity);
   // There are two multi-selection channels and they are NOT the same store
   // field: Ctrl+click in the viewport fills `selectedEntitiesSet`, while the
-  // hierarchy's range-select fills `selectedEntities`. Reading only one would
-  // report "nothing selected" for half the ways a user picks rooms.
+  // hierarchy's unified-storey path fills `selectedEntities`. Reading only one
+  // would report "nothing selected" for half the ways a user picks rooms — so
+  // the merge lives in `selectedEntityRefs` and every tool shares it.
   const selectedEntitiesSet = useViewerStore((s) => s.selectedEntitiesSet);
   const selectedEntities = useViewerStore((s) => s.selectedEntities);
   const setIfcZoneDescription = useViewerStore((s) => s.setIfcZoneDescription);
@@ -100,15 +101,10 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
    * A plain single click reaches neither multi-select field, so the primary
    * selection is the last fallback.
    */
-  const selectedRefs = useMemo(() => {
-    const byKey = new Map<string, { modelId: string; expressId: number }>();
-    for (const key of selectedEntitiesSet) byKey.set(key, stringToEntityRef(key));
-    for (const ref of selectedEntities) byKey.set(`${ref.modelId}:${ref.expressId}`, ref);
-    if (byKey.size === 0 && selectedEntity) {
-      byKey.set(`${selectedEntity.modelId}:${selectedEntity.expressId}`, selectedEntity);
-    }
-    return [...byKey.values()];
-  }, [selectedEntities, selectedEntitiesSet, selectedEntity]);
+  const selectedRefs = useMemo(
+    () => selectedEntityRefs({ selectedEntity, selectedEntities, selectedEntitiesSet }),
+    [selectedEntities, selectedEntitiesSet, selectedEntity],
+  );
 
   const selectionCount = selectedRefs.length;
 
