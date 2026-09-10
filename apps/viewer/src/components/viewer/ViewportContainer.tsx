@@ -1068,7 +1068,13 @@ export function ViewportContainer() {
       }
     }
     return intersection;
-  }, [storeModels, ifcDataStore, selectedStoreys, isolatedEntities, classFilter]);
+    // `mutationVersion` because `byStorey` is mutated IN PLACE: refiling an
+    // element under another storey changes the list's contents and nothing
+    // else, so none of the other dependencies move. Without it, an element
+    // moved out of the soloed storey stays on screen — the isolation still
+    // describes the building as it was when Solo was entered.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeModels, ifcDataStore, selectedStoreys, isolatedEntities, classFilter, mutationVersion]);
 
   // Grid Pattern
   const GridPattern = () => (

@@ -280,6 +280,11 @@ export function PlanView({
   const showModelBasepoints = useViewerStore((s) => s.showModelBasepoints);
   const modelOrigins = useModelOrigins(active && showModelBasepoints);
 
+  // Every edit bumps this, and several of the derivations below read maps
+  // that are mutated IN PLACE — `elementToStorey` above all. Without it the
+  // plan keeps cutting the building as it was parsed.
+  const mutationVersion = useViewerStore((s) => s.mutationVersion);
+
   // ── The storeys this model can be cut at ────────────────────────────────
   // Single-model only: `elementToStorey` keys are LOCAL express ids, so on a
   // federation they would collide with another model's mesh ids and derive
@@ -316,7 +321,11 @@ export function PlanView({
       storeyModelId: modelId,
       storeyDataStore: dataStore ?? null,
     };
-  }, [models, ifcDataStore, geometryResult]);
+    // `mutationVersion`: which storey an element belongs to is read from
+    // `elementToStorey`, and refiling one rewrites that map in place. The plan
+    // would go on drawing the element on the floor it used to be on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [models, ifcDataStore, geometryResult, mutationVersion]);
 
   // The storey in scope app-wide, or the default. An `activeStorey` that this
   // model has no geometry for — a stale ref after a model swap, or a storey
@@ -369,7 +378,6 @@ export function PlanView({
   const editEnabled = useViewerStore((s) => s.editEnabled);
   const translateEntity = useViewerStore((s) => s.translateEntity);
   const readEntityPosition = useViewerStore((s) => s.readEntityPosition);
-  const mutationVersion = useViewerStore((s) => s.mutationVersion);
 
   const roomShape = useMemo(() => {
     if (!roomShapeEditKey || !selectedEntity || !storeyModelId) return null;
