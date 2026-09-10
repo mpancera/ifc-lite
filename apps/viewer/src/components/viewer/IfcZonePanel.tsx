@@ -36,7 +36,7 @@ import {
   ZONE_MEMBER_TYPES, describeZoneTargets, eligibleZoneMembers,
 } from '@/lib/ifcZones/selectionTargets';
 import type { ZoneInfo } from '@/lib/ifcZones/membership';
-import { selectedEntityRefs } from '@/store/selectedRefs';
+import { useSelectedEntityRefs } from '@/hooks/useSelectedEntityRefs';
 
 /** A zone with no colour still needs something to show in the swatch. */
 const NO_COLOUR = 'transparent';
@@ -68,14 +68,8 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
   const deleteIfcZone = useViewerStore((s) => s.deleteIfcZone);
   const paintIfcZone = useViewerStore((s) => s.paintIfcZone);
 
+  // The brush below reacts to the PRIMARY pick alone — one click, one room.
   const selectedEntity = useViewerStore((s) => s.selectedEntity);
-  // There are two multi-selection channels and they are NOT the same store
-  // field: Ctrl+click in the viewport fills `selectedEntitiesSet`, while the
-  // hierarchy's unified-storey path fills `selectedEntities`. Reading only one
-  // would report "nothing selected" for half the ways a user picks rooms — so
-  // the merge lives in `selectedEntityRefs` and every tool shares it.
-  const selectedEntitiesSet = useViewerStore((s) => s.selectedEntitiesSet);
-  const selectedEntities = useViewerStore((s) => s.selectedEntities);
   const setIfcZoneDescription = useViewerStore((s) => s.setIfcZoneDescription);
   const setIfcZoneObjectType = useViewerStore((s) => s.setIfcZoneObjectType);
 
@@ -95,16 +89,8 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
     [activeModelId, ifcZonesOf, mutationVersion],
   );
 
-  /**
-   * Everything currently selected, from whichever channel has it, deduplicated.
-   *
-   * A plain single click reaches neither multi-select field, so the primary
-   * selection is the last fallback.
-   */
-  const selectedRefs = useMemo(
-    () => selectedEntityRefs({ selectedEntity, selectedEntities, selectedEntitiesSet }),
-    [selectedEntities, selectedEntitiesSet, selectedEntity],
-  );
+  /** Everything currently selected, from whichever channel has it. */
+  const selectedRefs = useSelectedEntityRefs();
 
   const selectionCount = selectedRefs.length;
 

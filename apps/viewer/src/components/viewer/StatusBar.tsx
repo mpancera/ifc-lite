@@ -3,11 +3,12 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { useMemo, useRef, useState, useEffect } from 'react';
-import { Boxes, Triangle, CheckCircle2, AlertCircle, Eye, Loader2, Lock, ListChecks } from 'lucide-react';
+import { Boxes, Triangle, CheckCircle2, AlertCircle, Eye, Loader2, Lock, ListChecks, MousePointerSquareDashed } from 'lucide-react';
 import { Separator } from '@/components/ui/separator';
 import { formatNumber, formatBytes } from '@/lib/utils';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
+import { useSelectedEntityRefs } from '@/hooks/useSelectedEntityRefs';
 import { VIEWER_ROLE_ID, findDisciplineSystem } from '@/lib/roles/disciplineRoles';
 import { useWebGPU } from '@/hooks/useWebGPU';
 import { FlavorIndicator } from '@/components/extensions/FlavorIndicator';
@@ -24,6 +25,12 @@ export function StatusBar() {
   const error = useViewerStore((s) => s.error);
   const selectedStoreys = useViewerStore((s) => s.selectedStoreys);
   const activeStreamCanceller = useViewerStore((s) => s.activeStreamCanceller);
+  // What a tool will act on, counted where it can be seen without opening one.
+  // The selection is assembled from four store fields and a bulk pick can land
+  // in any of them, so "how many did I actually catch" was a question only the
+  // next dialog could answer — after the click that used them.
+  const selectedRefs = useSelectedEntityRefs();
+  const clearEntitySelection = useViewerStore((s) => s.clearEntitySelection);
   const webgpu = useWebGPU();
 
   const [fps, setFps] = useState(60);
@@ -195,6 +202,22 @@ export function StatusBar() {
           <Triangle className="h-3.5 w-3.5" />
           <span>{formatNumber(stats.triangles)} tris</span>
         </div>
+
+        {selectedRefs.length > 0 && (
+          <>
+            <Separator orientation="vertical" className="h-3.5" />
+            <button
+              type="button"
+              onClick={clearEntitySelection}
+              className="flex items-center gap-1.5 rounded border border-primary/40 px-1.5 py-0.5 text-primary hover:bg-primary/10"
+              title="Ausgewählte Objekte — das, worauf ein Werkzeug jetzt wirken würde. Klicken hebt die Auswahl auf."
+            >
+              <MousePointerSquareDashed className="h-3 w-3" />
+              <span className="tabular-nums">{formatNumber(selectedRefs.length)}</span>
+              <span>gewählt</span>
+            </button>
+          </>
+        )}
       </div>
 
       {/* Right: Performance */}

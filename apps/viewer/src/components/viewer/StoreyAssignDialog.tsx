@@ -31,7 +31,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { toast } from '@/components/ui/toast';
 import { useViewerStore } from '@/store';
-import { selectedEntityRefs } from '@/store/selectedRefs';
+import { useSelectedEntityRefs } from '@/hooks/useSelectedEntityRefs';
 import { storeyRows, type StoreyRow, type StoreySource } from '@/lib/storeyAssign/storey-rows';
 
 /** `IfcBuildingStorey.Name` / `.Elevation`, for a storey authored this session. */
@@ -49,13 +49,7 @@ export function StoreyAssignDialog({ trigger }: { trigger?: ReactNode }) {
   const mutationVersion = useViewerStore((s) => s.mutationVersion);
   const assignElementsToStorey = useViewerStore((s) => s.assignElementsToStorey);
 
-  const selectedEntity = useViewerStore((s) => s.selectedEntity);
-  const selectedEntities = useViewerStore((s) => s.selectedEntities);
-  const selectedEntitiesSet = useViewerStore((s) => s.selectedEntitiesSet);
-  const picked = useMemo(
-    () => selectedEntityRefs({ selectedEntity, selectedEntities, selectedEntitiesSet }),
-    [selectedEntity, selectedEntities, selectedEntitiesSet],
-  );
+  const picked = useSelectedEntityRefs();
 
   // Storey express ids are model-local, so a selection spanning two models has
   // no single list to offer. Saying so beats silently refiling one model's half.

@@ -52,3 +52,53 @@ describe('selectedEntityRefs', () => {
     assert.deepEqual(selectedEntityRefs(empty), []);
   });
 });
+
+describe('selectedEntityRefs — the highlight channel', () => {
+  // "Select all IfcColumn" in the context menu lights up every column in the
+  // renderer and writes ONLY global ids. Reading the model-aware channels alone
+  // saw one column and moved one of a hundred and fourteen.
+  const federated: SelectionChannels = {
+    ...empty,
+    selectedEntityIds: new Set([1_000_041, 1_000_057]),
+    selectedEntity: { modelId: 'm1', expressId: 41 },
+    resolveGlobalIdFromModels: (g) => ({ modelId: 'm1', expressId: g - 1_000_000 }),
+  };
+
+  it('resolves what the renderer highlights back to model-local refs', () => {
+    assert.deepEqual(selectedEntityRefs(federated), [
+      { modelId: 'm1', expressId: 41 },
+      { modelId: 'm1', expressId: 57 },
+    ]);
+  });
+
+  it('falls back to the registry for a model that left the store', () => {
+    const refs = selectedEntityRefs({
+      ...empty,
+      selectedEntityIds: new Set([7]),
+      resolveGlobalIdFromModels: () => null,
+      fromGlobalId: (g) => ({ modelId: 'gone', expressId: g }),
+    });
+    assert.deepEqual(refs, [{ modelId: 'gone', expressId: 7 }]);
+  });
+
+  it('drops a highlight nothing can resolve rather than guessing at the id', () => {
+    assert.deepEqual(selectedEntityRefs({
+      ...empty,
+      selectedEntityIds: new Set([1_000_041]),
+      resolveGlobalIdFromModels: () => null,
+    }), []);
+  });
+
+  it('does not count an element twice when both channels carry it', () => {
+    const refs = selectedEntityRefs({
+      ...federated,
+      selectedEntitiesSet: new Set(['m1:41']),
+    });
+    assert.equal(refs.length, 2);
+  });
+
+  it('ignores global ids when nothing can resolve them at all', () => {
+    // No resolver: the ids are renderer-space and mean nothing on their own.
+    assert.deepEqual(selectedEntityRefs({ ...empty, selectedEntityIds: new Set([1_000_041]) }), []);
+  });
+});
