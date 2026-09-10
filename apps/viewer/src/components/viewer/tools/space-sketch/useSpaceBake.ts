@@ -19,6 +19,7 @@
 import { useCallback, useRef } from 'react';
 import { useViewerStore } from '@/store';
 import { overlayAttribute } from '@/lib/mutations/overlayAttribute';
+import { storeyPlanFrame, toStoreyLocal, fromStoreyLocal, type Pt as FramePt } from '@/lib/room-frame';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import {
   existingSpaceFootprintsByStorey,
@@ -164,9 +165,39 @@ export function useSpaceBake({
       removeEntity(sketchModelId, made.id);
     }
     generatedRef.current.delete(sid);
+
+    // The outlines are in the ROOM frame; `addSpace` writes into a slot the
+    // file re-applies the storey's placement chain to. On a georeferenced model
+    // those are not the same frame, and handing the room frame over unchanged
+    // put every baked room ~31 m from the building — correct on screen, wrong
+    // in the file, which is the worst way for it to be wrong. See
+    // `lib/room-frame.ts`.
+    const model = useViewerStore.getState().models.get(sketchModelId);
+    const dataStore = model?.ifcDataStore;
+    const readAttrs = (id: number): readonly unknown[] | null =>
+      view?.getNewEntity(id)?.attributes ?? dataStore?.getEntity?.(id)?.attributes ?? null;
+    const frame = dataStore ? storeyPlanFrame(readAttrs, sid) : null;
+    if (dataStore && !frame) {
+      return {
+        emitted: 0, skipped: 0, discarded: 0, gfa: 0, kept,
+        error: `Geschoss #${sid}: Platzierung nicht auflösbar — die Räume kämen versetzt in die Datei`,
+      };
+    }
+    const rtc = model?.geometryResult?.coordinateInfo?.wasmRtcOffset ?? { x: 0, y: 0 };
+    const toFile = (ring: readonly FramePt[]): FramePt[] =>
+      frame ? ring.map((pt) => toStoreyLocal(frame, rtc, pt)) : ring.map((pt) => [pt[0], pt[1]] as FramePt);
+    // The rooms already in the file come back storey-locally, and the dedup
+    // compares them against drafts in the room frame. Bringing them over is
+    // what keeps "there is already a room here" working — without it the
+    // comparison matches nothing and every confirm lays a second room on top
+    // of the first.
+    const authoredHere: Pt[][] = frame
+      ? authored.map((ring) => ring.map((pt) => fromStoreyLocal(frame, rtc, pt as FramePt) as Pt))
+      : authored;
+
     const height = floorToFloor(sid);
     const { planned, skipped, discarded } = planStoreySpaces(
-      rooms, authored, height, discardedRooms.current?.get(sid) ?? [],
+      rooms, authoredHere, height, discardedRooms.current?.get(sid) ?? [],
     );
     const made: Array<{ id: number; name: string }> = [];
     // An addSpace failure (anchor resolution, missing mutation view, …) is
@@ -182,7 +213,7 @@ export function useSpaceBake({
       // a gap in the numbering the user can see.
       const res = addSpace(sketchModelId, sid, {
         Profile: 'polygon',
-        OuterCurve: space.OuterCurve,
+        OuterCurve: toFile(space.OuterCurve),
         Height: space.Height,
         Name: `Space ${made.length + 1}`,
         ObjectType: GENERATED_SPACE_OBJECTTYPE,
@@ -203,7 +234,7 @@ export function useSpaceBake({
       if (plan) {
         const res = addSpace(sketchModelId, sid, {
           Profile: 'polygon',
-          OuterCurve: plan.OuterCurve,
+          OuterCurve: toFile(plan.OuterCurve),
           Height: plan.Height,
           Name: plan.Name,
           LongName: plan.LongName ?? undefined,
