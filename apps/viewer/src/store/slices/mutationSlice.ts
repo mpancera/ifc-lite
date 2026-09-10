@@ -104,6 +104,12 @@ import { overlayContainerOf } from '@/lib/persistence/storeAdapter';
 import { applySmartPropertyRules } from '@/lib/smartProperties/applyRules';
 import { toGlobalIdFromModels } from '../globalId.js';
 import { buildElementMesh, type ElementMeshPayload } from './addElementMeshes.js';
+import { roomsByStorey, storeysOfElements } from '@/lib/roomTransfer/read-rooms';
+import { dominantAxis } from '@/lib/roomTransfer/plan-axis';
+
+/** `IfcSpace.LongName` — attribute 8 of the entity, index 7. */
+const LONG_NAME_ATTR = 7;
+import { planRoomTransfer } from '@/lib/roomTransfer/match-rooms';
 import type { AddElementType } from './addElementSlice.js';
 import type { TypeViewMode } from '../constants.js';
 import {
@@ -512,6 +518,40 @@ export interface MutationSlice {
     value: string,
     oldValue?: string
   ) => Mutation | null;
+
+  /**
+   * Carry room numbers and names from another loaded model's spaces onto this
+   * one's, by where the rooms are.
+   *
+   * Rooms get re-derived — the walls come back remodelled, the detection
+   * improves, a storey is redone — and the geometry is cheap to make again
+   * while the NUMBERING is not. A number was agreed with the client, printed
+   * on a door, quoted in a fire concept. Re-deriving and retyping seventy of
+   * them is how a plan acquires the typo nobody catches until the wrong door
+   * gets a detector.
+   *
+   * The offset between the two models is found, not asked for: every possible
+   * pairing proposes the translation that would make it true, and the one the
+   * most pairs agree on wins. Storeys are paired by NAME, because elevations
+   * do not survive a remodel and names do.
+   *
+   * A room whose match is not clearly better than the runner-up is REPORTED
+   * rather than written. The whole point is to avoid a number landing quietly
+   * on the room next door.
+   */
+  transferRoomNames: (
+    sourceModelId: string,
+    targetModelId: string,
+  ) => {
+    offset: [number, number];
+    /** Degrees the source plan had to be turned by to line the two up. */
+    rotationDeg: number;
+    storeys: number;
+    applied: number;
+    ambiguous: number;
+    unmatched: number;
+    unused: number;
+  } | { error: string };
 
   /**
    * Reassign an entity's IFC class in place ("retype"). The expressId is
@@ -2080,6 +2120,91 @@ export const createMutationSlice: StateCreator<
   },
 
   // Attribute Mutations
+  transferRoomNames: (sourceModelId, targetModelId) => {
+    const state = get();
+    const src = state.models.get(sourceModelId);
+    const tgt = state.models.get(targetModelId);
+    if (!src?.ifcDataStore || !tgt?.ifcDataStore) return { error: 'Beide Modelle müssen geladen sein.' };
+    if (sourceModelId === targetModelId) return { error: 'Quelle und Ziel sind dasselbe Modell.' };
+
+    const roomsOf = (m: NonNullable<typeof src>) => {
+      const ds = m.ifcDataStore!;
+      const view = state.mutationViews.get(m.id);
+      // An authored name has to win over the parsed one, or a room renamed in
+      // this session would be carried under the name it no longer has.
+      const attr = (id: number, field: 'Name' | 'LongName'): string | null => {
+        const overlaid = view ? overlayAttribute(view, id, field) : null;
+        if (overlaid !== null) return overlaid;
+        if (field === 'Name') return ds.entities.getName(id) || null;
+        // LongName is where the room's actual NAME lives — "Werkstatt",
+        // "Ausstellung" — while Name holds the number. It has no accessor of
+        // its own, so it is read off the entity, from the file or from this
+        // session's creations, whichever the room came from.
+        const stored = ds.getEntity?.(id)?.attributes?.[LONG_NAME_ATTR]
+          ?? view?.getNewEntity(id)?.attributes?.[LONG_NAME_ATTR];
+        return typeof stored === 'string' && stored ? stored : null;
+      };
+      const storeys = storeysOfElements(ds.spatialHierarchy);
+      return roomsByStorey({
+        meshes: m.geometryResult?.meshes ?? [],
+        coord: m.geometryResult?.coordinateInfo,
+        idOffset: m.idOffset,
+        storeyOf: (id) => storeys.get(id) ?? null,
+        nameOf: (id) => attr(id, 'Name'),
+        longNameOf: (id) => attr(id, 'LongName'),
+      });
+    };
+
+    const from = roomsOf(src);
+    const to = roomsOf(tgt);
+
+    // How far the two plans are turned against each other. Georeferencing one
+    // export and not the other bakes the site's true-north angle into every
+    // coordinate of it — measured here at 9.6°, which is invisible on screen
+    // and moves the far end of the building further than its rooms are apart.
+    // An axis is only known modulo 90°, so all four quarter turns are offered
+    // and the rooms decide; the plain translation stays in the list so a
+    // model pair that needs no turn cannot be talked into one.
+    const srcAxis = dominantAxis(src.geometryResult?.meshes ?? []);
+    const tgtAxis = dominantAxis(tgt.geometryResult?.meshes ?? []);
+    const turn = srcAxis && tgtAxis ? tgtAxis.deg - srcAxis.deg : null;
+    const rotations = turn === null ? [0] : [0, turn, turn + 90, turn - 90, turn + 180];
+
+    let storeys = 0, applied = 0, ambiguous = 0, unmatched = 0, unused = 0;
+    let offset: [number, number] = [0, 0];
+    let rotationDeg = 0;
+    let bestVotes = -1;
+
+    for (const [name, targets] of to) {
+      const sources = from.get(name);
+      if (!sources || sources.length === 0) { unmatched += targets.length; continue; }
+      const plan = planRoomTransfer(sources, targets, { rotations });
+      if (!plan) { unmatched += targets.length; continue; }
+      storeys += 1;
+      // Report the transform the most rooms agreed on, across storeys — they
+      // should agree, and a storey that disagrees is worth seeing.
+      if (plan.votes > bestVotes) {
+        bestVotes = plan.votes;
+        offset = plan.offset;
+        rotationDeg = plan.rotationDeg;
+      }
+      ambiguous += plan.ambiguous.length;
+      unmatched += plan.unmatchedTargets.length;
+      unused += plan.unusedSources.length;
+      const byId = new Map(sources.map((r) => [r.id, r]));
+      for (const m of plan.matched) {
+        const s = byId.get(m.source);
+        if (!s) continue;
+        let wrote = false;
+        if (s.name) wrote = !!get().setAttribute(targetModelId, m.target, 'Name', s.name) || wrote;
+        if (s.longName) wrote = !!get().setAttribute(targetModelId, m.target, 'LongName', s.longName) || wrote;
+        if (wrote) applied += 1;
+      }
+    }
+    if (storeys === 0) return { error: 'Keine gemeinsamen Geschosse mit Räumen gefunden.' };
+    return { offset, rotationDeg, storeys, applied, ambiguous, unmatched, unused };
+  },
+
   setAttribute: (modelId, entityId, attrName, value, oldValue) => {
     if (!get().canAuthorOn(modelId, entityId).allowed) return null;
     // Collab role gate before the local commit — see setProperty.

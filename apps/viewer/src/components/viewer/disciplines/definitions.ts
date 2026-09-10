@@ -76,6 +76,7 @@ import type { RibbonTabId, ViewerState } from '@/store';
 import type { WorkspacePanelId } from '@/lib/panels/registry';
 import { DISCIPLINE_ROLES, EDITOR_ROLE_ID, type DisciplineSystem } from '@/lib/roles/disciplineRoles';
 import { openDemoFlows } from '@/components/screenflow/DemoFlowsLauncher';
+import { toast } from '@/components/ui/toast';
 import type { ToolPanel } from '../toolbar/useWorkspacePanelControls';
 import { ClassCatalogPanel } from '../ClassCatalogPanel';
 import { ColorPalettePanel } from '../ColorPalettePanel';
@@ -326,6 +327,54 @@ export const DISCIPLINE_TABS: readonly DisciplineTab[] = [
             needsAuthor: true,
             enabled: (s) => s.viewMode === '2d',
             run: (s) => s.requestPlanCommit('openingSymbol'),
+          },
+        ],
+      },
+      {
+        label: 'Rooms',
+        items: [
+          {
+            // Data, not a trade: a room number is what every discipline
+            // afterwards refers to — the fire concept, the wiring, the
+            // detector list — so carrying it across a re-derivation belongs
+            // where the shared facts live, not in one trade's tab.
+            id: 'transferRoomNames',
+            kind: 'action',
+            label: 'Raumnummern übernehmen',
+            ribbonLabel: 'Raum­nummern',
+            tooltip: 'Nummern und Bezeichnungen aus einem zweiten geladenen Modell auf die Räume hier übertragen — nach Lage, Geschoss für Geschoss. Versatz und Verdrehung zwischen den Modellen werden selbst bestimmt',
+            icon: ClipboardList,
+            needsModel: true,
+            needsAuthor: true,
+            enabled: (s) => s.models.size >= 2,
+            run: (s) => {
+              // The OTHER loaded model is the source. With exactly two loaded
+              // there is no choice to offer; with more, asking would be a
+              // dialog, and this is the shape the workflow actually has —
+              // open the old file beside the new one.
+              const target = s.activeModelId;
+              if (!target) { toast.error('Kein aktives Modell.'); return; }
+              const others = [...s.models.keys()].filter((id) => id !== target);
+              if (others.length !== 1) {
+                toast.error('Genau zwei Modelle laden: das neue als aktives, das alte daneben.');
+                return;
+              }
+              const r = s.transferRoomNames(others[0], target);
+              if ('error' in r) { toast.error(r.error); return; }
+              const parts = [`${r.applied} Räume benannt`];
+              if (r.ambiguous > 0) parts.push(`${r.ambiguous} unklar`);
+              if (r.unmatched > 0) parts.push(`${r.unmatched} ohne Vorlage`);
+              if (r.unused > 0) parts.push(`${r.unused} Nummern übrig`);
+              // The offset itself is a national-grid number nobody can read;
+              // the TURN is the part worth seeing, because it is the part that
+              // silently ruins a transfer when it is wrong.
+              const dreh = Math.abs(r.rotationDeg) < 0.01
+                ? 'ohne Drehung'
+                : `Drehung ${r.rotationDeg.toFixed(1)}°`;
+              parts.push(`${dreh}, ${r.storeys} Geschoss${r.storeys === 1 ? '' : 'e'}`);
+              if (r.ambiguous > 0 || r.unmatched > 0) toast.info(parts.join(' · '));
+              else toast.success(parts.join(' · '));
+            },
           },
         ],
       },
