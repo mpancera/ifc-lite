@@ -1500,11 +1500,75 @@
         let rooms = SpacePlate::rooms_from_wall_footprints(&rects, CLOSE, 0.3);
         assert_eq!(rooms.len(), 1, "four walls leave one hole");
         let area = polygon_area(&rooms[0]).abs();
-        // `close` grows each wall inward by 5 mm too, so the room is that much
-        // smaller on each of its four sides: 3.79 × 2.79.
-        let want = (3.8 - 2.0 * CLOSE) * (2.8 - 2.0 * CLOSE);
+        // Exactly the inner face, with no `close` in it: the walls were
+        // stretched along their runs to meet each other, not fattened across
+        // them, so nothing moved the faces the room is measured to.
+        let want = 3.8 * 2.8;
         assert!((area - want).abs() < 1e-6, "net area {area}, want {want}");
         assert!(polygon_area(&rooms[0]) > 0.0, "rings come back CCW");
+    }
+
+    #[test]
+    fn walls_reach_for_each_other_without_growing_into_the_room() {
+        // The same box, but each long wall stops 2 mm short of the side wall it
+        // meets — the hairline gap a rendered footprint actually leaves. A union
+        // is exact, so it pours straight through such a slit; closing it is the
+        // whole reason `close` exists.
+        let rects = vec![
+            [[0.102, -0.1], [3.898, -0.1], [3.898, 0.1], [0.102, 0.1]],
+            [[0.102, 2.9], [3.898, 2.9], [3.898, 3.1], [0.102, 3.1]],
+            [[-0.1, -0.1], [0.1, -0.1], [0.1, 3.1], [-0.1, 3.1]],
+            [[3.9, -0.1], [4.1, -0.1], [4.1, 3.1], [3.9, 3.1]],
+        ];
+        // Undilated it leaks: no enclosed hole survives at all.
+        assert!(
+            SpacePlate::rooms_from_wall_footprints(&rects, 0.0, 0.3).is_empty(),
+            "the 2 mm slits should let the union straight out",
+        );
+
+        let rooms = SpacePlate::rooms_from_wall_footprints(&rects, CLOSE, 0.3);
+        assert_eq!(rooms.len(), 1, "5 mm of reach closes all four slits");
+        // And it costs the room nothing. The walls were stretched end-on into
+        // each other, so every face is still where the model put it: 3.8 × 2.8,
+        // not 5 mm less on each of the four sides. Growing across the thickness
+        // as well used to shrink it, which drew as a constant gap between each
+        // room and its wall — identical in every corner of every storey.
+        let area = polygon_area(&rooms[0]).abs();
+        assert!((area - 3.8 * 2.8).abs() < 1e-6, "net area {area}, want {}", 3.8 * 2.8);
+        for v in &rooms[0] {
+            // A nanometre of slack: the boolean works on a fixed-point grid, so
+            // a corner lands on its face to within the grid rather than exactly.
+            let on_face = |c: f64, a: f64, b: f64| (c - a).abs() < 1e-6 || (c - b).abs() < 1e-6;
+            assert!(
+                on_face(v[0], 0.1, 3.9) && on_face(v[1], 0.1, 2.9),
+                "corner {v:?} is off the wall faces it should sit on",
+            );
+        }
+    }
+
+    #[test]
+    fn a_wall_is_stretched_along_its_run_whichever_way_its_corners_came_in() {
+        // The rectangle's long edge is measured, not assumed to be the first
+        // one: a caller listing its corners the other way round would otherwise
+        // have its walls fattened instead of extended, silently.
+        let run_first = vec![
+            [[0.102, -0.1], [3.898, -0.1], [3.898, 0.1], [0.102, 0.1]],
+            [[0.102, 2.9], [3.898, 2.9], [3.898, 3.1], [0.102, 3.1]],
+            [[-0.1, -0.1], [0.1, -0.1], [0.1, 3.1], [-0.1, 3.1]],
+            [[3.9, -0.1], [4.1, -0.1], [4.1, 3.1], [3.9, 3.1]],
+        ];
+        // Same four walls, every one of them started from the next corner round,
+        // which swaps which edge comes first.
+        let rotated: Vec<_> = run_first
+            .iter()
+            .map(|r| [r[1], r[2], r[3], r[0]])
+            .collect();
+        let a = SpacePlate::rooms_from_wall_footprints(&run_first, CLOSE, 0.3);
+        let b = SpacePlate::rooms_from_wall_footprints(&rotated, CLOSE, 0.3);
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), a.len(), "corner order must not decide whether a room exists");
+        let (aa, ba) = (polygon_area(&a[0]).abs(), polygon_area(&b[0]).abs());
+        assert!((aa - ba).abs() < 1e-9, "areas differ by corner order: {aa} vs {ba}");
     }
 
     #[test]

@@ -402,11 +402,17 @@ impl SpacePlate {
 /// overlap at some corners and leave hairline gaps at others. A union is exact,
 /// so it flows straight through a gap the way a paint bucket does: undilated,
 /// this storey's walls fell into 13 separate clusters and yielded 3 rooms
-/// instead of 21. Each footprint is therefore grown by `close` before the
-/// union, which shrinks every room by that much all round — the price of a
-/// closed outline. On the same storey the room COUNT is stable from 2 mm to 20
-/// mm, so the value is chosen well inside that plateau rather than tuned to an
-/// edge; at 2 mm the areas match the old path exactly.
+/// instead of 21. Each footprint is therefore grown by `close` before the union.
+///
+/// It grows along its RUN only, never across its thickness. Every gap a union
+/// has to bridge is at a wall's end — a wall stopping a millimetre short of the
+/// one it meets, a T whose stem does not quite reach the crossbar — and a run
+/// extended by `close` closes all of them. A wall's FACES are not a tolerance:
+/// they are where the model puts them, and fattening them moved every room
+/// boundary inward by `close`, which showed up in the drawing as a constant gap
+/// between each room and the wall it runs along, the same in every corner of
+/// every storey. On this storey the room COUNT is stable from 2 mm to 20 mm, so
+/// the value sits well inside that plateau rather than tuned to an edge.
 ///
 /// Returns one ring per room, CCW, first vertex not repeated. Rooms below
 /// `min_area` are dropped, as is everything outside the largest wall cluster —
@@ -416,9 +422,12 @@ pub fn rooms_from_wall_footprints(
     close: f64,
     min_area: f64,
 ) -> Vec<Vec<[f64; 2]>> {
-    // Grow each footprint about its own axes. The rectangle's own edges give
-    // those axes, so a wall at any angle grows along itself rather than along X
-    // and Y — growing in world axes would fatten a diagonal wall unevenly.
+    // Stretch each footprint along its own run. The rectangle's own edges give
+    // that direction, so a wall at any angle grows along itself rather than
+    // along X and Y — growing in world axes would stretch a diagonal wall
+    // sideways as well. Which of the two edges is the run is measured here
+    // rather than assumed, so a caller that hands its corners over in the other
+    // order does not silently get its walls fattened instead of extended.
     let grown: Vec<Ring2D> = rects
         .iter()
         .filter_map(|r| {
@@ -429,20 +438,23 @@ pub fn rooms_from_wall_footprints(
             if lx < EPS || ly < EPS {
                 return None;
             }
-            let ux = [ex[0] / lx, ex[1] / lx];
-            let uy = [ey[0] / ly, ey[1] / ly];
-            let out = |i: usize, sx: f64, sy: f64| -> [f64; 2] {
-                [
-                    r[i][0] + sx * close * ux[0] + sy * close * uy[0],
-                    r[i][1] + sx * close * ux[1] + sy * close * uy[1],
-                ]
+            // The longer edge is the run; the shorter one is the thickness, and
+            // nothing moves along it.
+            let (u, sign) = if lx >= ly {
+                ([ex[0] / lx, ex[1] / lx], [-1.0, 1.0, 1.0, -1.0])
+            } else {
+                ([ey[0] / ly, ey[1] / ly], [-1.0, -1.0, 1.0, 1.0])
             };
-            Some(vec![
-                out(0, -1.0, -1.0),
-                out(1, 1.0, -1.0),
-                out(2, 1.0, 1.0),
-                out(3, -1.0, 1.0),
-            ])
+            Some(
+                (0..4)
+                    .map(|i| {
+                        [
+                            r[i][0] + sign[i] * close * u[0],
+                            r[i][1] + sign[i] * close * u[1],
+                        ]
+                    })
+                    .collect(),
+            )
         })
         .collect();
     if grown.is_empty() {
