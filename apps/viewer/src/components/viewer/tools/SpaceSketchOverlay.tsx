@@ -1727,17 +1727,21 @@ export function SpaceSketchOverlay() {
           footprintRooms={footprintRooms}
           onToggleFootprintRooms={() => {
             // Sessions are cached per storey, so flipping this changes nothing
-            // until something rebuilds. Rebuild the storey on screen at once,
-            // or the switch looks broken.
+            // on its own. EVERY cached storey has to go, not just the one on
+            // screen: leaving the others meant walking onto a storey derived
+            // the old way, from a switch that says the new one — and the only
+            // way out was to toggle twice.
+            //
+            // Drafts on other storeys are lost with them. That is the honest
+            // trade: they were derived by a method that is no longer the one
+            // selected, so keeping them would leave the plan half in each.
             footprintRoomsRef.current = !footprintRoomsRef.current;
             setFootprintRooms(footprintRoomsRef.current);
+            for (const session of sessionsRef.current.values()) session.dispose();
+            sessionsRef.current.clear();
+            sessionRef.current = null;
             const lb = lastBuildRef.current;
-            if (lb) {
-              sessionsRef.current.get(lb.storey ?? -1)?.dispose();
-              sessionsRef.current.delete(lb.storey ?? -1);
-              sessionRef.current = null;
-              void buildFrom(lb.rects, lb.label, lb.storey);
-            }
+            if (lb) void buildFrom(lb.rects, lb.label, lb.storey);
           }}
         />
       )}
