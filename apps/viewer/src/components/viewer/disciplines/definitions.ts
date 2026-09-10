@@ -50,6 +50,7 @@ import {
   Footprints,
   HardHat,
   KeyRound,
+  Layers,
   Library,
   ListChecks,
   LogOut,
@@ -333,6 +334,63 @@ export const DISCIPLINE_TABS: readonly DisciplineTab[] = [
       {
         label: 'Rooms',
         items: [
+          {
+            // The storey an element is filed under is shared data, not one
+            // trade's business: the room list, the wiring, the fire concept
+            // and every schedule read it, and a handful of elements exported
+            // against the wrong storey quietly poisons all of them.
+            id: 'assignElementsToStorey',
+            kind: 'action',
+            label: 'Geschoss zuweisen',
+            ribbonLabel: 'Geschoss\u00ADzuweisen',
+            tooltip: 'Die ausgewählten Elemente auf das AKTIVE Geschoss umhängen (das im Baum hervorgehobene). Ändert nur die Verortung — nichts bewegt sich im Modell',
+            icon: Layers,
+            needsModel: true,
+            needsAuthor: true,
+            enabled: (s) => {
+              const picked = s.selectedEntities.length > 0 || s.selectedEntity !== null;
+              return picked && s.activeStorey !== null;
+            },
+            run: (s) => {
+              // The destination is the ACTIVE storey rather than a dropdown:
+              // choosing a storey is something the hierarchy already does, and
+              // the toast names the one it used, so a wrong pick is visible at
+              // once and undone by activating the right storey and clicking
+              // again. That reversibility is what makes a one-click action fair
+              // here — the edit itself does not go on the undo stack.
+              const storey = s.activeStorey;
+              if (!storey) { toast.error('Kein aktives Geschoss — im Baum eines anwählen.'); return; }
+              const picked = s.selectedEntities.length > 0
+                ? s.selectedEntities
+                : s.selectedEntity ? [s.selectedEntity] : [];
+              const mine = picked.filter((e) => e.modelId === storey.modelId);
+              if (mine.length === 0) {
+                toast.error('Auswahl und Geschoss gehören zu verschiedenen Modellen.');
+                return;
+              }
+              const name = s.models.get(storey.modelId)?.ifcDataStore?.entities?.getName?.(storey.expressId)
+                || `#${storey.expressId}`;
+              const r = s.assignElementsToStorey(
+                storey.modelId, mine.map((e) => e.expressId), storey.expressId,
+              );
+              if ('error' in r) { toast.error(r.error); return; }
+              if (r.moved === 0) {
+                toast.info(r.refused > 0
+                  ? `Nichts umgehängt — ${r.refused} Raum/Geschoss übersprungen.`
+                  : `Liegt schon auf ${name}.`);
+                return;
+              }
+              const parts = [`${r.moved} Element${r.moved === 1 ? '' : 'e'} auf ${name}`];
+              if (r.alreadyThere > 0) parts.push(`${r.alreadyThere} lagen schon dort`);
+              if (r.wereUnfiled > 0) parts.push(`${r.wereUnfiled} hatten kein Geschoss`);
+              if (r.refused > 0) parts.push(`${r.refused} übersprungen (Raum/Geschoss)`);
+              if (picked.length > mine.length) {
+                parts.push(`${picked.length - mine.length} aus anderem Modell übersprungen`);
+              }
+              if (r.refused > 0 || picked.length > mine.length) toast.info(parts.join(' · '));
+              else toast.success(parts.join(' · '));
+            },
+          },
           {
             // Data, not a trade: a room number is what every discipline
             // afterwards refers to — the fire concept, the wiring, the

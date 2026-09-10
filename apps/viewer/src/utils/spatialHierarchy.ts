@@ -334,6 +334,55 @@ export function registerAuthoredElement(
 }
 
 /**
+ * Take an element out of every container the live hierarchy files it under.
+ *
+ * The counterpart of {@link registerAuthoredElement}, and it has to sweep
+ * rather than look up the one place: the hierarchy carries the same containment
+ * in four representations (`elementToStorey`, `elementToContainer`, the flat
+ * `byStorey` / `bySpace` lists, and each tree node's own `elements` array), and
+ * leaving the element in any one of them files it under two storeys at once —
+ * which is the exact defect refiling exists to fix. Straight after a parse the
+ * flat list and the node array are the SAME array, so a sweep is also the only
+ * way to be right whether or not that is still true.
+ *
+ * Idempotent, and a no-op for an element the hierarchy never knew.
+ */
+export function unfileElement(hierarchy: SpatialHierarchy, entityId: number): void {
+  hierarchy.elementToStorey.delete(entityId);
+  hierarchy.elementToContainer?.delete(entityId);
+  const drop = (list: number[] | undefined) => {
+    if (!list) return;
+    const at = list.indexOf(entityId);
+    if (at >= 0) list.splice(at, 1);
+  };
+  for (const list of hierarchy.byStorey.values()) drop(list);
+  for (const list of hierarchy.bySpace.values()) drop(list);
+  const walk = (node: SpatialNode) => {
+    drop(node.elements);
+    for (const child of node.children) walk(child);
+  };
+  walk(hierarchy.project);
+}
+
+/**
+ * Move an element to another storey in the live hierarchy.
+ *
+ * Refiling only — nothing here touches placement, so the element stays exactly
+ * where it is drawn. See `lib/storeyAssign/plan-storey-move.ts` for why that is
+ * the whole of the operation.
+ */
+export function refileElement(
+  hierarchy: SpatialHierarchy,
+  entityId: number,
+  storeyExpressId: number,
+  ifcTypeName: string,
+  name: string,
+): void {
+  unfileElement(hierarchy, entityId);
+  registerAuthoredElement(hierarchy, storeyExpressId, entityId, ifcTypeName, name);
+}
+
+/**
  * Entity index type for property/quantity set lookup
  */
 export interface EntityIndex {

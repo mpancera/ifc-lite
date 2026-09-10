@@ -45,6 +45,7 @@ import {
   addWallToStore,
   addWindowToStore,
   resolveSpatialAnchor,
+  findOwnerHistoryId,
   duplicateInStore,
   resolveDuplicateSource,
   generateSpacesFromWalls,
@@ -72,6 +73,7 @@ import {
   type WindowInStoreParams,
 } from '@ifc-lite/create';
 import { EntityExtractor, type MapConversion, type ProjectedCRS } from '@ifc-lite/parser';
+import { generateIfcGuid } from '@ifc-lite/encoding';
 import type { MeshData } from '@ifc-lite/geometry';
 import { getEntityBounds, getEntityCenter } from '@/utils/viewportUtils';
 import { TRADE_PROPERTY, TRADE_PSET, tradeCodeFor } from '@/lib/catalog/tradeCode';
@@ -109,6 +111,12 @@ import { dominantAxis } from '@/lib/roomTransfer/plan-axis';
 
 /** `IfcSpace.LongName` — attribute 8 of the entity, index 7. */
 const LONG_NAME_ATTR = 7;
+
+/** Spatial structure: these belong to their parent by IfcRelAggregates, so
+ *  containment has no say over which storey they are on. */
+const AGGREGATED_SPATIAL_TYPES = new Set([
+  'IfcSpace', 'IfcSpatialZone', 'IfcBuildingStorey', 'IfcBuilding', 'IfcSite',
+]);
 import { planRoomTransfer } from '@/lib/roomTransfer/match-rooms';
 import type { AddElementType } from './addElementSlice.js';
 import type { TypeViewMode } from '../constants.js';
@@ -136,7 +144,11 @@ import {
 } from '@/lib/slab-edit.js';
 import { getModelLengthUnitScale } from '@/lib/length-unit-scale.js';
 import type { Point2D } from '@/lib/polygon-clip.js';
-import { registerAuthoredElement } from '@/utils/spatialHierarchy.js';
+import { registerAuthoredElement, refileElement } from '@/utils/spatialHierarchy.js';
+import { planStoreyMove } from '@/lib/storeyAssign/plan-storey-move';
+import {
+  readContainmentRels, CONTAINMENT_TYPE, RELATED_ELEMENTS,
+} from '@/lib/storeyAssign/read-containment';
 import { footprintsToSkip } from '@/lib/spaces/skipFootprints.js';
 
 /**
@@ -551,6 +563,40 @@ export interface MutationSlice {
     ambiguous: number;
     unmatched: number;
     unused: number;
+  } | { error: string };
+
+  /**
+   * Refile elements under another `IfcBuildingStorey`.
+   *
+   * Containment ONLY: the elements' placement chains are untouched, so nothing
+   * moves in the model — this changes which storey they are filed under, which
+   * is the case it was built for (a handful of elements exported against the
+   * wrong storey while standing in the right place). The consequence to know is
+   * that an element whose placement hangs off its OLD storey's local placement
+   * stays anchored there, so changing that storey's elevation later would still
+   * drag it.
+   *
+   * Spatial structure elements (a space, a storey) are refused rather than
+   * refiled: they belong to their parent by aggregation, not containment, and
+   * writing them into a containment relationship would put them in the file
+   * twice over, under two different rules.
+   */
+  assignElementsToStorey: (
+    modelId: string,
+    expressIds: readonly number[],
+    storeyId: number,
+  ) => {
+    moved: number;
+    /** Already filed under the target — nothing was written for these. */
+    alreadyThere: number;
+    /** Had no containment at all; the move gives them their first. */
+    wereUnfiled: number;
+    /** Spatial structure elements, which containment does not govern. */
+    refused: number;
+    /** Relationships emptied by the move and therefore removed. */
+    droppedRelations: number;
+    /** Whether the target storey had to be given its first relationship. */
+    createdRelation: boolean;
   } | { error: string };
 
   /**
@@ -3150,6 +3196,110 @@ export const createMutationSlice: StateCreator<
       isAuthored: view?.getNewEntity?.(expressId) != null,
       roleLabel: disciplineSystemName(system),
     });
+  },
+
+  assignElementsToStorey: (modelId, expressIds, storeyId) => {
+    if (expressIds.length === 0) return { error: 'Keine Elemente ausgewählt' };
+    const mayCreate = mayCreateEntities(normalizeRoleId(get().activeDisciplineSystemId));
+    if (!mayCreate.allowed) return { error: mayCreate.reason };
+    if (!get().canCollabEdit()) return { error: 'Editing is disabled for your role in this shared session' };
+
+    const dataStore = get().models.get(modelId)?.ifcDataStore;
+    if (!dataStore) return { error: `No model loaded for id "${modelId}"` };
+    const typeOf = (id: number): string | null =>
+      dataStore.entities?.getTypeName?.(id)
+      ?? get().mutationViews.get(modelId)?.getNewEntity(id)?.type
+      ?? null;
+    if (typeOf(storeyId) !== 'IfcBuildingStorey') {
+      return { error: `#${storeyId} ist kein IfcBuildingStorey` };
+    }
+    if (!get().ensureMutationView(modelId)) {
+      return { error: 'Model has no editable mutation view yet' };
+    }
+    const editor = getOrCreateStoreEditor(get, set, modelId);
+    if (!editor) return { error: 'Failed to create store editor' };
+    const view = get().mutationViews.get(modelId);
+
+    // A space or a storey hangs off its parent by IfcRelAggregates. Refiling it
+    // through containment would leave it decomposed into one parent and
+    // contained in another — two answers to the same question.
+    const refused: number[] = [];
+    const movable: number[] = [];
+    for (const id of expressIds) {
+      if (AGGREGATED_SPATIAL_TYPES.has(typeOf(id) ?? '')) refused.push(id);
+      else movable.push(id);
+    }
+    if (movable.length === 0) {
+      return { error: 'Räume und Geschosse hängen an ihrem Geschoss über die Zerlegung, nicht über die Verortung' };
+    }
+
+    try {
+      const rels = readContainmentRels({
+        parsed: dataStore.getEntitiesByType(CONTAINMENT_TYPE) ?? [],
+        authored: view?.getNewEntities?.() ?? [],
+        positionalOf: (id) => view?.getPositionalMutationsForEntity?.(id) ?? null,
+      });
+      const plan = planStoreyMove(rels, movable, storeyId);
+      if (!plan) {
+        return {
+          moved: 0,
+          alreadyThere: movable.length,
+          wereUnfiled: 0,
+          refused: refused.length,
+          droppedRelations: 0,
+          createdRelation: false,
+        };
+      }
+
+      const refs = (ids: readonly number[]) => ids.map((id) => `#${id}`);
+      for (const rewrite of plan.rewrites) {
+        editor.setPositionalAttribute(rewrite.relExpressId, RELATED_ELEMENTS, refs(rewrite.elementIds));
+      }
+      // After the rewrites, so an element is never briefly in neither.
+      for (const relId of plan.drops) editor.removeEntity(relId);
+      if ('create' in plan.target) {
+        const ownerHistoryId = findOwnerHistoryId(dataStore);
+        editor.addEntity(CONTAINMENT_TYPE, [
+          generateIfcGuid(),
+          ownerHistoryId === null ? null : `#${ownerHistoryId}`,
+          null,
+          null,
+          refs(plan.target.elementIds),
+          `#${storeyId}`,
+        ]);
+      } else {
+        editor.setPositionalAttribute(plan.target.relExpressId, RELATED_ELEMENTS, refs(plan.target.elementIds));
+      }
+
+      // The live hierarchy is a separate representation of the same fact, and
+      // the panels read IT, not the relationships — without this the move is
+      // in the file and invisible on screen until a reload.
+      const hierarchy = dataStore.spatialHierarchy;
+      if (hierarchy) {
+        for (const id of plan.moved) {
+          refileElement(
+            hierarchy, id, storeyId,
+            typeOf(id) ?? 'IfcProduct',
+            dataStore.entities?.getName?.(id) || '',
+          );
+        }
+      }
+
+      set((state) => ({
+        dirtyModels: new Set(state.dirtyModels).add(modelId),
+        mutationVersion: state.mutationVersion + 1,
+      }));
+      return {
+        moved: plan.moved.length,
+        alreadyThere: plan.alreadyThere.length,
+        wereUnfiled: plan.wereUnfiled.length,
+        refused: refused.length,
+        droppedRelations: plan.drops.length,
+        createdRelation: 'create' in plan.target,
+      };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Geschoss zuweisen fehlgeschlagen' };
+    }
   },
 
   assignElementsToSystem: (modelId, expressIds, target) => runGroupRelation(
