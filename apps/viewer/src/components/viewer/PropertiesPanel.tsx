@@ -361,7 +361,14 @@ export function PropertiesPanel() {
       elevation: hierarchy.storeyElevations.get(storeyId),
       height,
     };
-  }, [selectedEntity, activeDataStore]);
+    // `mutationVersion` is what makes a refile visible here. The hierarchy is
+    // mutated IN PLACE, so neither the data store nor `elementToStorey` changes
+    // identity when an element moves to another storey — without this the panel
+    // kept naming the old storey for the element still selected, which is
+    // exactly the element whose move you just asked for. The edit was real and
+    // the panel said nothing happened (Marc, 2026-09-10).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedEntity, activeDataStore, mutationVersion]);
 
   // Compute entity bounding box and coordinates (local scene + world)
   //

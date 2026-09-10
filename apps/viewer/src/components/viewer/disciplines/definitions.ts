@@ -89,6 +89,7 @@ import { ProjectFolderPanel } from '../ProjectFolderPanel';
 import { ReferenceOverridesPanel } from '../ReferenceOverridesPanel';
 import { RelationKindsPanel } from '../RelationKindsPanel';
 import { SmartPropertyPanel } from '../SmartPropertyPanel';
+import { StoreyAssignDialog } from '../StoreyAssignDialog';
 import { SymbolCatalogPanel } from '../SymbolCatalogPanel';
 import { ProductLibraryPanel } from '../catalog/ProductLibraryPanel';
 
@@ -341,55 +342,18 @@ export const DISCIPLINE_TABS: readonly DisciplineTab[] = [
             // and every schedule read it, and a handful of elements exported
             // against the wrong storey quietly poisons all of them.
             id: 'assignElementsToStorey',
-            kind: 'action',
+            kind: 'dialog',
+            Dialog: StoreyAssignDialog,
             label: 'Geschoss zuweisen',
-            ribbonLabel: 'Geschoss\u00ADzuweisen',
-            tooltip: 'Die ausgewählten Elemente auf das AKTIVE Geschoss umhängen (das im Baum hervorgehobene). Ändert nur die Verortung — nichts bewegt sich im Modell',
+            ribbonLabel: 'Geschoss­zuweisen',
+            tooltip: 'Die ausgewählten Elemente auf ein anderes Geschoss umhängen — das Ziel wird im Dialog gewählt. Ändert nur die Verortung, im Modell bewegt sich nichts',
             icon: Layers,
             needsModel: true,
             needsAuthor: true,
-            enabled: (s) => selectedEntityRefs(s).length > 0 && s.activeStorey !== null,
-            run: (s) => {
-              // The destination is the ACTIVE storey rather than a dropdown:
-              // choosing a storey is something the hierarchy already does, and
-              // the toast names the one it used, so a wrong pick is visible at
-              // once and undone by activating the right storey and clicking
-              // again. That reversibility is what makes a one-click action fair
-              // here — the edit itself does not go on the undo stack.
-              const storey = s.activeStorey;
-              if (!storey) { toast.error('Kein aktives Geschoss — im Baum eines anwählen.'); return; }
-              // Every selection channel, not just one: Ctrl-clicking six walls
-              // fills `selectedEntitiesSet` and leaves `selectedEntities`
-              // empty, so reading that array alone would refile the primary
-              // pick and report success over the other five.
-              const picked = selectedEntityRefs(s);
-              const mine = picked.filter((e) => e.modelId === storey.modelId);
-              if (mine.length === 0) {
-                toast.error('Auswahl und Geschoss gehören zu verschiedenen Modellen.');
-                return;
-              }
-              const name = s.models.get(storey.modelId)?.ifcDataStore?.entities?.getName?.(storey.expressId)
-                || `#${storey.expressId}`;
-              const r = s.assignElementsToStorey(
-                storey.modelId, mine.map((e) => e.expressId), storey.expressId,
-              );
-              if ('error' in r) { toast.error(r.error); return; }
-              if (r.moved === 0) {
-                toast.info(r.refused > 0
-                  ? `Nichts umgehängt — ${r.refused} Raum/Geschoss übersprungen.`
-                  : `Liegt schon auf ${name}.`);
-                return;
-              }
-              const parts = [`${r.moved} Element${r.moved === 1 ? '' : 'e'} auf ${name}`];
-              if (r.alreadyThere > 0) parts.push(`${r.alreadyThere} lagen schon dort`);
-              if (r.wereUnfiled > 0) parts.push(`${r.wereUnfiled} hatten kein Geschoss`);
-              if (r.refused > 0) parts.push(`${r.refused} übersprungen (Raum/Geschoss)`);
-              if (picked.length > mine.length) {
-                parts.push(`${picked.length - mine.length} aus anderem Modell übersprungen`);
-              }
-              if (r.refused > 0 || picked.length > mine.length) toast.info(parts.join(' · '));
-              else toast.success(parts.join(' · '));
-            },
+            // No storey condition any more: the dialog IS where the storey is
+            // picked, so requiring one beforehand would only close the door in
+            // front of the room it opens.
+            enabled: (s) => selectedEntityRefs(s).length > 0,
           },
           {
             // Data, not a trade: a room number is what every discipline
