@@ -192,6 +192,12 @@ export function useHousekeeping(enabled: boolean): HousekeepingState {
             : inSpatialStructure(store, expressId),
           hasType: (store.relationships
             ?.getRelated(expressId, RelationshipType.DefinesByType, 'inverse')?.length ?? 0) > 0,
+          // Only the part classes are asked about this, and none of them is
+          // aggregated by a storey — so a plain "has an aggregate parent" is
+          // the whole answer here and needs no spatial-versus-element telling
+          // apart. See `checkDecomposition`.
+          partOfWhole: (store.relationships
+            ?.getRelated(expressId, RelationshipType.Aggregates, 'inverse')?.length ?? 0) > 0,
         });
       }
     }

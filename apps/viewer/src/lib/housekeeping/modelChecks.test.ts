@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   checkSpatialContainment, checkSpaceInStorey, checkTypeAssignment,
-  checkIdentification, checkClassAssignment,
+  checkIdentification, checkClassAssignment, checkDecomposition, namePrefix,
   type HousekeepingElement,
 } from './modelChecks.js';
 
@@ -22,6 +22,7 @@ function element(
     longName: null,
     inSpatialStructure: true,
     hasType: true,
+    partOfWhole: false,
     ...over,
   };
 }
@@ -165,5 +166,81 @@ describe('checkClassAssignment', () => {
 
   it('says nothing when every proxy has been answered', () => {
     assert.deepEqual(checkClassAssignment([], 70), []);
+  });
+});
+
+describe('checkDecomposition', () => {
+  const pane = (id: number, over = {}) => element(id, {
+    ifcType: 'IfcPlate', name: `Curtain Wall:Curtain Wall 1:${1237000 + id}`, ...over,
+  });
+
+  it('finds the panes and mullions that never got their curtain wall', () => {
+    const [finding] = checkDecomposition([pane(1), pane(2), element(3, {
+      ifcType: 'IfcMember', name: 'Curtain Wall:Curtain Wall 1:1237003',
+    })]);
+    assert.equal(finding.checkId, 'decomposition');
+    assert.match(finding.title, /^3 Teile ohne Ganzes \(IfcMember, IfcPlate\)/);
+    assert.deepEqual(finding.elements, [1, 2, 3]);
+  });
+
+  it('says nothing about a part that HAS its whole', () => {
+    assert.deepEqual(checkDecomposition([pane(1, { partOfWhole: true })]), []);
+  });
+
+  it("leaves ordinary elements alone — a wall is nobody's part", () => {
+    assert.deepEqual(checkDecomposition([element(1), element(2, { ifcType: 'IfcSlab' })]), []);
+  });
+
+  it('keeps a stair and a curtain wall apart, because they are different repairs', () => {
+    const findings = checkDecomposition([
+      pane(1),
+      element(2, { ifcType: 'IfcStairFlight', name: 'Assembled Stair:Stair:1237447' }),
+    ]);
+    assert.equal(findings.length, 2);
+    assert.deepEqual(findings.map((f) => f.id).sort(), [
+      'decomposition/loose-parts/panel', 'decomposition/loose-parts/stair',
+    ]);
+  });
+
+  it('counts the name groups, which is what says whether a repair could be automated', () => {
+    // Two types from the same export: two wholes would be formed, not five.
+    const findings = checkDecomposition([
+      pane(1), pane(2),
+      pane(3, { name: 'Curtain Wall:Shopfront:1237010' }),
+      pane(4, { name: 'Curtain Wall:Shopfront:1237011' }),
+      pane(5, { name: 'Curtain Wall:Shopfront:1237012' }),
+    ]);
+    assert.match(findings[0].detail, /Die Namen fallen in 2 Gruppen/);
+  });
+
+  it('admits when the names give nothing to group by', () => {
+    const [finding] = checkDecomposition([pane(1, { name: '' }), pane(2, { name: '' })]);
+    assert.match(finding.detail, /müsste\s+aus der Geometrie raten/);
+  });
+
+  it('is a warning, because IFC does permit a lone plate', () => {
+    assert.equal(checkDecomposition([pane(1)])[0].severity, 'warning');
+  });
+
+  it('does not claim a curtain wall for a member that may be a structural one', () => {
+    // The bundled bridge sample has eight loose IfcMember and wants no curtain
+    // wall at all; a confident wrong answer is how a checklist loses its reader.
+    const [finding] = checkDecomposition([element(1, { ifcType: 'IfcMember', name: 'Strut 1' })]);
+    assert.match(finding.detail, /meist einer IfcCurtainWall/);
+    assert.doesNotMatch(finding.title, /IfcCurtainWall/);
+  });
+});
+
+describe('namePrefix', () => {
+  it('drops the instance id an exporter appends, keeping family and type', () => {
+    assert.equal(namePrefix('Curtain Wall:Curtain Wall 1:1237260'), 'Curtain Wall:Curtain Wall 1');
+  });
+
+  it('keeps a name that carries no convention at all', () => {
+    assert.equal(namePrefix('Fassade Nord'), 'Fassade Nord');
+  });
+
+  it('has no key for an element with no name', () => {
+    assert.equal(namePrefix('   '), null);
   });
 });

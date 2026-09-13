@@ -23,6 +23,7 @@ function element(
     longName: null,
     inSpatialStructure: true,
     hasType: true,
+    partOfWhole: false,
     ...over,
   };
 }
@@ -158,12 +159,16 @@ describe('summariseChecks', () => {
 
   it('reports progress rather than a defect count', () => {
     const summary = summariseChecks(runHousekeeping(input()));
-    assert.equal(formatProgress(summary), '6 von 6 erledigt');
+    // Against CHECK_ORDER rather than a literal: adding a check should not
+    // make this test claim the wrong thing about the checks that existed.
+    const n = CHECK_ORDER.length;
+    assert.equal(formatProgress(summary), `${n} von ${n} erledigt`);
   });
 
   it('counts an unavailable check as neither done nor open', () => {
     const summary = summariseChecks(runHousekeeping(input({ elements: [element(1)] })));
     assert.equal(summary.unavailable, 1);
-    assert.equal(formatProgress(summary), '5 von 6 erledigt');
+    const n = CHECK_ORDER.length;
+    assert.equal(formatProgress(summary), `${n - 1} von ${n} erledigt`);
   });
 });

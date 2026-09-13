@@ -42,6 +42,8 @@ export interface HousekeepingElement {
   readonly inSpatialStructure: boolean;
   /** Defined by an `IfcTypeObject` through `IfcRelDefinesByType`. */
   readonly hasType: boolean;
+  /** Decomposed into a bigger element by `IfcRelAggregates`. */
+  readonly partOfWhole: boolean;
 }
 
 function count(n: number, singular: string, plural: string): string {
@@ -218,4 +220,102 @@ export function checkClassAssignment(
     elements: openProxies,
     remedy: { label: 'Proxy-Triage öffnen', target: 'proxy-triage' },
   }];
+}
+
+/**
+ * Classes that are normally a PART of something bigger.
+ *
+ * A curtain wall is not one element in a file: it is an `IfcCurtainWall` that
+ * aggregates its `IfcPlate` panes and `IfcMember` mullions. Same for a stair
+ * and its flights. Whether the export writes that whole at all depends on the
+ * export settings, and several do not — the parts arrive loose.
+ *
+ * `family` keys the finding so the id stays stable while the wording may not.
+ * `whole` is deliberately vague for panels and precise for flights, because
+ * the confidence is: a loose `IfcStairFlight` is nearly always a missing
+ * `IfcStair`, while a loose `IfcMember` may be an entirely legitimate
+ * structural member — the bundled bridge sample has eight of them, and none of
+ * them wants to be a curtain wall. Saying "ohne IfcCurtainWall" there would be
+ * a confident wrong answer, which is how a checklist loses its reader.
+ *
+ * `IfcBuildingElementPart` is in the list for a different reason: being a part
+ * is the entire meaning of the class, so a loose one is not a judgement call.
+ */
+const PART_CLASSES: Readonly<Record<string, { family: string; whole: string }>> = {
+  IfcPlate: { family: 'panel', whole: 'einem übergeordneten Bauteil, meist einer IfcCurtainWall' },
+  IfcMember: { family: 'panel', whole: 'einem übergeordneten Bauteil, meist einer IfcCurtainWall' },
+  IfcStairFlight: { family: 'stair', whole: 'einer IfcStair' },
+  IfcRampFlight: { family: 'ramp', whole: 'einer IfcRamp' },
+  IfcBuildingElementPart: { family: 'part', whole: 'dem Bauteil, dessen Schicht sie sind' },
+};
+
+/**
+ * The grouping key an exporter's naming convention gives away.
+ *
+ * Revit and others write `Family:Type:InstanceId`, so everything up to the last
+ * colon names the type the parts came from — which is the decomposition the
+ * export threw away, spelled out in the one field it kept. Counting those
+ * groups is how this check answers the question that decides whether a repair
+ * tool is worth building: is there a signal, or would it have to guess from
+ * geometry?
+ */
+export function namePrefix(name: string): string | null {
+  const trimmed = name.trim();
+  if (trimmed.length === 0) return null;
+  const cut = trimmed.lastIndexOf(':');
+  return cut > 0 ? trimmed.slice(0, cut) : trimmed;
+}
+
+/**
+ * Parts with no whole.
+ *
+ * A warning, not an error: IFC permits a standalone plate, and a canopy really
+ * can be one. It is worth listing because everything downstream treats the
+ * whole as the thing — the spatial structure holds it, a click should select
+ * it, a schedule counts it — so loose parts make the model answer "which
+ * curtain wall is this?" with silence.
+ *
+ * One finding per family, because a curtain wall and a stair are different
+ * repairs and the panel selects a finding's elements as one set.
+ */
+export function checkDecomposition(
+  elements: readonly HousekeepingElement[],
+): HousekeepingFinding[] {
+  const byFamily = new Map<string, { whole: string; loose: HousekeepingElement[] }>();
+  for (const element of elements) {
+    const part = PART_CLASSES[element.ifcType];
+    if (part === undefined || element.partOfWhole) continue;
+    const bucket = byFamily.get(part.family);
+    if (bucket) bucket.loose.push(element);
+    else byFamily.set(part.family, { whole: part.whole, loose: [element] });
+  }
+
+  const findings: HousekeepingFinding[] = [];
+  // Sorted so two runs over the same model produce the same plan.
+  for (const family of [...byFamily.keys()].sort()) {
+    const { whole, loose } = byFamily.get(family)!;
+    const classes = [...new Set(loose.map((e) => e.ifcType))].sort();
+    const groups = new Set<string>();
+    for (const element of loose) {
+      const key = namePrefix(element.name);
+      if (key !== null) groups.add(key);
+    }
+
+    findings.push({
+      id: `decomposition/loose-parts/${family}`,
+      checkId: 'decomposition',
+      severity: 'warning',
+      title: `${count(loose.length, 'Teil', 'Teile')} ohne Ganzes (${classes.join(', ')})`,
+      detail: `Diese Elemente gehören üblicherweise zu ${whole}, stehen aber ohne `
+        + 'IfcRelAggregates allein. Das Ganze ist, was die Bauwerksstruktur hält und '
+        + 'was ein Klick meinen sollte — fehlt es, hängen die Teile einzeln im Modell. '
+        + (groups.size > 0
+          ? `Die Namen fallen in ${count(groups.size, 'Gruppe', 'Gruppen')}: `
+            + 'so viele Ganze wären daraus zu bilden.'
+          : 'Die Namen geben keine Gruppierung her — ein Zusammenführen müsste '
+            + 'aus der Geometrie raten.'),
+      elements: loose.map((e) => e.expressId),
+    });
+  }
+  return findings;
 }

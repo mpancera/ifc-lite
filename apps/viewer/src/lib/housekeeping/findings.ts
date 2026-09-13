@@ -40,6 +40,7 @@ export type HousekeepingCheckId =
   | 'class-assignment'
   | 'spatial-containment'
   | 'space-in-storey'
+  | 'decomposition'
   | 'type-assignment'
   | 'identification';
 
@@ -93,6 +94,7 @@ export const CHECK_TITLES: Readonly<Record<HousekeepingCheckId, string>> = {
   'class-assignment': 'Fachklassenzuweisung',
   'spatial-containment': 'Element → Bauwerksstruktur',
   'space-in-storey': 'Raum → Geschoss',
+  decomposition: 'Teil → Ganzes',
   'type-assignment': 'Element → Typ',
   identification: 'Identifikation',
 };
@@ -111,6 +113,7 @@ export const CHECK_ORDER: readonly HousekeepingCheckId[] = [
   'class-assignment',
   'spatial-containment',
   'space-in-storey',
+  'decomposition',
   'type-assignment',
   'identification',
 ];

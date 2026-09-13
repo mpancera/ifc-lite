@@ -27,7 +27,7 @@ import {
 } from './findings.js';
 import {
   checkSpatialContainment, checkSpaceInStorey, checkTypeAssignment,
-  checkIdentification, checkClassAssignment,
+  checkIdentification, checkClassAssignment, checkDecomposition,
   type HousekeepingElement,
 } from './modelChecks.js';
 
@@ -136,6 +136,7 @@ function findingsFor(
     case 'class-assignment': return checkClassAssignment(input.openProxies, input.statedProxies);
     case 'spatial-containment': return checkSpatialContainment(input.elements);
     case 'space-in-storey': return checkSpaceInStorey(input.elements);
+    case 'decomposition': return checkDecomposition(input.elements);
     case 'type-assignment': return checkTypeAssignment(input.elements);
     case 'identification': return checkIdentification(input.elements);
   }
