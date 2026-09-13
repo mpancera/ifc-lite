@@ -39,6 +39,7 @@ import { Cable,
   Layers as LayersIcon,
   Box,
   Ruler,
+  Wand2,
   Workflow,
   PackageCheck,
   Radio,
@@ -77,7 +78,8 @@ export type WorkspacePanelId =
   | 'doorNumbers'
   | 'detectorGroups'
   | 'wiring'
-  | 'loadReport';
+  | 'loadReport'
+  | 'smartSelect';
 
 /** Activity-bar clustering — a divider is drawn whenever the group changes. */
 export type PanelGroup = 'navigate' | 'inspect' | 'review' | 'author' | 'work';
@@ -192,6 +194,10 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   // `loadReportPanelVisible` boolean; `openWorkspacePanel`'s generic
   // non-SIDEBAR_PANEL_FLAGS branch adopts it directly (issue #3927).
   { id: 'loadReport', title: 'Load report', short: 'Load report', Icon: FileWarning, group: 'review', region: 'side' },
+  // The magic wand: pick one element, get every element that is the same in
+  // the respects you chose. APPENDED so the frozen Alt+1..0 mapping stays
+  // intact (no Alt shortcut).
+  { id: 'smartSelect', title: 'Smarte Auswahl', short: 'Smart select', Icon: Wand2, group: 'inspect', region: 'side' },
 ];
 
 /** The bottom-strip panel ids, mapped to their store visibility flag + setter

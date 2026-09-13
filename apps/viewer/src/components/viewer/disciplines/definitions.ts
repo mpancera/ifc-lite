@@ -334,6 +334,25 @@ export const DISCIPLINE_TABS: readonly DisciplineTab[] = [
         ],
       },
       {
+        // Picking the right elements is nobody's trade and everybody's
+        // problem: the fire concept selects detectors, the wiring selects
+        // cable runs, a schedule selects a storey's doors. So it sits with
+        // the shared tools rather than in one tab.
+        label: 'Selection',
+        items: [
+          {
+            id: 'smartSelect',
+            kind: 'panel',
+            panel: 'smartSelect',
+            label: 'Smarte Auswahl',
+            ribbonLabel: 'Smarte­Auswahl',
+            tooltip: 'Zauberstab: festlegen, worin Objekte GLEICH sein müssen — Klasse, Geschoss, Raum, Typ, PredefinedType, Material — und mit einem Klick alle gleichen mitnehmen',
+            icon: Wand2,
+            needsModel: true,
+          },
+        ],
+      },
+      {
         label: 'Rooms',
         items: [
           {

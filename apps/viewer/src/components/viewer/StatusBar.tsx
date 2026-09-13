@@ -3,12 +3,13 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { useMemo, useRef, useState, useEffect } from 'react';
-import { Boxes, Triangle, CheckCircle2, AlertCircle, Eye, Loader2, Lock, ListChecks, MousePointerSquareDashed } from 'lucide-react';
+import { Boxes, Triangle, CheckCircle2, AlertCircle, Eye, Loader2, Lock, ListChecks, MousePointerSquareDashed, X } from 'lucide-react';
 import { Separator } from '@/components/ui/separator';
 import { formatNumber, formatBytes } from '@/lib/utils';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
 import { useSelectedEntityRefs } from '@/hooks/useSelectedEntityRefs';
+import { listFromSelection } from '@/lib/lists/selectionList';
 import { VIEWER_ROLE_ID, findDisciplineSystem } from '@/lib/roles/disciplineRoles';
 import { useWebGPU } from '@/hooks/useWebGPU';
 import { FlavorIndicator } from '@/components/extensions/FlavorIndicator';
@@ -32,6 +33,22 @@ export function StatusBar() {
   const mutationVersion = useViewerStore((s) => s.mutationVersion);
   const selectedRefs = useSelectedEntityRefs();
   const clearEntitySelection = useViewerStore((s) => s.clearEntitySelection);
+  const requestListRun = useViewerStore((s) => s.requestListRun);
+  const setListPanelVisible = useViewerStore((s) => s.setListPanelVisible);
+  /**
+   * Open the cart as a list: the count says how many, this says which.
+   *
+   * `requestListRun` and not `setPendingListDraft` — the draft channel opens
+   * the BUILDER, which is right when the columns are still a question. Here
+   * they are not: the answer wanted is the table, so the list runs and shows
+   * it. The builder is one click away from there if a column is missing.
+   */
+  const showSelectionAsList = () => {
+    const draft = listFromSelection(selectedRefs);
+    if (!draft) return;
+    setListPanelVisible(true);
+    requestListRun(draft);
+  };
   const webgpu = useWebGPU();
 
   const [fps, setFps] = useState(60);
@@ -211,16 +228,29 @@ export function StatusBar() {
         {selectedRefs.length > 0 && (
           <>
             <Separator orientation="vertical" className="h-3.5" />
-            <button
-              type="button"
-              onClick={clearEntitySelection}
-              className="flex items-center gap-1.5 rounded border border-primary/40 px-1.5 py-0.5 text-primary hover:bg-primary/10"
-              title="Ausgewählte Objekte — das, worauf ein Werkzeug jetzt wirken würde. Klicken hebt die Auswahl auf."
-            >
-              <MousePointerSquareDashed className="h-3 w-3" />
-              <span className="tabular-nums">{formatNumber(selectedRefs.length)}</span>
-              <span>gewählt</span>
-            </button>
+            <div className="flex items-center rounded border border-primary/40 text-primary">
+              <button
+                type="button"
+                onClick={showSelectionAsList}
+                className="flex items-center gap-1.5 px-1.5 py-0.5 hover:bg-primary/10"
+                title="Ausgewählte Objekte — das, worauf ein Werkzeug jetzt wirken würde. Klicken zeigt sie als Liste."
+              >
+                <MousePointerSquareDashed className="h-3 w-3" />
+                <span className="tabular-nums">{formatNumber(selectedRefs.length)}</span>
+                <span>gewählt</span>
+              </button>
+              {/* Its own control: emptying the cart and looking into it are
+                  different intentions, and one of them cannot be undone. */}
+              <button
+                type="button"
+                onClick={clearEntitySelection}
+                className="px-1 py-0.5 hover:bg-primary/10"
+                title="Auswahl aufheben"
+                aria-label="Auswahl aufheben"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
           </>
         )}
       </div>

@@ -29,6 +29,7 @@ import { GraphPanel } from '@/components/viewer/graph/GraphPanel';
 import { RoomPanel } from '@/components/viewer/RoomPanel';
 import { ExportProductsPanel } from '@/components/viewer/ExportProductsPanel';
 import { ZonesPanel } from '@/components/viewer/ZonesPanel';
+import { SmartSelectPanel } from '@/components/viewer/SmartSelectPanel';
 import { HeightsPanel } from '@/components/viewer/HeightsPanel';
 import { HousekeepingPanel } from '@/components/viewer/HousekeepingPanel';
 import { ProxyTriagePanel } from '@/components/viewer/ProxyTriagePanel';
@@ -71,6 +72,7 @@ export function renderPanelBody(id: WorkspacePanelId, onClose: () => void): Reac
     case 'lists': return <ListPanel onClose={onClose} />;
     case 'collab': return <RoomPanel onClose={onClose} />;
     case 'zones': return <ZonesPanel onClose={onClose} />;
+    case 'smartSelect': return <SmartSelectPanel onClose={onClose} />;
     case 'exports': return <ExportProductsPanel onClose={onClose} />;
     case 'heights': return <HeightsPanel onClose={onClose} />;
     case 'graph': return <GraphPanel onClose={onClose} />;
