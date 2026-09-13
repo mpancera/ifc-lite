@@ -12,6 +12,11 @@
  * where 14 were meant (Marc, 2026-09-13). Here the answer is yours, and the
  * context menu does not grow a row per combination.
  *
+ * "Nur Sichtbares" sits apart from the tick list on purpose: the criteria are
+ * facts about the MODEL, that one is a fact about the VIEW. Both narrow the
+ * answer, and listing them together would suggest they answer the same kind of
+ * question — the first is stable, the second changes with every solo and hide.
+ *
  * It rides the PRIMARY selection rather than the picking pipeline, the same
  * way the zone brush does: a click anywhere — viewport, tree, list — sets the
  * primary pick, and this reacts to it. One mechanism, and it works from every
@@ -35,6 +40,7 @@ import {
   collectSmartSelection, DEFAULT_CRITERIA, SMART_CRITERIA, type SmartCriterion,
 } from '@/lib/smartSelect/criteria';
 import { smartSelectSources } from '@/lib/smartSelect/model-facts';
+import { getVisibleBasketEntityRefsFromStore } from '@/store/basketVisibleSet';
 
 interface SmartSelectPanelProps {
   onClose?: () => void;
@@ -48,6 +54,15 @@ export function SmartSelectPanel({ onClose }: SmartSelectPanelProps) {
   const addEntitiesToSelection = useViewerStore((s) => s.addEntitiesToSelection);
 
   const [criteria, setCriteria] = useState<Set<SmartCriterion>>(new Set(DEFAULT_CRITERIA));
+  /**
+   * Scope, not sameness: whether the answer may reach past what is on screen.
+   *
+   * Off by default. The wand answers a question about the MODEL, and silently
+   * skipping the floors that happen to be hidden would make the same click
+   * mean different things depending on the view it was made in — the kind of
+   * surprise that is only discovered in an export.
+   */
+  const [visibleOnly, setVisibleOnly] = useState(false);
   const [armed, setArmed] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
@@ -81,8 +96,19 @@ export function SmartSelectPanel({ onClose }: SmartSelectPanelProps) {
     }
 
     const started = performance.now();
+    // Read at click time, never memoised: visibility changes with every solo,
+    // hide and lens, and a scope cached from an earlier view would answer the
+    // question the screen no longer asks. The store's own helper does the
+    // caching, keyed on a fingerprint of everything that can hide something.
+    const scope = visibleOnly
+      ? new Set(
+        getVisibleBasketEntityRefsFromStore()
+          .filter((ref) => ref.modelId === seed.modelId)
+          .map((ref) => ref.expressId),
+      )
+      : undefined;
     const { ids, deepReads } = collectSmartSelection(
-      seed.expressId, enabled, smartSelectSources(dataStore),
+      seed.expressId, enabled, smartSelectSources(dataStore, scope),
     );
     const took = Math.round(performance.now() - started);
 
@@ -99,9 +125,10 @@ export function SmartSelectPanel({ onClose }: SmartSelectPanelProps) {
     const seedClass = dataStore.entities?.getTypeName?.(seed.expressId) || 'Element';
     setNote(
       `${ids.length}× ${seedClass} · ${took} ms`
-      + (deepReads > 0 ? ` · ${deepReads} tief gelesen` : ''),
+      + (deepReads > 0 ? ` · ${deepReads} tief gelesen` : '')
+      + (visibleOnly ? ' · nur Sichtbares' : ''),
     );
-  }, [models, enabled, clearEntitySelection, setSelectedEntityIds, addEntitiesToSelection]);
+  }, [models, enabled, visibleOnly, clearEntitySelection, setSelectedEntityIds, addEntitiesToSelection]);
 
   useEffect(() => {
     if (!armed || !selectedEntity) return;
@@ -172,6 +199,21 @@ export function SmartSelectPanel({ onClose }: SmartSelectPanelProps) {
           </label>
         ))}
       </div>
+
+      <label className="flex items-start gap-2 px-3 py-2 border-t border-zinc-200 dark:border-zinc-800 cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-950">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={visibleOnly}
+          onChange={() => setVisibleOnly((v) => !v)}
+        />
+        <span className="min-w-0">
+          <span className="block text-xs text-zinc-900 dark:text-zinc-100">Nur Sichtbares</span>
+          <span className="block text-[10px] font-mono text-zinc-500 dark:text-zinc-400">
+            begrenzt auf das, was gerade im Bild ist — Solo, Ausblenden, Filter
+          </span>
+        </span>
+      </label>
 
       <div className="border-t border-zinc-200 dark:border-zinc-800 px-3 py-2 flex flex-col gap-2">
         <Button

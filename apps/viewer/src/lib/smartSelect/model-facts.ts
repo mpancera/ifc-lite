@@ -18,26 +18,36 @@ import { resolveEntityPredefinedType } from '@/lib/entity-predefined-type';
 import type { Fact, SmartCriterion, SmartSelectSources } from './criteria';
 
 /**
- * The elements the wand may return: everything with geometry.
+ * The elements the wand may return: everything with geometry, optionally
+ * narrowed to a set the caller vouches for.
  *
  * The wand is driven by clicking a thing in the view, so what it hands back
  * should be things that could have been clicked. Openings, type objects and
  * the spatial skeleton carry no mesh and stay out — including them would grow
  * the answer with entities the user cannot see selected.
+ *
+ * `restrictTo` is how "nur Sichtbares" is expressed: a scope, not a sameness
+ * criterion. Whether two elements are the same is a fact about the model;
+ * whether one is on screen is a fact about the view, and mixing the two into
+ * one list of tick boxes would suggest they answer the same kind of question.
  */
-function* pickableElements(store: IfcDataStore): Generator<number> {
+function* pickableElements(store: IfcDataStore, restrictTo?: ReadonlySet<number>): Generator<number> {
   const entities = store.entities;
   for (let i = 0; i < entities.count; i++) {
     // `hasGeometry` takes an EXPRESS ID, not the row index — the columnar
     // arrays are indexed, the accessors are not. Feeding it `i` answers false
     // for nearly everything, which reads as "nothing else is the same".
     const expressId = entities.expressId[i];
+    if (restrictTo && !restrictTo.has(expressId)) continue;
     if (!entities.hasGeometry(expressId)) continue;
     yield expressId;
   }
 }
 
-export function smartSelectSources(store: IfcDataStore): SmartSelectSources {
+export function smartSelectSources(
+  store: IfcDataStore,
+  restrictTo?: ReadonlySet<number>,
+): SmartSelectSources {
   const hierarchy = store.spatialHierarchy;
   const relationships = store.relationships;
 
@@ -71,5 +81,5 @@ export function smartSelectSources(store: IfcDataStore): SmartSelectSources {
   // A FRESH generator per iteration: handing out one generator object would
   // make the second click of a session scan an exhausted iterator and answer
   // "nothing else is the same".
-  return { candidates: { [Symbol.iterator]: () => pickableElements(store) }, fact };
+  return { candidates: { [Symbol.iterator]: () => pickableElements(store, restrictTo) }, fact };
 }
