@@ -14,6 +14,7 @@ import { LIGHTING_PRESETS } from '@/lib/lighting-presets';
 import { presetViewRotation } from '@/lib/preset-view-orientation';
 import { isGeometryLoadStreaming } from '@/lib/pick-gating';
 import { effectiveIsolatedIds } from '@/lib/effective-isolation';
+import { resolvePickSelection } from '@/lib/decomposition/pick-selection';
 import { composeLightingEnvironment } from '@/lib/compose-environment';
 import { sunDirectionForTimeOfDay } from '@/lib/sun-time-of-day';
 import {
@@ -132,6 +133,7 @@ export function Viewport({
   const { selectedEntityId, selectedEntityIds, setSelectedEntityId, setSelectedEntity, toggleSelection, models } = useSelectionState();
   const selectedEntity = useViewerStore((s) => s.selectedEntity);
   const addEntityToSelection = useViewerStore((s) => s.addEntityToSelection);
+  const setSelectedEntityIds = useViewerStore((s) => s.setSelectedEntityIds);
   const toggleEntitySelection = useViewerStore((s) => s.toggleEntitySelection);
 
   // Sync selectedEntityId with model-aware selectedEntity for PropertiesPanel
@@ -188,7 +190,10 @@ export function Viewport({
   // Helper to handle pick result and set selection properly
   // IMPORTANT: pickResult.expressId is now a globalId (transformed at load time)
   // resolveEntityRef is the single source of truth for globalId → EntityRef
-  const handlePickForSelection = useCallback((pickResult: import('@ifc-lite/renderer').PickResult | null) => {
+  const handlePickForSelection = useCallback((
+    pickResult: import('@ifc-lite/renderer').PickResult | null,
+    opts: { exact?: boolean } = {},
+  ) => {
     // Normal click clears any lingering multi-highlight (fresh single-selection).
     // Gate on EITHER set: `selectedEntityIds` is the legacy global-id set that
     // drives the renderer highlight, and some features populate it WITHOUT the
@@ -206,14 +211,31 @@ export function Viewport({
     }
 
     const globalId = pickResult.expressId;
-    const resolvedRef = resolveEntityRef(globalId);
+
+    // A pane of glass means its curtain wall, a flight means its stair — the
+    // same resolution the tree already does (#1133), so the two agree about
+    // what was clicked. `lib/decomposition/pick-selection.ts` explains why the
+    // parts are highlighted while only the whole counts as selected, and why
+    // Alt (not Shift) is what reaches the part itself.
+    const picked = resolvePickSelection(globalId, { exact: opts.exact ?? false });
+    if (picked && picked.globalIds.length > 1) {
+      // Parts first, whole last: `setSelectedEntityIds` keys the primary
+      // highlight off the final id.
+      setSelectedEntityIds(picked.globalIds);
+      addEntityToSelection(picked.ref);
+      setSelectedEntityId(picked.globalIds[picked.globalIds.length - 1]);
+      setSelectedEntity(picked.ref);
+      return;
+    }
+
+    const resolvedRef = picked?.ref ?? resolveEntityRef(globalId);
 
     // Set globalId for renderer (highlighting uses globalIds directly)
     setSelectedEntityId(globalId);
 
     // Resolve globalId → EntityRef for property panel (single source of truth, never null)
     setSelectedEntity(resolvedRef);
-  }, [setSelectedEntityId, setSelectedEntity]);
+  }, [setSelectedEntityId, setSelectedEntity, setSelectedEntityIds, addEntityToSelection]);
 
   // Ref to always access latest handlePickForSelection from event handlers
   // (useMouseControls/useTouchControls capture this at effect setup time)

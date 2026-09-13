@@ -316,7 +316,7 @@ export async function handleSelectionClick(ctx: MouseHandlerContext, e: MouseEve
     // Uses visibility filtering so only visible elements can be selected
     const pickResult = await renderer.pick(x, y, pickOptions);
     if (pickResult) {
-      ctx.handlePickForSelection(pickResult);
+      ctx.handlePickForSelection(pickResult, { exact: e.altKey });
     }
     ctx.lastClickTimeRef.current = 0;
     ctx.lastClickPosRef.current = null;
@@ -331,7 +331,10 @@ export async function handleSelectionClick(ctx: MouseHandlerContext, e: MouseEve
         ctx.toggleSelection(pickResult.expressId);
       }
     } else {
-      ctx.handlePickForSelection(pickResult);
+      // Alt reaches the element literally under the cursor; without it a pane
+      // of glass selects its curtain wall. Alt and not Shift, because Shift is
+      // already the pan gesture for this tool (see `isPanGesture` above).
+      ctx.handlePickForSelection(pickResult, { exact: e.altKey });
     }
 
     ctx.lastClickTimeRef.current = now;

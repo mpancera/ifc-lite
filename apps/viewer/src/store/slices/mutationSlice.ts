@@ -108,7 +108,7 @@ import { toGlobalIdFromModels } from '../globalId.js';
 import { buildElementMesh, type ElementMeshPayload } from './addElementMeshes.js';
 import { roomsByStorey, storeysOfElements } from '@/lib/roomTransfer/read-rooms';
 import { dominantAxis } from '@/lib/roomTransfer/plan-axis';
-import { liftSelectionToWholes } from '@/lib/storeyAssign/whole-of';
+import { liftSelectionToWholes } from '@/lib/decomposition/whole-of';
 
 /** `IfcSpace.LongName` — attribute 8 of the entity, index 7. */
 const LONG_NAME_ATTR = 7;

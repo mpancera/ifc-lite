@@ -89,12 +89,14 @@ describe('selectedEntityRefs — the highlight channel', () => {
     }), []);
   });
 
-  it('does not count an element twice when both channels carry it', () => {
+  it('lets the model-aware channel win, so a whole is not mistaken for its parts', () => {
+    // Clicking a curtain wall highlights its panes — a whole that only
+    // aggregates has no mesh — but the selection is the one wall.
     const refs = selectedEntityRefs({
       ...federated,
       selectedEntitiesSet: new Set(['m1:41']),
     });
-    assert.equal(refs.length, 2);
+    assert.deepEqual(refs, [{ modelId: 'm1', expressId: 41 }]);
   });
 
   it('ignores global ids when nothing can resolve them at all', () => {

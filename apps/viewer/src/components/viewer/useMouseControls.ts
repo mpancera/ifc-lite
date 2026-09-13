@@ -116,7 +116,7 @@ export interface UseMouseControlsParams {
   } | null>;
 
   // Callbacks
-  handlePickForSelection: (pickResult: PickResult | null) => void;
+  handlePickForSelection: (pickResult: PickResult | null, opts?: { exact?: boolean }) => void;
   setHoverState: (state: {
     entityId: number;
     screenX: number;

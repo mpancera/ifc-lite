@@ -100,7 +100,9 @@ export interface MouseHandlerContext {
   setMeasurementConstraintEdge: (edge: MeasurementConstraintEdge) => void;
   updateConstraintActiveAxis: (axis: OrthogonalAxis | null) => void;
   updateMeasurementScreenCoords: (projector: (worldPos: { x: number; y: number; z: number }) => { x: number; y: number } | null) => void;
-  handlePickForSelection: (pickResult: PickResult | null) => void;
+  /** `exact` (Alt) selects what is literally under the cursor instead of the
+   *  whole it is a part of — see `lib/decomposition/pick-selection.ts`. */
+  handlePickForSelection: (pickResult: PickResult | null, opts?: { exact?: boolean }) => void;
   toggleSelection: (entityId: number) => void;
   openContextMenu: (entityId: number | null, screenX: number, screenY: number) => void;
   hasPendingMeasurements: () => boolean;

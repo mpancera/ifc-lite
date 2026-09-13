@@ -47,7 +47,7 @@ export interface UseTouchControlsParams {
   sectionRangeRef: MutableRefObject<{ min: number; max: number } | null>;
   geometryRef: MutableRefObject<MeshData[] | null>;
   isInteractingRef: MutableRefObject<boolean>;
-  handlePickForSelection: (pickResult: PickResult | null) => void;
+  handlePickForSelection: (pickResult: PickResult | null, opts?: { exact?: boolean }) => void;
   getPickOptions: () => { isStreaming: boolean; hiddenIds: Set<number>; isolatedIds: Set<number> | null };
 }
 

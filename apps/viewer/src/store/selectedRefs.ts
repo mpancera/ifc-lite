@@ -18,14 +18,19 @@
  *   panel fill.
  * - `selectedEntity` — a plain single click reaches none of the above.
  *
- * The convention is that a bulk selection drives the highlight channel AND the
- * model-aware one; several producers only ever managed the first. Rather than
- * chase each of them, this reads what the user can SEE selected — the highlight
- * is the promise the screen makes — and resolves it back to model-local refs.
+ * The rule: THE MODEL-AWARE CHANNELS ARE THE SELECTION WHEN THEY HOLD ANYTHING;
+ * the highlight is what we fall back on.
  *
- * An action that reads one channel is not obviously broken, which is the
- * problem: it greys out while six walls are lit up, or it moves one of a
- * hundred and thirteen highlighted columns and reports success.
+ * Reading the highlight at all is what makes bulk picks work — "Select all
+ * IfcColumn" and "Select same storey" write only global ids, and an action that
+ * read the model-aware channels alone moved one of a hundred and thirteen lit
+ * columns and reported success.
+ *
+ * Preferring the model-aware channels is what keeps a whole from being mistaken
+ * for its parts. Clicking a curtain wall lights up its forty panes, because a
+ * whole that only aggregates carries no mesh and would otherwise be invisible —
+ * but the selection is one curtain wall, and that is what the model-aware
+ * channel says. Unioning the two would report forty-one.
  */
 
 import { stringToEntityRef, type EntityRef } from './types.js';
@@ -55,12 +60,6 @@ const key = (ref: EntityRef) => `${ref.modelId}:${ref.expressId}`;
 export function selectedEntityRefs(s: SelectionChannels): EntityRef[] {
   const byKey = new Map<string, EntityRef>();
 
-  for (const globalId of s.selectedEntityIds ?? []) {
-    const ref = s.resolveGlobalIdFromModels?.(globalId) ?? s.fromGlobalId?.(globalId);
-    // A highlight whose model has been unloaded resolves to nothing. Dropping
-    // it is right: an edit cannot reach an entity no longer here.
-    if (ref && ref.expressId > 0) byKey.set(key(ref), ref);
-  }
   for (const str of s.selectedEntitiesSet) {
     const ref = stringToEntityRef(str);
     // `stringToEntityRef` answers -1 for a malformed key rather than throwing;
@@ -70,7 +69,18 @@ export function selectedEntityRefs(s: SelectionChannels): EntityRef[] {
   for (const ref of s.selectedEntities) {
     if (ref.expressId > 0) byKey.set(key(ref), ref);
   }
-  if (byKey.size === 0 && s.selectedEntity && s.selectedEntity.expressId > 0) {
+  if (byKey.size > 0) return [...byKey.values()];
+
+  // Nothing model-aware was recorded: fall back to what is lit up.
+  for (const globalId of s.selectedEntityIds ?? []) {
+    const ref = s.resolveGlobalIdFromModels?.(globalId) ?? s.fromGlobalId?.(globalId);
+    // A highlight whose model has been unloaded resolves to nothing. Dropping
+    // it is right: an edit cannot reach an entity no longer here.
+    if (ref && ref.expressId > 0) byKey.set(key(ref), ref);
+  }
+  if (byKey.size > 0) return [...byKey.values()];
+
+  if (s.selectedEntity && s.selectedEntity.expressId > 0) {
     byKey.set(key(s.selectedEntity), s.selectedEntity);
   }
   return [...byKey.values()];

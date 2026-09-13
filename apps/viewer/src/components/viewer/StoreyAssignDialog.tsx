@@ -40,7 +40,7 @@ import { toast } from '@/components/ui/toast';
 import { useViewerStore } from '@/store';
 import { useSelectedEntityRefs } from '@/hooks/useSelectedEntityRefs';
 import { storeyRows, type StoreyRow, type StoreySource } from '@/lib/storeyAssign/storey-rows';
-import { liftSelectionToWholes } from '@/lib/storeyAssign/whole-of';
+import { liftSelectionToWholes } from '@/lib/decomposition/whole-of';
 
 /** `IfcBuildingStorey.Name` / `.Elevation`, for a storey authored this session. */
 const STOREY_NAME = 2;
