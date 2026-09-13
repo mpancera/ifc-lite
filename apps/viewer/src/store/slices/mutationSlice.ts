@@ -108,6 +108,7 @@ import { toGlobalIdFromModels } from '../globalId.js';
 import { buildElementMesh, type ElementMeshPayload } from './addElementMeshes.js';
 import { roomsByStorey, storeysOfElements } from '@/lib/roomTransfer/read-rooms';
 import { dominantAxis } from '@/lib/roomTransfer/plan-axis';
+import { liftSelectionToWholes } from '@/lib/storeyAssign/whole-of';
 
 /** `IfcSpace.LongName` — attribute 8 of the entity, index 7. */
 const LONG_NAME_ATTR = 7;
@@ -597,6 +598,9 @@ export interface MutationSlice {
     droppedRelations: number;
     /** Whether the target storey had to be given its first relationship. */
     createdRelation: boolean;
+    /** Parts replaced by the whole they belong to — a clicked curtain-wall
+     *  panel moves its curtain wall, because containment names the whole. */
+    lifted: number;
   } | { error: string };
 
   /**
@@ -3224,14 +3228,20 @@ export const createMutationSlice: StateCreator<
     // through containment would leave it decomposed into one parent and
     // contained in another — two answers to the same question.
     const refused: number[] = [];
-    const movable: number[] = [];
+    const picked: number[] = [];
     for (const id of expressIds) {
       if (AGGREGATED_SPATIAL_TYPES.has(typeOf(id) ?? '')) refused.push(id);
-      else movable.push(id);
+      else picked.push(id);
     }
-    if (movable.length === 0) {
+    if (picked.length === 0) {
       return { error: 'Räume und Geschosse hängen an ihrem Geschoss über die Zerlegung, nicht über die Verortung' };
     }
+
+    // A curtain wall's panes, a stair's flights: the parts are located THROUGH
+    // their whole and carry no containment of their own. Filing a part would
+    // leave the file answering "which floor?" one way through the aggregate and
+    // another through the part — and the whole would visibly stay behind.
+    const { targets: movable, lifted } = liftSelectionToWholes(picked, dataStore.relationships, typeOf);
 
     try {
       const rels = readContainmentRels({
@@ -3248,6 +3258,7 @@ export const createMutationSlice: StateCreator<
           refused: refused.length,
           droppedRelations: 0,
           createdRelation: false,
+          lifted: lifted.length,
         };
       }
 
@@ -3296,6 +3307,7 @@ export const createMutationSlice: StateCreator<
         refused: refused.length,
         droppedRelations: plan.drops.length,
         createdRelation: 'create' in plan.target,
+        lifted: lifted.length,
       };
     } catch (err) {
       return { error: err instanceof Error ? err.message : 'Geschoss zuweisen fehlgeschlagen' };

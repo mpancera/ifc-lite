@@ -20,6 +20,13 @@
  *
  * Containment only — see `lib/storeyAssign/plan-storey-move.ts`. Nothing moves
  * in the model; only the filing changes.
+ *
+ * What moves is the WHOLE, not the part that was clicked: a curtain wall's
+ * panes and a stair's flights are located through their aggregate and carry no
+ * containment of their own (`lib/storeyAssign/lift-to-whole.ts`). The list
+ * below counts what the move will actually touch, for the same reason the
+ * destination is chosen here — the number you act on should be the number you
+ * were shown.
  */
 
 import { useMemo, useState, type ReactNode } from 'react';
@@ -33,6 +40,7 @@ import { toast } from '@/components/ui/toast';
 import { useViewerStore } from '@/store';
 import { useSelectedEntityRefs } from '@/hooks/useSelectedEntityRefs';
 import { storeyRows, type StoreyRow, type StoreySource } from '@/lib/storeyAssign/storey-rows';
+import { liftSelectionToWholes } from '@/lib/storeyAssign/whole-of';
 
 /** `IfcBuildingStorey.Name` / `.Elevation`, for a storey authored this session. */
 const STOREY_NAME = 2;
@@ -55,6 +63,22 @@ export function StoreyAssignDialog({ trigger }: { trigger?: ReactNode }) {
   // no single list to offer. Saying so beats silently refiling one model's half.
   const modelIds = useMemo(() => [...new Set(picked.map((p) => p.modelId))], [picked]);
   const modelId = modelIds.length === 1 ? modelIds[0] : null;
+
+  /**
+   * What will actually be refiled: a clicked curtain-wall pane moves its
+   * curtain wall, because containment names the whole and not the part. The
+   * same resolution the store action performs, so the list below can never
+   * count the panes while the move takes the wall.
+   */
+  const { targets, lifted } = useMemo(() => {
+    const dataStore = modelId ? models.get(modelId)?.ifcDataStore : null;
+    if (!modelId || !dataStore) return { targets: [] as number[], lifted: [] as { part: number; whole: number }[] };
+    return liftSelectionToWholes(
+      picked.map((ref) => ref.expressId),
+      dataStore.relationships,
+      (id) => dataStore.entities?.getTypeName?.(id) ?? null,
+    );
+  }, [modelId, models, picked]);
 
   const storeys = useMemo<StoreyRow[]>(() => {
     const dataStore = modelId ? models.get(modelId)?.ifcDataStore : null;
@@ -82,12 +106,12 @@ export function StoreyAssignDialog({ trigger }: { trigger?: ReactNode }) {
         elevation: typeof elevation === 'number' ? elevation : null,
       });
     }
-    return storeyRows(sources, picked.map((ref) => filedIn?.get(ref.expressId) ?? null));
+    return storeyRows(sources, targets.map((id) => filedIn?.get(id) ?? null));
     // `mutationVersion` because both the overlay and the live hierarchy are
     // mutated in place: neither map changes identity when this dialog's own
     // last assignment landed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelId, models, mutationViews, mutationVersion, picked]);
+  }, [modelId, models, mutationViews, mutationVersion, targets]);
 
   const assign = (storey: StoreyRow) => {
     if (!modelId) return;
@@ -105,6 +129,7 @@ export function StoreyAssignDialog({ trigger }: { trigger?: ReactNode }) {
     }
     const parts = [`${result.moved} Element${result.moved === 1 ? '' : 'e'} auf ${storey.name}`];
     if (result.alreadyThere > 0) parts.push(`${result.alreadyThere} lagen schon dort`);
+    if (result.lifted > 0) parts.push(`${result.lifted} über das übergeordnete Bauteil`);
     if (result.wereUnfiled > 0) parts.push(`${result.wereUnfiled} hatten kein Geschoss`);
     if (result.refused > 0) parts.push(`${result.refused} übersprungen (Raum/Geschoss)`);
     if (result.refused > 0) toast.info(parts.join(' · '));
@@ -129,8 +154,12 @@ export function StoreyAssignDialog({ trigger }: { trigger?: ReactNode }) {
               ? 'Nichts ausgewählt — erst Elemente anwählen, dann das Geschoss.'
               : modelId === null
                 ? 'Die Auswahl stammt aus mehreren Modellen. Geschosse gelten je Modell — bitte modellweise umhängen.'
-                : `${picked.length} Element${picked.length === 1 ? '' : 'e'} umhängen. `
-                  + 'Nur die Verortung ändert sich; im Modell bewegt sich nichts.'}
+                : `${targets.length} Element${targets.length === 1 ? '' : 'e'} umhängen. `
+                  + 'Nur die Verortung ändert sich; im Modell bewegt sich nichts.'
+                  + (lifted.length > 0
+                    ? ` ${lifted.length} angeklickte Teil${lifted.length === 1 ? '' : 'e'} `
+                      + 'gehören zu einem übergeordneten Bauteil — das wandert mit.'
+                    : '')}
           </DialogDescription>
         </DialogHeader>
 
@@ -144,7 +173,7 @@ export function StoreyAssignDialog({ trigger }: { trigger?: ReactNode }) {
               {storeys.map((storey) => {
                 // Every selected element is already here: the row would be a
                 // no-op, so it says so rather than reporting a hollow success.
-                const complete = storey.here === picked.length;
+                const complete = storey.here === targets.length;
                 return (
                   <Button
                     key={storey.expressId}
