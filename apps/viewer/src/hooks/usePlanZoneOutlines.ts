@@ -46,6 +46,14 @@ export interface PlanZoneOutline {
   /** `#RRGGBB` from the zone, or `null` — the plan then picks its own. */
   readonly colour: string | null;
   readonly segments: readonly OutlineSegment[];
+  /**
+   * The zone's rooms as projected triangles, for the tint inside the line.
+   *
+   * The same triangles the outline was built from — they are already here, and
+   * a second derivation would be a second chance for the fill and the boundary
+   * to disagree about where the zone is.
+   */
+  readonly fills: readonly Float32Array[];
 }
 
 export interface UsePlanZoneOutlinesOptions {
@@ -110,6 +118,7 @@ export function usePlanZoneOutlines({
         // Half the drawn weight, so the line comes to rest against the wall
         // face instead of straddling it — the fire-plan convention.
         segments: zoneOutline(rooms, doors, { inset: ZONE_LINE_WEIGHT_M / 2 }),
+        fills: rooms.map((room) => room.triangles),
       });
     }
     return out;

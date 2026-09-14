@@ -13,6 +13,9 @@ import { deviceMarkPaths, DEVICE_MARK_PAPER_MM, type DeviceMark } from '@/lib/pl
 import { symbolDrawingFor, symbolEntryFor } from '@/lib/symbolCatalog/symbolCatalog';
 import type { PlanZoneOutline } from '@/hooks/usePlanZoneOutlines';
 import { ZONE_LINE_WEIGHT_M, ZONE_FALLBACK_COLOUR } from '@/components/viewer/PlanZoneOutlines';
+import {
+  trianglesToPathData, ZONE_FILL_OPACITY, ZONE_FILL_RULE,
+} from '@/lib/zoneOutline/zoneFill';
 import { symbolFit, symbolGeometryOf } from '@/lib/symbolCatalog/symbolGeometry';
 import { useSymbolCatalog } from '@/lib/symbolCatalog/useSymbolCatalog';
 import { useActiveSymbolSet } from '@/hooks/useActiveSymbolSet';
@@ -716,6 +719,21 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     if (zoneOutlines.length > 0) {
       svg += '  <g id="zone-outlines">\n';
       for (const zone of zoneOutlines) {
+        const colour = escapeXml(zone.colour ?? ZONE_FALLBACK_COLOUR);
+        // The tint first, so the line lies on top of its own zone.
+        const fill = (zone.fills ?? [])
+          .map((triangles) => trianglesToPathData(
+            triangles,
+            (x, y) => ({ x: flipX ? -x : x, y: flipY ? -y : y }),
+            4,
+          ))
+          .filter((path) => path.length > 0)
+          .join(' ');
+        if (fill.length > 0) {
+          svg += `    <path data-zone-fill="${zone.zoneId}" d="${fill}" fill="${colour}"`
+            + ` fill-opacity="${ZONE_FILL_OPACITY}" fill-rule="${ZONE_FILL_RULE}" stroke="none"/>
+`;
+        }
         if (zone.segments.length === 0) continue;
         const d = zone.segments.map((seg) => {
           const ax = flipX ? -seg.a.x : seg.a.x;
@@ -725,7 +743,7 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
           return `M ${ax.toFixed(4)} ${ay.toFixed(4)} L ${bx.toFixed(4)} ${by.toFixed(4)}`;
         }).join(' ');
         svg += `    <path data-zone-outline="${zone.zoneId}" d="${d}" fill="none"`
-          + ` stroke="${escapeXml(zone.colour ?? ZONE_FALLBACK_COLOUR)}"`
+          + ` stroke="${colour}"`
           + ` stroke-width="${ZONE_LINE_WEIGHT_M.toFixed(4)}" stroke-linecap="butt" opacity="0.85">`
           + `<title>${escapeXml(zone.name || `Zone #${zone.zoneId}`)}</title></path>\n`;
       }

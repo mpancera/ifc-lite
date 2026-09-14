@@ -20,6 +20,9 @@
 import React from 'react';
 import type { Point2D } from '@ifc-lite/drawing-2d';
 import type { PlanZoneOutline } from '@/hooks/usePlanZoneOutlines';
+import {
+  trianglesToPathData, ZONE_FILL_OPACITY, ZONE_FILL_RULE,
+} from '@/lib/zoneOutline/zoneFill';
 
 export interface PlanZoneOutlinesProps {
   outlines: readonly PlanZoneOutline[];
@@ -70,9 +73,29 @@ export function PlanZoneOutlines({
           return `M ${a.x.toFixed(1)} ${a.y.toFixed(1)} L ${b.x.toFixed(1)} ${b.y.toFixed(1)}`;
         }).join(' ');
 
+        // The tint first, so the line lies on top of its own zone rather than
+        // being half swallowed by it.
+        const fill = zone.fills
+          .map((triangles) => trianglesToPathData(triangles, (x, y) => {
+            const p = project({ x, y }, transform);
+            return p;
+          }, 1))
+          .filter((d) => d.length > 0)
+          .join(' ');
+
         return (
+          <React.Fragment key={zone.zoneId}>
+          {fill.length > 0 && (
+            <path
+              data-zone-fill={zone.zoneId}
+              d={fill}
+              fill={colour}
+              fillOpacity={ZONE_FILL_OPACITY}
+              fillRule={ZONE_FILL_RULE}
+              stroke="none"
+            />
+          )}
           <path
-            key={zone.zoneId}
             data-zone-outline={zone.zoneId}
             d={d}
             fill="none"
@@ -83,6 +106,7 @@ export function PlanZoneOutlines({
           >
             <title>{zone.name || `Zone #${zone.zoneId}`}</title>
           </path>
+          </React.Fragment>
         );
       })}
     </svg>

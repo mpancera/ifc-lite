@@ -31,9 +31,12 @@ const ZONES: PlanZoneOutline[] = [
       { a: { x: 0, y: 0 }, b: { x: 4, y: 0 } },
       { a: { x: 4, y: 0 }, b: { x: 4, y: 3 } },
     ],
+    // One room, two triangles — the rectangle the boundary encloses.
+    fills: [new Float32Array([0, 0, 4, 0, 4, 3, 0, 0, 4, 3, 0, 3])],
   },
   // No colour of its own: screen and sheet must fall back to the same red.
-  { zoneId: 4712, name: 'Ohne Farbe', colour: null, segments: [{ a: { x: 0, y: 3 }, b: { x: 0, y: 0 } }] },
+  { zoneId: 4712, name: 'Ohne Farbe', colour: null, fills: [],
+    segments: [{ a: { x: 0, y: 3 }, b: { x: 0, y: 0 } }] },
 ];
 
 function buildDrawing(): Drawing2D {
@@ -144,6 +147,34 @@ describe('useDrawingExport — Auslösezonen on the exported sheet', () => {
     const d = doc.querySelector('[data-zone-outline="4711"]')?.getAttribute('d') ?? '';
     // Two moves: two separate runs of line, which is what an interruption is.
     assert.equal((d.match(/M /g) ?? []).length, 2);
+  });
+
+  it('tints the zone inside its own line, faintly enough to read through', async () => {
+    // The colour answers "which zone" from across a room; the plan underneath
+    // answers everything else, so the tint must not win that argument.
+    const svg = await exportSvg(ZONES);
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+    const fill = doc.querySelector('[data-zone-fill="4711"]');
+    assert.ok(fill, 'the zone with rooms is filled');
+    assert.equal(fill?.getAttribute('fill'), '#1d4ed8');
+    assert.ok(Number(fill?.getAttribute('fill-opacity')) <= 0.25);
+    assert.equal(fill?.getAttribute('stroke'), 'none');
+  });
+
+  it('paints the rooms as ONE path, or every shared edge shows as a seam', async () => {
+    const svg = await exportSvg(ZONES);
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+    assert.equal(doc.querySelectorAll('[data-zone-fill="4711"]').length, 1);
+    const d = doc.querySelector('[data-zone-fill="4711"]')?.getAttribute('d') ?? '';
+    assert.equal((d.match(/Z/g) ?? []).length, 2, 'both triangles, one element');
+    assert.equal(doc.querySelector('[data-zone-fill="4711"]')?.getAttribute('fill-rule'), 'nonzero');
+  });
+
+  it('writes no fill for a zone whose rooms are on another storey', async () => {
+    const svg = await exportSvg(ZONES);
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+    assert.equal(doc.querySelector('[data-zone-fill="4712"]'), null);
+    assert.ok(doc.querySelector('[data-zone-outline="4712"]'), 'the line still stands');
   });
 
   it('writes no group at all when the zones are switched off', async () => {
