@@ -37,8 +37,9 @@ export interface PlanZoneOutlinesProps {
 export const ZONE_LINE_WEIGHT_M = 0.18;
 /** Screen pixels the line never goes below, so it survives a zoomed-out plan. */
 const MIN_PX = 3;
-/** What a zone with no colour of its own is drawn in. */
-const FALLBACK = '#dc2626';
+/** What a zone with no colour of its own is drawn in. Shared with the sheet
+ *  export so screen and paper cannot disagree about an unpainted zone. */
+export const ZONE_FALLBACK_COLOUR = '#dc2626';
 
 function project(
   p: Point2D,
@@ -60,7 +61,7 @@ export function PlanZoneOutlines({
   return (
     <svg className="absolute inset-0 h-full w-full pointer-events-none" data-plan-zone-outlines>
       {outlines.map((zone) => {
-        const colour = zone.colour ?? FALLBACK;
+        const colour = zone.colour ?? ZONE_FALLBACK_COLOUR;
         // One path per zone rather than one per segment: a boundary is one
         // thing, and the DOM ends up with tens of nodes instead of thousands.
         const d = zone.segments.map((seg) => {

@@ -1271,6 +1271,7 @@ export function PlanView({
     planLabels: planLabels.length > 0 ? planLabels : undefined,
     openingSymbols: planShowOpeningSymbols ? openingSymbols : undefined,
     deviceMarks: planShowDeviceMarks ? deviceMarks : undefined,
+    zoneOutlines: planShowZoneOutlines ? zoneOutlines : undefined,
     // A plan is not a sheet. Laying one out on paper is the 2D Section tool's
     // job and stays there, so the export writes the drawing itself.
     sheetEnabled: false, activeSheet: null,

@@ -11,6 +11,8 @@ import { labelVisible, type PlanLabel } from '@/lib/plan/roomLabels';
 import type { SymbolLine } from '@/lib/plan/openingSymbols';
 import { deviceMarkPaths, DEVICE_MARK_PAPER_MM, type DeviceMark } from '@/lib/plan/deviceSymbols';
 import { symbolDrawingFor, symbolEntryFor } from '@/lib/symbolCatalog/symbolCatalog';
+import type { PlanZoneOutline } from '@/hooks/usePlanZoneOutlines';
+import { ZONE_LINE_WEIGHT_M, ZONE_FALLBACK_COLOUR } from '@/components/viewer/PlanZoneOutlines';
 import { symbolFit, symbolGeometryOf } from '@/lib/symbolCatalog/symbolGeometry';
 import { useSymbolCatalog } from '@/lib/symbolCatalog/useSymbolCatalog';
 import { useActiveSymbolSet } from '@/hooks/useActiveSymbolSet';
@@ -56,6 +58,7 @@ import { titleBlockWithEffectiveScale } from '@/hooks/titleBlockScaleField';
 const EMPTY_PLAN_LABELS: readonly PlanLabel[] = [];
 const EMPTY_OPENING_SYMBOLS: readonly { readonly lines: readonly SymbolLine[] }[] = [];
 const EMPTY_DEVICE_MARKS: readonly DeviceMark[] = [];
+const EMPTY_ZONE_OUTLINES: readonly PlanZoneOutline[] = [];
 
 /** Map a DXF vertical justification onto an SVG dominant-baseline. */
 function dxfValignToBaseline(valign: 'baseline' | 'bottom' | 'middle' | 'top'): string {
@@ -339,6 +342,15 @@ interface UseDrawingExportParams {
    * take them from, and they are not in the cut to begin with.
    */
   deviceMarks?: readonly DeviceMark[];
+  /**
+   * Auslösezonen-Umrandungen, already in drawing space.
+   *
+   * The heaviest line on a fire plan, and the one the sheet is read for — a
+   * Feuerwehrlageplan without it is a floor plan. It was drawn on screen and
+   * nowhere else, so the file that leaves the building did not carry the thing
+   * it exists to show.
+   */
+  zoneOutlines?: readonly PlanZoneOutline[];
   sheetEnabled: boolean;
   activeSheet: DrawingSheet | null;
   /** DXF underlays pre-mapped to drawing space, rendered beneath the drawing (issue #1782) */
@@ -393,6 +405,7 @@ function useDrawingExport({
   planLabels = EMPTY_PLAN_LABELS,
   openingSymbols = EMPTY_OPENING_SYMBOLS,
   deviceMarks = EMPTY_DEVICE_MARKS,
+  zoneOutlines = EMPTY_ZONE_OUTLINES,
   sheetEnabled,
   activeSheet,
   dxfUnderlays,
@@ -696,6 +709,29 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     // assumed, so the line appears only when such a symbol is really on it.
     let symbolAttribution: string | null = null;
 
+    // Under the device marks and over the drawing: the boundary encloses the
+    // rooms, the symbols sit inside it. Its weight is a REAL 0.18 m, not a
+    // paper millimetre — it describes how far the zone reaches, so it has to
+    // grow and shrink with the building like a wall does.
+    if (zoneOutlines.length > 0) {
+      svg += '  <g id="zone-outlines">\n';
+      for (const zone of zoneOutlines) {
+        if (zone.segments.length === 0) continue;
+        const d = zone.segments.map((seg) => {
+          const ax = flipX ? -seg.a.x : seg.a.x;
+          const ay = flipY ? -seg.a.y : seg.a.y;
+          const bx = flipX ? -seg.b.x : seg.b.x;
+          const by = flipY ? -seg.b.y : seg.b.y;
+          return `M ${ax.toFixed(4)} ${ay.toFixed(4)} L ${bx.toFixed(4)} ${by.toFixed(4)}`;
+        }).join(' ');
+        svg += `    <path data-zone-outline="${zone.zoneId}" d="${d}" fill="none"`
+          + ` stroke="${escapeXml(zone.colour ?? ZONE_FALLBACK_COLOUR)}"`
+          + ` stroke-width="${ZONE_LINE_WEIGHT_M.toFixed(4)}" stroke-linecap="butt" opacity="0.85">`
+          + `<title>${escapeXml(zone.name || `Zone #${zone.zoneId}`)}</title></path>\n`;
+      }
+      svg += '  </g>\n';
+    }
+
     if (deviceMarks.length > 0) {
       const half = mmToModel(DEVICE_MARK_PAPER_MM) / 2;
       const weight = mmToModel(0.25);
@@ -959,7 +995,7 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
 
     svg += '</svg>';
     return svg;
-  }, [drawing, displayOptions, activePresetId, entityColorMap, overridesEnabled, overrideEngine, measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D, planLabels, openingSymbols, deviceMarks, symbolCatalog, symbolSet, sectionPlane.axis, dxfUnderlays, scanSection, viewRotation, ifcDataStore, storeModels]);
+  }, [drawing, displayOptions, activePresetId, entityColorMap, overridesEnabled, overrideEngine, measure2DResults, polygonArea2DResults, textAnnotations2D, cloudAnnotations2D, planLabels, openingSymbols, deviceMarks, zoneOutlines, symbolCatalog, symbolSet, sectionPlane.axis, dxfUnderlays, scanSection, viewRotation, ifcDataStore, storeModels]);
 
   // Generate SVG with drawing sheet (frame, title block, scale bar)
   // This generates coordinates directly in paper mm space (like the canvas rendering)
