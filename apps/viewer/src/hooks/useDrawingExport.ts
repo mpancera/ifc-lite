@@ -12,7 +12,7 @@ import type { SymbolLine } from '@/lib/plan/openingSymbols';
 import { deviceMarkPaths, DEVICE_MARK_PAPER_MM, type DeviceMark } from '@/lib/plan/deviceSymbols';
 import { symbolDrawingFor, symbolEntryFor } from '@/lib/symbolCatalog/symbolCatalog';
 import type { PlanZoneOutline } from '@/hooks/usePlanZoneOutlines';
-import { ZONE_LINE_WEIGHT_M, ZONE_FALLBACK_COLOUR } from '@/components/viewer/PlanZoneOutlines';
+import { fallbackColourFor } from '@/lib/zoneOutline/zoneLayers';
 import {
   trianglesToPathData, ZONE_FILL_OPACITY, ZONE_FILL_RULE,
 } from '@/lib/zoneOutline/zoneFill';
@@ -713,13 +713,15 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
     let symbolAttribution: string | null = null;
 
     // Under the device marks and over the drawing: the boundary encloses the
-    // rooms, the symbols sit inside it. Its weight is a REAL 0.18 m, not a
-    // paper millimetre — it describes how far the zone reaches, so it has to
-    // grow and shrink with the building like a wall does.
+    // rooms, the symbols sit inside it. Its weight is a REAL measure in metres,
+    // not a paper millimetre — it describes how far the zone reaches, so it has
+    // to grow and shrink with the building like a wall does. Each layer brings
+    // its own weight; a Brandabschnitt is drawn heavier than the detection
+    // zones inside it.
     if (zoneOutlines.length > 0) {
       svg += '  <g id="zone-outlines">\n';
       for (const zone of zoneOutlines) {
-        const colour = escapeXml(zone.colour ?? ZONE_FALLBACK_COLOUR);
+        const colour = escapeXml(zone.colour ?? fallbackColourFor(zone.themeId));
         // The tint first, so the line lies on top of its own zone.
         const fill = (zone.fills ?? [])
           .map((triangles) => trianglesToPathData(
@@ -742,9 +744,10 @@ ${rotDeg !== 0 ? `  <g id="plan-rotation" transform="rotate(${rotDeg.toFixed(6)}
           const by = flipY ? -seg.b.y : seg.b.y;
           return `M ${ax.toFixed(4)} ${ay.toFixed(4)} L ${bx.toFixed(4)} ${by.toFixed(4)}`;
         }).join(' ');
-        svg += `    <path data-zone-outline="${zone.zoneId}" d="${d}" fill="none"`
+        svg += `    <path data-zone-outline="${zone.zoneId}"`
+          + ` data-zone-theme="${escapeXml(zone.themeId)}" d="${d}" fill="none"`
           + ` stroke="${colour}"`
-          + ` stroke-width="${ZONE_LINE_WEIGHT_M.toFixed(4)}" stroke-linecap="butt" opacity="0.85">`
+          + ` stroke-width="${zone.weightM.toFixed(4)}" stroke-linecap="butt" opacity="0.85">`
           + `<title>${escapeXml(zone.name || `Zone #${zone.zoneId}`)}</title></path>\n`;
       }
       svg += '  </g>\n';

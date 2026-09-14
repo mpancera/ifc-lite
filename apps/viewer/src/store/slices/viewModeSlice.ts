@@ -138,6 +138,10 @@ export interface ViewModeSlice {
   planShowDeviceMarks: boolean;
   /** The FKS boundary around each Auslösezone. */
   planShowZoneOutlines: boolean;
+  /** The Brandabschnitt boundary — its own layer, heavier, and independent of
+   *  the detection zones: a compartment holds several of them, and a detection
+   *  zone may reach across compartments. */
+  planShowCompartments: boolean;
   /**
    * Suspend the active plan product's class filter, without leaving the
    * product.
@@ -160,6 +164,7 @@ export interface ViewModeSlice {
   setPlanShowDeviceMarks: (show: boolean) => void;
   setPlanProductClassFilterOff: (off: boolean) => void;
   setPlanShowZoneOutlines: (show: boolean) => void;
+  setPlanShowCompartments: (show: boolean) => void;
   setPlanRotation: (radians: number) => void;
   setPlanRotationPicking: (picking: boolean) => void;
   /**
@@ -188,6 +193,9 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   // Off by default: it is a fire-plan convention, not part of an
   // architectural drawing, and it is the heaviest line on the sheet.
   planShowZoneOutlines: false,
+  // Off for the same reason, and separately: a Feuerwehrlageplan wants both
+  // layers, an architectural plan neither, and a Meldeplan only the zones.
+  planShowCompartments: false,
 
   setViewMode: (viewMode) => {
     if (get().viewMode === viewMode) return;
@@ -251,6 +259,7 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   setPlanShowDeviceMarks: (planShowDeviceMarks) => set({ planShowDeviceMarks }),
   setPlanProductClassFilterOff: (planProductClassFilterOff) => set({ planProductClassFilterOff }),
   setPlanShowZoneOutlines: (planShowZoneOutlines) => set({ planShowZoneOutlines }),
+  setPlanShowCompartments: (planShowCompartments) => set({ planShowCompartments }),
 
   restorePlanRotationForProject: () => {
     const project = get().currentProjectKey();

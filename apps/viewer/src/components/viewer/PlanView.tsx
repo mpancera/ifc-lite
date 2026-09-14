@@ -102,6 +102,7 @@ import { pixelsPerMetreForScale, scaleDenominator } from '@/lib/plan/planChrome'
 import { usePlanOpeningSymbols } from '@/hooks/usePlanOpeningSymbols';
 import { usePlanDeviceMarks } from '@/hooks/usePlanDeviceMarks';
 import { usePlanZoneOutlines } from '@/hooks/usePlanZoneOutlines';
+import { COMPARTMENT_LAYER } from '@/lib/zoneOutline/zoneLayers';
 import { useDrawingColorKeys } from '@/hooks/useDrawingColorKeys';
 import { useModelOrigins } from '@/hooks/useModelOrigins';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
@@ -660,6 +661,8 @@ export function PlanView({
   // you had asked to see them would be useless.
   const planShowZoneOutlines = useViewerStore((s) => s.planShowZoneOutlines);
   const setPlanShowZoneOutlines = useViewerStore((s) => s.setPlanShowZoneOutlines);
+  const planShowCompartments = useViewerStore((s) => s.planShowCompartments);
+  const setPlanShowCompartments = useViewerStore((s) => s.setPlanShowCompartments);
   const zoneOutlines = usePlanZoneOutlines({
     enabled: active,
     geometryResult,
@@ -667,6 +670,24 @@ export function PlanView({
     modelId: storeyModelId,
     storeyId: storey?.expressId ?? null,
   });
+
+  /**
+   * Which boundary layers are actually drawn.
+   *
+   * The hook derives both whether or not they are switched on, because the
+   * layer menu reads the counts to decide whether a switch can be used at all.
+   * The filtering is here, where "shown" is decided.
+   */
+  const drawnZoneOutlines = useMemo(
+    () => zoneOutlines.filter((outline) => (outline.themeId === COMPARTMENT_LAYER.themeId
+      ? planShowCompartments
+      : planShowZoneOutlines)),
+    [zoneOutlines, planShowCompartments, planShowZoneOutlines],
+  );
+  const compartmentCount = useMemo(
+    () => zoneOutlines.filter((o) => o.themeId === COMPARTMENT_LAYER.themeId).length,
+    [zoneOutlines],
+  );
 
   // Room text and door tags are two layers, not one. They look alike and they
   // answer different questions: a room schedule wants the room text alone, a
@@ -1271,7 +1292,7 @@ export function PlanView({
     planLabels: planLabels.length > 0 ? planLabels : undefined,
     openingSymbols: planShowOpeningSymbols ? openingSymbols : undefined,
     deviceMarks: planShowDeviceMarks ? deviceMarks : undefined,
-    zoneOutlines: planShowZoneOutlines ? zoneOutlines : undefined,
+    zoneOutlines: drawnZoneOutlines.length > 0 ? drawnZoneOutlines : undefined,
     // A plan is not a sheet. Laying one out on paper is the 2D Section tool's
     // job and stays there, so the export writes the drawing itself.
     sheetEnabled: false, activeSheet: null,
@@ -1840,8 +1861,8 @@ export function PlanView({
       {/* The zone boundary goes under the text and over everything else: it is
           the heaviest line on a fire plan, and a room number sitting on top of
           it is still readable while the reverse is not. */}
-      {planShowZoneOutlines && (
-        <PlanZoneOutlines outlines={zoneOutlines} transform={planTransform} />
+      {drawnZoneOutlines.length > 0 && (
+        <PlanZoneOutlines outlines={drawnZoneOutlines} transform={planTransform} />
       )}
 
       {/* Door swings and window sashes go UNDER the room labels: both belong
@@ -2042,7 +2063,10 @@ export function PlanView({
           onToggleDoorLabels={() => setPlanShowDoorLabels(!planShowDoorLabels)}
           showZoneOutlines={planShowZoneOutlines}
           onToggleZoneOutlines={() => setPlanShowZoneOutlines(!planShowZoneOutlines)}
-          zoneOutlineCount={zoneOutlines.length}
+          zoneOutlineCount={zoneOutlines.length - compartmentCount}
+          showCompartments={planShowCompartments}
+          onToggleCompartments={() => setPlanShowCompartments(!planShowCompartments)}
+          compartmentCount={compartmentCount}
           showSpaceGraph={showSpaceGraph}
           onToggleSpaceGraph={() => setShowSpaceGraph(!showSpaceGraph)}
           graphNodeCount={spaceGraphView.nodes.length}

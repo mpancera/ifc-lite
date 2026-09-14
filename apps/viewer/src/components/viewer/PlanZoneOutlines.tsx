@@ -5,10 +5,16 @@
 /**
  * Zone boundaries, drawn over the plan the way a fire plan draws them.
  *
- * A heavy line around each Auslösezone, interrupted at every door and passage.
+ * A heavy line around each zone, interrupted at every door and passage.
  * Deliberately the heaviest thing on the drawing: it is the line the plan is
  * read for, and a fire officer finding it has to be able to follow it across a
  * page without tracing it with a finger.
+ *
+ * Several layers at once — Brandabschnitt and Meldezone are different lines
+ * and both belong on the sheet. Each carries its own weight and sits at its
+ * own inset (`lib/zoneOutline/zoneLayers.ts`), so they touch rather than
+ * overlap and a compartment that coincides with a detection zone still reads
+ * as two boundaries.
  *
  * # Thick in PAPER terms, not screen terms
  * Unlike the labels and the device marks, this one scales with the zoom. It
@@ -23,6 +29,9 @@ import type { PlanZoneOutline } from '@/hooks/usePlanZoneOutlines';
 import {
   trianglesToPathData, ZONE_FILL_OPACITY, ZONE_FILL_RULE,
 } from '@/lib/zoneOutline/zoneFill';
+import {
+  fallbackColourFor, ZONE_FALLBACK_COLOUR, ZONE_LINE_WEIGHT_M,
+} from '@/lib/zoneOutline/zoneLayers';
 
 export interface PlanZoneOutlinesProps {
   outlines: readonly PlanZoneOutline[];
@@ -30,19 +39,14 @@ export interface PlanZoneOutlinesProps {
   transform: { x: number; y: number; scale: number; rotation: number };
 }
 
-/**
- * Metres. The drawn weight of a zone boundary, before the zoom is applied.
- *
- * Exported because the GEOMETRY depends on it: the line is drawn inside the
- * compartment it encloses, so the outline is offset inward by half of this and
- * the two numbers have to be the same one.
- */
-export const ZONE_LINE_WEIGHT_M = 0.18;
 /** Screen pixels the line never goes below, so it survives a zoomed-out plan. */
 const MIN_PX = 3;
-/** What a zone with no colour of its own is drawn in. Shared with the sheet
- *  export so screen and paper cannot disagree about an unpainted zone. */
-export const ZONE_FALLBACK_COLOUR = '#dc2626';
+
+// Re-exported at their old names so the sheet export and everything else that
+// already imports them from here keeps working; they live in
+// `lib/zoneOutline/zoneLayers.ts` now, beside the stacking rule that depends
+// on them.
+export { ZONE_LINE_WEIGHT_M, ZONE_FALLBACK_COLOUR };
 
 function project(
   p: Point2D,
@@ -59,12 +63,12 @@ export function PlanZoneOutlines({
   outlines, transform,
 }: PlanZoneOutlinesProps): React.ReactElement | null {
   if (outlines.length === 0) return null;
-  const weight = Math.max(MIN_PX, ZONE_LINE_WEIGHT_M * transform.scale);
 
   return (
     <svg className="absolute inset-0 h-full w-full pointer-events-none" data-plan-zone-outlines>
       {outlines.map((zone) => {
-        const colour = zone.colour ?? ZONE_FALLBACK_COLOUR;
+        const colour = zone.colour ?? fallbackColourFor(zone.themeId);
+        const weight = Math.max(MIN_PX, zone.weightM * transform.scale);
         // One path per zone rather than one per segment: a boundary is one
         // thing, and the DOM ends up with tens of nodes instead of thousands.
         const d = zone.segments.map((seg) => {
@@ -84,7 +88,9 @@ export function PlanZoneOutlines({
           .join(' ');
 
         return (
-          <React.Fragment key={zone.zoneId}>
+          // Keyed by LAYER as well as zone: the same room grouping can be
+          // drawn on two layers, and a bare zone id would collide.
+          <React.Fragment key={`${zone.themeId}:${zone.zoneId}`}>
           {fill.length > 0 && (
             <path
               data-zone-fill={zone.zoneId}
@@ -97,6 +103,7 @@ export function PlanZoneOutlines({
           )}
           <path
             data-zone-outline={zone.zoneId}
+            data-zone-theme={zone.themeId}
             d={d}
             fill="none"
             stroke={colour}

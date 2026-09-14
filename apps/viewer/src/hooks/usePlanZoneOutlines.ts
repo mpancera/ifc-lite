@@ -16,12 +16,22 @@
  * case: a zone that came in with the file is exactly what a fire plan has to
  * show. Both sides are merged.
  *
- * # One theme at a time
- * A room is in one fire compartment AND one Auslösezone, and drawing both gives
- * two nearly identical lines a few centimetres apart. Which one is meant
- * follows the active installation: on Branddetektion it is the fire trigger
- * zone, on Gasdetektion the gas one. Off a discipline role it falls back to
- * fire, which is the one this feature was asked for.
+ * # Layers, not one theme
+ * A room is in one Brandabschnitt AND in one Meldezone, and the two do not
+ * coincide — see `lib/zoneOutline/zoneLayers.ts` for why they are drawn
+ * together and how they keep out of each other's way. Which DETECTION theme is
+ * meant still follows the active installation: on Branddetektion the fire
+ * trigger zone, on Gasdetektion the gas one.
+ *
+ * Every layer the MODEL has is computed, whether or not it is switched on:
+ * the toolbar reads these counts to decide whether a layer can be shown at
+ * all, so computing only the visible ones would disable the switch that turns
+ * them on. The caller filters by `themeId` for drawing.
+ *
+ * The nesting follows the model for the same reason it must not follow the
+ * switches: a boundary would otherwise move on the sheet because somebody
+ * toggled a different layer. A storey with no Brandabschnitt has nothing to
+ * nest behind, and its detection zones sit against the wall exactly as before.
  */
 
 import { useMemo } from 'react';
@@ -38,11 +48,22 @@ import {
   boundaryEdges, zoneOutline,
   type OutlineDoor, type OutlineSegment,
 } from '@/lib/zoneOutline/zoneOutline';
-import { ZONE_LINE_WEIGHT_M } from '@/components/viewer/PlanZoneOutlines';
+import {
+  COMPARTMENT_LAYER, FIRE_TRIGGER_LAYER, GAS_TRIGGER_LAYER,
+  layerInsets, type ZoneLayer,
+} from '@/lib/zoneOutline/zoneLayers';
+
+/** Shared, so a layer that does not tint allocates nothing per zone. */
+const EMPTY_FILLS: readonly Float32Array[] = [];
 
 export interface PlanZoneOutline {
   readonly zoneId: number;
   readonly name: string;
+  /** Which layer drew it — a theme id from `lib/ifcZones/themes.ts`. Decides
+   *  the drawn weight and the fallback colour, on screen and on the sheet. */
+  readonly themeId: string;
+  /** Metres. The drawn weight of THIS boundary, before any zoom. */
+  readonly weightM: number;
   /** `#RRGGBB` from the zone, or `null` — the plan then picks its own. */
   readonly colour: string | null;
   readonly segments: readonly OutlineSegment[];
@@ -52,6 +73,9 @@ export interface PlanZoneOutline {
    * The same triangles the outline was built from — they are already here, and
    * a second derivation would be a second chance for the fill and the boundary
    * to disagree about where the zone is.
+   *
+   * EMPTY for every layer but the innermost one drawn; see the tinting rule
+   * where it is filled in.
    */
   readonly fills: readonly Float32Array[];
 }
@@ -84,10 +108,19 @@ export function usePlanZoneOutlines({
     const parsed = parsedZonesOf(dataStore, RelationshipType.AssignsToGroup);
 
     const system = findDisciplineSystem(roleId);
-    const theme = system?.objectType === 'GasDetection' ? 'gas-trigger' : 'fire-trigger';
-    const zones = readZonesForDisplay(parsed, view ? readZones(authoredEntities(view)) : [])
-      .filter((zone) => themeOfZone(zone.objectType)?.id === theme);
-    if (zones.length === 0) return [];
+    const detection = system?.objectType === 'GasDetection' ? GAS_TRIGGER_LAYER : FIRE_TRIGGER_LAYER;
+
+    const all = readZonesForDisplay(parsed, view ? readZones(authoredEntities(view)) : []);
+    const has = (layer: ZoneLayer) =>
+      all.some((zone) => themeOfZone(zone.objectType)?.id === layer.themeId);
+    // Outermost first: the compartment encloses the detection zone, on the
+    // plan as in the building, and that order is what the insets stack along.
+    // A layer the model does not have is left OUT of the stack rather than
+    // reserved a place in it — otherwise a plan with no compartments would
+    // float its detection boundaries a compartment's width inside the wall.
+    const layers: ZoneLayer[] = [COMPARTMENT_LAYER, detection].filter(has);
+    if (layers.length === 0) return [];
+    const insets = layerInsets(layers);
 
     // Every door on the storey breaks any boundary it sits in — including a
     // door between two rooms of the same zone, whose wall is internal and
@@ -100,27 +133,39 @@ export function usePlanZoneOutlines({
     }
 
     const out: PlanZoneOutline[] = [];
-    for (const zone of zones) {
-      const rooms = zone.memberIds
-        .map((id) => graph.spaces.get(id))
-        .filter((space): space is NonNullable<typeof space> => space !== undefined)
-        .map((space) => ({
-          id: space.id,
-          triangles: space.triangles,
-          edges: boundaryEdges(space.triangles),
-        }));
-      // A zone whose rooms are all on another storey has nothing to draw here.
-      if (rooms.length === 0) continue;
-      out.push({
-        zoneId: zone.expressId,
-        name: zone.name,
-        colour: zone.colour,
-        // Half the drawn weight, so the line comes to rest against the wall
-        // face instead of straddling it — the fire-plan convention.
-        segments: zoneOutline(rooms, doors, { inset: ZONE_LINE_WEIGHT_M / 2 }),
-        fills: rooms.map((room) => room.triangles),
-      });
-    }
+    layers.forEach((layer, index) => {
+      for (const zone of all) {
+        if (themeOfZone(zone.objectType)?.id !== layer.themeId) continue;
+        const rooms = zone.memberIds
+          .map((id) => graph.spaces.get(id))
+          .filter((space): space is NonNullable<typeof space> => space !== undefined)
+          .map((space) => ({
+            id: space.id,
+            triangles: space.triangles,
+            edges: boundaryEdges(space.triangles),
+          }));
+        // A zone whose rooms are all on another storey has nothing to draw here.
+        if (rooms.length === 0) continue;
+        out.push({
+          zoneId: zone.expressId,
+          name: zone.name,
+          themeId: layer.themeId,
+          weightM: layer.weightM,
+          colour: zone.colour,
+          // Half this layer's weight plus everything outside it, so the line
+          // comes to rest ON its boundary rather than straddling it, and the
+          // layers touch instead of overlapping.
+          segments: zoneOutline(rooms, doors, { inset: insets[index] }),
+          // Only the INNERMOST layer tints. Two tints over one room is 32 % of
+          // two different hues, which reads as a third colour and hides the
+          // floor under it; and the finest subdivision on the sheet is the one
+          // the tint should be answering for. So the compartment fills when it
+          // is drawn alone, and drops to a line as soon as the detection zones
+          // subdivide it.
+          fills: index === layers.length - 1 ? rooms.map((room) => room.triangles) : EMPTY_FILLS,
+        });
+      }
+    });
     return out;
     // `mutationVersion` bumps whenever a room is painted into a zone, which is
     // the whole point: the line follows the brush.

@@ -65,6 +65,11 @@ export interface PlanToolbarProps {
   showZoneOutlines: boolean;
   onToggleZoneOutlines: () => void;
   zoneOutlineCount: number;
+  /** The Brandabschnitt boundary, a layer of its own: a compartment holds
+   *  several detection zones, and a detection zone may span compartments. */
+  showCompartments: boolean;
+  onToggleCompartments: () => void;
+  compartmentCount: number;
   /** How many rooms the graph found, for the tooltip. */
   graphNodeCount: number;
   /** How many rooms this storey actually has, for the tooltip. */
@@ -151,6 +156,7 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
     showDoorLabels, onToggleDoorLabels,
     showSpaceGraph, onToggleSpaceGraph, graphNodeCount,
     showZoneOutlines, onToggleZoneOutlines, zoneOutlineCount,
+    showCompartments, onToggleCompartments, compartmentCount,
     showOpeningSymbols, onToggleOpeningSymbols, openingCount, assumedLinings,
     wallMeasuredDepths, doorsWithSymbol,
     showDeviceMarks, onToggleDeviceMarks, deviceCount, deviceSymbolGap,
@@ -292,6 +298,16 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
             onToggle: onToggleZoneOutlines,
             unavailable: zoneOutlineCount === 0
               ? 'Auf diesem Geschoss liegt keine Auslösezone — unter Author → Zones anlegen'
+              : undefined,
+          },
+          {
+            id: 'compartments',
+            label: 'Brandabschnitte (Umrandung)',
+            count: compartmentCount,
+            visible: showCompartments,
+            onToggle: onToggleCompartments,
+            unavailable: compartmentCount === 0
+              ? 'Auf diesem Geschoss liegt kein Brandabschnitt — unter Author → Zones anlegen'
               : undefined,
           },
           {

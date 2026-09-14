@@ -26,6 +26,8 @@ const ZONES: PlanZoneOutline[] = [
   {
     zoneId: 4711,
     name: 'Auslösezone Nord',
+    themeId: 'fire-trigger',
+    weightM: 0.18,
     colour: '#1d4ed8',
     segments: [
       { a: { x: 0, y: 0 }, b: { x: 4, y: 0 } },
@@ -35,8 +37,14 @@ const ZONES: PlanZoneOutline[] = [
     fills: [new Float32Array([0, 0, 4, 0, 4, 3, 0, 0, 4, 3, 0, 3])],
   },
   // No colour of its own: screen and sheet must fall back to the same red.
-  { zoneId: 4712, name: 'Ohne Farbe', colour: null, fills: [],
+  { zoneId: 4712, name: 'Ohne Farbe', themeId: 'fire-trigger', weightM: 0.18,
+    colour: null, fills: [],
     segments: [{ a: { x: 0, y: 3 }, b: { x: 0, y: 0 } }] },
+  // A Brandabschnitt: its own layer, drawn heavier, with its own fallback
+  // colour so two unpainted layers do not merge into one red smear.
+  { zoneId: 4713, name: 'Brandabschnitt A', themeId: 'fire-compartment', weightM: 0.28,
+    colour: null, fills: [],
+    segments: [{ a: { x: 0, y: 0 }, b: { x: 0, y: 3 } }] },
 ];
 
 function buildDrawing(): Drawing2D {
@@ -121,7 +129,7 @@ describe('useDrawingExport — Auslösezonen on the exported sheet', () => {
     assert.equal(doc.querySelector('parsererror'), null, svg);
 
     const paths = [...doc.querySelectorAll('[data-zone-outline]')];
-    assert.deepEqual(paths.map((p) => p.getAttribute('data-zone-outline')), ['4711', '4712']);
+    assert.deepEqual(paths.map((p) => p.getAttribute('data-zone-outline')), ['4711', '4712', '4713']);
     assert.equal(paths[0].getAttribute('stroke'), '#1d4ed8');
   });
 
@@ -159,6 +167,20 @@ describe('useDrawingExport — Auslösezonen on the exported sheet', () => {
     assert.equal(fill?.getAttribute('fill'), '#1d4ed8');
     assert.ok(Number(fill?.getAttribute('fill-opacity')) <= 0.25);
     assert.equal(fill?.getAttribute('stroke'), 'none');
+  });
+
+  it('gives each layer its own weight and its own fallback colour', async () => {
+    // A Brandabschnitt and a Meldezone are different statements and both
+    // belong on the sheet. Drawn identically they read as one boundary drawn
+    // twice — the reason the plan used to show only one of them.
+    const svg = await exportSvg(ZONES);
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+    const compartment = doc.querySelector('[data-zone-outline="4713"]');
+
+    assert.equal(compartment?.getAttribute('data-zone-theme'), 'fire-compartment');
+    assert.equal(Number(compartment?.getAttribute('stroke-width')), 0.28);
+    // Not the detection zone's red: two unpainted layers must not merge.
+    assert.equal(compartment?.getAttribute('stroke'), '#1d4ed8');
   });
 
   it('paints the rooms as ONE path, or every shared edge shows as a seam', async () => {
