@@ -84,10 +84,10 @@ describe('prealignDxf', () => {
     expect(result.rotationDeg).toBeLessThanOrEqual(180);
   });
 
-  it('resolves the quarter turn from the shape of the plan', () => {
+  it('resolves the quarter turn by measuring what overlaps', () => {
     // An orthogonal building's direction histogram peaks every ninety
-    // degrees, so four angles fit it equally. Only the proportions tell them
-    // apart, which is why the fixture is an L and not a square.
+    // degrees, so four angles fit it equally. The winner is the one whose
+    // line work actually lands on the model's.
     const source = move(PLAN, 90, 1, 120, 40);
     const result = prealignDxf(source, PLAN);
 
@@ -95,6 +95,39 @@ describe('prealignDxf', () => {
     const want = bounds(PLAN.flat());
     near(got.maxX - got.minX, want.maxX - want.minX);
     near(got.maxY - got.minY, want.maxY - want.minY);
+    expect(result.fit).toBeGreaterThan(0.9);
+  });
+
+  it('resolves the HALF turn, which a bounding box cannot', () => {
+    // The failure this measure was built for. A plan and the same plan turned
+    // half around have identical boxes, and on the first real drawing the box
+    // proxy duly chose the wrong one — 171 degrees where 9 was meant.
+    const source = move(PLAN, 180, 1, -30, 60);
+    const result = prealignDxf(source, PLAN);
+
+    const got = placed(source, result);
+    // Corner for corner, not just the box: a half-turn passes a box check.
+    const want = PLAN.flat();
+    for (const p of want) {
+      const nearest = Math.min(...got.map((q) => Math.hypot(q.x - p.x, q.y - p.y)));
+      expect(nearest).toBeLessThan(0.5);
+    }
+  });
+
+  it('reports a poor fit for a drawing of somewhere else', () => {
+    // A plan of another storey has no candidate that fits. Saying so is worth
+    // more than turning it to the least bad angle and calling that aligned.
+    const elsewhere: Polyline[] = [
+      [{ x: 0, y: 0 }, { x: 6, y: 0 }],
+      [{ x: 6, y: 0 }, { x: 6, y: 34 }],
+      [{ x: 6, y: 34 }, { x: 0, y: 34 }],
+      [{ x: 0, y: 34 }, { x: 0, y: 0 }],
+      [{ x: 0, y: 17 }, { x: 6, y: 17 }],
+      [{ x: 3, y: 0 }, { x: 3, y: 34 }],
+    ];
+    const result = prealignDxf(elsewhere, PLAN);
+
+    expect(result.fit).toBeLessThan(0.6);
   });
 
   it('corrects a millimetre drawing', () => {

@@ -51,7 +51,7 @@ import { useDrawingExport } from '@/hooks/useDrawingExport';
 import type { CachedSheetTransform } from '@/lib/drawing/sheet-geometry-key';
 import { useSymbolicAnnotationsForDrawing, symbolicAnnotationsOverlayEnabled } from '@/hooks/useSymbolicAnnotations';
 import { useDxfUnderlaysForDrawing, useDxfMapToWorldTransform, dxfWorldShift, dxfUnderlayDrawingBounds } from '@/hooks/useDxfUnderlay';
-import { describePrealign, prealignUnderlay } from '@/hooks/dxfPrealign';
+import { describePrealign, prealignUnderlay, PREALIGN_MIN_FIT } from '@/hooks/dxfPrealign';
 import { useScanSectionLayer } from '@/hooks/useScanSectionLayer';
 
 interface Section2DPanelProps {
@@ -549,7 +549,7 @@ export function Section2DPanel({
       entry, drawing, shift, mirrorX,
       mapToWorld: dxfMapToWorld, georeferenceAvailable: dxfGeoreferenceAvailable,
     });
-    if (rough) {
+    if (rough && rough.fit >= PREALIGN_MIN_FIT) {
       updateDxfUnderlayPlacement(id, rough.placement);
       toast.success(describePrealign(rough));
       return;
@@ -583,6 +583,7 @@ export function Section2DPanel({
       return;
     }
     updateDxfUnderlayPlacement(id, { offsetX, offsetY });
+    if (rough) toast.info(describePrealign(rough));
   }, [dxfUnderlays, drawing, geometryResult, sectionPlane.flipped, sectionPlane.custom, updateDxfUnderlayPlacement, dxfMapToWorld, dxfGeoreferenceAvailable]);
 
   // Point-cloud scan overlay (issue #1805): a thin band of the loaded

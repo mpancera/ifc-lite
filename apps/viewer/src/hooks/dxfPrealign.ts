@@ -19,6 +19,14 @@ import type { Drawing2D } from '@ifc-lite/drawing-2d';
 import type { DxfUnderlayState } from '@/store/slices/drawing2DSlice';
 import { dxfUnderlayToDrawing } from './dxfUnderlayMath.js';
 
+/**
+ * Below this share of overlapping line work the estimate is not an alignment.
+ *
+ * Set where the message and the decision can both see it: the caller must not
+ * apply a placement this file would then describe as not fitting.
+ */
+export const PREALIGN_MIN_FIT = 0.35;
+
 export interface PrealignInput {
   entry: DxfUnderlayState;
   drawing: Drawing2D;
@@ -75,21 +83,33 @@ export function prealignUnderlay(input: PrealignInput): PrealignResult | null {
 /**
  * What to tell the user, in one line.
  *
+ * The FIT leads, because it is the one number that says whether this drawing
+ * belongs over this plan at all. A poor fit with a confident-sounding angle is
+ * the failure worth guarding against: the estimator turned a basement plan 171
+ * degrees over a ground-floor drawing and reported it as an alignment, which
+ * is how somebody ends up verifying rooms against the wrong storey.
+ *
  * The scale is named whenever it is not one, for the reason the two-point
  * solver names it: a factor absorbed in silence is a fact nobody learns. The
- * angle is named always, because it is the number they can check against the
- * drawing in front of them — and when the line work was too vague to read, the
- * sentence says the placement is only centred rather than letting a centring
- * pass for an alignment.
+ * angle is named always — it is the number they can check against the drawing
+ * in front of them.
  */
 export function describePrealign(result: PrealignResult): string {
+  const turn = `${result.rotationDeg.toFixed(2)}° gedreht`;
+  const scale = result.scale === 1
+    ? ''
+    : `, Massstab ${result.scale} — die Zeichnung war offenbar in anderen Einheiten`;
+
+  if (result.fit < PREALIGN_MIN_FIT) {
+    return `Die Zeichnung deckt sich nicht mit diesem Grundriss `
+      + `(nur ${Math.round(result.fit * 100)} % der Linien liegen auf). `
+      + `Stimmt das Geschoss? Sonst über Referenz- und Passlinie ausrichten.`;
+  }
   if (result.sharpness < 1.5) {
     return 'Nur zentriert — die Zeichnung gibt keine klare Richtung her. '
       + 'Über Referenz- und Passlinie ausrichten.';
   }
-  const turn = `Grob ausgerichtet: ${result.rotationDeg.toFixed(2)}° gedreht`;
-  const scale = result.scale === 1
-    ? ''
-    : `, Massstab ${result.scale} — die Zeichnung war offenbar in anderen Einheiten`;
-  return `${turn}${scale}. Feinschliff über Referenz- und Passlinie.`;
+  return `Grob ausgerichtet: ${turn}${scale}, `
+    + `${Math.round(result.fit * 100)} % der Linien liegen auf. `
+    + `Feinschliff über Referenz- und Passlinie.`;
 }

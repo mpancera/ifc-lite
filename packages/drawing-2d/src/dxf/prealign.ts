@@ -20,14 +20,19 @@
  * is which. Taken modulo 180 degrees, because a wall drawn left to right and
  * the same wall drawn right to left are one wall.
  *
- * That leaves a QUARTER-TURN ambiguity: an orthogonal building's histogram has
- * peaks every ninety degrees, so four candidates score alike. Two things tell
- * them apart. The bounding box settles the quarter — a turned drawing should
- * be as wide and as tall as the model. The half-turn survives that, because a
- * box is the same box upside down, and is settled by where the line work sits
- * INSIDE the box: an L-shaped plan has its weight off-centre, and a half-turn
- * puts it on the opposite side. A centrally symmetric plan defeats both, and
- * then the two-point line is the honest place for it.
+ * That leaves a quarter-turn ambiguity: an orthogonal building's histogram has
+ * peaks every ninety degrees, so four candidates score alike. They are told
+ * apart by MEASURING each one — centre it, then count how much of the drawing's
+ * line work lands on the model's. Proxies for that (does the bounding box have
+ * the right proportions, does the weight sit in the right corner) are cheaper
+ * and they are what this did first; they chose a half-turn on the first real
+ * drawing it met, because a box is the same box upside down and the weights of
+ * two different floors say nothing about each other. Counting what actually
+ * overlaps answers the question that was being asked all along.
+ *
+ * The same count says whether the drawing belongs here at all. A plan of
+ * another storey — or another building — has no candidate that fits, and
+ * reporting that is worth more than turning it to the least bad angle.
  *
  * # The scale is only guessed when it is grossly wrong
  *
@@ -57,6 +62,14 @@ export interface PrealignResult {
    * Below ~1.5 the rotation is a guess and the caller should say so.
    */
   sharpness: number;
+  /**
+   * The share of the drawing's line work that ended up on the model's, 0..1.
+   *
+   * The one number that says whether this drawing belongs over this plan. A
+   * plan of a different storey scores low at every angle, and the caller
+   * should say so rather than present the least bad turn as an alignment.
+   */
+  fit: number;
 }
 
 const BINS = 720;
@@ -116,49 +129,68 @@ function turned(lines: readonly Polyline[], rad: number, scale: number): Polylin
   })));
 }
 
-/**
- * How badly a turned drawing's box disagrees with the model's.
- *
- * Width and height SEPARATELY, and that is the whole point: a ratio of the
- * two — an aspect — is identical for a shape and the same shape turned a
- * quarter, which is precisely the ambiguity this has to resolve. Compared as
- * logarithms so a drawing that shows twice as much as the building is still
- * the right shape.
- */
-function boxMiss(b: { w: number; h: number }, want: { w: number; h: number }): number {
-  const safe = (v: number) => (v > 1e-9 ? v : 1e-9);
-  return Math.abs(Math.log(safe(b.w) / safe(want.w)))
-    + Math.abs(Math.log(safe(b.h) / safe(want.h)));
-}
-
-/**
- * Where the line work sits inside its own bounding box, as a fraction of it.
- *
- * This is what tells a plan from the same plan turned half around: their boxes
- * are identical, but an L has its weight in one corner and the turned L has it
- * in the opposite one. Length-weighted, for the same reason the histogram is.
- */
-function weightOffset(lines: readonly Polyline[]): { u: number; v: number } {
-  let sum = 0;
-  let cx = 0;
-  let cy = 0;
+/** Points along a polyline at roughly `step` apart, ends included. */
+function samplePoints(lines: readonly Polyline[], step: number, into: (x: number, y: number) => void): void {
   for (const line of lines) {
     for (let i = 0; i + 1 < line.length; i += 1) {
       const a = line[i];
       const b = line[i + 1];
       const length = Math.hypot(b.x - a.x, b.y - a.y);
-      if (length <= 0) continue;
-      sum += length;
-      cx += ((a.x + b.x) / 2) * length;
-      cy += ((a.y + b.y) / 2) * length;
+      const n = Math.max(1, Math.ceil(length / step));
+      for (let k = 0; k <= n; k += 1) {
+        into(a.x + ((b.x - a.x) * k) / n, a.y + ((b.y - a.y) * k) / n);
+      }
     }
   }
-  const box = boundsOf(lines);
-  if (sum <= 0 || !box) return { u: 0, v: 0 };
-  const safe = (v: number) => (v > 1e-9 ? v : 1e-9);
+}
+
+/**
+ * How much of `source` lies on `target`, as a share of the source, 0..1.
+ *
+ * A hash grid at the tolerance, so this stays linear in the number of sampled
+ * points — the drawings this runs on have tens of thousands of segments, and a
+ * pairwise comparison over four candidate angles would be minutes.
+ *
+ * Tolerance is half a metre. A drawn wall and the model's cut through the same
+ * wall differ by the thickness of a finish and by whatever the surveyor
+ * rounded to; asking for centimetres would score a correct alignment as a
+ * failure.
+ */
+function coverage(source: readonly Polyline[], target: readonly Polyline[], tol = 0.5): number {
+  const grid = new Set<string>();
+  samplePoints(target, tol / 2, (x, y) => {
+    grid.add(`${Math.round(x / tol)},${Math.round(y / tol)}`);
+  });
+  if (grid.size === 0) return 0;
+
+  let total = 0;
+  let hit = 0;
+  samplePoints(source, tol / 2, (x, y) => {
+    total += 1;
+    const gx = Math.round(x / tol);
+    const gy = Math.round(y / tol);
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        if (grid.has(`${gx + dx},${gy + dy}`)) {
+          hit += 1;
+          return;
+        }
+      }
+    }
+  });
+  return total > 0 ? hit / total : 0;
+}
+
+/** Move `lines` so their bounding box centre sits on `centre`. */
+function centredOn(lines: readonly Polyline[], centre: { cx: number; cy: number }): { lines: Polyline[]; dx: number; dy: number } {
+  const b = boundsOf(lines);
+  if (!b) return { lines: [...lines], dx: 0, dy: 0 };
+  const dx = centre.cx - b.cx;
+  const dy = centre.cy - b.cy;
   return {
-    u: (cx / sum - box.cx) / safe(box.w),
-    v: (cy / sum - box.cy) / safe(box.h),
+    lines: lines.map((line) => line.map((p) => ({ x: p.x + dx, y: p.y + dy }))),
+    dx,
+    dy,
   };
 }
 
@@ -200,6 +232,7 @@ export function prealignDxf(
     rotationDeg: 0,
     scale: 1,
     sharpness: 1,
+    fit: 0,
   };
   if (!sourceBounds || !targetBounds) return identity;
 
@@ -244,38 +277,37 @@ export function prealignDxf(
   const mean = total / BINS;
   const sharpness = mean > 0 ? best / mean : 1;
 
-  // Four quarter turns fit the histogram equally; the one whose bounding box
-  // has the model's proportions is the one meant.
+  // Four quarter turns fit the histogram equally. Each is MEASURED: turn the
+  // drawing, centre it, and count how much of its line work lands on the
+  // model's. Proxies for this — box proportions, where the weight sits — chose
+  // a half-turn on the first real drawing, because a box is the same box
+  // upside down.
   const base = (bestShift / BINS) * Math.PI;
-  const wantWeight = weightOffset(target);
   let bestRad = base;
-  let bestMiss = Infinity;
+  let bestFit = -1;
+  let bestShiftXY = { dx: 0, dy: 0 };
   for (let quarter = 0; quarter < 4; quarter += 1) {
     const rad = base + (quarter * Math.PI) / 2;
-    const rotated = turned(source, rad, scale);
-    const bounds = boundsOf(rotated);
-    if (!bounds) continue;
-    const weight = weightOffset(rotated);
-    // The box settles the quarter, the weight settles the half. Both are
-    // scale-free, so a drawing that shows more than the building still scores
-    // as the right shape.
-    const miss = boxMiss(bounds, targetBounds)
-      + Math.hypot(weight.u - wantWeight.u, weight.v - wantWeight.v)
-      + 1e-6 * quarter;
-    if (miss < bestMiss) {
-      bestMiss = miss;
+    const placedLines = centredOn(turned(source, rad, scale), targetBounds);
+    const fit = coverage(placedLines.lines, target);
+    if (fit > bestFit) {
+      bestFit = fit;
       bestRad = rad;
+      bestShiftXY = { dx: placedLines.dx, dy: placedLines.dy };
     }
   }
 
-  // `DxfPlacement.rotationDeg` turns CLOCKWISE (see `applyDxfPlacement`), and
-  // `bestRad` is the counter-clockwise angle that lays source on target. The
-  // sign is pinned by a round-trip test rather than argued for here.
-  //
-  // Normalised into (-180, 180]: the same turn either way, but "9.25" is a
-  // number somebody can check against a drawing and "-350.75" is not.
   let deg = (-(bestRad * 180) / Math.PI) % 360;
   if (deg > 180) deg -= 360;
   if (deg <= -180) deg += 360;
-  return centre({ placement: identity.placement, rotationDeg: deg, scale, sharpness });
+  // The offset the winning candidate was measured AT, not one recomputed
+  // afterwards: a second derivation is a second chance to disagree with the
+  // number the fit was scored on.
+  return {
+    placement: { offsetX: bestShiftXY.dx, offsetY: bestShiftXY.dy, rotationDeg: deg, scale },
+    rotationDeg: deg,
+    scale,
+    sharpness,
+    fit: bestFit,
+  };
 }

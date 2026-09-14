@@ -102,7 +102,7 @@ import { pixelsPerMetreForScale, scaleDenominator } from '@/lib/plan/planChrome'
 import { usePlanOpeningSymbols } from '@/hooks/usePlanOpeningSymbols';
 import { usePlanDeviceMarks } from '@/hooks/usePlanDeviceMarks';
 import { usePlanZoneOutlines } from '@/hooks/usePlanZoneOutlines';
-import { describePrealign, prealignUnderlay } from '@/hooks/dxfPrealign';
+import { describePrealign, prealignUnderlay, PREALIGN_MIN_FIT } from '@/hooks/dxfPrealign';
 import {
   COMPARTMENT_LAYER, FIRE_TRIGGER_LAYER, GAS_TRIGGER_LAYER,
 } from '@/lib/zoneOutline/zoneLayers';
@@ -1063,7 +1063,9 @@ export function PlanView({
     const shift = dxfWorldShift(geometryResult?.coordinateInfo);
 
     const rough = prealignUnderlay({ entry, drawing, shift, mirrorX: false });
-    if (rough) {
+    // A turn nobody can justify is worse than no turn: when the line work does
+    // not agree, centre it plainly so it comes into view and say why.
+    if (rough && rough.fit >= PREALIGN_MIN_FIT) {
       updateDxfUnderlayPlacement(id, rough.placement);
       toast.success(describePrealign(rough));
       return;
@@ -1076,6 +1078,9 @@ export function PlanView({
     const underlayCx = (bounds.min.x + bounds.max.x) / 2;
     const underlayCy = (bounds.min.y + bounds.max.y) / 2;
     updateDxfUnderlayPlacement(id, { offsetX: modelCx - underlayCx, offsetY: modelCy - underlayCy });
+    // Centred, and the reason it was only centred — otherwise the button does
+    // something different from last time and says nothing about why.
+    if (rough) toast.info(describePrealign(rough));
   }, [dxfUnderlays, drawing, geometryResult, updateDxfUnderlayPlacement]);
 
   // ── Correcting a door's OperationType ───────────────────────────────────
