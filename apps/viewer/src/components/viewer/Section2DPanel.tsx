@@ -34,6 +34,7 @@ import {
   alignmentStep, alignmentTarget, constrainToAxis,
 } from '@/lib/heights/alignmentSession';
 import { snapToUnderlay } from '@/lib/heights/underlaySnap';
+import { resolveAlignmentPick } from '@/lib/dxf/alignmentPick';
 import { applyDxfPlacement, inverseDxfPlacement } from '@ifc-lite/drawing-2d';
 import { ScanSectionPanel } from './ScanSectionPanel';
 import { SheetSetupPanel } from './SheetSetupPanel';
@@ -363,6 +364,17 @@ export function Section2DPanel({
   /** Where the cursor is while a line is half-drawn, for the rubber band. */
   const [alignmentCursor, setAlignmentCursor] = useState<{ x: number; y: number } | null>(null);
 
+  // DXF reference underlays mapped to drawing space (issue #1782): the hook
+  // applies the render-frame origin shift, the flipped-section mirror, and
+  // each underlay's placement. Plan sections only.
+  const dxfUnderlayData = useDxfUnderlaysForDrawing({
+    enabled: status === 'ready',
+    sectionAxis: sectionPlane.axis,
+    isCustomPlane: sectionPlane.custom !== undefined,
+    flipped: sectionPlane.flipped,
+    coordinateInfo: geometryResult?.coordinateInfo,
+  });
+
   /**
    * Snap a click to the drawing it belongs to.
    *
@@ -376,12 +388,11 @@ export function Section2DPanel({
   ): { x: number; y: number } | null => {
     if (target === 'reference') return measureHandlers.findSnapPoint(point);
 
-    const session = dxfAlignment;
-    const underlay = session && dxfUnderlays.find((u) => u.id === session.underlayId);
-    if (!underlay) return null;
-    // 10 screen pixels, the same feel as the measure tool's snap.
-    return snapToUnderlay(underlay, point, 10 / viewTransform.scale);
-  }, [measureHandlers, dxfAlignment, dxfUnderlays, viewTransform.scale]);
+    // 10 screen pixels, the same feel as the measure tool's snap. Against the
+    // DRAWN lines: see `snapToUnderlay`.
+    const drawn = dxfUnderlayData.find((u) => u.id === dxfAlignment?.underlayId);
+    return snapToUnderlay(drawn, point, 10 / viewTransform.scale);
+  }, [measureHandlers, dxfAlignment, dxfUnderlayData, viewTransform.scale]);
 
   /**
    * A stored fitting-line point in DRAWING space.
@@ -419,37 +430,29 @@ export function Section2DPanel({
     // and letting a pan or a selection through would make the picks depend on
     // which tool happened to be active.
     if (dxfAlignment) {
-      const step = alignmentStep(dxfAlignment);
-      if (step.kind !== 'ready') {
-        const rect = containerRef.current?.getBoundingClientRect();
-        if (rect) {
-          const raw = measureHandlers.screenToDrawing(
-            e.clientX - rect.left, e.clientY - rect.top,
-          );
-          // Snapped against whichever drawing the click belongs to — the model
-          // for the reference line, the plan for the fitting line. Snapping to
-          // the wrong drawing would quietly move the point onto the geometry
-          // being aligned AGAINST.
-          const line = step.target === 'reference' ? dxfAlignment.reference : dxfAlignment.fit;
-          const anchor = step.target === 'fit' && line?.start
-            ? placedFitPoint(line.start)
-            : line?.start ?? null;
-          const point = e.shiftKey && step.kind === 'end' && anchor
-            ? constrainToAxis(anchor, raw)
-            : snapForAlignment(raw, step.target) ?? raw;
-
-          if (step.target === 'fit') {
-            // Recorded in the underlay's OWN coordinates, so re-aligning a
-            // plan that was already moved replaces its placement rather than
-            // compounding the two.
-            const underlay = dxfUnderlays.find((u) => u.id === dxfAlignment.underlayId);
-            const local = underlay ? inverseDxfPlacement(point, underlay.placement) : point;
-            if (local) addDxfAlignmentPick(local);
-            else toast.error('Der Massstab dieser Unterlage lässt sich nicht umkehren.');
-          } else {
-            addDxfAlignmentPick(point);
-          }
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (rect) {
+        // The rules live in `lib/dxf/alignmentPick` because the plan view
+        // needs the same ones — which drawing each line snaps to, which
+        // coordinates a fitting point is recorded in, when shift constrains.
+        const pick = resolveAlignmentPick({
+          session: dxfAlignment,
+          raw: measureHandlers.screenToDrawing(e.clientX - rect.left, e.clientY - rect.top),
+          shiftKey: e.shiftKey,
+          placement: dxfUnderlays.find((u) => u.id === dxfAlignment.underlayId)?.placement,
+          snapModel: (p) => measureHandlers.findSnapPoint(p),
+          snapUnderlay: (p) => snapForAlignment(p, 'fit'),
+          constrainToAxis,
+        });
+        if (pick.kind === 'not-invertible') {
+          toast.error('Der Massstab dieser Unterlage lässt sich nicht umkehren.');
+          return;
         }
+        if (pick.kind === 'pick') {
+          addDxfAlignmentPick(pick.point);
+          return;
+        }
+      } else if (alignmentStep(dxfAlignment).kind !== 'ready') {
         return;
       }
     }
@@ -519,17 +522,6 @@ export function Section2DPanel({
   const handleDoubleClick = useCallback((e: React.MouseEvent) => {
     annotationHandlers.handleDoubleClick(e);
   }, [annotationHandlers]);
-
-  // DXF reference underlays mapped to drawing space (issue #1782): the hook
-  // applies the render-frame origin shift, the flipped-section mirror, and
-  // each underlay's placement. Plan sections only.
-  const dxfUnderlayData = useDxfUnderlaysForDrawing({
-    enabled: status === 'ready',
-    sectionAxis: sectionPlane.axis,
-    isCustomPlane: sectionPlane.custom !== undefined,
-    flipped: sectionPlane.flipped,
-    coordinateInfo: geometryResult?.coordinateInfo,
-  });
 
   // Centre an underlay on the generated drawing: offset = model-drawing
   // centre − underlay centre at zero offset (same world→drawing mapping

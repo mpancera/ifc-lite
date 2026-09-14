@@ -145,9 +145,14 @@ export async function ingestDxfFile(file: File): Promise<void> {
     : '';
   const georefNote = georeference ? ', aligned to the model georeference' : '';
   if (store.models.size > 0) {
-    // Surface the result immediately: the underlay renders in the 2D
-    // drawing panel, so open it (the user still picks/moves the section).
-    store.setDrawing2DPanelVisible(true);
+    // Surface the result immediately: the underlay renders in the 2D drawing
+    // panel, so open it (the user still picks/moves the section).
+    //
+    // Unless the plan view is already open, which draws underlays itself and
+    // has its own DXF panel. Opening the section window there put a second,
+    // smaller copy of the same drawing on top of the one being worked on —
+    // a window the user then has to find and close (Marc, 2026-09-15).
+    if (store.viewMode !== '2d') store.setDrawing2DPanelVisible(true);
     toast.success(
       `"${file.name}" imported as reference layer: ${count} elements on ${layerCount} layer${layerCount === 1 ? '' : 's'}${unitsNote}${georefNote}.`,
     );

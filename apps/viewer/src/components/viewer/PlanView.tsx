@@ -103,6 +103,10 @@ import { usePlanOpeningSymbols } from '@/hooks/usePlanOpeningSymbols';
 import { usePlanDeviceMarks } from '@/hooks/usePlanDeviceMarks';
 import { usePlanZoneOutlines } from '@/hooks/usePlanZoneOutlines';
 import { describePrealign, prealignUnderlay, PREALIGN_MIN_FIT } from '@/hooks/dxfPrealign';
+import { applyDxfPlacement } from '@ifc-lite/drawing-2d';
+import { resolveAlignmentPick } from '@/lib/dxf/alignmentPick';
+import { alignmentStep, alignmentTarget, constrainToAxis } from '@/lib/heights/alignmentSession';
+import { snapToUnderlay } from '@/lib/heights/underlaySnap';
 import {
   COMPARTMENT_LAYER, FIRE_TRIGGER_LAYER, GAS_TRIGGER_LAYER,
 } from '@/lib/zoneOutline/zoneLayers';
@@ -1399,6 +1403,109 @@ export function PlanView({
     return measureHandlers.findSnapPoint(p) ?? p;
   }, [measureHandlers]);
 
+  // ── Aligning a DXF underlay, from the plan ──────────────────────────────
+  //
+  // The panel offered "Referenzlinie bearbeiten" here long before the canvas
+  // could answer it: the picking lived only in the 2D Section window, so the
+  // buttons armed a session, no snap marker appeared, and the click fell
+  // through to selecting a room (Marc, 2026-09-15).
+  const dxfAlignment = useViewerStore((s) => s.dxfAlignment);
+  const addDxfAlignmentPick = useViewerStore((s) => s.addDxfAlignmentPick);
+  /** Where the cursor is while a line is being drawn, in drawing space. */
+  const [alignmentCursor, setAlignmentCursor] = useState<Point2D | null>(null);
+  const alignedUnderlay = useMemo(
+    () => (dxfAlignment ? dxfUnderlays.find((u) => u.id === dxfAlignment.underlayId) : undefined),
+    [dxfAlignment, dxfUnderlays],
+  );
+
+  /**
+   * Ten screen pixels of catch, the same feel as the measure tool's snap.
+   *
+   * Against the DRAWN lines, not the stored underlay: only the drawn ones have
+   * been through the render frame, and a target that has not is displaced by
+   * the model's origin shift.
+   */
+  const snapUnderlay = useCallback((p: Point2D): Point2D | null => {
+    const drawn = dxfUnderlayData.find((u) => u.id === dxfAlignment?.underlayId);
+    return snapToUnderlay(drawn, p, 10 / planTransform.scale);
+  }, [dxfUnderlayData, dxfAlignment, planTransform.scale]);
+
+  /**
+   * Shove the underlay aside with Alt and a drag.
+   *
+   * Typing an offset is fine for a number somebody already knows and useless
+   * for "put that over there so I can see underneath" (Marc, 2026-09-15). The
+   * drag is Alt because every unmodified button on this canvas already means
+   * something — left selects, right pans — and taking one of those away to
+   * move a reference layer would be a poor trade.
+   *
+   * Which underlay: the one being aligned if a session is running, else the
+   * first visible one. A pile of underlays is rare and the panel's own offset
+   * fields remain the exact way to address a particular one.
+   */
+  const underlayDragRef = useRef<{ id: string; from: Point2D; offset: { x: number; y: number } } | null>(null);
+  const draggableUnderlay = useMemo(() => (
+    dxfUnderlays.find((u) => u.id === dxfAlignment?.underlayId)
+    ?? dxfUnderlays.find((u) => u.visible)
+  ), [dxfUnderlays, dxfAlignment]);
+
+  const takeUnderlayDrag = useCallback((e: React.MouseEvent): boolean => {
+    if (!e.altKey || !draggableUnderlay) return false;
+    const container = containerRef.current;
+    if (!container) return false;
+    const rect = container.getBoundingClientRect();
+    underlayDragRef.current = {
+      id: draggableUnderlay.id,
+      from: planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, planTransform),
+      offset: {
+        x: draggableUnderlay.placement.offsetX,
+        y: draggableUnderlay.placement.offsetY,
+      },
+    };
+    return true;
+  }, [draggableUnderlay, planTransform]);
+
+  /** Drag in DRAWING units, so a zoomed-out plan does not fly across the page. */
+  const continueUnderlayDrag = useCallback((e: React.MouseEvent): boolean => {
+    const drag = underlayDragRef.current;
+    if (!drag) return false;
+    const container = containerRef.current;
+    if (!container) return true;
+    const rect = container.getBoundingClientRect();
+    const now = planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, planTransform);
+    updateDxfUnderlayPlacement(drag.id, {
+      offsetX: drag.offset.x + (now.x - drag.from.x),
+      offsetY: drag.offset.y + (now.y - drag.from.y),
+    });
+    return true;
+  }, [planTransform, updateDxfUnderlayPlacement]);
+
+  const takeAlignmentClick = useCallback((clientX: number, clientY: number, shiftKey: boolean): boolean => {
+    if (!dxfAlignment) return false;
+    const container = containerRef.current;
+    if (!container) return true;
+    const rect = container.getBoundingClientRect();
+    const raw = planScreenToDrawing(clientX - rect.left, clientY - rect.top, planTransform);
+    const pick = resolveAlignmentPick({
+      session: dxfAlignment,
+      raw,
+      shiftKey,
+      placement: alignedUnderlay?.placement,
+      snapModel: (q: Point2D) => measureHandlers.findSnapPoint(q),
+      snapUnderlay,
+      constrainToAxis,
+    });
+    // A finished session still swallows the click: the only thing left to do
+    // is press Übernehmen, and a stray selection behind the dialog is noise.
+    if (pick.kind === 'done') return true;
+    if (pick.kind === 'not-invertible') {
+      toast.error('Der Massstab dieser Unterlage lässt sich nicht umkehren.');
+      return true;
+    }
+    addDxfAlignmentPick(pick.point);
+    return true;
+  }, [dxfAlignment, alignedUnderlay, planTransform, measureHandlers, snapUnderlay, addDxfAlignmentPick]);
+
   /**
    * Lay the finished line onto `targetDeg`.
    *
@@ -1461,6 +1568,13 @@ export function PlanView({
     if (e.button === 2) { panRef.current = { x: e.clientX, y: e.clientY }; return; }
     if (e.button !== 0) return;
 
+    // Alt and a drag moves the reference plan, not the selection.
+    if (takeUnderlayDrag(e)) { pressRef.current = null; return; }
+
+    // An alignment session takes the click before anything else, for the same
+    // reason the rotation below does.
+    if (takeAlignmentClick(e.clientX, e.clientY, e.shiftKey)) return;
+
     // An armed rotation takes the click outright: while it is running the only
     // meaningful thing to do on the canvas is draw the reference line, and
     // letting a selection through would make the result depend on what the
@@ -1494,19 +1608,36 @@ export function PlanView({
     // dragged; only if the click misses one does it become a model selection.
     if (annotationHandlers.handleMouseDown(e)) return;
     pressRef.current = { x: e.clientX, y: e.clientY };
-  }, [annotating, annotation2DActiveTool, measureHandlers, annotationHandlers, planRotationPicking, planTransform, rotationStart, rotationLine, snapPoint]);
+  }, [annotating, annotation2DActiveTool, measureHandlers, annotationHandlers, planRotationPicking,
+    planTransform, rotationStart, rotationLine, snapPoint, takeAlignmentClick, takeUnderlayDrag]);
 
   // Where the cursor is, in drawing units — only tracked while placing, since
   // that is the only thing that needs to redraw on every mouse move.
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    if (continueUnderlayDrag(e)) return;
     const from = panRef.current;
     if (from) {
       const dx = e.clientX - from.x;
       const dy = e.clientY - from.y;
       panRef.current = { x: e.clientX, y: e.clientY };
       setViewTransform((prev) => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+      return;
+    }
+    if (dxfAlignment) {
+      const container = containerRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      const raw = planScreenToDrawing(e.clientX - rect.left, e.clientY - rect.top, planTransform);
+      // Snapped BEFORE it is shown, and against the SAME drawing the click
+      // will use — a preview that catches something the click would not is
+      // worse than no preview.
+      const step = alignmentStep(dxfAlignment);
+      const snapped = step.kind === 'ready'
+        ? null
+        : (step.target === 'reference' ? measureHandlers.findSnapPoint(raw) : snapUnderlay(raw));
+      setAlignmentCursor(snapped ?? raw);
       return;
     }
     if (planRotationPicking && !rotationLine) {
@@ -1566,6 +1697,9 @@ export function PlanView({
 
   const handleMouseUp = useCallback((e: React.MouseEvent) => {
     panRef.current = null;
+    // A finished underlay drag consumes the release too: without this the
+    // press that started it would be read as a click and select a room.
+    if (underlayDragRef.current) { underlayDragRef.current = null; return; }
     // The rotation gesture is click-to-click, so a release does nothing.
     if (planRotationPicking) return;
     if (annotating || annotationHandlers.isDraggingRef.current) {
@@ -1590,6 +1724,7 @@ export function PlanView({
   const handleMouseLeave = useCallback(() => {
     panRef.current = null;
     pressRef.current = null;
+    underlayDragRef.current = null;
     setCursor(null);
     measureHandlers.handleMouseLeave();
   }, [measureHandlers]);
@@ -1985,6 +2120,58 @@ export function PlanView({
             {b && !rotationLine && (
               <rect x={b.x - 4} y={b.y - 4} width={8} height={8}
                     className="fill-none stroke-sky-500" strokeWidth={1.5} />
+            )}
+          </svg>
+        );
+      })()}
+
+      {/* The alignment lines, while they are being drawn. Same shapes as the
+          rotation preview above — a round dot for a placed point, a square for
+          what the cursor has caught — so the two read alike. */}
+      {dxfAlignment && (() => {
+        const toScreen = (p: Point2D) => {
+          const sx = p.x * viewTransform.scale;
+          const sy = p.y * viewTransform.scale;
+          const c = Math.cos(planRotation);
+          const sn = Math.sin(planRotation);
+          return { x: sx * c - sy * sn + viewTransform.x, y: sx * sn + sy * c + viewTransform.y };
+        };
+        // A fitting-line point is stored in the underlay's own coordinates and
+        // has to be placed before it can be drawn beside the model's.
+        const place = (p: Point2D | null | undefined) => (
+          p && alignedUnderlay ? applyDxfPlacement(p, alignedUnderlay.placement) : p ?? null
+        );
+        const lines: Array<{ a: Point2D | null; b: Point2D | null; live: boolean }> = [
+          { a: dxfAlignment.reference?.start ?? null, b: dxfAlignment.reference?.end ?? null, live: false },
+          { a: place(dxfAlignment.fit?.start), b: place(dxfAlignment.fit?.end), live: false },
+        ];
+        const active = alignmentTarget(dxfAlignment);
+        const pending = active === 'fit'
+          ? place(dxfAlignment.fit?.start)
+          : dxfAlignment.reference?.start ?? null;
+        if (pending && !(active === 'fit' ? dxfAlignment.fit?.end : dxfAlignment.reference?.end)) {
+          lines.push({ a: pending, b: alignmentCursor, live: true });
+        }
+        const cursor = alignmentCursor ? toScreen(alignmentCursor) : null;
+        return (
+          <svg className="absolute inset-0 h-full w-full pointer-events-none" data-plan-dxf-alignment>
+            {lines.map((l, i) => {
+              const a = l.a ? toScreen(l.a) : null;
+              const b = l.b ? toScreen(l.b) : null;
+              return (
+                <React.Fragment key={i}>
+                  {a && b && (
+                    <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="stroke-violet-500"
+                          strokeWidth={1.5} strokeDasharray={l.live ? '5 3' : undefined} />
+                  )}
+                  {a && <circle cx={a.x} cy={a.y} r={3.5} className="fill-violet-500" />}
+                  {b && !l.live && <circle cx={b.x} cy={b.y} r={3.5} className="fill-violet-500" />}
+                </React.Fragment>
+              );
+            })}
+            {cursor && (
+              <rect x={cursor.x - 4} y={cursor.y - 4} width={8} height={8}
+                    className="fill-none stroke-violet-500" strokeWidth={1.5} />
             )}
           </svg>
         );

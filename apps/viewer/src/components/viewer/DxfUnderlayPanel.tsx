@@ -480,6 +480,12 @@ function UnderlayCard({
           </button>
         </CollapsibleTrigger>
         <CollapsibleContent>
+          {/* Discoverability: a modifier nobody is told about is a modifier
+              nobody uses, and these fields are the slow way to do what the
+              drag does. */}
+          <p className="pl-2 pr-1 pt-1 text-[10px] leading-snug text-muted-foreground">
+            Im Grundriss verschiebt <kbd className="font-mono">Alt</kbd> + Ziehen den Plan.
+          </p>
           <div className="grid grid-cols-2 gap-1.5 pl-2 pr-1 pt-1">
             <PlacementField
               label="Offset X (m)"
