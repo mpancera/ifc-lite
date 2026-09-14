@@ -47,6 +47,8 @@ export interface InterpretStats {
   symbols: number;
   doors: number;
   columns: number;
+  /** Walls paired from double lines (stage C4); absent when the caller did not run it. */
+  walls?: number;
   /** Closed loops that were looked at but did not become a space, and why. */
   rejected: Array<{ reason: 'narrow' | 'small'; handle: string }>;
 }

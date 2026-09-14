@@ -78,6 +78,7 @@ export {
   type InterpretStats,
 } from './interpret/interpret.js';
 export { spacesFromLoops, addTopologySpaces, dxfLabels, type Loop, type Label } from './interpret/interpret.js';
+export { wallsFromDoubleLines, type WallStroke, type WallOptions, type WallResult } from './interpret/walls.js';
 export { parseLabel, type LabelKind, type ParsedLabel } from './interpret/labels.js';
 export {
   findEnclosedAreas,
