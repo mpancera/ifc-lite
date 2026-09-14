@@ -319,22 +319,25 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
       }
       if (!wroteTo) {
         for (const file of named) downloadFile(file.content, file.name, file.mime);
-      } else {
-        toast.success(`${named[0].name} in „${wroteTo}“ gespeichert`);
       }
 
       setExportStatus('success');
       setTimeout(() => setExportStatus('idle'), 2000);
 
+      // ONE message, and it says WHERE. Two toasts used to report the same
+      // export — one naming the file, one naming the folder — and the download
+      // case named no place at all, which leaves "where did it go" to be
+      // answered by hunting. That hunt is what sends somebody back into a
+      // folder of four versions to open the wrong one.
       const exportedChanges = files.reduce((n, f) => n + f.changeCount, 0);
+      const where = wroteTo ? `„${wroteTo}“` : 'den Download-Ordner';
+      const what = files.length === 1 ? named[0].name : `${files.length} Modelle`;
       if (skipped.length > 0) {
         toast.info(
-          `Exported ${files.length} of ${files.length + skipped.length} models — ${skipped.length} skipped (${skipped[0].reason})`,
+          `${what} nach ${where} — ${skipped.length} von ${files.length + skipped.length} übersprungen (${skipped[0].reason})`,
         );
-      } else if (files.length === 1) {
-        toast.success(`Exported ${files[0].base}.${files[0].ext} (${exportedChanges} changes)`);
       } else {
-        toast.success(`Exported ${files.length} models (${exportedChanges} changes)`);
+        toast.success(`${what} nach ${where} · ${exportedChanges} Änderung${exportedChanges === 1 ? '' : 'en'}`);
       }
     } catch (error) {
       console.error('[ExportChangesButton] Export failed:', error);
