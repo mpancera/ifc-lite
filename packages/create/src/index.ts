@@ -101,6 +101,12 @@ export {
   type SpatialZoneType,
 } from './in-store/spatial-zone.js';
 export {
+  addCompartmentZoneToStore,
+  type CompartmentPart,
+  type CompartmentZoneParams,
+  type CompartmentZoneResult,
+} from './in-store/compartment-zone.js';
+export {
   applyStylesInStore,
   collectLeafRepresentationItems,
   type ApplyStyleOptions,

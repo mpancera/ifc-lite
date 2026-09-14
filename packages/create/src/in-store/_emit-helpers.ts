@@ -142,13 +142,21 @@ export function emitExtrudedSolid(editor: StoreEditor, profileId: number, depth:
 export function emitBodyRepresentation(
   editor: StoreEditor,
   bodyContextId: number,
-  solidId: number,
+  solidId: number | readonly number[],
 ): { shapeRepId: number; productShapeId: number } {
+  // `Items` is a SET in the schema, and a body legitimately holds more than
+  // one solid — a fire compartment is the rooms it encloses, which is several
+  // prisms and not one. Every existing caller passes a single id and is
+  // unaffected.
+  const solidIds = typeof solidId === 'number' ? [solidId] : solidId;
+  if (solidIds.length === 0) {
+    throw new Error('emitBodyRepresentation: a body needs at least one solid');
+  }
   const shapeRepId = editor.addEntity('IfcShapeRepresentation', [
     `#${bodyContextId}`,
     'Body',
     'SweptSolid',
-    [`#${solidId}`],
+    solidIds.map((id) => `#${id}`),
   ]).expressId;
   const productShapeId = editor.addEntity('IfcProductDefinitionShape', [
     null,
