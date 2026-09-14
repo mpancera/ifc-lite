@@ -21,7 +21,9 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Brush, Check, MousePointerSquareDashed, Palette, Pencil, Plus, Trash2, X } from 'lucide-react';
+import {
+  Boxes, Brush, Check, MousePointerSquareDashed, Palette, Pencil, Plus, Trash2, X,
+} from 'lucide-react';
 import { LENS_PALETTE } from '@ifc-lite/lens';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -38,6 +40,8 @@ import {
 import type { ZoneInfo } from '@/lib/ifcZones/membership';
 import { useSelectedEntityRefs } from '@/hooks/useSelectedEntityRefs';
 import { useZoneRoster } from '@/hooks/useZoneRoster';
+import { useDeriveCompartments } from '@/hooks/useDeriveCompartments';
+import { deriveRefusalText } from '@/lib/fireSafety/deriveCompartments';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import { formatArea } from '@/lib/ifcZones/roster';
 import {
@@ -75,6 +79,7 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
   const deleteIfcZone = useViewerStore((s) => s.deleteIfcZone);
   const paintIfcZone = useViewerStore((s) => s.paintIfcZone);
   const setIfcZoneRequirement = useViewerStore((s) => s.setIfcZoneRequirement);
+  const deriveCompartments = useDeriveCompartments();
 
   // The brush below reacts to the PRIMARY pick alone — one click, one room.
   const selectedEntity = useViewerStore((s) => s.selectedEntity);
@@ -193,6 +198,38 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
     store.addEntitiesToSelection(expressIds.map((id) => ({ modelId: activeModelId, expressId: id })));
     setNote(said);
   }, [activeModelId]);
+
+  /**
+   * "Was bisher der Leuchtstift auf dem PDF war" — the body follows from the
+   * assignment rather than being drawn a second time by hand, which is what
+   * keeps the two from disagreeing.
+   */
+  const derive = useCallback(() => {
+    if (!activeModelId) return;
+    const result = deriveCompartments(activeModelId, 'fire-compartment');
+    if (result.blocked === 'collab-role') {
+      setNote('Deine Rolle in dieser Sitzung ist nur lesend.');
+      return;
+    }
+    if (result.blocked === 'no-model' || result.blocked === 'no-zones') {
+      setNote('Kein Brandabschnitt in diesem Modell.');
+      return;
+    }
+    if (result.refusal) {
+      setNote(deriveRefusalText(result.refusal, result.modelName));
+      return;
+    }
+    const built = result.outcomes.filter((o) => o.zoneId !== null);
+    const skipped = result.outcomes.reduce((sum, o) => sum + o.skipped, 0);
+    const empty = result.outcomes.filter((o) => o.zoneId === null);
+    const parts = [`${built.length} Körper aus ${built.reduce((sum, o) => sum + o.bodies, 0)} Räumen`];
+    if (result.replaced > 0) parts.push(`${result.replaced} aus einem früheren Lauf ersetzt`);
+    // Named rather than folded into a count: a room with no geometry is a
+    // fact about the model that somebody has to act on.
+    if (skipped > 0) parts.push(`${skipped} Raum/Räume ohne brauchbare Geometrie übersprungen`);
+    if (empty.length > 0) parts.push(`${empty.map((o) => o.name).join(', ')} ohne Körper`);
+    setNote(parts.join(' · '));
+  }, [activeModelId, deriveCompartments]);
 
   const typeOf = useCallback((modelId: string, expressId: number): string | null => {
     const view = mutationViews.get(modelId);
@@ -600,6 +637,25 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
           </ul>
         )}
       </ScrollArea>
+
+      {/* Derive the bodies. Only for the Brandabschnitt: it is the theme whose
+          zone IS a body in IFC, and the one the exchange requirement checks
+          for. Next to the completeness line because that is the question you
+          answer before pressing it. */}
+      {colourTheme === 'fire-compartment' && roster.rows.length > 0 && (
+        <div className="border-t px-3 py-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 w-full text-[11px]"
+            title="Aus den zugewiesenen Räumen je Brandabschnitt einen IfcSpatialZone-Körper ableiten — ein Prisma je Raum, die Anforderungen wandern mit"
+            onClick={derive}
+          >
+            <Boxes className="mr-1 h-3.5 w-3.5" />
+            Körper ableiten
+          </Button>
+        </div>
+      )}
 
       {/* Is the assignment FINISHED. Assigning by hand fails the same way every
           time — a room nobody looked at — and an unassigned room in a model
