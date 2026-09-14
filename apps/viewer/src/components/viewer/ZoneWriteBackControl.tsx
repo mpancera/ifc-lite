@@ -29,10 +29,13 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { toast } from '@/components/ui/toast';
+import { useViewerStore } from '@/store';
 import { useZoneWriteBack } from '@/hooks/useZoneWriteBack';
 import { useZoneSpatialZones } from '@/hooks/useZoneSpatialZones';
 import { useZoneTableExport, type ZoneTableFormat } from '@/hooks/useZoneTableExport';
 import { emitRefusalText } from '@/lib/zones/emit-spatial-zones';
+import { ZONE_THEMES } from '@/lib/ifcZones/themes';
+import { zoneSetTheme } from '@/lib/zones/set-theme';
 import {
   zonePropertySetName,
   zoneQuantitySetName,
@@ -59,6 +62,8 @@ export function ZoneWriteBackControl({ zoneSet }: { zoneSet: ZoneSet }) {
   // as the geometry export in `ZonesPanel`.
   const exportingTableRef = useRef(false);
   const [exportingTable, setExportingTable] = useState<ZoneTableFormat | null>(null);
+  const setZoneSetTheme = useViewerStore((s) => s.setZoneSetTheme);
+  const theme = zoneSetTheme(zoneSet);
 
   const runTableExport = async (format: ZoneTableFormat) => {
     if (exportingTableRef.current) return;
@@ -179,6 +184,21 @@ export function ZoneWriteBackControl({ zoneSet }: { zoneSet: ZoneSet }) {
           </Button>
         ))}
       </div>
+      {/* What the zones ARE, which is a different question from where they
+          are. It sits next to the emit button and not up with the set's name
+          because this is the only place it changes anything: it decides the
+          PredefinedType the emission writes. */}
+      <select
+        value={theme.id}
+        onChange={(e) => setZoneSetTheme(zoneSet.id, e.target.value)}
+        aria-label="Zone kind"
+        title="What these zones are - lands in IfcSpatialZone.PredefinedType"
+        className="h-6 w-full rounded-md border border-border bg-background px-1.5 text-[11px]"
+      >
+        {ZONE_THEMES.map((t) => (
+          <option key={t.id} value={t.id}>{t.label}</option>
+        ))}
+      </select>
       <div className="flex items-center gap-1">
         <Button
           variant="outline"
@@ -225,9 +245,17 @@ export function ZoneWriteBackControl({ zoneSet }: { zoneSet: ZoneSet }) {
             toast.success(
               `Emitted ${zones.toLocaleString()} IfcSpatialZone(s) across ${written.length} model(s), `
               + `referencing ${elements.toLocaleString()} element(s)`
+              + ` as ${theme.label}`
               + (replaced > 0 ? `, replacing ${replaced.toLocaleString()} from an earlier run` : '')
               + (result.staleRemoved > 0 ? `, and clearing ${result.staleRemoved.toLocaleString()} from a model this set no longer reaches` : ''),
             );
+            // Said once, not per model: the schema is a property of the file
+            // and every degraded model degraded the same way.
+            if (written.some((m) => m.themeDegraded)) {
+              toast.info(
+                `"${theme.label}" needs IFC4X3, so it was written as USERDEFINED with the name in ObjectType`,
+              );
+            }
           }}
         >
           <Box className="h-3 w-3 mr-1" />

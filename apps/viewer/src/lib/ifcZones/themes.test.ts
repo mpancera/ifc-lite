@@ -5,7 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DEFAULT_THEME_ID, ZONE_THEMES, resolveSpatialType, themeById, themeOfZone,
+  DEFAULT_THEME_ID, ZONE_THEMES, resolveSpatialType, themeById, themeOfSpatialZone, themeOfZone,
 } from './themes.js';
 
 /** Every value `IfcSpatialZoneTypeEnum` declares, per schema. */
@@ -99,7 +99,10 @@ describe('resolveSpatialType', () => {
   it('passes an IFC4 value through unchanged', () => {
     const mapping = resolveSpatialType(themeById('fire-compartment'), 'IFC4');
 
-    assert.deepEqual(mapping, { predefinedType: 'FIRESAFETY', objectType: null, degraded: false });
+    assert.deepEqual(
+      mapping,
+      { predefinedType: 'FIRESAFETY', objectType: 'FIRECOMPARTMENT', degraded: false },
+    );
   });
 
   it('keeps the refinement', () => {
@@ -129,5 +132,62 @@ describe('resolveSpatialType', () => {
     // Degrading is the safe direction: USERDEFINED is valid in every schema.
     assert.equal(resolveSpatialType(themeById('interference'), 'IFC2X3').predefinedType, 'USERDEFINED');
     assert.equal(resolveSpatialType(themeById('interference'), '').predefinedType, 'USERDEFINED');
+  });
+});
+
+describe('the Brandabschnitt', () => {
+  it('carries the two tokens the exchange requirement names', () => {
+    // The Swiss fire-safety exchange requirement pins a Brandabschnitt to
+    // IfcSpatialZone with PredefinedType FIRESAFETY and ObjectType
+    // FIRECOMPARTMENT, and checks for that exact string. FIRESAFETY alone
+    // would tell this theme from the others, so the refinement is here for
+    // conformance rather than for distinguishability — which is why the
+    // spelling is theirs (shouted) and not this catalogue's (camel case).
+    const theme = themeById('fire-compartment');
+
+    assert.equal(theme.spatialPredefinedType, 'FIRESAFETY');
+    assert.equal(theme.spatialObjectType, 'FIRECOMPARTMENT');
+  });
+});
+
+describe('themeOfSpatialZone', () => {
+  it('needs both fields, because the theme is split across them', () => {
+    assert.equal(themeOfSpatialZone('FIRESAFETY', 'FIRECOMPARTMENT')?.id, 'fire-compartment');
+    assert.equal(themeOfSpatialZone('FIRESAFETY', 'TriggerZoneFire')?.id, 'fire-trigger');
+    // Same enum, different zone kind: reading the enum alone would merge them.
+    assert.notEqual(
+      themeOfSpatialZone('FIRESAFETY', 'FIRECOMPARTMENT')?.id,
+      themeOfSpatialZone('FIRESAFETY', 'SmokeZone')?.id,
+    );
+  });
+
+  it('reads back a theme that carries no refinement', () => {
+    assert.equal(themeOfSpatialZone('THERMAL', null)?.id, 'thermal');
+    assert.equal(themeOfSpatialZone('CONSTRUCTION', '')?.id, 'construction');
+  });
+
+  it('reads back a value the schema forced to USERDEFINED', () => {
+    // Otherwise the degradation is a one-way loss: the zone goes in as a
+    // Störungszone and comes back as "somebody else's convention".
+    const written = resolveSpatialType(themeById('interference'), 'IFC4');
+
+    assert.equal(themeOfSpatialZone(written.predefinedType, written.objectType)?.id, 'interference');
+  });
+
+  it('round-trips every theme through the IFC4 mapping', () => {
+    for (const theme of ZONE_THEMES) {
+      const written = resolveSpatialType(theme, 'IFC4');
+      assert.equal(
+        themeOfSpatialZone(written.predefinedType, written.objectType)?.id,
+        theme.id,
+        `${theme.id} does not survive a write and a read`,
+      );
+    }
+  });
+
+  it('reports null rather than a guess', () => {
+    assert.equal(themeOfSpatialZone(null, 'FIRECOMPARTMENT'), null);
+    assert.equal(themeOfSpatialZone('FIRESAFETY', 'Brandabschnitt_Nord'), null);
+    assert.equal(themeOfSpatialZone('USERDEFINED', null), null);
   });
 });

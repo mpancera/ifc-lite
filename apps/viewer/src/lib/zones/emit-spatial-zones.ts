@@ -42,13 +42,15 @@ import {
   resolveSpatialAnchor,
   type SpatialZoneInput,
 } from '@ifc-lite/create';
-import type { IfcDataStore } from '@ifc-lite/parser';
+import { IfcSpatialZoneTypeEnum, type IfcDataStore } from '@ifc-lite/parser';
 import type { StoreEditor } from '@ifc-lite/mutations';
 import {
   renderToWorldViewer,
   viewerToIfcAxes,
   type RenderFrameOffsets,
 } from '@/components/viewer/tools/measure-modes/coordinates';
+import { resolveSpatialType, type ZoneTheme } from '@/lib/ifcZones/themes';
+import { zoneSetTheme } from './set-theme.js';
 import type { Zone, ZoneSet } from './types.js';
 
 /** One element's membership, as the assignment engine reports it. */
@@ -83,6 +85,13 @@ export interface EmitResult {
   /** Zones from an earlier run of this set that this one replaced. */
   zonesReplaced: number;
   refusal: EmitRefusal | null;
+  /**
+   * Set when the file's schema could not carry the set's theme and it was
+   * written as USERDEFINED instead. Not a refusal — the zone is emitted and
+   * keeps its identity in `ObjectType` — but the panel says so, because the
+   * receiving tool will read a different token than the one it was promised.
+   */
+  themeDegraded?: boolean;
 }
 
 /** Why one model got no zones, as a sentence rather than a code. Kept beside
@@ -193,11 +202,21 @@ export function emitSpatialZones(
   // exported file. Same principle as the write-back's per-element sweep.
   const zonesReplaced = removeSpatialZones(editor, zoneSet);
 
+  // What the zone IS, into the file. Without this every emitted zone claimed
+  // CONSTRUCTION — the builder's default, right for the takt areas the feature
+  // began as and wrong for every zone drawn since. A fire compartment that
+  // exports as a construction section is not a cosmetic mislabel: the
+  // receiving tool filters on exactly this enum.
+  const theme = zoneSetTheme(zoneSet);
+  const themed = writableSpatialType(theme, anchor.schema ?? 'IFC4');
+
   const result = addSpatialZonesToStore(editor, anchor, {
     LongName: zoneSet.name,
     Description: zoneSetMarker(zoneSet.id),
     zones: zoneSet.zones.map((zone) => zoneToIfcWorld(zone, frame)),
     RelatedElements: referenced,
+    PredefinedType: themed.predefinedType,
+    ...(themed.objectType ? { ObjectType: themed.objectType } : {}),
   });
 
   return {
@@ -205,6 +224,48 @@ export function emitSpatialZones(
     elementsReferenced: total,
     zonesReplaced,
     refusal: null,
+    themeDegraded: themed.degraded,
+  };
+}
+
+/** A `PredefinedType` the writer will accept — see {@link WRITABLE_TYPES}. */
+type WritableSpatialType = `${IfcSpatialZoneTypeEnum}`;
+
+/** Every `PredefinedType` the bundled schema declares, and so the only ones
+ *  `addSpatialZonesToStore` accepts — it validates against this same enum and
+ *  THROWS for anything else. */
+const WRITABLE_TYPES: ReadonlySet<string> = new Set<string>(Object.values(IfcSpatialZoneTypeEnum));
+
+function isWritable(value: string): value is WritableSpatialType {
+  return WRITABLE_TYPES.has(value);
+}
+
+/**
+ * The theme's `PredefinedType`, narrowed to what the writer can actually emit.
+ *
+ * {@link resolveSpatialType} answers for the FILE's schema: on an IFC4X3 model
+ * it passes `INTERFERENCE` and `RESERVATION` through, because IFC4X3 declares
+ * them. The bundled schema this repo generates from is IFC4 and declares
+ * neither, and the builder validates against that enum — so the two are right
+ * about different things and the emitter has to satisfy the stricter one.
+ *
+ * Degrading rather than refusing, for the same reason the schema rule degrades:
+ * `USERDEFINED` plus the name in `ObjectType` is valid in every schema and
+ * keeps the zone's identity, which is a far better outcome than an exception
+ * out of a button press.
+ */
+function writableSpatialType(
+  theme: ZoneTheme,
+  schema: string,
+): { predefinedType: WritableSpatialType; objectType: string | null; degraded: boolean } {
+  const mapping = resolveSpatialType(theme, schema);
+  if (isWritable(mapping.predefinedType)) {
+    return { ...mapping, predefinedType: mapping.predefinedType };
+  }
+  return {
+    predefinedType: 'USERDEFINED',
+    objectType: theme.spatialObjectType ?? theme.zoneObjectType,
+    degraded: true,
   };
 }
 

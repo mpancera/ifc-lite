@@ -40,8 +40,13 @@ export interface ZoneTheme {
   /** `IfcSpatialZone.PredefinedType`. */
   spatialPredefinedType: AnchoredSpatialZonePredefinedType;
   /**
-   * `IfcSpatialZone.ObjectType`, when the enum alone cannot tell two themes
-   * apart — six of these map to FIRESAFETY, three to TRANSPORT.
+   * `IfcSpatialZone.ObjectType`, for two different reasons.
+   *
+   * Usually it is the refinement the enum is too coarse for — six themes map
+   * to FIRESAFETY, three to TRANSPORT, and without it they would all export as
+   * the same bare token. The Brandabschnitt carries one for the other reason:
+   * a receiving specification NAMES the value it expects, and conformance
+   * beats the internal spelling convention.
    */
   spatialObjectType: string | null;
   /**
@@ -80,7 +85,13 @@ export const ZONE_THEMES: readonly ZoneTheme[] = [
     id: 'fire-compartment', label: 'Brandabschnitt',
     // One of the four values IFC itself documents for IfcZone.
     zoneObjectType: 'FireCompartment',
-    spatialPredefinedType: 'FIRESAFETY', spatialObjectType: null,
+    // FIRESAFETY alone would be enough to tell this theme from the others —
+    // the refinement is here because the Swiss fire-safety exchange
+    // requirement pins the Brandabschnitt to `IfcSpatialZone` with
+    // PredefinedType FIRESAFETY and ObjectType exactly `FIRECOMPARTMENT`, and
+    // checks for that string. Shouted rather than camel-cased for the same
+    // reason: it is their token, not ours.
+    spatialPredefinedType: 'FIRESAFETY', spatialObjectType: 'FIRECOMPARTMENT',
   },
   {
     id: 'fire-trigger', label: 'Auslösezone Branddetektion',
@@ -241,6 +252,36 @@ export function themeOfZone(objectType: string | null | undefined): ZoneTheme | 
   const value = (objectType ?? '').trim().toLowerCase();
   if (!value) return null;
   return ZONE_THEMES.find((t) => t.zoneObjectType.toLowerCase() === value) ?? null;
+}
+
+/**
+ * Recognise the theme of an `IfcSpatialZone` already in the model.
+ *
+ * The counterpart to {@link themeOfZone}, and it has to read BOTH fields
+ * because the theme is split across them: `ObjectType` alone cannot tell a
+ * bare OCCUPANCY zone from a bare THERMAL one (both write none), and
+ * `PredefinedType` alone cannot tell the six FIRESAFETY themes apart.
+ *
+ * `USERDEFINED` is checked against the refinement only — that is the degraded
+ * form {@link resolveSpatialType} writes for an IFC4X3 value in an IFC4 file,
+ * and it must read back as the theme it went in as, or the degradation is a
+ * one-way loss.
+ */
+export function themeOfSpatialZone(
+  predefinedType: string | null | undefined,
+  objectType: string | null | undefined,
+): ZoneTheme | null {
+  const type = (predefinedType ?? '').trim().toUpperCase();
+  const refinement = (objectType ?? '').trim().toLowerCase();
+  if (!type) return null;
+
+  if (type === 'USERDEFINED') {
+    if (!refinement) return null;
+    return ZONE_THEMES.find((t) => t.since === 'IFC4X3'
+      && (t.spatialObjectType ?? t.zoneObjectType).toLowerCase() === refinement) ?? null;
+  }
+  return ZONE_THEMES.find((t) => t.spatialPredefinedType === type
+    && (t.spatialObjectType ?? '').toLowerCase() === refinement) ?? null;
 }
 
 export interface SpatialTypeMapping {

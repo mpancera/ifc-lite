@@ -61,6 +61,8 @@ export interface ModelEmitOutcome {
   elementsReferenced: number;
   zonesReplaced: number;
   refusal: EmitRefusal | null;
+  /** The file's schema could not carry the set's theme; see `EmitResult`. */
+  themeDegraded: boolean;
 }
 
 export interface ZoneEmitResult {
@@ -215,6 +217,7 @@ export function emitZoneSpatialZones(zoneSet: ZoneSet): ZoneEmitResult {
       elementsReferenced: result.elementsReferenced,
       zonesReplaced: result.zonesReplaced,
       refusal: result.refusal,
+      themeDegraded: result.themeDegraded === true,
     });
     if (result.zonesEmitted > 0 || result.zonesReplaced > 0) touchedModels.push(modelId);
   }

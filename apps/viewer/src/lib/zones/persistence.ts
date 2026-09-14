@@ -88,6 +88,12 @@ function isValidZoneSet(v: unknown): v is ZoneSet {
   return (
     typeof zs.id === 'string' && zs.id.length > 0 &&
     typeof zs.name === 'string' &&
+    // Optional, but not "anything". A theme of the wrong TYPE would resolve to
+    // the historical default and silently relabel a fire compartment as a
+    // construction section — this file's policy is that a corrupted field
+    // fails loudly rather than becoming a plausible wrong answer. An
+    // unrecognised NAME is a different matter and handled at read time.
+    (zs.themeId === undefined || typeof zs.themeId === 'string') &&
     Array.isArray(zs.zones) && zs.zones.every(isValidZone) &&
     typeof zs.visible === 'boolean' &&
     isFiniteNumber(zs.createdAt) &&

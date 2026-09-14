@@ -67,6 +67,18 @@ export interface ZoneSet {
    *  the UI; ids are what actually disambiguate). */
   name: string;
   zones: Zone[];
+  /**
+   * What the set is ABOUT — an id from `lib/ifcZones/themes.ts`, shared with
+   * the painted room zones so one vocabulary covers both ways of drawing a
+   * zone.
+   *
+   * This is what decides the `IfcSpatialZone.PredefinedType` an emission
+   * writes, and until it existed every emitted zone claimed to be a
+   * CONSTRUCTION section — including a fire compartment. Resolve it through
+   * `zoneSetTheme`, never by reading this field: absent and unknown mean
+   * different things and it knows which.
+   */
+  themeId?: string;
   /** Whether this set's boxes render in the 3D view. Independent of whether
    *  assignment runs — assignment always runs for every zone set so Lists /
    *  selection stay live even while the set's boxes are hidden. */

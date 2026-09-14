@@ -87,6 +87,9 @@ export interface ZonesSlice {
   createZoneSet: (name: string) => string;
   removeZoneSet: (setId: string) => void;
   renameZoneSet: (setId: string, name: string) => void;
+  /** What the set is about — an id from the shared theme catalogue. It is what
+   *  an emission writes as `IfcSpatialZone.PredefinedType`. */
+  setZoneSetTheme: (setId: string, themeId: string) => void;
   setZoneSetVisible: (setId: string, visible: boolean) => void;
   /** Replace every zone in a set at once (e.g. "generate from storeys"). */
   replaceZonesInSet: (setId: string, zones: Zone[]) => void;
@@ -225,6 +228,14 @@ export const createZonesSlice: StateCreator<ViewerState, [], [], ZonesSlice> = (
     const trimmed = name.trim();
     if (!trimmed) return state;
     const zoneSets = state.zoneSets.map((zs) => (zs.id === setId ? { ...zs, name: trimmed, updatedAt: Date.now() } : zs));
+    savePersistedZoneSets(zoneSets, get().currentProjectKey());
+    return { zoneSets };
+  }),
+
+  setZoneSetTheme: (setId, themeId) => set((state) => {
+    const zoneSets = state.zoneSets.map((zs) => (zs.id === setId
+      ? { ...zs, themeId, updatedAt: Date.now() }
+      : zs));
     savePersistedZoneSets(zoneSets, get().currentProjectKey());
     return { zoneSets };
   }),
