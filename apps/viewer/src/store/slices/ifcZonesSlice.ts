@@ -19,6 +19,8 @@
 import { type StateCreator } from 'zustand';
 import { findOwnerHistoryId } from '@ifc-lite/create';
 import type { Mutation } from '@ifc-lite/mutations';
+import { PropertyValueType } from '@ifc-lite/data';
+import { COMPARTMENT_PSET } from '@/lib/fireSafety/compartmentRequirements';
 import {
   createZone as createZoneInStore,
   deleteZone as deleteZoneInStore,
@@ -62,6 +64,18 @@ export interface IfcZonesSlice {
   /** Change the zone's theme. `ObjectType`, since `IfcZone` has no
    *  PredefinedType — see `lib/ifcZones/themes`. */
   setIfcZoneObjectType: (modelId: string, zoneId: number, objectType: string) => boolean;
+  /**
+   * Write one `CHIBB_FireCompartmentRequirements` property on a zone, or clear
+   * it when `value` is empty.
+   *
+   * Clearing DELETES the property rather than writing an empty string: absent
+   * means "not decided yet" and `NONE` means "decided: no requirement", and an
+   * empty value would be a third thing that reads like the first and exports
+   * like neither.
+   */
+  setIfcZoneRequirement: (
+    modelId: string, zoneId: number, propertyName: string, value: string,
+  ) => boolean;
   deleteIfcZone: (modelId: string, zoneId: number) => boolean;
   /**
    * Paint rooms into (or out of) a zone. Returns what changed, or `null` when
@@ -199,6 +213,23 @@ export const createIfcZonesSlice: StateCreator<ViewerState, [], [], IfcZonesSlic
       const ctx = writable(modelId);
       if (!ctx || !setZoneObjectTypeInStore(ctx.editor, ctx.entities, zoneId, objectType)) return false;
       commit(set, modelId, null);
+      return true;
+    },
+
+    setIfcZoneRequirement: (modelId, zoneId, propertyName, value) => {
+      const ctx = writable(modelId);
+      if (!ctx) return false;
+      // The property set is created on first write by `setProperty`; there is
+      // nothing to declare up front.
+      const mutation = value === ''
+        ? ctx.view.deleteProperty(zoneId, COMPARTMENT_PSET, propertyName)
+        : ctx.view.setProperty(
+          zoneId, COMPARTMENT_PSET, propertyName, value, PropertyValueType.Label,
+        );
+      // `deleteProperty` answers null for a property that was not there, and a
+      // no-op must not push an undo entry or mark the model dirty.
+      if (!mutation) return false;
+      commit(set, modelId, mutation);
       return true;
     },
 

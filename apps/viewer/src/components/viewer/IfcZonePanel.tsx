@@ -40,6 +40,9 @@ import { useSelectedEntityRefs } from '@/hooks/useSelectedEntityRefs';
 import { useZoneRoster } from '@/hooks/useZoneRoster';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import { formatArea } from '@/lib/ifcZones/roster';
+import {
+  COMPARTMENT_PSET, COMPARTMENT_REQUIREMENTS,
+} from '@/lib/fireSafety/compartmentRequirements';
 
 /** A zone with no colour still needs something to show in the swatch. */
 const NO_COLOUR = 'transparent';
@@ -71,6 +74,7 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
   const setIfcZoneColour = useViewerStore((s) => s.setIfcZoneColour);
   const deleteIfcZone = useViewerStore((s) => s.deleteIfcZone);
   const paintIfcZone = useViewerStore((s) => s.paintIfcZone);
+  const setIfcZoneRequirement = useViewerStore((s) => s.setIfcZoneRequirement);
 
   // The brush below reacts to the PRIMARY pick alone — one click, one room.
   const selectedEntity = useViewerStore((s) => s.selectedEntity);
@@ -136,6 +140,27 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
     dataStore: activeModelId ? models.get(activeModelId)?.ifcDataStore : null,
     geometryResult,
   });
+  /**
+   * The requirement values on the OPEN zone.
+   *
+   * Read through the overlay, which is where they are written; a zone that
+   * came in with the file keeps whatever the file says until it is edited.
+   */
+  const requirementValues = useMemo(() => {
+    const values = new Map<string, string>();
+    if (!activeModelId || !activeZone) return values;
+    const view = mutationViews.get(activeModelId);
+    if (!view) return values;
+    for (const req of COMPARTMENT_REQUIREMENTS) {
+      const value = view.getPropertyValue(activeZone.expressId, COMPARTMENT_PSET, req.name);
+      if (typeof value === 'string' && value !== '') values.set(req.name, value);
+    }
+    return values;
+    // `mutationVersion`: the overlay is mutated in place, so nothing else
+    // changes identity when a requirement is written.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeModelId, activeZone, mutationViews, mutationVersion]);
+
   const rosterRows = useMemo(
     () => new Map(roster.rows.map((row) => [row.expressId, row])),
     [roster],
@@ -524,6 +549,49 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
                           }
                         }}
                       />
+
+                      {/* The Anforderungsinformation, and only on a
+                          Brandabschnitt: these five say what the compartment
+                          requires of the parts that form it, which is a
+                          question no other theme asks. */}
+                      {themeOfZone(zone.objectType)?.id === 'fire-compartment' && (
+                        <div className="space-y-1 rounded-md border border-border/60 p-1.5">
+                          <p className="text-[10px] font-medium text-muted-foreground">
+                            Anforderung an brandabschnittsbildende Bauteile
+                          </p>
+                          {COMPARTMENT_REQUIREMENTS.map((req) => (
+                            <label key={req.name} className="flex items-center gap-1.5">
+                              <span className="w-28 shrink-0 text-[10px] text-muted-foreground">
+                                {req.label}
+                              </span>
+                              <select
+                                value={requirementValues.get(req.name) ?? ''}
+                                onChange={(e) => {
+                                  if (!activeModelId) return;
+                                  if (!setIfcZoneRequirement(
+                                    activeModelId, zone.expressId, req.name, e.target.value,
+                                  )) setNote('Dieses Modell ist hier nicht beschreibbar.');
+                                }}
+                                className="h-6 min-w-0 flex-1 rounded-md border border-border bg-background px-1.5 text-[11px]"
+                              >
+                                {/* Absent is "not decided yet"; NONE is
+                                    "decided: nothing required". Two different
+                                    answers, so two different entries. */}
+                                <option value="">nicht festgelegt</option>
+                                {req.values.map((v) => (
+                                  <option key={v} value={v}>
+                                    {v === 'NONE' ? 'keine Anforderung (NONE)' : v}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          ))}
+                          <p className="text-[10px] leading-snug text-muted-foreground">
+                            Landet als {COMPARTMENT_PSET} am Abschnitt — Mindestanforderung
+                            aus dem Konzept, nicht die geplante Ausführung am Bauteil.
+                          </p>
+                        </div>
+                      )}
                     </div>
                   )}
                 </li>
