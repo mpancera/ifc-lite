@@ -291,11 +291,12 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
         return;
       }
 
-      // `restamp`, not "append": the file being exported is often itself a
-      // previous export, and appending grew the name by a stamp per round.
+      // `base` is already stamped — `buildChangedArtifacts` does it, because the
+      // same name goes into the STEP header. Stamping again here would give the
+      // file on disk a different minute than the one written inside it.
       const named: Array<{ name: string; content: Blob | Uint8Array | string; mime: string }> =
         files.length === 1
-          ? [{ name: `${restamp(files[0].base)}.${files[0].ext}`, content: files[0].content, mime: files[0].mime }]
+          ? [{ name: `${files[0].base}.${files[0].ext}`, content: files[0].content, mime: files[0].mime }]
           : [{
             name: `${restamp('ifc-lite-changes')}.zip`,
             content: await zipArtifacts(files),

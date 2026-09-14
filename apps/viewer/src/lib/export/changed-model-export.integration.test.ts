@@ -12,6 +12,7 @@
  */
 
 import { describe, it } from 'node:test';
+import { filenameStamp } from './filename-stamp.js';
 import assert from 'node:assert';
 import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate';
 import type { IfcDataStore } from '@ifc-lite/parser';
@@ -132,8 +133,13 @@ describe('changed-model export (real exporters, #1534)', () => {
     const zipped = zipFiles(files);
     const unzipped = unzipSync(zipped);
     const names = Object.keys(unzipped).sort();
-    assert.deepStrictEqual(names, ['alpha.ifc', 'beta.ifc']);
-    assert.ok(strFromU8(unzipped['alpha.ifc']).includes('ALPHA-EDITED'));
-    assert.ok(strFromU8(unzipped['beta.ifc']).includes('BETA-EDITED'));
+    // The stamp is the run's own; what this test is about is that each model
+    // keeps its own name and its own edits inside the zip.
+    const stamp = filenameStamp();
+    assert.deepStrictEqual(names, [`alpha_${stamp}.ifc`, `beta_${stamp}.ifc`]);
+    assert.ok(strFromU8(unzipped[`alpha_${stamp}.ifc`]).includes('ALPHA-EDITED'));
+    assert.ok(strFromU8(unzipped[`beta_${stamp}.ifc`]).includes('BETA-EDITED'));
+    // And the name written INTO the file is the same one, not `export.ifc`.
+    assert.ok(strFromU8(unzipped[`alpha_${stamp}.ifc`]).includes(`FILE_NAME('alpha_${stamp}.ifc'`));
   });
 });

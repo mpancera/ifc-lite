@@ -48,6 +48,10 @@ export async function exportChangedModelToStep(
     georefMutations: invocation.georefMutations,
     description: invocation.description,
     application: 'ifc-lite',
+    // The name INSIDE the file, which several tools show instead of the one on
+    // disk. Left at its default it said `export.ifc` for every model ever
+    // exported — a name that identifies nothing.
+    filename: invocation.filename,
   });
 
   let content: string | Uint8Array = result.content;

@@ -31,6 +31,7 @@ import type { ExportScheduleState } from '@/sdk/adapters/export-schedule-splice'
 // slice's runtime graph — keeps the module and its tests hermetic.
 import { countGeneratedTasks } from '@/store/slices/schedule-edit-helpers';
 import { sanitizeFilename } from './download.js';
+import { restamp } from './filename-stamp.js';
 
 /** Synthetic id for the legacy single-model store (no federation map). */
 export const LEGACY_MODEL_ID = '__legacy__';
@@ -241,6 +242,8 @@ export interface StepExportInvocation {
   /** Real schedule state ONLY for the schedule-target model; null otherwise. */
   scheduleState: ExportScheduleState | null;
   description: string;
+  /** The name to write into the STEP header, matching the file on disk. */
+  filename: string;
 }
 
 /** IFC5 export request handed to the injected `exportIfcx` dep. */
@@ -355,6 +358,12 @@ export async function buildChangedArtifacts(
 
   for (const entry of changed) {
     const view = state.mutationViews.get(entry.id);
+    // Stamped HERE and not at the call site, so the name on disk and the name
+    // written INTO the STEP header are the same one — stamping twice, a minute
+    // apart, would have a file disagree with itself about when it was made.
+    // `restamp` and not "append": the file being exported is often a previous
+    // export, and appending grew the name by a stamp per round.
+    const stem = sanitizeFilename(restamp(stripExtension(entry.name)), { fallback: 'export' });
     // Rewrite the source id to the resolved target so the STEP splice gate
     // (`scheduleSourceModelId === modelId`) matches deterministically — even
     // when the original attribution was null (unattributed) or pointed at a
@@ -391,15 +400,12 @@ export async function buildChangedArtifacts(
           georefMutations: state.georefMutations.get(entry.id),
           scheduleState: scheduleArg,
           description: `Exported from ifc-lite with ${entry.changeCount} modifications`,
+          filename: `${stem}.ifc`,
         });
         if (scheduleArg) scheduleSpliced = true;
       }
 
-      const base = uniqueArtifactBase(
-        sanitizeFilename(stripExtension(entry.name), { fallback: 'export' }),
-        artifact.ext,
-        usedNames,
-      );
+      const base = uniqueArtifactBase(stem, artifact.ext, usedNames);
       files.push({
         base,
         ext: artifact.ext,

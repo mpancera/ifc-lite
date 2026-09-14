@@ -7,6 +7,7 @@ import assert from 'node:assert';
 import type { IfcDataStore, ScheduleExtraction } from '@ifc-lite/parser';
 import { MutablePropertyView as RealMutablePropertyView, type MutablePropertyView } from '@ifc-lite/mutations';
 import { PropertyValueType } from '@ifc-lite/data';
+import { filenameStamp } from './filename-stamp.js';
 import type { FederatedModel, SchemaVersion } from '@/store/types';
 import type { GeorefMutationData } from '@/store/slices/mutationSlice';
 import {
@@ -431,7 +432,11 @@ describe('buildChangedArtifacts', () => {
     const { files, skipped } = await buildChangedArtifacts(mkState({ models, mutationViews }), deps);
     assert.strictEqual(files.length, 2);
     assert.strictEqual(skipped.length, 0);
-    assert.deepStrictEqual(files.map((f) => `${f.base}.${f.ext}`), ['alpha.ifc', 'beta.ifc']);
+    const stamp = filenameStamp();
+    assert.deepStrictEqual(
+      files.map((f) => `${f.base}.${f.ext}`),
+      [`alpha_${stamp}.ifc`, `beta_${stamp}.ifc`],
+    );
   });
 
   it('splices the schedule into exactly one model', async () => {
@@ -509,7 +514,13 @@ describe('buildChangedArtifacts', () => {
     ]);
     const { deps } = fakeDeps();
     const { files } = await buildChangedArtifacts(mkState({ models, mutationViews }), deps);
-    assert.deepStrictEqual(files.map((f) => `${f.base}.${f.ext}`), ['model.ifc', 'model-2.ifc']);
+    // The stamp is what the name gains; the collision suffix is what this test
+    // is about, so compare against the stamp the run itself produced.
+    const stamp = filenameStamp();
+    assert.deepStrictEqual(
+      files.map((f) => `${f.base}.${f.ext}`),
+      [`model_${stamp}.ifc`, `model_${stamp}-2.ifc`],
+    );
   });
 
   it('routes IFC5 models to the IFCX exporter (mixed batch keeps both)', async () => {
