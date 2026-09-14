@@ -207,6 +207,14 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
     return () => { cancelled = true; };
   }, [targetKey]);
 
+  // `handleExport` is built once (empty deps, like every other click handler
+  // here that reads fresh state at call time), so the folder has to reach it
+  // through a ref: captured in the closure it stayed `null` forever, and
+  // choosing a folder changed the toast and nothing else — the file kept
+  // landing in the download folder (Marc, 2026-09-14).
+  const targetRef = useRef<DirectoryTarget | null>(target);
+  useEffect(() => { targetRef.current = target; }, [target]);
+
   const chooseFolder = useCallback(async () => {
     if (!targetKey) return;
     try {
@@ -308,13 +316,20 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
       // inside this click. A refusal falls back to the download rather than
       // leaving the user with nothing saved.
       let wroteTo: string | null = null;
-      if (target && await ensureWritable(target, { prompt: true })) {
-        try {
-          for (const file of named) await writeIntoTarget(target, file.name, file.content);
-          wroteTo = target.name;
-        } catch (error) {
-          console.warn('[export] writing into the chosen folder failed:', error);
-          toast.error(`Schreiben nach „${target.name}“ ist fehlgeschlagen — gespeichert im Download-Ordner.`);
+      const folder = targetRef.current;
+      if (folder) {
+        if (await ensureWritable(folder, { prompt: true })) {
+          try {
+            for (const file of named) await writeIntoTarget(folder, file.name, file.content);
+            wroteTo = folder.name;
+          } catch (error) {
+            console.warn('[export] writing into the chosen folder failed:', error);
+            toast.error(`Schreiben nach „${folder.name}“ ist fehlgeschlagen — gespeichert im Download-Ordner.`);
+          }
+        } else {
+          // Refused or never granted. Saying so is the difference between "the
+          // browser said no" and "the folder setting does nothing".
+          toast.error(`Keine Schreibrechte für „${folder.name}“ — gespeichert im Download-Ordner.`);
         }
       }
       if (!wroteTo) {

@@ -1646,7 +1646,7 @@ export function Viewport({
     lastClickTimeRef,
     lastClickPosRef,
     lastCameraStateRef,
-    handlePickForSelection: (pickResult) => handlePickForSelectionRef.current(pickResult),
+    handlePickForSelection: (pickResult, opts) => handlePickForSelectionRef.current(pickResult, opts),
     setHoverState,
     clearHover,
     setRectSelection,
@@ -1695,7 +1695,7 @@ export function Viewport({
     sectionRangeRef,
     geometryRef,
     isInteractingRef,
-    handlePickForSelection: (pickResult) => handlePickForSelectionRef.current(pickResult),
+    handlePickForSelection: (pickResult, opts) => handlePickForSelectionRef.current(pickResult, opts),
     getPickOptions,
   });
 
