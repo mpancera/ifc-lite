@@ -102,6 +102,7 @@ import { pixelsPerMetreForScale, scaleDenominator } from '@/lib/plan/planChrome'
 import { usePlanOpeningSymbols } from '@/hooks/usePlanOpeningSymbols';
 import { usePlanDeviceMarks } from '@/hooks/usePlanDeviceMarks';
 import { usePlanZoneOutlines } from '@/hooks/usePlanZoneOutlines';
+import { describePrealign, prealignUnderlay } from '@/hooks/dxfPrealign';
 import {
   COMPARTMENT_LAYER, FIRE_TRIGGER_LAYER, GAS_TRIGGER_LAYER,
 } from '@/lib/zoneOutline/zoneLayers';
@@ -1042,13 +1043,33 @@ export function PlanView({
     cancelEscapeRoute,
   });
 
-  // Centre an underlay on the generated drawing. Same derivation the 2D Section
-  // panel uses, minus the flip cases a plan cannot be in.
+  /**
+   * Lay an underlay roughly over the drawing: turn it, scale it if the units
+   * were never declared, then centre it.
+   *
+   * Centring alone left the plan turned — nine degrees against a georeferenced
+   * model, ninety when the sheet was set up on another axis — and picking two
+   * corresponding points on a drawing lying across the model is the hard part
+   * of the alignment that follows (Marc, 2026-09-15). The gross transform can
+   * be read off the two drawings; the two points are for the correction.
+   *
+   * Falls back to centring alone when the line work gives no clear direction,
+   * which is what this did before and is never the worse answer.
+   */
   const updateDxfUnderlayPlacement = useViewerStore((s) => s.updateDxfUnderlayPlacement);
   const centerDxfUnderlay = useCallback((id: string) => {
     const entry = dxfUnderlays.find((u) => u.id === id);
     if (!entry || !drawing) return;
-    const bounds = dxfUnderlayDrawingBounds(entry, dxfWorldShift(geometryResult?.coordinateInfo), false);
+    const shift = dxfWorldShift(geometryResult?.coordinateInfo);
+
+    const rough = prealignUnderlay({ entry, drawing, shift, mirrorX: false });
+    if (rough) {
+      updateDxfUnderlayPlacement(id, rough.placement);
+      toast.success(describePrealign(rough));
+      return;
+    }
+
+    const bounds = dxfUnderlayDrawingBounds(entry, shift, false);
     if (!bounds) return;
     const modelCx = (drawing.bounds.min.x + drawing.bounds.max.x) / 2;
     const modelCy = (drawing.bounds.min.y + drawing.bounds.max.y) / 2;

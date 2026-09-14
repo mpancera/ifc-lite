@@ -51,6 +51,7 @@ import { useDrawingExport } from '@/hooks/useDrawingExport';
 import type { CachedSheetTransform } from '@/lib/drawing/sheet-geometry-key';
 import { useSymbolicAnnotationsForDrawing, symbolicAnnotationsOverlayEnabled } from '@/hooks/useSymbolicAnnotations';
 import { useDxfUnderlaysForDrawing, useDxfMapToWorldTransform, dxfWorldShift, dxfUnderlayDrawingBounds } from '@/hooks/useDxfUnderlay';
+import { describePrealign, prealignUnderlay } from '@/hooks/dxfPrealign';
 import { useScanSectionLayer } from '@/hooks/useScanSectionLayer';
 
 interface Section2DPanelProps {
@@ -541,6 +542,19 @@ export function Section2DPanel({
     if (!entry || !drawing) return;
     const shift = dxfWorldShift(geometryResult?.coordinateInfo);
     const mirrorX = sectionPlane.flipped && sectionPlane.custom === undefined;
+
+    // Turn and scale it first, then centre — see `centerDxfUnderlay` in
+    // PlanView for why centring alone is not enough.
+    const rough = prealignUnderlay({
+      entry, drawing, shift, mirrorX,
+      mapToWorld: dxfMapToWorld, georeferenceAvailable: dxfGeoreferenceAvailable,
+    });
+    if (rough) {
+      updateDxfUnderlayPlacement(id, rough.placement);
+      toast.success(describePrealign(rough));
+      return;
+    }
+
     const underlayBounds = dxfUnderlayDrawingBounds(entry, shift, mirrorX, dxfMapToWorld, dxfGeoreferenceAvailable);
     if (!underlayBounds) {
       // PR #1965 review: this guard fires when the underlay has no usable

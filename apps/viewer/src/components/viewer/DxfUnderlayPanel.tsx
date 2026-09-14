@@ -198,7 +198,9 @@ function UnderlayCard({
           size="icon-sm"
           onClick={() => onCenterOnModel(state.id)}
           disabled={!planViewActive}
-          title={planViewActive ? 'Center on model' : 'Center on model (switch to a plan view first)'}
+          title={planViewActive
+            ? 'Grob ausrichten: drehen, Einheiten korrigieren, zentrieren — danach die Passlinie'
+            : 'Grob ausrichten (erst in eine Planansicht wechseln)'}
         >
           <Crosshair className="h-3.5 w-3.5" />
         </Button>

@@ -471,6 +471,7 @@ export {
   parseDxf,
   convertDxfToUnderlay,
   applyDxfPlacement,
+  prealignDxf,
   aciToCss,
   DEFAULT_DXF_PLACEMENT,
 } from './dxf/index.js';
@@ -485,6 +486,7 @@ export type {
   DxfUnderlayFill,
   DxfUnderlayText,
   DxfPlacement,
+  PrealignResult,
 } from './dxf/index.js';
 export {
   describeSolvedScale, inverseDxfPlacement, solveDxfPlacement,
