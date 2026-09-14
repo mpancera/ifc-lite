@@ -23,11 +23,12 @@
  * on the selection acts on one curtain wall rather than on forty panes. The
  * status bar says "1 gewählt", which is the truth of what was picked.
  *
- * # Holding Alt means what you clicked
+ * # Alt or Shift means what you clicked
  *
- * Alt and not Shift: with the select tool, Shift+drag is already the pan
- * gesture (`useMouseControls.ts`), so a Shift+click would be one twitch away
- * from panning instead of selecting.
+ * Two modifiers, not one. Shift is what other viewers use and what a user
+ * reaches for first; Alt is the fallback for the window managers that swallow
+ * it. Neither collides: Shift+DRAG pans, but this runs on a click that did not
+ * move, and Alt is unbound in the mouse path.
  */
 
 import { collectAggregatedDescendants, RelationshipType } from '@ifc-lite/data';

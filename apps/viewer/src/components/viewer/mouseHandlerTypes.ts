@@ -103,7 +103,8 @@ export interface MouseHandlerContext {
   /** `exact` (Alt) selects what is literally under the cursor instead of the
    *  whole it is a part of — see `lib/decomposition/pick-selection.ts`. */
   handlePickForSelection: (pickResult: PickResult | null, opts?: { exact?: boolean }) => void;
-  toggleSelection: (entityId: number) => void;
+  /** `exact` (Alt/Shift) toggles the picked part itself instead of its whole. */
+  toggleSelection: (entityId: number, opts?: { exact?: boolean }) => void;
   openContextMenu: (entityId: number | null, screenX: number, screenY: number) => void;
   hasPendingMeasurements: () => boolean;
   getPickOptions: () => { isStreaming: boolean; hiddenIds: Set<number>; isolatedIds: Set<number> | null };

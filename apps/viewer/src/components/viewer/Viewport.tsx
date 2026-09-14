@@ -248,9 +248,20 @@ export function Viewport({
 
   // Multi-select handler: Ctrl+Click adds/removes from multi-selection
   // Properly populates both selectedEntitiesSet (multi-model) and selectedEntityIds (legacy)
-  const handleMultiSelect = useCallback((globalId: number) => {
-    // Resolve globalId → EntityRef (single source of truth, never null)
-    const entityRef = resolveEntityRef(globalId);
+  const handleMultiSelect = useCallback((globalId: number, opts: { exact?: boolean } = {}) => {
+    // Ctrl-clicking a pane of glass means one more curtain wall, the same way a
+    // plain click does — otherwise the one place a facade CANNOT be collected
+    // is the multi-selection, which is where collecting happens.
+    const picked = resolvePickSelection(globalId, { exact: opts.exact ?? false });
+    const entityRef = picked?.ref ?? resolveEntityRef(globalId);
+    // The whole's own id is what the highlight is keyed on; its parts carry the
+    // mesh and are toggled with it so the facade lights up as one thing.
+    const wholeGlobalId = picked && picked.globalIds.length > 1
+      ? picked.globalIds[picked.globalIds.length - 1]
+      : globalId;
+    const partGlobalIds = picked && picked.globalIds.length > 1
+      ? picked.globalIds.slice(0, -1)
+      : [];
 
     // If this is the first Ctrl+click and there's already a single-selected entity,
     // add it to the multi-select set first (so it's not lost)
@@ -268,14 +279,20 @@ export function Viewport({
     toggleEntitySelection(entityRef);
 
     // Also sync legacy selectedEntityIds and selectedEntityId
-    toggleSelection(globalId);
+    toggleSelection(wholeGlobalId);
+    // The parts follow the whole in the highlight, never in the selection —
+    // `selectedRefs` reads the model-aware channel first for exactly this.
+    const lit = useViewerStore.getState().selectedEntityIds.has(wholeGlobalId);
+    for (const part of partGlobalIds) {
+      if (useViewerStore.getState().selectedEntityIds.has(part) !== lit) toggleSelection(part);
+    }
 
     // Read post-toggle state to keep renderer highlighting in sync:
     // If the entity was toggled OFF, don't force-highlight it.
     const updated = useViewerStore.getState();
-    if (updated.selectedEntityIds.has(globalId)) {
+    if (updated.selectedEntityIds.has(wholeGlobalId)) {
       // Entity was toggled ON — highlight it
-      setSelectedEntityId(globalId);
+      setSelectedEntityId(wholeGlobalId);
     } else if (updated.selectedEntityIds.size > 0) {
       // Entity was toggled OFF but others remain — highlight the last remaining
       const remaining = Array.from(updated.selectedEntityIds);
@@ -1647,7 +1664,7 @@ export function Viewport({
     updateConstraintActiveAxis,
     updateMeasurementScreenCoords,
     updateCameraRotationRealtime,
-    toggleSelection: (entityId: number) => handleMultiSelectRef.current(entityId),
+    toggleSelection: (entityId: number, opts?: { exact?: boolean }) => handleMultiSelectRef.current(entityId, opts),
     calculateScale,
     getPickOptions,
     hasPendingMeasurements,
