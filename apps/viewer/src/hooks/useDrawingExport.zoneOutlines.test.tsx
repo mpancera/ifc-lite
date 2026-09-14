@@ -21,13 +21,16 @@ import { GraphicOverrideEngine, type Drawing2D } from '@ifc-lite/drawing-2d';
 import { useViewerStore } from '@/store';
 import useDrawingExport from './useDrawingExport.js';
 import type { PlanZoneOutline } from './usePlanZoneOutlines.js';
+import {
+  COMPARTMENT_LINE_WEIGHT_M, ZONE_LINE_WEIGHT_M,
+} from '@/lib/zoneOutline/zoneLayers';
 
 const ZONES: PlanZoneOutline[] = [
   {
     zoneId: 4711,
     name: 'Auslösezone Nord',
     themeId: 'fire-trigger',
-    weightM: 0.18,
+    weightM: ZONE_LINE_WEIGHT_M,
     colour: '#1d4ed8',
     segments: [
       { a: { x: 0, y: 0 }, b: { x: 4, y: 0 } },
@@ -37,12 +40,13 @@ const ZONES: PlanZoneOutline[] = [
     fills: [new Float32Array([0, 0, 4, 0, 4, 3, 0, 0, 4, 3, 0, 3])],
   },
   // No colour of its own: screen and sheet must fall back to the same red.
-  { zoneId: 4712, name: 'Ohne Farbe', themeId: 'fire-trigger', weightM: 0.18,
+  { zoneId: 4712, name: 'Ohne Farbe', themeId: 'fire-trigger', weightM: ZONE_LINE_WEIGHT_M,
     colour: null, fills: [],
     segments: [{ a: { x: 0, y: 3 }, b: { x: 0, y: 0 } }] },
   // A Brandabschnitt: its own layer, drawn heavier, with its own fallback
   // colour so two unpainted layers do not merge into one red smear.
-  { zoneId: 4713, name: 'Brandabschnitt A', themeId: 'fire-compartment', weightM: 0.28,
+  { zoneId: 4713, name: 'Brandabschnitt A', themeId: 'fire-compartment',
+    weightM: COMPARTMENT_LINE_WEIGHT_M,
     colour: null, fills: [],
     segments: [{ a: { x: 0, y: 0 }, b: { x: 0, y: 3 } }] },
 ];
@@ -141,12 +145,12 @@ describe('useDrawingExport — Auslösezonen on the exported sheet', () => {
   });
 
   it('draws the line at its real width — a boundary in the building, not on paper', async () => {
-    // 0.18 m: it says how far the zone reaches, so it grows with the building
-    // like a wall does rather than staying a fixed millimetre on the sheet.
+    // Metres, not paper millimetres: the line says how far the zone reaches,
+    // so it grows with the building like a wall does.
     const svg = await exportSvg(ZONES);
     const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
     const first = doc.querySelector('[data-zone-outline="4711"]');
-    assert.equal(Number(first?.getAttribute('stroke-width')), 0.18);
+    assert.equal(Number(first?.getAttribute('stroke-width')), ZONE_LINE_WEIGHT_M);
   });
 
   it('carries every segment, so a boundary cut at a door stays cut', async () => {
@@ -178,7 +182,7 @@ describe('useDrawingExport — Auslösezonen on the exported sheet', () => {
     const compartment = doc.querySelector('[data-zone-outline="4713"]');
 
     assert.equal(compartment?.getAttribute('data-zone-theme'), 'fire-compartment');
-    assert.equal(Number(compartment?.getAttribute('stroke-width')), 0.28);
+    assert.equal(Number(compartment?.getAttribute('stroke-width')), COMPARTMENT_LINE_WEIGHT_M);
     // Not the detection zone's red: two unpainted layers must not merge.
     assert.equal(compartment?.getAttribute('stroke'), '#1d4ed8');
   });

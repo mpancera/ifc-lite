@@ -45,15 +45,21 @@ export interface ZoneLayer {
  *
  * The geometry depends on it — the line is drawn inside the zone it encloses —
  * so the drawn width and the inset have to be the same number.
+ *
+ * 0.06 m is 0.6 mm on an A3 at 1:100. It was 0.18 m, which is 1.8 mm, and that
+ * survived as long as it did because it was the only such line on the sheet:
+ * nothing stood next to it to be too heavy against. Printed with a
+ * Brandabschnitt outside it, the two ate 0.92 m of a 1.4 m corridor and the
+ * gang closed (Marc, 2026-09-14, on the specimen sheet).
  */
-export const ZONE_LINE_WEIGHT_M = 0.18;
+export const ZONE_LINE_WEIGHT_M = 0.06;
 
 /**
  * Metres. The weight of a Brandabschnitt boundary: heavier, because the
  * compartment is the stronger statement. It is what the building is divided
- * into; a detection zone is only what reports from inside one.
+ * into; a detection zone is only what reports from inside one. 1.0 mm at 1:100.
  */
-export const COMPARTMENT_LINE_WEIGHT_M = 0.28;
+export const COMPARTMENT_LINE_WEIGHT_M = 0.10;
 
 /** What a zone with no colour of its own is drawn in. Shared with the sheet
  *  export so screen and paper cannot disagree about an unpainted zone. */
