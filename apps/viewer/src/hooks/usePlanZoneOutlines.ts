@@ -28,10 +28,21 @@
  * all, so computing only the visible ones would disable the switch that turns
  * them on. The caller filters by `themeId` for drawing.
  *
- * The nesting follows the model for the same reason it must not follow the
- * switches: a boundary would otherwise move on the sheet because somebody
- * toggled a different layer. A storey with no Brandabschnitt has nothing to
- * nest behind, and its detection zones sit against the wall exactly as before.
+ * # The nesting follows what is DRAWN
+ *
+ * It followed the model first, so that a boundary could not move on the sheet
+ * because somebody toggled a different layer. That was the wrong trade. The
+ * Meldezonen-Umrandung is the one the FKS guideline requires and the one that
+ * is normally on a sheet; Brandabschnitte rarely reach a plan product at all,
+ * because colouring the rooms with the lens says it well enough (Marc,
+ * 2026-09-14). Nesting by the model would therefore push the REQUIRED line a
+ * compartment's width into the room on every plan, to make space for a line
+ * that is not being drawn.
+ *
+ * So a layer that is off takes no room. Turning it on steps the inner boundary
+ * inward — which is what a reader expects when a heavier line appears outside
+ * it, and it is visible at the moment it happens rather than baked into an
+ * export nobody was watching.
  */
 
 import { useMemo } from 'react';
@@ -82,6 +93,12 @@ export interface PlanZoneOutline {
 
 export interface UsePlanZoneOutlinesOptions {
   enabled: boolean;
+  /**
+   * Theme ids being DRAWN, which is what the insets stack along. A layer left
+   * out is still derived — the layer menu needs its count — but takes up no
+   * room, so the boundaries that ARE drawn sit where they would without it.
+   */
+  shownThemes?: ReadonlySet<string>;
   geometryResult: GeometryResult | null | undefined;
   dataStore: IfcDataStore | null | undefined;
   modelId: string | null;
@@ -89,7 +106,7 @@ export interface UsePlanZoneOutlinesOptions {
 }
 
 export function usePlanZoneOutlines({
-  enabled, geometryResult, dataStore, modelId, storeyId,
+  enabled, shownThemes, geometryResult, dataStore, modelId, storeyId,
 }: UsePlanZoneOutlinesOptions): PlanZoneOutline[] {
   const mutationViews = useViewerStore((s) => s.mutationViews);
   const mutationVersion = useViewerStore((s) => s.mutationVersion);
@@ -115,12 +132,20 @@ export function usePlanZoneOutlines({
       all.some((zone) => themeOfZone(zone.objectType)?.id === layer.themeId);
     // Outermost first: the compartment encloses the detection zone, on the
     // plan as in the building, and that order is what the insets stack along.
-    // A layer the model does not have is left OUT of the stack rather than
-    // reserved a place in it — otherwise a plan with no compartments would
-    // float its detection boundaries a compartment's width inside the wall.
     const layers: ZoneLayer[] = [COMPARTMENT_LAYER, detection].filter(has);
     if (layers.length === 0) return [];
-    const insets = layerInsets(layers);
+
+    // Only the DRAWN layers take up room. A layer that is derived but hidden
+    // keeps its own half-weight, which nothing reads, rather than displacing
+    // the boundaries that are actually on the sheet.
+    const drawn = shownThemes === undefined
+      ? layers
+      : layers.filter((layer) => shownThemes.has(layer.themeId));
+    const drawnInsets = layerInsets(drawn);
+    const insetOf = (layer: ZoneLayer): number => {
+      const index = drawn.indexOf(layer);
+      return index >= 0 ? drawnInsets[index] : layer.weightM / 2;
+    };
 
     // Every door on the storey breaks any boundary it sits in — including a
     // door between two rooms of the same zone, whose wall is internal and
@@ -133,7 +158,7 @@ export function usePlanZoneOutlines({
     }
 
     const out: PlanZoneOutline[] = [];
-    layers.forEach((layer, index) => {
+    for (const layer of layers) {
       for (const zone of all) {
         if (themeOfZone(zone.objectType)?.id !== layer.themeId) continue;
         const rooms = zone.memberIds
@@ -155,22 +180,24 @@ export function usePlanZoneOutlines({
           // Half this layer's weight plus everything outside it, so the line
           // comes to rest ON its boundary rather than straddling it, and the
           // layers touch instead of overlapping.
-          segments: zoneOutline(rooms, doors, { inset: insets[index] }),
+          segments: zoneOutline(rooms, doors, { inset: insetOf(layer) }),
           // Only the INNERMOST layer tints. Two tints over one room is 32 % of
           // two different hues, which reads as a third colour and hides the
           // floor under it; and the finest subdivision on the sheet is the one
           // the tint should be answering for. So the compartment fills when it
           // is drawn alone, and drops to a line as soon as the detection zones
           // subdivide it.
-          fills: index === layers.length - 1 ? rooms.map((room) => room.triangles) : EMPTY_FILLS,
+          fills: layer === (drawn[drawn.length - 1] ?? layers[layers.length - 1])
+            ? rooms.map((room) => room.triangles)
+            : EMPTY_FILLS,
         });
       }
-    });
+    }
     return out;
     // `mutationVersion` bumps whenever a room is painted into a zone, which is
     // the whole point: the line follows the brush.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, graph, dataStore, modelId, mutationViews, mutationVersion, roleId]);
+  }, [enabled, shownThemes, graph, dataStore, modelId, mutationViews, mutationVersion, roleId]);
 }
 
 export default usePlanZoneOutlines;

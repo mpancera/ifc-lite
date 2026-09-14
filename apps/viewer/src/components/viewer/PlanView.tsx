@@ -102,7 +102,9 @@ import { pixelsPerMetreForScale, scaleDenominator } from '@/lib/plan/planChrome'
 import { usePlanOpeningSymbols } from '@/hooks/usePlanOpeningSymbols';
 import { usePlanDeviceMarks } from '@/hooks/usePlanDeviceMarks';
 import { usePlanZoneOutlines } from '@/hooks/usePlanZoneOutlines';
-import { COMPARTMENT_LAYER } from '@/lib/zoneOutline/zoneLayers';
+import {
+  COMPARTMENT_LAYER, FIRE_TRIGGER_LAYER, GAS_TRIGGER_LAYER,
+} from '@/lib/zoneOutline/zoneLayers';
 import { useDrawingColorKeys } from '@/hooks/useDrawingColorKeys';
 import { useModelOrigins } from '@/hooks/useModelOrigins';
 import { planStoreys, defaultPlanStorey, planCut, type PlanStorey } from '@/lib/plan/planCut';
@@ -663,8 +665,17 @@ export function PlanView({
   const setPlanShowZoneOutlines = useViewerStore((s) => s.setPlanShowZoneOutlines);
   const planShowCompartments = useViewerStore((s) => s.planShowCompartments);
   const setPlanShowCompartments = useViewerStore((s) => s.setPlanShowCompartments);
+  /** What the insets stack along — see `usePlanZoneOutlines`. */
+  const shownZoneThemes = useMemo(() => {
+    const shown = new Set<string>();
+    if (planShowCompartments) shown.add(COMPARTMENT_LAYER.themeId);
+    if (planShowZoneOutlines) { shown.add(FIRE_TRIGGER_LAYER.themeId); shown.add(GAS_TRIGGER_LAYER.themeId); }
+    return shown;
+  }, [planShowCompartments, planShowZoneOutlines]);
+
   const zoneOutlines = usePlanZoneOutlines({
     enabled: active,
+    shownThemes: shownZoneThemes,
     geometryResult,
     dataStore: storeyDataStore,
     modelId: storeyModelId,
