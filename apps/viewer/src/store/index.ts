@@ -413,6 +413,7 @@ const createViewerStore = () => create<ViewerState>()(withVisibilityOwnershipInv
       roomTriagePanelVisible: panel === 'roomTriage',
       doorNumbersPanelVisible: panel === 'doorNumbers',
       detectorGroupsPanelVisible: panel === 'detectorGroups',
+      harmonizerReviewPanelVisible: panel === 'harmonizerReview',
       wiringPanelVisible: panel === 'wiring',
       rightPanelCollapsed: false,
     });
@@ -474,6 +475,7 @@ const createViewerStore = () => create<ViewerState>()(withVisibilityOwnershipInv
         roomTriagePanelVisible: false,
         doorNumbersPanelVisible: false,
         detectorGroupsPanelVisible: false,
+        harmonizerReviewPanelVisible: false,
         wiringPanelVisible: false,
         rightPanelCollapsed: false,
       });
@@ -581,6 +583,7 @@ export const SIDEBAR_PANEL_FLAGS: ReadonlyArray<readonly [keyof ViewerState, Wor
   ['roomTriagePanelVisible', 'roomTriage'],
   ['doorNumbersPanelVisible', 'doorNumbers'],
   ['detectorGroupsPanelVisible', 'detectorGroups'],
+  ['harmonizerReviewPanelVisible', 'harmonizerReview'],
   ['wiringPanelVisible', 'wiring'],
 ];
 

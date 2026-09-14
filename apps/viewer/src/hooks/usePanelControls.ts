@@ -72,6 +72,7 @@ function setDockedVisible(id: AnalysisPanelId, visible: boolean): void {
     case 'detectorGroups': s.setDetectorGroupsPanelVisible(visible); break;
     case 'wiring': s.setWiringPanelVisible(visible); break;
     case 'classTriage': s.setClassTriagePanelVisible(visible); break;
+    case 'harmonizerReview': s.setHarmonizerReviewPanelVisible(visible); break;
   }
 }
 

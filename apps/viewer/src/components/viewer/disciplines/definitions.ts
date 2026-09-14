@@ -38,6 +38,7 @@ import {
   Brush,
   Cable,
   Cctv,
+  ClipboardCheck,
   ClipboardList,
   DoorClosed,
   DoorOpen,
@@ -482,6 +483,22 @@ export const DISCIPLINE_TABS: readonly DisciplineTab[] = [
             icon: PenLine,
             run: (s) => s.setActiveDisciplineSystemId(EDITOR_ROLE_ID),
             isActive: (s) => s.activeDisciplineSystemId === EDITOR_ROLE_ID,
+          },
+        ],
+      },
+      {
+        label: 'Harmonizer',
+        items: [
+          {
+            // Die Prüfung eines DataHarmonizer-Entwurfs gehört zur Rolle Editor:
+            // nur sie korrigiert das Referenzmodell, und der Entwurf wird eines.
+            id: 'harmonizerReview',
+            kind: 'panel',
+            panel: 'harmonizerReview',
+            label: 'Prüfung',
+            tooltip: 'Den Entwurf des DataHarmonizers prüfen: je Element bestätigen, korrigiert oder verwerfen — der Status geht ins Pset und mit dem Export in die Datei',
+            icon: ClipboardCheck,
+            needsModel: true,
           },
         ],
       },

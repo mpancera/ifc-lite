@@ -15,6 +15,7 @@ import { lazy, Suspense, type ReactNode } from 'react';
 import type { WorkspacePanelId } from './registry';
 import { ChunkErrorBoundary } from '@/components/ChunkErrorBoundary';
 import { HierarchyPanel } from '@/components/viewer/HierarchyPanel';
+import { HarmonizerReviewPanel } from '@/components/viewer/HarmonizerReviewPanel';
 import { PropertiesPanel } from '@/components/viewer/PropertiesPanel';
 import { ComparePanel } from '@/components/viewer/ComparePanel';
 import { BCFPanel } from '@/components/viewer/BCFPanel';
@@ -82,6 +83,7 @@ export function renderPanelBody(id: WorkspacePanelId, onClose: () => void): Reac
     case 'detectorGroups': return <DetectorGroupsPanel onClose={onClose} />;
     case 'wiring': return <WiringPanel onClose={onClose} />;
     case 'loadReport': return <LoadReportPanel onClose={onClose} />;
+    case 'harmonizerReview': return <HarmonizerReviewPanel onClose={onClose} />;
     case 'layers': return (
       <ChunkErrorBoundary label="Layers panel">
         <Suspense fallback={null}>

@@ -77,7 +77,8 @@ export type WorkspacePanelId =
   | 'doorNumbers'
   | 'detectorGroups'
   | 'wiring'
-  | 'loadReport';
+  | 'loadReport'
+  | 'harmonizerReview';
 
 /** Activity-bar clustering — a divider is drawn whenever the group changes. */
 export type PanelGroup = 'navigate' | 'inspect' | 'review' | 'author' | 'work';
@@ -192,6 +193,8 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   // `loadReportPanelVisible` boolean; `openWorkspacePanel`'s generic
   // non-SIDEBAR_PANEL_FLAGS branch adopts it directly (issue #3927).
   { id: 'loadReport', title: 'Load report', short: 'Load report', Icon: FileWarning, group: 'review', region: 'side' },
+  // Prüfung eines DataHarmonizer-Entwurfs: Status je Element ins Pset. APPENDED, wie alles seit #1200.
+  { id: 'harmonizerReview', title: 'Prüfung DataHarmonizer', short: 'Prüfung', Icon: ClipboardCheck, group: 'review', region: 'side' },
 ];
 
 /** The bottom-strip panel ids, mapped to their store visibility flag + setter
