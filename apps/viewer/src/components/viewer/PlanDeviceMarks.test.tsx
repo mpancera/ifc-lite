@@ -22,12 +22,15 @@ const TRANSFORM = { x: 100, y: 100, scale: 10, rotation: 0 };
 const mark = (expressId: number, x: number): DeviceMark => ({
   key: `m${expressId}`,
   expressId,
-  kind: 'detector',
+  kind: 'sensor',
   position: { x, y: 0 },
   name: `Melder ${expressId}`,
   ifcType: 'IfcSensor',
   predefinedType: 'SMOKESENSOR',
-} as DeviceMark);
+  objectType: null,
+  tag: '',
+  assetIdentifier: '',
+});
 
 const marksIn = (container: HTMLElement) =>
   [...container.querySelectorAll('[data-plan-device-mark]')];
