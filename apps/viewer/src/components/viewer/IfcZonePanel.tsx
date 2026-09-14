@@ -37,6 +37,9 @@ import {
 } from '@/lib/ifcZones/selectionTargets';
 import type { ZoneInfo } from '@/lib/ifcZones/membership';
 import { useSelectedEntityRefs } from '@/hooks/useSelectedEntityRefs';
+import { useZoneRoster } from '@/hooks/useZoneRoster';
+import { toGlobalIdFromModels } from '@/store/globalId';
+import { formatArea } from '@/lib/ifcZones/roster';
 
 /** A zone with no colour still needs something to show in the swatch. */
 const NO_COLOUR = 'transparent';
@@ -53,6 +56,7 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
   const mutationVersion = useViewerStore((s) => s.mutationVersion);
   const mutationViews = useViewerStore((s) => s.mutationViews);
   const ifcZonesOf = useViewerStore((s) => s.ifcZonesOf);
+  const geometryResult = useViewerStore((s) => s.geometryResult);
 
   const activeIfcZoneKey = useViewerStore((s) => s.activeIfcZoneKey);
   const setActiveIfcZone = useViewerStore((s) => s.setActiveIfcZone);
@@ -117,6 +121,27 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
   const colourTheme = themeOfZone(activeZone?.objectType ?? null)?.id ?? newThemeId;
 
   /**
+   * How the rooms sit in the theme being worked on — see `useZoneRoster`.
+   *
+   * The panel counted MEMBERS, and a member count decides nothing. What forms
+   * a Brandabschnitt is the usage, the resulting total area and the resulting
+   * escape route lengths; the area is the one of those the model can answer
+   * today, and the rooms nobody has assigned yet are the other half of the
+   * question — on paper the highlighter showed them by leaving them white.
+   */
+  const roster = useZoneRoster({
+    enabled: activeModelId !== null,
+    themeId: colourTheme,
+    modelId: activeModelId,
+    dataStore: activeModelId ? models.get(activeModelId)?.ifcDataStore : null,
+    geometryResult,
+  });
+  const rosterRows = useMemo(
+    () => new Map(roster.rows.map((row) => [row.expressId, row])),
+    [roster],
+  );
+
+  /**
    * The IFC class of an entity, from the parse or from this session's edits.
    *
    * The overlay is consulted first and is not optional: a room drawn in this
@@ -126,6 +151,24 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
    * try to group them, and the tool said no; that is the ordinary order of
    * work, not an edge case.
    */
+  /**
+   * Put a set of rooms into the selection, both channels.
+   *
+   * The renderer highlights global ids, every tool reads model-local refs —
+   * writing one alone is how a bulk pick ends up lighting rooms that no
+   * subsequent action can see (`store/selectedRefs.ts`).
+   */
+  const selectRooms = useCallback((expressIds: number[], said: string) => {
+    if (!activeModelId || expressIds.length === 0) return;
+    const store = useViewerStore.getState();
+    store.clearEntitySelection();
+    store.setSelectedEntityIds(
+      expressIds.map((id) => toGlobalIdFromModels(store.models, activeModelId, id)),
+    );
+    store.addEntitiesToSelection(expressIds.map((id) => ({ modelId: activeModelId, expressId: id })));
+    setNote(said);
+  }, [activeModelId]);
+
   const typeOf = useCallback((modelId: string, expressId: number): string | null => {
     const view = mutationViews.get(modelId);
     if (view) {
@@ -381,8 +424,17 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
                         {zone.name || <span className="text-muted-foreground">ohne Namen</span>}
                       </button>
                     )}
+                    {/* Rooms AND area. The count alone answers nothing a
+                        specialist has to decide; the area is what forms a
+                        compartment, and the mark says when it is only a
+                        floor because a room carries no area at all. */}
                     <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
                       {zone.memberIds.length}
+                      {(() => {
+                        const row = rosterRows.get(zone.expressId);
+                        if (!row || row.rooms === 0) return null;
+                        return ` · ${row.withoutArea > 0 ? '≥ ' : ''}${formatArea(row.area)}`;
+                      })()}
                     </span>
                     {/* Double-click renames too, and did before this button.
                         It is not discoverable: a single click selects, so
@@ -480,6 +532,46 @@ export function IfcZonePanel({ onClose }: IfcZonePanelProps) {
           </ul>
         )}
       </ScrollArea>
+
+      {/* Is the assignment FINISHED. Assigning by hand fails the same way every
+          time — a room nobody looked at — and an unassigned room in a model
+          looks exactly like one you have not scrolled to. Counted over every
+          storey, because a Brandabschnitt is routinely vertical. */}
+      {roster.roomCount > 0 && (
+        <div className="border-t px-3 py-2 space-y-1">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-muted-foreground">
+              {roster.roomCount - roster.unassigned.length} von {roster.roomCount} Räumen
+              {' '}in einer Zone dieses Themas
+            </span>
+            {roster.unassigned.length > 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="ml-auto h-6 shrink-0 px-2 text-[10px]"
+                title="Die Räume ohne Zone dieses Themas auswählen — dann mit „Auswahl zuweisen“ in die offene Zone legen"
+                onClick={() => selectRooms(roster.unassigned.map((r) => r.expressId),
+                  `${roster.unassigned.length} Raum/Räume ohne Zone ausgewählt`)}
+              >
+                {roster.unassigned.length} ohne
+              </Button>
+            )}
+          </div>
+          {/* Two zones of one theme claiming a room is always an error, and
+              which of the two is wrong is a question only the author can
+              answer — so it is named rather than resolved. */}
+          {roster.contested.length > 0 && (
+            <button
+              type="button"
+              className="block w-full text-left text-[10px] text-amber-600 hover:underline"
+              onClick={() => selectRooms(roster.contested.map((c) => c.room.expressId),
+                `${roster.contested.length} Raum/Räume in mehr als einer Zone`)}
+            >
+              {roster.contested.length} Raum/Räume in zwei Zonen dieses Themas — beide zählen ihn
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="border-t px-3 py-2">
         <p className="text-[10px] leading-relaxed text-muted-foreground">
