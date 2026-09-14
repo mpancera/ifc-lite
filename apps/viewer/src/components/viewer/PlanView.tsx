@@ -569,7 +569,30 @@ export function PlanView({
   const setWiringHover = useViewerStore((s) => s.setWiringHover);
   const wiringActive = activeTool === 'wiring';
 
-  const handleDeviceMarkClick = useCallback((expressId: number) => {
+  /**
+   * One selection, both channels — the plan's single door to the store.
+   *
+   * The global-id set drives the renderer highlight; the model-aware channel is
+   * what every tool reads to answer "what did the user pick". Writing one and
+   * not the other leaves the drawing and the panels describing different
+   * selections, and the tools follow the panels.
+   *
+   * Read through `getState` rather than subscribed: this runs on a click, and a
+   * subscription would repaint the whole plan whenever the selection moves.
+   */
+  const applyPlanSelection = useCallback((globalId: number, additive: boolean) => {
+    const state = useViewerStore.getState();
+    if (additive) {
+      state.toggleEntitySelection(resolveEntityRef(globalId));
+      state.toggleSelection(globalId);
+      return;
+    }
+    useViewerStore.setState({ selectedEntitiesSet: new Set(), selectedEntityIds: new Set() });
+    state.setSelectedEntityId(globalId);
+    state.setSelectedEntity(resolveEntityRef(globalId));
+  }, []);
+
+  const handleDeviceMarkClick = useCallback((expressId: number, additive: boolean) => {
     if (wiringActive) {
       pushWiringPick(expressId);
       return;
@@ -577,10 +600,16 @@ export function PlanView({
     // The selection speaks global ids; the mark carries the model's own. Read
     // through `getState` rather than subscribed: this runs on a click, and a
     // subscription would repaint the whole plan whenever the selection moves.
-    useViewerStore.getState().setSelectedEntityId(
-      storeyModelId ? toGlobalIdFromModels(models, storeyModelId, expressId) : expressId,
-    );
-  }, [wiringActive, pushWiringPick, storeyModelId, models]);
+    const globalId = storeyModelId
+      ? toGlobalIdFromModels(models, storeyModelId, expressId)
+      : expressId;
+    // Through the same door as a click on the drawing itself. Writing only the
+    // highlight id left whatever was in the model-aware channel standing, and
+    // that channel is what the tools read — so picking a detector in the plan
+    // highlighted it while "Geschoss zuweisen" still meant the six walls
+    // selected ten minutes ago in 3D.
+    applyPlanSelection(globalId, additive);
+  }, [wiringActive, pushWiringPick, storeyModelId, models, applyPlanSelection]);
 
   const deviceMarks = usePlanDeviceMarks({
     enabled: active,
@@ -918,19 +947,8 @@ export function PlanView({
       ? toGlobalIdFromModels(state.models, modelId, hit.entityId)
       : hit.entityId;
 
-    if (additive) {
-      state.toggleEntitySelection(resolveEntityRef(globalId));
-      state.toggleSelection(globalId);
-      return;
-    }
-
-    // Both channels, per the viewer's selection contract: the global-id set
-    // drives the renderer highlight, the EntityRef drives property lookup.
-    // Writing only one leaves the plan and the panels disagreeing.
-    useViewerStore.setState({ selectedEntitiesSet: new Set(), selectedEntityIds: new Set() });
-    state.setSelectedEntityId(globalId);
-    state.setSelectedEntity(resolveEntityRef(globalId));
-  }, [drawing, planTransform, indexToModelId]);
+    applyPlanSelection(globalId, additive);
+  }, [drawing, planTransform, indexToModelId, applyPlanSelection]);
 
   // ── The overlays the toolbar switches on ────────────────────────────────
   const overrideEngine = useMemo(

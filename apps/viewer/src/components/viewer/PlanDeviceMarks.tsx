@@ -57,8 +57,13 @@ export interface PlanDeviceMarksProps {
    * straight through. That was the whole behaviour until now, and it made the
    * devices unreachable in the plan — a detector IS its symbol there, so a
    * symbol that cannot be clicked is a detector that cannot be picked.
+   *
+   * `additive` carries Ctrl/Cmd, so a run of detectors can be collected here
+   * the same way it is collected anywhere else. Without it the plan is the one
+   * surface where a multi-selection cannot be built, and the plan is where
+   * somebody picks the detectors of one Meldebereich.
    */
-  onMarkClick?: (expressId: number) => void;
+  onMarkClick?: (expressId: number, additive: boolean) => void;
   /** Called with the id under the cursor, or `null` on leaving one. */
   onMarkHover?: (expressId: number | null) => void;
   /**
@@ -185,7 +190,7 @@ export function PlanDeviceMarks({
               // would read this as a click on empty drawing — starting a
               // rubber band under the device that was just picked.
               event.stopPropagation();
-              onMarkClick(mark.expressId);
+              onMarkClick(mark.expressId, event.ctrlKey || event.metaKey);
             } : undefined}
             onPointerEnter={onMarkHover ? () => onMarkHover(mark.expressId) : undefined}
             onPointerLeave={onMarkHover ? () => onMarkHover(null) : undefined}
