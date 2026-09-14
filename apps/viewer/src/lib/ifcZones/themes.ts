@@ -280,8 +280,19 @@ export function themeOfSpatialZone(
     return ZONE_THEMES.find((t) => t.since === 'IFC4X3'
       && (t.spatialObjectType ?? t.zoneObjectType).toLowerCase() === refinement) ?? null;
   }
-  return ZONE_THEMES.find((t) => t.spatialPredefinedType === type
-    && (t.spatialObjectType ?? '').toLowerCase() === refinement) ?? null;
+
+  const exact = ZONE_THEMES.find((t) => t.spatialPredefinedType === type
+    && (t.spatialObjectType ?? '').toLowerCase() === refinement);
+  if (exact) return exact;
+
+  // A bare enum with no refinement is the family's BASE theme — the first one
+  // in the catalogue with that value. This is not a convenience: another tool
+  // writing a fire compartment as plain FIRESAFETY with an empty ObjectType is
+  // the common case, and it is what IFC's own wording describes ("a fire
+  // safety zone, or fire compartment"). Without this, our own requirement to
+  // WRITE `FIRECOMPARTMENT` would make us unable to READ anyone else's.
+  if (!refinement) return ZONE_THEMES.find((t) => t.spatialPredefinedType === type) ?? null;
+  return null;
 }
 
 export interface SpatialTypeMapping {

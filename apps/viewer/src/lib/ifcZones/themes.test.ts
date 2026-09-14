@@ -185,6 +185,15 @@ describe('themeOfSpatialZone', () => {
     }
   });
 
+  it('reads a bare FIRESAFETY zone as a Brandabschnitt', () => {
+    // We WRITE the ObjectType a Swiss exchange requirement asks for, but other
+    // tools — and the IG BIM&BS example itself — leave it empty. Refusing to
+    // recognise those would make conformance on the way out cost us every
+    // compartment on the way in.
+    assert.equal(themeOfSpatialZone('FIRESAFETY', null)?.id, 'fire-compartment');
+    assert.equal(themeOfSpatialZone('firesafety', '')?.id, 'fire-compartment');
+  });
+
   it('reports null rather than a guess', () => {
     assert.equal(themeOfSpatialZone(null, 'FIRECOMPARTMENT'), null);
     assert.equal(themeOfSpatialZone('FIRESAFETY', 'Brandabschnitt_Nord'), null);
