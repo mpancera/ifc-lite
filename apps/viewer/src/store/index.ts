@@ -414,6 +414,7 @@ const createViewerStore = () => create<ViewerState>()(withVisibilityOwnershipInv
       doorNumbersPanelVisible: panel === 'doorNumbers',
       detectorGroupsPanelVisible: panel === 'detectorGroups',
       wiringPanelVisible: panel === 'wiring',
+      smartSelectPanelVisible: panel === 'smartSelect',
       rightPanelCollapsed: false,
     });
     // A side panel with NO visibility flag of its own (Location zones, #1869)
@@ -475,6 +476,7 @@ const createViewerStore = () => create<ViewerState>()(withVisibilityOwnershipInv
         doorNumbersPanelVisible: false,
         detectorGroupsPanelVisible: false,
         wiringPanelVisible: false,
+        smartSelectPanelVisible: false,
         rightPanelCollapsed: false,
       });
       get().setSidebarActivePanel('properties');
@@ -582,6 +584,7 @@ export const SIDEBAR_PANEL_FLAGS: ReadonlyArray<readonly [keyof ViewerState, Wor
   ['doorNumbersPanelVisible', 'doorNumbers'],
   ['detectorGroupsPanelVisible', 'detectorGroups'],
   ['wiringPanelVisible', 'wiring'],
+  ['smartSelectPanelVisible', 'smartSelect'],
 ];
 
 /**

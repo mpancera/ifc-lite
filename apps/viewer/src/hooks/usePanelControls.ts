@@ -71,6 +71,7 @@ function setDockedVisible(id: AnalysisPanelId, visible: boolean): void {
     case 'doorNumbers': s.setDoorNumbersPanelVisible(visible); break;
     case 'detectorGroups': s.setDetectorGroupsPanelVisible(visible); break;
     case 'wiring': s.setWiringPanelVisible(visible); break;
+    case 'smartSelect': s.setSmartSelectPanelVisible(visible); break;
     case 'classTriage': s.setClassTriagePanelVisible(visible); break;
   }
 }
