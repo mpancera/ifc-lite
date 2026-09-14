@@ -261,3 +261,115 @@ export function zoneOfSpace(zones: readonly ZoneInfo[], spaceId: number): ZoneIn
   }
   return null;
 }
+
+/**
+ * A Brandabschnitt as a BODY, from either side of the overlay.
+ *
+ * `IfcSpatialZone` is the other container a room's assignment can go through —
+ * the exchange requirement names both, "Zugehörigkeit zu Zonen (IfcZone) und
+ * Zonierungselementen (IfcSpatialZone)". Its theme is NOT the PredefinedType
+ * alone: six themes share `FIRESAFETY`, and `ObjectType` is what tells a
+ * Brandabschnitt from an Auslösezone (Marc, 2026-09-14). Both fields are
+ * carried here so the caller can resolve it with `themeOfSpatialZone`, which
+ * is the one place that knows how the two combine.
+ */
+export interface SpatialZoneInfo {
+  readonly expressId: number;
+  readonly name: string;
+  /** `IfcSpatialZone.PredefinedType`, enum markers stripped. */
+  readonly predefinedType: string | null;
+  /** `IfcSpatialZone.ObjectType` — the refinement. */
+  readonly objectType: string | null;
+  /** Rooms referenced through `IfcRelReferencedInSpatialStructure`. */
+  readonly memberIds: readonly number[];
+}
+
+/** What {@link parsedSpatialZonesOf} needs of a store, beyond `ZoneReadableStore`. */
+export interface SpatialZoneReadableStore extends ZoneReadableStore {
+  /** Resolves `PredefinedType`, which has no columnar accessor. */
+  predefinedTypeOf?(expressId: number): string | undefined;
+}
+
+/**
+ * The `IfcSpatialZone`s the loaded FILE carries, with the rooms they reference.
+ *
+ * `relType` is passed as a number for the same reason `parsedZonesOf` does it:
+ * this module does not depend on the store's enum, the caller names it.
+ */
+export function parsedSpatialZonesOf(
+  store: SpatialZoneReadableStore | null | undefined,
+  referencedInSpatialStructure: number,
+): SpatialZoneInfo[] {
+  const ids = store?.entityIndex?.byType?.get('IFCSPATIALZONE') ?? [];
+  return ids.map((expressId) => ({
+    expressId,
+    name: store?.entities?.getName?.(expressId) ?? '',
+    predefinedType: store?.predefinedTypeOf?.(expressId) ?? null,
+    objectType: store?.entities?.getObjectType?.(expressId) ?? null,
+    memberIds: store?.relationships?.getRelated(
+      expressId, referencedInSpatialStructure, 'forward',
+    ) ?? [],
+  }));
+}
+
+/** `IfcSpatialZone` attribute positions, of the nine the schema gives it. */
+const SPATIAL_ZONE_NAME = 2;
+const SPATIAL_ZONE_OBJECT_TYPE = 4;
+const SPATIAL_ZONE_PREDEFINED_TYPE = 8;
+/** `IfcRelReferencedInSpatialStructure`: RelatedElements, then RelatingStructure. */
+const REL_RELATED_ELEMENTS = 4;
+const REL_RELATING_STRUCTURE = 5;
+
+/** `.FIRESAFETY.` → `FIRESAFETY`; a plain string passes through. */
+function enumToken(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (trimmed === '') return null;
+  return trimmed.startsWith('.') && trimmed.endsWith('.')
+    ? trimmed.slice(1, -1)
+    : trimmed;
+}
+
+/**
+ * The `IfcSpatialZone`s THIS SESSION authored, with the rooms they reference.
+ *
+ * The overlay half of {@link parsedSpatialZonesOf}: a zone emitted a minute
+ * ago is not in the parse at all, and a roster that read only the file would
+ * report its rooms as unassigned the moment they were assigned.
+ */
+export function authoredSpatialZonesOf(
+  entities: Iterable<OverlayEntity>,
+): SpatialZoneInfo[] {
+  const zones = new Map<number, SpatialZoneInfo>();
+  const members = new Map<number, number[]>();
+
+  for (const entity of entities) {
+    if (entity.type === 'IfcSpatialZone') {
+      zones.set(entity.expressId, {
+        expressId: entity.expressId,
+        name: asString(entity.attributes[SPATIAL_ZONE_NAME]),
+        predefinedType: enumToken(entity.attributes[SPATIAL_ZONE_PREDEFINED_TYPE]),
+        objectType: enumToken(entity.attributes[SPATIAL_ZONE_OBJECT_TYPE]),
+        memberIds: [],
+      });
+      continue;
+    }
+    if (entity.type !== 'IfcRelReferencedInSpatialStructure') continue;
+    const structure = refId(entity.attributes[REL_RELATING_STRUCTURE]);
+    if (structure === null) continue;
+    const related = entity.attributes[REL_RELATED_ELEMENTS];
+    if (!Array.isArray(related)) continue;
+    const list = members.get(structure) ?? [];
+    for (const value of related) {
+      const id = refId(value);
+      if (id !== null) list.push(id);
+    }
+    members.set(structure, list);
+  }
+
+  // Several relationships may point at one zone — the builder writes one per
+  // zone, but nothing in IFC says it must.
+  return [...zones.values()].map((zone) => ({
+    ...zone, memberIds: members.get(zone.expressId) ?? [],
+  }));
+}

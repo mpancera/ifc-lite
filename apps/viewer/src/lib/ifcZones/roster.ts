@@ -34,6 +34,21 @@
  * other compartment quietly too small, which is exactly the kind of wrong
  * number a specialist would act on.
  *
+ * # A room can be assigned through more than one kind of container
+ *
+ * The exchange requirement documents the assignment "anhand der Räume
+ * (IfcSpace) und ihrer Zugehörigkeit zu Zonen (IfcZone) und
+ * Zonierungselementen (IfcSpatialZone)" — two containers, one question. A
+ * room referenced by a Brandabschnitt BODY is assigned, and reporting it as
+ * unassigned because it is not also in a group would send its author looking
+ * for work that is done.
+ *
+ * Those come in through `alsoAssigned` rather than as more rows, and they do
+ * NOT make a room contested: one compartment expressed both as a group of
+ * rooms and as the body derived from it is one compartment, and flagging that
+ * pair as a double claim would turn the intended modelling into an error
+ * report.
+ *
  * Pure: takes the rooms and the zones, returns the reading. No store, no IFC.
  */
 
@@ -83,7 +98,11 @@ export interface Roster {
  * the filtering here would need this module to know the theme catalogue, and
  * the caller knows which theme it is asking about anyway.
  */
-export function readRoster(rooms: readonly RosterRoom[], zones: readonly ZoneInfo[]): Roster {
+export function readRoster(
+  rooms: readonly RosterRoom[],
+  zones: readonly ZoneInfo[],
+  alsoAssigned: ReadonlySet<number> = new Set(),
+): Roster {
   const byId = new Map<number, RosterRoom>(rooms.map((room) => [room.expressId, room]));
   /** Which zones of this theme claim each room. */
   const claims = new Map<number, number[]>();
@@ -123,8 +142,11 @@ export function readRoster(rooms: readonly RosterRoom[], zones: readonly ZoneInf
   const contested: Roster['contested'] = [];
   for (const room of rooms) {
     const claimed = claims.get(room.expressId);
-    if (!claimed) unassigned.push(room);
-    else if (claimed.length > 1) contested.push({ room, zoneIds: claimed });
+    if (!claimed) {
+      if (!alsoAssigned.has(room.expressId)) unassigned.push(room);
+    } else if (claimed.length > 1) {
+      contested.push({ room, zoneIds: claimed });
+    }
   }
 
   return { rows, unassigned, contested, roomCount: rooms.length };

@@ -83,6 +83,25 @@ describe('readRoster', () => {
     assert.equal(rows[0].area, 50, 'and its area does not enter the sum twice');
   });
 
+  it('accepts a room assigned through another container', () => {
+    // An IfcSpatialZone referencing the room is the other half of the
+    // assignment the exchange requirement names. Calling it unassigned would
+    // send its author looking for work that is done.
+    const roster = readRoster(ROOMS, [zone(100, 'BA-01', [1, 2])], new Set([3]));
+
+    assert.deepEqual(roster.unassigned.map((r) => r.expressId), [4]);
+  });
+
+  it('does not call the body and its group a double claim', () => {
+    // One compartment expressed as a group of rooms AND as the body derived
+    // from it is one compartment. Flagging that pair would report the intended
+    // modelling as an error.
+    const roster = readRoster(ROOMS, [zone(100, 'BA-01', [1, 2])], new Set([1, 2]));
+
+    assert.deepEqual(roster.contested, []);
+    assert.deepEqual(roster.unassigned.map((r) => r.expressId), [3, 4]);
+  });
+
   it('calls everything unassigned when there is no zone yet', () => {
     const roster = readRoster(ROOMS, []);
 

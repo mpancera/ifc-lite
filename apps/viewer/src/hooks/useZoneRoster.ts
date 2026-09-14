@@ -22,6 +22,17 @@
  * neither is reported with `area: null` rather than zero: a compartment's total
  * is then a FLOOR and the panel says so, because "413 m²" and "at least
  * 413 m²" are different answers to the question that forms a compartment.
+ *
+ * # Both containers count
+ *
+ * A room's assignment can go through an `IfcZone` (a group of rooms) or an
+ * `IfcSpatialZone` (the body) — the exchange requirement names both. The
+ * body's theme is resolved from PredefinedType AND ObjectType together, since
+ * six themes share `FIRESAFETY` and only the refinement tells a Brandabschnitt
+ * from an Auslösezone. Those rooms are handed to the roster as already
+ * assigned rather than as extra rows: the body of a compartment and the group
+ * it was derived from are one compartment, and listing both would report the
+ * intended modelling as a double claim.
  */
 
 import { useMemo } from 'react';
@@ -31,8 +42,11 @@ import { useViewerStore } from '@/store';
 import { RelationshipType } from '@ifc-lite/data';
 import { authoredEntities } from '@/lib/mutations/authoredEntities';
 import { overlayAttribute } from '@/lib/mutations/overlayAttribute';
-import { parsedZonesOf, readZones, readZonesForDisplay } from '@/lib/ifcZones/membership';
-import { themeOfZone } from '@/lib/ifcZones/themes';
+import {
+  authoredSpatialZonesOf, parsedSpatialZonesOf, parsedZonesOf, readZones, readZonesForDisplay,
+} from '@/lib/ifcZones/membership';
+import { themeOfSpatialZone, themeOfZone } from '@/lib/ifcZones/themes';
+import { resolveEntityPredefinedType } from '@/lib/entity-predefined-type';
 import { readRoster, type Roster, type RosterRoom } from '@/lib/ifcZones/roster';
 import {
   roomAreaFromQuantities, roomFootprint, type QuantitySetLike, type RoomMesh,
@@ -102,7 +116,27 @@ export function useZoneRoster({
       overlay ? readZones(authoredEntities(overlay)) : [],
     ).filter((zone) => themeOfZone(zone.objectType)?.id === themeId);
 
-    return readRoster(rooms, zones);
+    // The other container. An id present on both sides is one zone the session
+    // has edited, and the authored record carries the later membership.
+    const bodies = new Map(
+      parsedSpatialZonesOf(
+        {
+          ...dataStore,
+          predefinedTypeOf: (id) => resolveEntityPredefinedType(dataStore, id),
+        },
+        RelationshipType.ReferencedInSpatialStructure,
+      ).map((body) => [body.expressId, body]),
+    );
+    for (const body of overlay ? authoredSpatialZonesOf(authoredEntities(overlay)) : []) {
+      bodies.set(body.expressId, body);
+    }
+    const throughBody = new Set<number>();
+    for (const body of bodies.values()) {
+      if (themeOfSpatialZone(body.predefinedType, body.objectType)?.id !== themeId) continue;
+      for (const memberId of body.memberIds) throughBody.add(memberId);
+    }
+
+    return readRoster(rooms, zones, throughBody);
     // `mutationVersion` because painting a room mutates the overlay in place:
     // neither the view nor the map changes identity when the brush lands.
     // eslint-disable-next-line react-hooks/exhaustive-deps
