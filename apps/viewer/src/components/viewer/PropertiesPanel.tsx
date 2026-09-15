@@ -34,6 +34,7 @@ import { configureMutationView } from '@/utils/configureMutationView';
 import { IfcQuery } from '@ifc-lite/query';
 import { MutablePropertyView } from '@ifc-lite/mutations';
 import { withOverlayRelationships } from '@/lib/mutations/overlayRelationships';
+import { WRITABLE_ATTRIBUTES } from '@/lib/ifc/writableAttributes';
 import { extractClassificationsOnDemand, extractAllMaterialsOnDemand, extractMaterialPropertiesOnDemand, extractTypePropertiesOnDemand, extractTypeQuantitiesOnDemand, extractTypeEntityOwnProperties, extractDocumentsOnDemand, extractRelationshipsOnDemand, extractGroupMembersOnDemand, extractGeoreferencingOnDemand, extractLengthUnitScale, extractProjectUnits, ProjectUnits, getAttributeNames, type IfcDataStore, type MaterialPsetGroup } from '@ifc-lite/parser';
 import type { NewEntity } from '@ifc-lite/mutations';
 import { EntityFlags, RelationshipType, isSpatialStructureTypeName, isStoreyLikeSpatialTypeName } from '@ifc-lite/data';
@@ -687,12 +688,45 @@ export function PropertiesPanel() {
             merged.push({ name: ma.name, value: ma.value });
           }
         }
-        return merged;
+        return withFillableSlots(merged);
       }
     }
 
-    return base;
-  }, [entityNode, overlayEntity, selectedEntity, mutationViews, mutationVersion]);
+    return withFillableSlots(base);
+
+    /**
+     * Add a row for each writable attribute the schema HAS and the file left
+     * empty — but only while editing.
+     *
+     * An unset STEP slot produces no attribute and therefore no row, which for
+     * a read-only panel is right: there is nothing to report. In edit mode it
+     * is a trap. A room whose `LongName` is `$` has no LongName row, so the
+     * one place the readable name belongs is the one place it cannot be typed,
+     * and the attribute looks unsupported rather than simply empty (Marc,
+     * 2026-09-16: "kann ich den LongName nicht editieren ... wird in
+     * infopalette nicht angezeigt").
+     *
+     * Gated on the schema, not guessed: `getAttributeNames` answers per class,
+     * so an `IfcWall` is not offered a LongName it cannot hold. And gated on
+     * the same list the table uses, so the two surfaces cannot disagree about
+     * what is writable.
+     */
+    function withFillableSlots<T extends { name: string; value: unknown }>(
+      rows: T[],
+    ): (T | { name: string; value: string })[] {
+      if (!editMode) return rows;
+      const type = entityNode?.type ?? overlayEntity?.type;
+      if (!type) return rows;
+      const inSchema = getAttributeNames(type);
+      if (!inSchema) return rows;
+
+      const present = new Set(rows.map((a) => a.name));
+      const extra = inSchema
+        .filter((name) => WRITABLE_ATTRIBUTES.has(name) && !present.has(name))
+        .map((name) => ({ name, value: '' }));
+      return extra.length > 0 ? [...rows, ...extra] : rows;
+    }
+  }, [entityNode, overlayEntity, selectedEntity, mutationViews, mutationVersion, editMode]);
 
   // Resolve the entity id used for parsed-store lookups. For overlay
   // duplicates this is the source entity (via the view's alias) — so

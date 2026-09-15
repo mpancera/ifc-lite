@@ -17,6 +17,7 @@
  */
 
 import type { ColumnDefinition } from '@ifc-lite/lists';
+import { WRITABLE_ATTRIBUTES } from '@/lib/ifc/writableAttributes';
 
 export type EditTarget =
   | { kind: 'attribute'; name: string }
@@ -25,28 +26,6 @@ export type EditTarget =
 export type CellEditability =
   | { editable: true; target: EditTarget }
   | { editable: false; reason: string };
-
-/**
- * IFC attributes a list may write.
- *
- * The omissions are deliberate, not an oversight:
- *   - `GlobalId` is the element's identity. Everything that survives a reparse
- *     — the autosave snapshot, the reference-model index — is keyed by it.
- *   - `Class` is the entity type. Changing it is a retype (a different
- *     operation with its own consequences for geometry and psets), not a
- *     string edit.
- *   - `Type` is the name of the `IfcTypeProduct` this element is bound to via
- *     `IfcRelDefinesByType`. Typing over it would have to either rename a type
- *     shared by every other instance, or rebind this one to a different type;
- *     neither is what "edit this cell" looks like it does.
- */
-const WRITABLE_ATTRIBUTES = new Set([
-  'Name',
-  'Description',
-  'ObjectType',
-  'PredefinedType',
-  'Tag',
-]);
 
 const READ_ONLY_ATTRIBUTE_REASONS: Record<string, string> = {
   GlobalId: 'Die GlobalId ist die Identität des Bauteils und lässt sich nicht ändern.',

@@ -119,3 +119,23 @@ describe('isRelationColumn', () => {
     assert.equal(isRelationColumn(col({ source: 'model', propertyName: 'Model' })), false);
   });
 });
+
+describe('LongName', () => {
+  it('is editable — it is where a room\'s readable name lives', () => {
+    // `Name` holds the number ("U.06"), `LongName` the name ("Möbeldepot"). A
+    // room list whose only editable text is the number is a list you cannot
+    // correct a room in (Marc, 2026-09-16).
+    const editable = cellEditability(col({ propertyName: 'LongName' }));
+
+    assert.equal(editable.editable, true);
+    assert.deepEqual(editable.editable ? editable.target : null,
+      { kind: 'attribute', name: 'LongName' });
+  });
+
+  it('did not open the door for the three attributes that stay shut', () => {
+    // Widening an allowlist is how the arguments in it get lost.
+    for (const name of ['GlobalId', 'Class', 'Type']) {
+      assert.equal(cellEditability(col({ propertyName: name })).editable, false, name);
+    }
+  });
+});

@@ -278,6 +278,30 @@ export function withMutationOverlay(
     getEntityObjectType: (id) => readAttr(id, 'ObjectType', base.getEntityObjectType),
     getEntityTag: (id) => readAttr(id, 'Tag', base.getEntityTag),
 
+    /**
+     * `LongName`, with an edit winning over the file.
+     *
+     * Not through `readAttr`, because that reads an overlay entity's argument
+     * list POSITIONALLY and `LongName` has no fixed position: index 5 on an
+     * `IfcZone`, 7 on an `IfcSpace` — where `Tag` sits on a product. Guessing
+     * a slot here would read a room's name out of whatever happens to be at
+     * that index.
+     *
+     * So only the two paths that are keyed by NAME: an attribute mutation, and
+     * the base provider's schema-driven resolver. An entity authored in this
+     * session and never edited has no `LongName` anywhere to read, which is
+     * exactly what an empty string says.
+     *
+     * Without this a committed edit was written and stayed invisible in the
+     * table — the worst of the three outcomes, since it looks like the edit
+     * was refused (Marc, 2026-09-16).
+     */
+    getEntityLongName(id: number): string {
+      const edited = editedAttr(id, 'LongName');
+      if (edited !== null) return edited;
+      return base.getEntityLongName?.(id) ?? '';
+    },
+
     getEntityPredefinedType(id: number): string {
       const authored = overlayById.get(id);
       if (!authored) return base.getEntityPredefinedType?.(id) ?? '';

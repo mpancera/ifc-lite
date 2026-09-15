@@ -229,3 +229,36 @@ test('withMutationOverlay: the Raum column of the demo list carries the room', (
   // `values` is positional, in column order: Name, then Raum.
   assert.deepEqual(row?.values, ['Rauchmelder', '03']);
 });
+
+test('withMutationOverlay: an edited LongName wins over the parsed store', () => {
+  // The report: a room's readable name is the one thing a room list is edited
+  // for, and it was written and then not shown. An edit that lands in the
+  // overlay and never reaches the table looks exactly like an edit that was
+  // refused — the worst of the three outcomes, because it invites a second
+  // one.
+  const { view } = viewWithSensor();
+  const base = { ...baseProvider(), getEntityLongName: () => 'Möbeldepot' };
+  view.setAttribute(100, 'LongName', 'Lichtschacht');
+
+  assert.equal(withMutationOverlay(base, view).getEntityLongName!(100), 'Lichtschacht');
+});
+
+test('withMutationOverlay: an unedited LongName still comes from the file', () => {
+  const { view } = viewWithSensor();
+  const base = { ...baseProvider(), getEntityLongName: () => 'Möbeldepot' };
+  view.setAttribute(100, 'Name', 'U.06');
+
+  assert.equal(withMutationOverlay(base, view).getEntityLongName!(100), 'Möbeldepot');
+});
+
+test('withMutationOverlay: an authored entity has no LongName to guess at', () => {
+  // `LongName` has no fixed slot — index 5 on an IfcZone, 7 on an IfcSpace,
+  // which is where `Tag` sits on a product. Reading the overlay's argument
+  // list positionally here would hand back a room name taken from whatever
+  // happens to be at that index; the sensor's Tag is exactly that trap.
+  const { view, sensorId } = viewWithSensor();
+  const wrapped = withMutationOverlay({ ...baseProvider(), getEntityLongName: () => '' }, view);
+
+  assert.equal(wrapped.getEntityLongName!(sensorId), '');
+  assert.equal(wrapped.getEntityTag(sensorId), 'RM-001');
+});
