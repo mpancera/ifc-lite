@@ -117,6 +117,10 @@ import {
   rotationToDirection, normalizeAngle, bearingToAngle, angleToBearing, normalizeBearing,
   RAD_TO_DEG, DEG_TO_RAD,
 } from '@/lib/plan/planRotation';
+import {
+  drawingDeltaToStoreyLocal, drawingToStoreyLocal, storeyFrameOf, storeyLocalToDrawing,
+  worldShiftOf,
+} from '@/lib/placement/storeyFrameForModel';
 import { pickInPlan, planDrawingToScreen, planScreenToDrawing, planPointToRenderer, planPointToStoreyLocal } from '@/lib/plan/planPick';
 import { isPlanControlTarget } from '@/lib/plan/planControlTarget';
 import { setPlanDrawingState, setPlanViewport } from '@/lib/plan/planViewport';
@@ -396,6 +400,23 @@ export function PlanView({
   const translateEntity = useViewerStore((s) => s.translateEntity);
   const readEntityPosition = useViewerStore((s) => s.readEntityPosition);
 
+  /**
+   * The storey's own frame, and the render frame's shift.
+   *
+   * Every conversion between what is DRAWN and what is WRITTEN goes through
+   * these two. Before they existed the conversion was a bare axis swap, right
+   * only for a building whose placement chain is the identity — and on a
+   * surveyed model it never is. See `lib/placement/storeyFrame.ts`.
+   */
+  const storeyFrame = useMemo(
+    () => storeyFrameOf(models.get(storeyModelId ?? '')?.ifcDataStore, storey?.expressId),
+    [models, storeyModelId, storey],
+  );
+  const worldShift = useMemo(
+    () => worldShiftOf(geometryResult?.coordinateInfo),
+    [geometryResult],
+  );
+
   const roomShape = useMemo(() => {
     if (!roomShapeEditKey || !selectedEntity || !storeyModelId) return null;
     if (roomShapeEditKey !== `${selectedEntity.modelId}:${selectedEntity.expressId}`) return null;
@@ -406,15 +427,18 @@ export function PlanView({
     if (type !== 'IfcSpace') return null;
     const fp = readSlabFootprint(storeyModelId, selectedEntity.expressId);
     if (!fp || fp.footprint.length < 3) return null;
-    // Storey-local IFC XY to drawing space: drawing y is the renderer's z,
-    // which is IFC's y negated. `planPick` pins that mapping. The footprint
-    // arrives as [x, y] tuples, not objects — `slab-edit` has its own Point2D.
+    // Storey-local IFC XY to drawing space, through the STOREY'S OWN FRAME.
+    // The bare `[x, -y]` this used to be is that frame's identity case, and on
+    // a building turned on its site it put the handles where the room had been
+    // drawn rather than where it actually is — agreeing with the click and
+    // disagreeing with the mesh, which is what made the bug so hard to see.
     return {
       expressId: selectedEntity.expressId,
-      outline: fp.footprint.map(([x, y]) => ({ x, y: -y })),
+      outline: fp.footprint.map((xy) => storeyLocalToDrawing(xy, storeyFrame, worldShift)),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomShapeEditKey, selectedEntity, storeyModelId, models, readSlabFootprint, mutationVersion]);
+  }, [roomShapeEditKey, selectedEntity, storeyModelId, models, readSlabFootprint, mutationVersion,
+    storeyFrame, worldShift]);
 
   /**
    * Where the move gizmo sits: the selected object's centre, in drawing space.
@@ -478,15 +502,16 @@ export function PlanView({
     return {
       expressId: selectedEntity.expressId,
       unit,
-      start: { x: ends.start[0] * unit, y: -ends.start[1] * unit },
-      end: { x: ends.end[0] * unit, y: -ends.end[1] * unit },
+      start: storeyLocalToDrawing([ends.start[0] * unit, ends.start[1] * unit], storeyFrame, worldShift),
+      end: storeyLocalToDrawing([ends.end[0] * unit, ends.end[1] * unit], storeyFrame, worldShift),
       // The HEIGHT is carried through untouched, in the file's own unit — a
       // plan has nothing to say about it.
       startZ: ends.start[2],
       endZ: ends.end[2],
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomShapeEditKey, selectedEntity, storeyModelId, models, readWallEndpoints, mutationVersion]);
+  }, [roomShapeEditKey, selectedEntity, storeyModelId, models, readWallEndpoints, mutationVersion,
+    storeyFrame, worldShift]);
 
   /**
    * What a dragged corner can land on: the CUT lines, which at plan height are
@@ -2035,10 +2060,12 @@ export function PlanView({
             const result = translateEntity(
               storeyModelId,
               selectedEntity.expressId,
-              // Drawing space to IFC: y runs the other way, and the drawing's
-              // metres become the FILE's unit — `translateEntity` writes the
-              // number it is given straight into the placement.
-              [step.x / unit, -step.y / unit, 0],
+              // Drawing space to the storey's frame — a DELTA, so only the
+              // turn and the y-flip act on it and the origin cancels. Then
+              // into the FILE's unit: `translateEntity` writes the number it
+              // is given straight into the placement.
+              [...drawingDeltaToStoreyLocal(step, storeyFrame)
+                .map((v) => v / unit) as [number, number], 0],
               gizmoDrag.current?.batchId,
             );
             if (result.ok) return true;
@@ -2069,10 +2096,12 @@ export function PlanView({
             const result = resizeWall(
               storeyModelId,
               wallEnds.expressId,
-              // Back to IFC's frame AND the file's unit, with each end's own
-              // height preserved.
-              [a.x / wallEnds.unit, -a.y / wallEnds.unit, wallEnds.startZ],
-              [b.x / wallEnds.unit, -b.y / wallEnds.unit, wallEnds.endZ],
+              // Back through the storey's frame AND into the file's unit,
+              // with each end's own height preserved.
+              [...drawingToStoreyLocal(a, storeyFrame, worldShift)
+                .map((v) => v / wallEnds.unit) as [number, number], wallEnds.startZ],
+              [...drawingToStoreyLocal(b, storeyFrame, worldShift)
+                .map((v) => v / wallEnds.unit) as [number, number], wallEnds.endZ],
             );
             if (result.ok) toast.success(`Wand geändert — ${result.newLength.toFixed(2)} m`);
             else toast.error(result.reason);
@@ -2095,8 +2124,13 @@ export function PlanView({
             const result = reshapeSpace(
               storeyModelId,
               roomShape.expressId,
-              // Back to IFC's frame — see the note where the outline is read.
-              next.map((p) => ({ x: p.x, y: -p.y })),
+              // Back through the same frame the outline was read through. A
+              // pair that does not round-trip moves the room a little every
+              // time somebody opens the handles.
+              next.map((p) => {
+                const [x, y] = drawingToStoreyLocal(p, storeyFrame, worldShift);
+                return { x, y };
+              }),
             );
             if ('error' in result) toast.error(result.error);
             else toast.success(`Raum umgeformt — ${result.area.toFixed(2)} m²`);

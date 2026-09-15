@@ -14,6 +14,9 @@ import { useViewerStore } from '@/store';
 import { fromGlobalIdFromModels, toGlobalIdFromModels } from '@/store/globalId';
 import { pointInPolygon } from '@/lib/polygon-clip';
 import { toast } from '@/components/ui/toast';
+import {
+  rendererToStoreyLocal, storeyFrameOf, worldShiftOf,
+} from '@/lib/placement/storeyFrameForModel';
 import { notifyWallSplit } from './wallSplitNotice.js';
 import { raycastForPolylinePoint, isNearPolylineStart,
   isDuplicateClickPoint,
@@ -397,8 +400,26 @@ function resolveActiveModelId(): string | null {
  * the floor — matches construction-tool placement intuition. Refine
  * via the Raw STEP tab if needed.
  */
-export function rendererPointToIfcStoreyLocal(point: { x: number; y: number; z: number }): [number, number, number] {
-  return [point.x, -point.z, 0];
+export function rendererPointToIfcStoreyLocal(
+  point: { x: number; y: number; z: number },
+  storey?: { modelId: string; storeyId: number },
+): [number, number, number] {
+  // Without a storey named, the old bare axis swap — which is the right answer
+  // exactly when the storey's placement chain is the identity, and is what
+  // every caller relied on before there was anything better. Kept so a caller
+  // that genuinely has no storey (the wall-endpoint overlay reading back a
+  // point it just wrote) behaves as it always did.
+  if (!storey) return [point.x, -point.z, 0];
+
+  // With one: through the storey's REAL frame. A surveyed model puts the
+  // building under a site placement with a RefDirection, and writing a plan
+  // click straight into storey-local coordinates then buries that turn in the
+  // geometry — the room comes back sitting at an angle to its own walls, while
+  // the edit handles, reading the same numbers back through the same missing
+  // conversion, agree with where it was drawn (Marc, 2026-09-16).
+  const state = useViewerStore.getState();
+  const frame = storeyFrameOf(state.models.get(storey.modelId)?.ifcDataStore, storey.storeyId);
+  return rendererToStoreyLocal(point, frame, worldShiftOf(state.geometryResult?.coordinateInfo));
 }
 
 /**
@@ -927,7 +948,7 @@ export async function handleAddElementDrop(
 
   // Single-click placements: column / door / window all drop on one click.
   if (type === 'column') {
-    const ifc = rendererPointToIfcStoreyLocal(point);
+    const ifc = rendererPointToIfcStoreyLocal(point, { modelId, storeyId });
     const p = state.addElementColumnParams;
     finishAddElement(state.addColumn(modelId, storeyId, {
       Position: ifc, Width: p.Width, Depth: p.Depth, Height: p.Height,
@@ -935,7 +956,7 @@ export async function handleAddElementDrop(
     return;
   }
   if (type === 'door') {
-    const ifc = rendererPointToIfcStoreyLocal(point);
+    const ifc = rendererPointToIfcStoreyLocal(point, { modelId, storeyId });
     const p = state.addElementDoorParams;
     finishAddElement(state.addDoor(modelId, storeyId, {
       Position: ifc, Width: p.Width, Height: p.Height, FrameThickness: p.FrameThickness,
@@ -943,7 +964,7 @@ export async function handleAddElementDrop(
     return;
   }
   if (type === 'window') {
-    const ifc = rendererPointToIfcStoreyLocal(point);
+    const ifc = rendererPointToIfcStoreyLocal(point, { modelId, storeyId });
     const p = state.addElementWindowParams;
     finishAddElement(state.addWindow(modelId, storeyId, {
       Position: ifc, Width: p.Width, Height: p.Height, FrameThickness: p.FrameThickness,
@@ -951,7 +972,7 @@ export async function handleAddElementDrop(
     return;
   }
   if (type === 'sensor') {
-    const ifc = rendererPointToIfcStoreyLocal(point);
+    const ifc = rendererPointToIfcStoreyLocal(point, { modelId, storeyId });
     const p = state.addElementSensorParams;
     finishAddElement(state.addSensor(modelId, storeyId, {
       Position: ifc, Width: p.Width, Depth: p.Depth, Height: p.Height, PredefinedType: p.PredefinedType as SensorInStoreParams['PredefinedType'],
@@ -964,7 +985,7 @@ export async function handleAddElementDrop(
       toast.error('Pick an element from the library first');
       return;
     }
-    const ifc = rendererPointToIfcStoreyLocal(point);
+    const ifc = rendererPointToIfcStoreyLocal(point, { modelId, storeyId });
     const p = state.addElementLibraryParams;
     finishAddElement(state.addLibraryElement(modelId, storeyId, {
       IfcEntity: entry.ifc.entity,
@@ -990,8 +1011,8 @@ export async function handleAddElementDrop(
       return;
     }
     // End point — convert both points to IFC at dispatch time.
-    const startIfc = rendererPointToIfcStoreyLocal(pending[0]);
-    const endIfc = rendererPointToIfcStoreyLocal(point);
+    const startIfc = rendererPointToIfcStoreyLocal(pending[0], { modelId, storeyId });
+    const endIfc = rendererPointToIfcStoreyLocal(point, { modelId, storeyId });
     if (type === 'wall') {
       const p = state.addElementWallParams;
       finishAddElement(state.addWall(modelId, storeyId, {
@@ -1019,8 +1040,8 @@ export async function handleAddElementDrop(
         state.appendAddElementPendingPoint({ x: point.x, y: point.y, z: point.z });
         return;
       }
-      const cornerIfc = rendererPointToIfcStoreyLocal(pending[0]);
-      const oppositeIfc = rendererPointToIfcStoreyLocal(point);
+      const cornerIfc = rendererPointToIfcStoreyLocal(pending[0], { modelId, storeyId });
+      const oppositeIfc = rendererPointToIfcStoreyLocal(point, { modelId, storeyId });
       const minX = Math.min(cornerIfc[0], oppositeIfc[0]);
       const minY = Math.min(cornerIfc[1], oppositeIfc[1]);
       const width = Math.abs(oppositeIfc[0] - cornerIfc[0]);
@@ -1103,7 +1124,7 @@ export function commitAddElementSlabPolygon(): void {
   if (!ctx) return;
   const { modelId, storeyId } = ctx;
   const outer = pending.map((pt) => {
-    const ifc = rendererPointToIfcStoreyLocal(pt);
+    const ifc = rendererPointToIfcStoreyLocal(pt, { modelId, storeyId });
     return [ifc[0], ifc[1]] as [number, number];
   });
   // Reject degenerate (zero-area) polygons — repeated or collinear
