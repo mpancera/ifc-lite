@@ -1411,8 +1411,16 @@ export function PlanView({
   // through to selecting a room (Marc, 2026-09-15).
   const dxfAlignment = useViewerStore((s) => s.dxfAlignment);
   const addDxfAlignmentPick = useViewerStore((s) => s.addDxfAlignmentPick);
-  /** Where the cursor is while a line is being drawn, in drawing space. */
-  const [alignmentCursor, setAlignmentCursor] = useState<Point2D | null>(null);
+  /**
+   * Where the cursor is while a line is being drawn, and whether it CAUGHT
+   * something.
+   *
+   * The second half is not decoration. A marker that looks the same whether it
+   * snapped or not leaves the only question that matters — did it catch the
+   * corner I am aiming at — to be answered by placing the point and looking
+   * afterwards.
+   */
+  const [alignmentCursor, setAlignmentCursor] = useState<{ at: Point2D; snapped: boolean } | null>(null);
   const alignedUnderlay = useMemo(
     () => (dxfAlignment ? dxfUnderlays.find((u) => u.id === dxfAlignment.underlayId) : undefined),
     [dxfAlignment, dxfUnderlays],
@@ -1637,7 +1645,7 @@ export function PlanView({
       const snapped = step.kind === 'ready'
         ? null
         : (step.target === 'reference' ? measureHandlers.findSnapPoint(raw) : snapUnderlay(raw));
-      setAlignmentCursor(snapped ?? raw);
+      setAlignmentCursor({ at: snapped ?? raw, snapped: snapped !== null });
       return;
     }
     if (planRotationPicking && !rotationLine) {
@@ -2150,9 +2158,9 @@ export function PlanView({
           ? place(dxfAlignment.fit?.start)
           : dxfAlignment.reference?.start ?? null;
         if (pending && !(active === 'fit' ? dxfAlignment.fit?.end : dxfAlignment.reference?.end)) {
-          lines.push({ a: pending, b: alignmentCursor, live: true });
+          lines.push({ a: pending, b: alignmentCursor?.at ?? null, live: true });
         }
-        const cursor = alignmentCursor ? toScreen(alignmentCursor) : null;
+        const cursor = alignmentCursor ? toScreen(alignmentCursor.at) : null;
         return (
           <svg className="absolute inset-0 h-full w-full pointer-events-none" data-plan-dxf-alignment>
             {lines.map((l, i) => {
@@ -2169,9 +2177,15 @@ export function PlanView({
                 </React.Fragment>
               );
             })}
+            {/* Filled when it caught a vertex, hollow when the point would be
+                taken as-is. Two shapes, one question answered before the click
+                rather than after it. */}
             {cursor && (
-              <rect x={cursor.x - 4} y={cursor.y - 4} width={8} height={8}
-                    className="fill-none stroke-violet-500" strokeWidth={1.5} />
+              <rect x={cursor.x - 5} y={cursor.y - 5} width={10} height={10}
+                    className={alignmentCursor?.snapped
+                      ? 'fill-violet-500 stroke-violet-700'
+                      : 'fill-none stroke-violet-400'}
+                    strokeWidth={1.5} />
             )}
           </svg>
         );

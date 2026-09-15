@@ -37,28 +37,58 @@ export interface SnapLines {
 }
 
 /**
- * The nearest vertex of a visible plan layer within `tolerance`, or `null`.
+ * A vertex of the drawn plan within `tolerance`, or `null`.
  *
  * **Vertices only, not points along an edge.** A person aligning two drawings
  * picks corners, and an edge snap sliding along a wall would land somewhere
  * that cannot be found again on the other drawing — which is exactly what has
  * to match.
  *
+ * **A SHARED vertex beats a nearer lone one.** The nearest vertex is the wrong
+ * answer on a real drawing: a hatch is drawn as hundreds of separate strokes,
+ * so within ten pixels of anywhere inside a hatched room there are dozens of
+ * stroke ends and the corner you are aiming at is never the closest of them.
+ * On the plan this was found with, 8207 of 11864 lines were hatch strokes —
+ * two thirds of the drawing, all of it noise for this purpose (Marc,
+ * 2026-09-15: "die Passlinie kann immer noch nicht gesnappt werden").
+ *
+ * Where lines MEET is what a corner is. A stroke end belongs to one line, a
+ * wall corner to two or more, and ranking by that costs one pass and needs to
+ * know nothing about layers or line types — a drawing that names its hatch
+ * layer something else is handled by the same rule.
  */
 export function snapToUnderlay(
   drawn: SnapLines | null | undefined,
   point: Point,
   tolerance: number,
 ): Point | null {
-  let best: Point | null = null;
-  let bestDist = tolerance;
+  const lines = drawn?.lines ?? [];
 
-  // Hidden layers need no special case any more: a layer switched off is not
-  // in the drawn lines, so it cannot be caught.
-  for (const line of drawn?.lines ?? []) {
+  // How many line ENDS meet at each vertex. Quantised to a millimetre, because
+  // two lines that share a corner in the drawing rarely share the bit pattern.
+  const shared = new Map<string, number>();
+  const key = (p: Point) => `${Math.round(p.x * 1000)},${Math.round(p.y * 1000)}`;
+  for (const line of lines) {
+    for (const vertex of line.points) {
+      const k = key(vertex);
+      shared.set(k, (shared.get(k) ?? 0) + 1);
+    }
+  }
+
+  // Hidden layers need no special case: a layer switched off is not in the
+  // drawn lines, so it cannot be caught.
+  let best: Point | null = null;
+  let bestRank = -1;
+  let bestDist = tolerance;
+  for (const line of lines) {
     for (const vertex of line.points) {
       const dist = Math.hypot(vertex.x - point.x, vertex.y - point.y);
-      if (dist < bestDist) {
+      if (dist >= tolerance) continue;
+      const rank = shared.get(key(vertex)) ?? 1;
+      // Rank first, distance second. A corner slightly further away is the
+      // point being aimed at; the nearer stroke end is not.
+      if (rank > bestRank || (rank === bestRank && dist < bestDist)) {
+        bestRank = rank;
         bestDist = dist;
         best = vertex;
       }
