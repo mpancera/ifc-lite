@@ -38,6 +38,7 @@ import { isRelationColumn } from '@/lib/lists/editTarget';
 import { useListCellEdit } from '@/hooks/useListCellEdit';
 import { rangeContains, useEditableListGrid, type EditableListGrid } from './useEditableListGrid';
 import { ColumnHeaderMenu } from './ColumnHeaderMenu';
+import { dropDeletedRows } from '@/lib/lists/deletedRows';
 import { ListGroupingBar } from './ListGroupingBar';
 import { ListScheduleTable } from './ListScheduleTable';
 import {
@@ -163,16 +164,30 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
     [columns, modelUnits, unitDisplayOverrides],
   );
 
+  /**
+   * The snapshot, minus entities that have since been deleted.
+   *
+   * Ahead of every other filter because it is not a filter: the others choose
+   * what to show of what exists, this drops what no longer does. See
+   * `dropDeletedRows` for why the stored result is left alone.
+   */
+  const mutationViews = useViewerStore((s) => s.mutationViews);
+  const liveRows = useMemo(
+    () => dropDeletedRows(result.rows, mutationViews),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mutationVersion is the edit signal
+    [result.rows, mutationViews, mutationVersion],
+  );
+
   const visibilityFilteredRows = useMemo(() => {
-    if (!filterByVisibility) return result.rows;
+    if (!filterByVisibility) return liveRows;
     const visibleSet = new Set<string>();
     for (const ref of getVisibleBasketEntityRefsFromStore()) visibleSet.add(`${ref.modelId}:${ref.expressId}`);
-    return result.rows.filter((row) => {
+    return liveRows.filter((row) => {
       const modelId = row.modelId === 'default' ? 'legacy' : row.modelId;
       return visibleSet.has(`${modelId}:${row.entityId}`);
     });
   }, [
-    result.rows, filterByVisibility, hiddenEntities, isolatedEntities, classFilter, lensHiddenIds,
+    liveRows, filterByVisibility, hiddenEntities, isolatedEntities, classFilter, lensHiddenIds,
     selectedStoreys, typeVisibility, hiddenEntitiesByModel, isolatedEntitiesByModel, models,
     activeBasketViewId, geometryResult,
   ]);

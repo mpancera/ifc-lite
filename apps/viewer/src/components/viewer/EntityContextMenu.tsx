@@ -282,6 +282,15 @@ export function EntityContextMenu() {
       closeContextMenu();
       return;
     }
+    // Asked BEFORE the delete: an entity authored in this session is forgotten
+    // outright rather than tombstoned, and afterwards the two are
+    // indistinguishable. The difference is the whole answer to "why is there
+    // nothing to export" — a create-and-delete cancels out, correctly, and
+    // says so instead of leaving somebody hunting for a missing button (Marc,
+    // 2026-09-15: "Ein Export/Speichern taucht aber nun nicht auf").
+    const sessionOnly = useViewerStore.getState().mutationViews
+      .get(contextEntityRef.modelId)?.getNewEntity(contextEntityRef.expressId) != null;
+
     const ok = removeEntity(contextEntityRef.modelId, contextEntityRef.expressId);
     if (ok) {
       // Tombstoning only affects export — the mesh is still in the GPU buffers.
@@ -290,7 +299,9 @@ export function EntityContextMenu() {
       hideEntity(contextMenu.entityId);
       // Drop the selection so the right panel doesn't cling to a tombstoned id.
       setSelectedEntityId(null);
-      toast.success(`${contextEntityType || 'Entity'} #${contextEntityRef.expressId} deleted — undo to restore`);
+      toast.success(sessionOnly
+        ? `${contextEntityType || 'Entity'} #${contextEntityRef.expressId} gelöscht — war nur in dieser Sitzung erzeugt, die Datei ändert sich dadurch nicht`
+        : `${contextEntityType || 'Entity'} #${contextEntityRef.expressId} deleted — undo to restore`);
     } else {
       toast.error('Delete failed — entity not found in store overlay');
     }
