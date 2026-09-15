@@ -45,16 +45,17 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible';
 import { useViewerStore } from '@/store';
-import { assignableStoreys } from '@/lib/heights/underlayStack';
+import { assignableStoreys, underlayBelongsOnSheet } from '@/lib/heights/underlayStack';
 import {
   alignmentPairs, alignmentPrompt, isLineComplete,
 } from '@/lib/heights/alignmentSession';
 import { describeSolvedScale, solveDxfPlacement } from '@ifc-lite/drawing-2d';
-import { repivotDxfPlacement, adoptDxfPlacement } from '@ifc-lite/drawing-2d';
+import { repivotDxfPlacement, adoptDxfPlacement, sameDrawingOrigin } from '@ifc-lite/drawing-2d';
 import { toast } from '@/components/ui/toast';
 import { posthog } from '@/lib/analytics';
 import { ingestDxfFile } from '@/hooks/ingest/dxfIngest';
 import { resolveEffectiveGeoreferenced } from '@/hooks/dxfUnderlayMath';
+import { isPlaced } from '@/lib/dxf/placementMemory';
 import type { DxfUnderlayState } from '@/store/slices/drawing2DSlice';
 
 interface DxfUnderlayPanelProps {
@@ -71,6 +72,17 @@ interface DxfUnderlayPanelProps {
   pivot?: () => { x: number; y: number } | null;
   /** False when the current section is not a cardinal plan view. */
   planViewActive: boolean;
+  /**
+   * The height-system id of the storey on the sheet, so a card can say that
+   * its plan is filed elsewhere and therefore not on screen.
+   *
+   * The panel lists every loaded plan, which is right — they are managed from
+   * here — but once plans are filed by storey, some of them are not the one
+   * being looked at, and a card that does not say so invites acting on the
+   * wrong plan (Marc, 2026-09-15). `undefined` from a surface that does not
+   * filter by storey.
+   */
+  sheetStoreyId?: string | null;
   /**
    * Whether an anchor model currently has a usable IfcMapConversion (issue
    * #1929 / PR #1965 review) — drives the checkbox's displayed state for
@@ -114,12 +126,14 @@ function UnderlayCard({
   planViewActive,
   georeferenceAvailable,
   pivot,
+  sheetStoreyId,
 }: {
   state: DxfUnderlayState;
   onCenterOnModel: (id: string) => void;
   planViewActive: boolean;
   georeferenceAvailable: boolean;
   pivot?: () => { x: number; y: number } | null;
+  sheetStoreyId?: string | null;
 }): React.ReactElement {
   const removeDxfUnderlay = useViewerStore((s) => s.removeDxfUnderlay);
   const setDxfUnderlayVisible = useViewerStore((s) => s.setDxfUnderlayVisible);
@@ -139,28 +153,54 @@ function UnderlayCard({
   const [placementOpen, setPlacementOpen] = useState(false);
 
   /**
-   * Give this plan's placement to every other loaded plan.
+   * Passing a fitted placement between plans, in whichever direction this card
+   * is the one that can act.
    *
    * Storey plans out of one CAD export share an origin — that is what makes
-   * them stack — so the placement fitted on one of them is already the answer
-   * for the rest, and fitting each separately is work that answers a question
-   * already answered (Marc, 2026-09-15).
+   * them stack — so the placement fitted on one is already the answer for the
+   * rest. But the push-only version had a trap: pressed on the card of a plan
+   * that had NOT been fitted, it pushed that plan's untouched default over the
+   * one placement in the project (Marc, 2026-09-15 — he pressed the button and
+   * the transfer "did not work", which is what losing the source looks like).
    *
-   * Not automatic on import. Two plans with the same name in a project are the
-   * same drawing and get their own memory; two DIFFERENT drawings sharing an
-   * origin is a guess, and a guess that silently moves a plan somebody placed
-   * by hand is worse than a button.
+   * So the card offers only the move that makes sense from where it stands: a
+   * fitted plan gives, an unfitted one takes, and an untouched placement is
+   * never written over a fitted one in either direction.
+   *
+   * Plans drawn on a different origin are skipped and named. Those are not
+   * siblings of one export but cut-outs of a sheet, sitting side by side in
+   * their own files; giving them this placement would move them as far off as
+   * they are apart, with the right numbers in every field.
    */
-  const siblings = useViewerStore((s) => s.dxfUnderlays).filter((u) => u.id !== state.id);
+  const allUnderlays = useViewerStore((s) => s.dxfUnderlays);
+  const siblings = allUnderlays.filter((u) => u.id !== state.id);
+  const selfPlaced = isPlaced(state.placement);
+  const sameOrigin = siblings.filter(
+    (u) => sameDrawingOrigin(u.underlay.bounds, state.underlay.bounds),
+  );
+  const donor = selfPlaced ? null : sameOrigin.find((u) => isPlaced(u.placement));
+  /** Who would receive: every same-origin plan, whether fitted or not — a
+   *  deliberate press is an instruction, not a suggestion. */
+  const receivers = selfPlaced ? sameOrigin : [];
+  const strangers = siblings.length - sameOrigin.length;
+
   const passPlacementOn = () => {
-    for (const other of siblings) {
+    for (const other of receivers) {
       updateDxfUnderlayPlacement(other.id, adoptDxfPlacement(
         state.placement, state.underlay.unitScale, other.underlay.unitScale,
       ));
     }
-    toast.success(siblings.length === 1
+    toast.success(receivers.length === 1
       ? 'Platzierung auf den anderen Plan übertragen.'
-      : `Platzierung auf ${siblings.length} weitere Pläne übertragen.`);
+      : `Platzierung auf ${receivers.length} weitere Pläne übertragen.`);
+  };
+
+  const takePlacementFrom = () => {
+    if (!donor) return;
+    updateDxfUnderlayPlacement(state.id, adoptDxfPlacement(
+      donor.placement, donor.underlay.unitScale, state.underlay.unitScale,
+    ));
+    toast.success(`Platzierung von "${donor.name}" übernommen.`);
   };
 
   const session = useViewerStore((s) => s.dxfAlignment);
@@ -200,6 +240,10 @@ function UnderlayCard({
   };
 
   const { underlay, placement } = state;
+  /** Whether this plan is drawn on the sheet in front of the person — the same
+   *  rule the renderer applies, so the card and the canvas cannot disagree. */
+  const onSheet = sheetStoreyId === undefined
+    || underlayBelongsOnSheet({ id: state.id, storeyId: state.storeyId }, heightSystem, sheetStoreyId);
   const pathCount = underlay.layers.reduce((n, l) => n + l.paths.length + l.fills.length, 0);
   const textCount = underlay.layers.reduce((n, l) => n + l.texts.length, 0);
 
@@ -253,6 +297,16 @@ function UnderlayCard({
       <div className="text-[10px] text-muted-foreground px-1">
         {underlay.layers.length} layers · {pathCount} paths · {textCount} texts
       </div>
+
+      {/* Filed under another storey, so nothing on the sheet is this plan. Said
+          on the card because the panel lists every loaded plan and two cards
+          otherwise look alike — which is how a placement gets set on the plan
+          that is not being looked at. */}
+      {!onSheet && (
+        <div className="text-[10px] text-amber-600 dark:text-amber-500 px-1">
+          Nicht auf diesem Blatt — anderem Geschoss zugewiesen.
+        </div>
+      )}
 
       {underlay.warnings.length > 0 && (
         <div className="flex items-start gap-1 text-[10px] text-amber-600 dark:text-amber-500 px-1">
@@ -577,21 +631,39 @@ function UnderlayCard({
               }}
             />
           </div>
-          {/* Shown even with nothing to transfer to, disabled and saying why.
-              Hidden, it looked like the feature was missing rather than like
-              there was only one plan loaded (Marc, 2026-09-15). */}
+          {/* Only the direction this card can act in — see the handlers. The
+              push-only version quietly overwrote the one good placement in the
+              project when pressed on the wrong card. */}
           <div className="pl-2 pr-1 pt-2">
-            <Button variant="outline" size="sm" className="w-full h-6 text-xs"
-                    disabled={siblings.length === 0} onClick={passPlacementOn}>
-              Platzierung auf die anderen Pläne übertragen
-            </Button>
+            {donor ? (
+              <Button variant="outline" size="sm" className="w-full h-6 text-xs"
+                      onClick={takePlacementFrom}>
+                Platzierung von „{donor.name}" übernehmen
+              </Button>
+            ) : (
+              <Button variant="outline" size="sm" className="w-full h-6 text-xs"
+                      disabled={receivers.length === 0} onClick={passPlacementOn}>
+                Platzierung auf die anderen Pläne übertragen
+              </Button>
+            )}
             <p className="pt-1 text-[10px] leading-snug text-muted-foreground">
-              {siblings.length === 0
-                ? 'Kein weiterer Plan geladen. Ein neu importierter Plan übernimmt '
-                  + 'diese Platzierung ohnehin automatisch.'
-                : 'Für Geschosspläne aus demselben Export: gleicher Ursprung, also '
-                  + 'gleiche Platzierung. Ein abweichender Einheiten-Faktor der '
-                  + 'Zieldatei wird verrechnet.'}
+              {donor
+                ? 'Gleicher Ursprung in der Zeichnung — ein abweichender '
+                  + 'Einheiten-Faktor wird verrechnet.'
+                : receivers.length > 0
+                  ? 'Für Geschosspläne aus demselben Export: gleicher Ursprung, also '
+                    + 'gleiche Platzierung. Ein abweichender Einheiten-Faktor der '
+                    + 'Zieldatei wird verrechnet.'
+                  : !selfPlaced && siblings.length > 0
+                    ? 'Kein eingepasster Plan mit gleichem Ursprung vorhanden — '
+                      + 'dieser Plan braucht eine eigene Einpassung.'
+                    : 'Kein weiterer Plan geladen. Ein neu importierter Plan übernimmt '
+                      + 'diese Platzierung automatisch, sofern er auf demselben '
+                      + 'Zeichnungsursprung liegt.'}
+              {strangers > 0 && (
+                <> {strangers} Plan/Pläne liegen in ihrer Datei woanders und bleiben
+                   ausgenommen.</>
+              )}
             </p>
           </div>
         </CollapsibleContent>
@@ -600,7 +672,9 @@ function UnderlayCard({
   );
 }
 
-export function DxfUnderlayPanel({ onClose, onCenterOnModel, planViewActive, georeferenceAvailable, pivot }: DxfUnderlayPanelProps): React.ReactElement {
+export function DxfUnderlayPanel({
+  onClose, onCenterOnModel, planViewActive, georeferenceAvailable, pivot, sheetStoreyId,
+}: DxfUnderlayPanelProps): React.ReactElement {
   const dxfUnderlays = useViewerStore((s) => s.dxfUnderlays);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -677,7 +751,11 @@ export function DxfUnderlayPanel({ onClose, onCenterOnModel, planViewActive, geo
         )}
 
         {dxfUnderlays.map((state) => (
-          <UnderlayCard key={state.id} state={state} onCenterOnModel={onCenterOnModel} planViewActive={planViewActive} georeferenceAvailable={georeferenceAvailable} pivot={pivot} />
+          <UnderlayCard
+            key={state.id} state={state} onCenterOnModel={onCenterOnModel}
+            planViewActive={planViewActive} georeferenceAvailable={georeferenceAvailable}
+            pivot={pivot} sheetStoreyId={sheetStoreyId}
+          />
         ))}
       </div>
     </div>

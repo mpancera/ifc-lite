@@ -1455,15 +1455,22 @@ export function PlanView({
    * something — left selects, right pans — and taking one of those away to
    * move a reference layer would be a poor trade.
    *
-   * Which underlay: the one being aligned if a session is running, else the
-   * first visible one. A pile of underlays is rare and the panel's own offset
-   * fields remain the exact way to address a particular one.
+   * Which underlay: the one being aligned if a session is running, else one
+   * that is actually DRAWN ON THIS SHEET.
+   *
+   * `visible` was the wrong test — it is the master toggle, not "on screen
+   * now". Once plans were filed by storey, dragging on the ground floor moved
+   * the basement's plan, which is nowhere to be seen and gives no sign of
+   * having moved (Marc, 2026-09-15: "das Verschieben mit Alt bewegt die nun
+   * nicht mehr sichtbare UG-DXF"). Nothing drawn, nothing to drag.
    */
   const underlayDragRef = useRef<{ id: string; from: Point2D; offset: { x: number; y: number } } | null>(null);
-  const draggableUnderlay = useMemo(() => (
-    dxfUnderlays.find((u) => u.id === dxfAlignment?.underlayId)
-    ?? dxfUnderlays.find((u) => u.visible)
-  ), [dxfUnderlays, dxfAlignment]);
+  const draggableUnderlay = useMemo(() => {
+    const onSheet = new Set(dxfUnderlayData.map((u) => u.id));
+    const aligning = dxfUnderlays.find((u) => u.id === dxfAlignment?.underlayId);
+    if (aligning && onSheet.has(aligning.id)) return aligning;
+    return dxfUnderlays.find((u) => onSheet.has(u.id));
+  }, [dxfUnderlays, dxfUnderlayData, dxfAlignment]);
 
   const takeUnderlayDrag = useCallback((e: React.MouseEvent): boolean => {
     if (!e.altKey || !draggableUnderlay) return false;
@@ -2453,6 +2460,9 @@ export function PlanView({
             // A plan IS the cardinal plan view the underlays are for, always.
             planViewActive
             georeferenceAvailable={dxfGeoreferenceAvailable}
+            sheetStoreyId={storeyModelId !== null && storey
+              ? `${storeyModelId}:${storey.expressId}`
+              : null}
           />
         </div>
       )}

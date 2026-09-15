@@ -475,6 +475,7 @@ export {
   repivotDxfPlacement,
   adoptDxfPlacement,
   effectiveDxfScale,
+  sameDrawingOrigin,
   aciToCss,
   DEFAULT_DXF_PLACEMENT,
 } from './dxf/index.js';

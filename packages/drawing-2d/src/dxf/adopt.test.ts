@@ -2,8 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import { describe, expect, it } from 'vitest';
-import { adoptDxfPlacement, effectiveDxfScale } from './adopt.js';
+import { assert, describe, expect, it } from 'vitest';
+import { adoptDxfPlacement, effectiveDxfScale, sameDrawingOrigin } from './adopt.js';
 import type { DxfPlacement } from './types.js';
 
 const FITTED: DxfPlacement = { offsetX: 2398431.59, offsetY: 1134401.52, rotationDeg: -9.25, scale: 0.9 };
@@ -45,5 +45,35 @@ describe('adoptDxfPlacement', () => {
     // Somewhere a person can see and correct beats a plan at infinity.
     expect(adoptDxfPlacement(FITTED, 1, 0)).toEqual(FITTED);
     expect(adoptDxfPlacement(FITTED, Number.NaN, 1)).toEqual(FITTED);
+  });
+});
+
+describe('sameDrawingOrigin', () => {
+  const box = (x0: number, y0: number, x1: number, y1: number) =>
+    ({ min: { x: x0, y: y0 }, max: { x: x1, y: y1 } });
+
+  it('says yes to storey plans of one building, exported one per file', () => {
+    // They cover the same ground — that is what makes them stack — even when
+    // the upper floor is smaller than the basement.
+    assert(sameDrawingOrigin(box(0, 0, 40, 25), box(3, 2, 36, 22)));
+  });
+
+  it('says no to plans cut out of one sheet, side by side', () => {
+    // The trap the transfer used to fall into: each correct in its own frame,
+    // a hundred metres apart in the file. Handing the second the first's
+    // placement moves it exactly that far off, with the right numbers in every
+    // field.
+    assert(!sameDrawingOrigin(box(0, 0, 40, 25), box(140, 0, 180, 25)));
+  });
+
+  it('accepts plans that only touch at an edge', () => {
+    // A wing drawn flush against the next is still one building. Nothing is
+    // lost by accepting it: the placement is the same either way, and refusing
+    // would send somebody to re-fit a plan that needs no fitting.
+    assert(sameDrawingOrigin(box(0, 0, 40, 25), box(40, 0, 80, 25)));
+  });
+
+  it('notices a shift in y alone', () => {
+    assert(!sameDrawingOrigin(box(0, 0, 40, 25), box(0, 90, 40, 115)));
   });
 });

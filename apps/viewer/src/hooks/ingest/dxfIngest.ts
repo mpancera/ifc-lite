@@ -51,7 +51,7 @@ import { useViewerStore } from '@/store';
 import { toast } from '@/components/ui/toast';
 import { resolveDxfExportGeoreference } from '@/hooks/dxfExportGeoref';
 import { isPlaced, loadDxfPlacements, recallPlacement } from '@/lib/dxf/placementMemory';
-import { adoptDxfPlacement } from '@ifc-lite/drawing-2d';
+import { adoptDxfPlacement, sameDrawingOrigin } from '@ifc-lite/drawing-2d';
 
 export function isDxfFileName(name: string): boolean {
   return name.toLowerCase().endsWith('.dxf');
@@ -148,12 +148,28 @@ export async function ingestDxfFile(file: File): Promise<void> {
   // person has already moved. Landing every new plan at the file's own raw
   // coordinates — a kilometre off, invisibly — is not the safer default, it is
   // just the one that says nothing.
+  //
+  // Only from a plan drawn on the SAME origin, which is the thing the copy
+  // silently assumed and which is not always true: plans cut out of one CAD
+  // sheet sit side by side in the file, and handing the second the first's
+  // placement puts it as far off as they are apart, with the right numbers in
+  // every field. `sameDrawingOrigin` asks the file rather than hoping.
+  //
   // `store` was read BEFORE the new entry was added, so this list is exactly
   // the siblings.
-  const donor = recalled ? null : store.dxfUnderlays.find((u) => isPlaced(u.placement));
+  const placedSiblings = recalled
+    ? []
+    : store.dxfUnderlays.filter((u) => isPlaced(u.placement));
+  const donor = placedSiblings.find(
+    (u) => sameDrawingOrigin(u.underlay.bounds, underlay.bounds),
+  );
   const adopted = donor
     ? adoptDxfPlacement(donor.placement, donor.underlay.unitScale, underlay.unitScale)
     : null;
+  // A sibling exists, is placed, and sits somewhere else entirely in its own
+  // file. Silence here would read as "the feature did not work"; it is the
+  // feature declining to move a drawing a hundred metres.
+  const foreignOrigin = !recalled && !donor && placedSiblings.length > 0;
 
   if (recalled) {
     store.updateDxfUnderlayPlacement(id, recalled.placement);
@@ -187,7 +203,11 @@ export async function ingestDxfFile(file: File): Promise<void> {
   // own coordinates without explanation reads as an import bug.
   const recalledNote = recalled
     ? ', placed as it was last time'
-    : (donor ? `, placed like "${donor.name}"` : '');
+    : donor
+      ? `, placed like "${donor.name}"`
+      : foreignOrigin
+        ? ' — eigene Einpassung nötig, dieser Plan ist in seiner Datei anderswo gezeichnet'
+        : '';
   if (store.models.size > 0) {
     // Surface the result immediately: the underlay renders in the 2D drawing
     // panel, so open it (the user still picks/moves the section).

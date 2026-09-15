@@ -34,6 +34,7 @@
  * same thing on both drawings.
  */
 
+import type { Bounds2D } from '../types.js';
 import type { DxfPlacement } from './types.js';
 
 /**
@@ -64,4 +65,26 @@ export function adoptDxfPlacement(
 /** The metres one raw drawing unit of the file ends up as. What a person reads. */
 export function effectiveDxfScale(placement: DxfPlacement, unitScale: number): number {
   return unitScale * placement.scale;
+}
+
+/**
+ * Whether two drawings are laid out on the same origin, near enough that one's
+ * placement is the other's.
+ *
+ * This is the question the transfer silently assumed, and it is not always
+ * yes. Storey plans exported one per file out of one model share an origin —
+ * that is what makes them stack. Plans cut out of a SHEET do not: the CAD
+ * layout puts the basement here and the ground floor a hundred metres to the
+ * right, each correct in its own frame and a hundred metres apart in the file.
+ * Handing the second the first's placement then puts it a hundred metres off,
+ * with the right numbers in every field.
+ *
+ * Measured on the raw file bounds, BEFORE any placement — that is where the
+ * authoring frame is visible. Overlap is the test rather than a distance: two
+ * drawings of the same building cover the same ground, and two that do not
+ * overlap at all are not two views of one place whatever their extents are.
+ */
+export function sameDrawingOrigin(a: Bounds2D, b: Bounds2D): boolean {
+  return a.min.x <= b.max.x && b.min.x <= a.max.x
+    && a.min.y <= b.max.y && b.min.y <= a.max.y;
 }
