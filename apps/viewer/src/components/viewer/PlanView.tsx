@@ -1796,13 +1796,20 @@ export function PlanView({
   // click looks like it did nothing.
   const placementPreview = useMemo(() => {
     if (activeTool !== 'addElement' || addElementPendingPoints.length === 0) return null;
-    const toScreen = (p: { x: number; y: number }) => ({
-      x: p.x * viewTransform.scale + viewTransform.x,
-      y: p.y * viewTransform.scale + viewTransform.y,
-    });
+    // Through the shared transform, rotation included. This was a fourth
+    // hand-written copy without it, and on a turned plan the consequences are
+    // not subtle: the points go IN correctly — `placeAt` uses
+    // `planScreenToDrawing`, which does undo the rotation — and come back out
+    // turned about the origin, so the polygon on screen is a skewed thing
+    // whose corners sit nowhere near the walls that were clicked. The snap is
+    // working the whole time and cannot be seen to be working, because the
+    // crosshair it moves is drawn in the wrong place (Marc, 2026-09-16: "das
+    // Zeichenwerkzeug kommt aber mit der rotierten Ansicht nicht klar ... und
+    // es hat kein Snapping").
+    const toScreen = (p: { x: number; y: number }) => planDrawingToScreen(p, planTransform);
     const placed = addElementPendingPoints.map((p) => toScreen({ x: p.x, y: p.z }));
     return { placed, band: cursor ? toScreen(cursor) : null };
-  }, [activeTool, addElementPendingPoints, viewTransform, cursor]);
+  }, [activeTool, addElementPendingPoints, planTransform, cursor]);
 
   // ── Selection, as the canvas wants it ───────────────────────────────────
   // ── Bring one element into view, on request ─────────────────────────────
@@ -2473,11 +2480,15 @@ export function PlanView({
       {textAnnotation2DEditing && (() => {
         const editing = textAnnotations2D.find((a) => a.id === textAnnotation2DEditing);
         if (!editing) return null;
+        // Same shared transform as everything else placed at a drawing
+        // coordinate: written out by hand, the box opens away from the text it
+        // is editing as soon as the plan is turned.
+        const at = planDrawingToScreen(editing.position, planTransform);
         return (
           <TextAnnotationEditor
             annotation={editing}
-            screenX={editing.position.x * viewTransform.scale + viewTransform.x}
-            screenY={editing.position.y * viewTransform.scale + viewTransform.y}
+            screenX={at.x}
+            screenY={at.y}
             onConfirm={(id, text) => {
               updateTextAnnotation2D(id, { text });
               setTextAnnotation2DEditing(null);

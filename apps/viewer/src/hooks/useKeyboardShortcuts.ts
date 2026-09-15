@@ -12,6 +12,8 @@ import { resetVisibilityForHomeFromStore } from '@/store/homeView';
 import { workspacePanelForShortcutCode } from '@/lib/panels/registry';
 import { closeAllPanelWindows } from '@/services/panel-windows';
 import { eventKey, isTextEntryTarget } from '@/lib/keyboard-event';
+import { toast } from '@/components/ui/toast';
+import { deleteSelectedEntities, describeDeleteSelection } from '@/store/deleteSelection';
 import {
   executeBasketIsolate,
   executeBasketSet,
@@ -233,10 +235,20 @@ export function useKeyboardShortcuts(options: KeyboardShortcutsOptions = {}) {
       }
     }
 
+    // Delete DELETES. It used to hide, beside a Space bar that also hides, and
+    // that cost Marc an afternoon (2026-09-16): twenty-one rooms pressed away,
+    // struck through in the tree, and an export button that correctly never
+    // came because nothing had been deleted. A key named Delete has to do what
+    // it says; hiding keeps Space, which promises nothing.
+    //
+    // Undoable, per entity, like every other mutation. Entities the active
+    // role does not own are refused and counted rather than skipped silently.
     if ((key === 'delete' || key === 'backspace') && !ctrl && !shift && selectedEntityId) {
       e.preventDefault();
-      const ids = getAllSelectedGlobalIds();
-      hideEntities(ids);
+      const result = deleteSelectedEntities(getAllSelectedGlobalIds());
+      setSelectedEntityId(null);
+      if (result.deleted > 0) toast.success(describeDeleteSelection(result));
+      else toast.error(describeDeleteSelection(result));
     }
     // Space to hide — skip when focused on buttons/selects/links where Space has native behavior
     if (key === ' ' && !ctrl && !shift && selectedEntityId) {
