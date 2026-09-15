@@ -97,3 +97,42 @@ export function snapToUnderlay(
 
   return best;
 }
+
+/**
+ * The vertices near `point` that a click could catch, nearest first.
+ *
+ * So they can be DRAWN. Vertices-only snapping is the right rule — a point
+ * picked halfway along a wall cannot be found again on the other drawing, and
+ * the two-point solve needs the same feature twice — but it leaves somebody
+ * hunting for targets they cannot see: the middle of a wall catches nothing,
+ * and a vertex of line work that is faint or hidden behind the model catches
+ * for no visible reason (Marc, 2026-09-15: "der Fang scheinbar im Nirvana").
+ *
+ * Showing the candidates turns that hunt into a list of places to aim at, and
+ * it makes the invisible-geometry case explain itself the moment it happens.
+ *
+ * `limit` because a dense plan has thousands within any radius worth drawing,
+ * and a screen full of dots is its own kind of blindness.
+ */
+export function underlayVerticesNear(
+  drawn: SnapLines | null | undefined,
+  point: Point,
+  radius: number,
+  limit = 40,
+): Point[] {
+  const found: Array<{ p: Point; d: number }> = [];
+  const seen = new Set<string>();
+  for (const line of drawn?.lines ?? []) {
+    for (const vertex of line.points) {
+      const d = Math.hypot(vertex.x - point.x, vertex.y - point.y);
+      if (d > radius) continue;
+      // One dot per place, however many lines end there.
+      const key = `${Math.round(vertex.x * 1000)},${Math.round(vertex.y * 1000)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      found.push({ p: vertex, d });
+    }
+  }
+  found.sort((a, b) => a.d - b.d);
+  return found.slice(0, limit).map((f) => f.p);
+}

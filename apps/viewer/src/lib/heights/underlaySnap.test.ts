@@ -15,7 +15,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { snapToUnderlay, type SnapLines } from './underlaySnap.js';
+import { snapToUnderlay, underlayVerticesNear, type SnapLines } from './underlaySnap.js';
 
 /** One underlay's lines, as the render hook hands them over. */
 function drawn(...lines: { x: number; y: number }[][]): SnapLines {
@@ -94,5 +94,40 @@ describe('snapToUnderlay', () => {
     const wall = drawn([{ x: 0, y: 0 }, { x: 10, y: 0 }]);
 
     assert.equal(snapToUnderlay(wall, { x: 5, y: 0 }, 0.5), null);
+  });
+});
+
+describe('underlayVerticesNear', () => {
+  it('lists what a click could catch, nearest first', () => {
+    const plan = drawn([{ x: 0, y: 0 }, { x: 1, y: 0 }], [{ x: 3, y: 0 }, { x: 9, y: 0 }]);
+
+    assert.deepEqual(underlayVerticesNear(plan, { x: 1.2, y: 0 }, 5),
+      [{ x: 1, y: 0 }, { x: 0, y: 0 }, { x: 3, y: 0 }]);
+  });
+
+  it('shows one dot where several lines meet', () => {
+    // Otherwise a corner draws darker than a stroke end for no reason the
+    // reader can act on.
+    const corner = { x: 5, y: 5 };
+    const meeting = drawn([{ x: 0, y: 5 }, corner], [corner, { x: 5, y: 0 }]);
+
+    assert.deepEqual(underlayVerticesNear(meeting, corner, 1), [corner]);
+  });
+
+  it('keeps out of reach what a click could not catch', () => {
+    const plan = drawn([{ x: 0, y: 0 }, { x: 100, y: 0 }]);
+
+    assert.deepEqual(underlayVerticesNear(plan, { x: 50, y: 0 }, 5), []);
+  });
+
+  it('caps the list, because a dense plan has thousands', () => {
+    const many: { x: number; y: number }[][] = [];
+    for (let i = 0; i < 200; i += 1) many.push([{ x: i * 0.01, y: 0 }, { x: i * 0.01, y: 1 }]);
+
+    assert.equal(underlayVerticesNear(drawn(...many), { x: 1, y: 0.5 }, 100, 40).length, 40);
+  });
+
+  it('answers nothing for an underlay that has gone', () => {
+    assert.deepEqual(underlayVerticesNear(null, { x: 0, y: 0 }, 5), []);
   });
 });

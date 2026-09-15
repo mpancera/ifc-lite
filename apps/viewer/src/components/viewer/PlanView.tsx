@@ -106,7 +106,7 @@ import { describePrealign, prealignUnderlay, PREALIGN_MIN_FIT } from '@/hooks/dx
 import { applyDxfPlacement } from '@ifc-lite/drawing-2d';
 import { resolveAlignmentPick } from '@/lib/dxf/alignmentPick';
 import { alignmentStep, alignmentTarget, constrainToAxis } from '@/lib/heights/alignmentSession';
-import { snapToUnderlay } from '@/lib/heights/underlaySnap';
+import { snapToUnderlay, underlayVerticesNear } from '@/lib/heights/underlaySnap';
 import {
   COMPARTMENT_LAYER, FIRE_TRIGGER_LAYER, GAS_TRIGGER_LAYER,
 } from '@/lib/zoneOutline/zoneLayers';
@@ -1489,6 +1489,22 @@ export function PlanView({
     return true;
   }, [planTransform, updateDxfUnderlayPlacement]);
 
+  /**
+   * Where a click on the plan COULD catch, near the cursor.
+   *
+   * Drawn so the hunt stops being blind. Only while the fitting line is being
+   * collected: the reference line snaps to the model, which has its own
+   * behaviour, and showing plan vertices then would point at the wrong
+   * drawing.
+   */
+  const fitCandidates = useMemo((): Point2D[] => {
+    if (!dxfAlignment || !alignmentCursor || alignmentCursor.target !== 'fit') return [];
+    const drawn = dxfUnderlayData.find((u) => u.id === dxfAlignment.underlayId);
+    // Sixty screen pixels: far enough to show where to aim, near enough that
+    // the dots do not become a second drawing.
+    return underlayVerticesNear(drawn, alignmentCursor.at, 60 / planTransform.scale);
+  }, [dxfAlignment, alignmentCursor, dxfUnderlayData, planTransform.scale]);
+
   const takeAlignmentClick = useCallback((clientX: number, clientY: number, shiftKey: boolean): boolean => {
     if (!dxfAlignment) return false;
     const container = containerRef.current;
@@ -2184,6 +2200,15 @@ export function PlanView({
                 </React.Fragment>
               );
             })}
+            {/* What a click could catch, near the cursor. Without these the
+                middle of a wall and a vertex look alike, and a catch at a
+                place with no visible line work has no explanation. */}
+            {fitCandidates.map((p, i) => {
+              const c = toScreen(p);
+              return <circle key={i} cx={c.x} cy={c.y} r={2}
+                             className="fill-none stroke-amber-400" strokeWidth={1} />;
+            })}
+
             {/* Filled when it caught a vertex, hollow when the point would be
                 taken as-is — and COLOURED AND NAMED by which drawing it is
                 collecting. The two lines snap to different drawings, so a
