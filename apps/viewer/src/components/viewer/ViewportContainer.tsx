@@ -30,6 +30,7 @@ import { SunSkyPanel } from './SunSkyPanel';
 import { SpaceMousePanel } from './SpaceMousePanel';
 import { useSolarEnvironment } from '@/hooks/useSolarEnvironment';
 import { useSolarSweep } from '@/hooks/useSolarSweep';
+import { useDxfPlacementMemory } from '@/hooks/useDxfPlacementMemory';
 import { getViewerStoreApi, useViewerStore } from '@/store';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import { collectIfcBuildingStoreyElementsWithIfcSpace } from '@/store/basketVisibleSet';
@@ -429,6 +430,11 @@ export function ViewportContainer() {
   useSolarEnvironment(georef);
   // Sweep animation runs here so collapsing/closing the panel doesn't stop it.
   useSolarSweep();
+
+  // Where the DXF underlays sit, remembered across reloads. Here rather than
+  // in the DXF panel because a plan is moved on the canvas as much as in the
+  // panel, and the panel is usually shut by the time it looks right.
+  useDxfPlacementMemory();
 
   // Determine whether Cesium button should be visible (model has georef or user added it via mutations).
   // Runs independently of cesiumEnabled so the button appears/disappears reactively.

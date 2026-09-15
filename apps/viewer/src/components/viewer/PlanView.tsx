@@ -117,7 +117,7 @@ import {
   rotationToDirection, normalizeAngle, bearingToAngle, angleToBearing, normalizeBearing,
   RAD_TO_DEG, DEG_TO_RAD,
 } from '@/lib/plan/planRotation';
-import { pickInPlan, planScreenToDrawing, planPointToRenderer, planPointToStoreyLocal } from '@/lib/plan/planPick';
+import { pickInPlan, planDrawingToScreen, planScreenToDrawing, planPointToRenderer, planPointToStoreyLocal } from '@/lib/plan/planPick';
 import { isPlanControlTarget } from '@/lib/plan/planControlTarget';
 import { setPlanDrawingState, setPlanViewport } from '@/lib/plan/planViewport';
 import { handleAddElementDrop } from './selectionHandlers';
@@ -2140,13 +2140,7 @@ export function PlanView({
       {/* The reference line: the placed point, the snapped preview, and once
           it is finished, the question of where it should go. */}
       {(planRotationPicking && (rotationStart || rotationCursor || rotationLine)) && (() => {
-        const toScreen = (p: Point2D) => {
-          const sx = p.x * viewTransform.scale;
-          const sy = p.y * viewTransform.scale;
-          const c = Math.cos(planRotation);
-          const sn = Math.sin(planRotation);
-          return { x: sx * c - sy * sn + viewTransform.x, y: sx * sn + sy * c + viewTransform.y };
-        };
+        const toScreen = (p: Point2D) => planDrawingToScreen(p, planTransform);
         // Before the FIRST click there is no line yet — only the snap the first
         // point would take. Showing it then is the whole point: you place the
         // start knowing what it caught, instead of finding out afterwards.
@@ -2175,13 +2169,7 @@ export function PlanView({
           rotation preview above — a round dot for a placed point, a square for
           what the cursor has caught — so the two read alike. */}
       {dxfAlignment && (() => {
-        const toScreen = (p: Point2D) => {
-          const sx = p.x * viewTransform.scale;
-          const sy = p.y * viewTransform.scale;
-          const c = Math.cos(planRotation);
-          const sn = Math.sin(planRotation);
-          return { x: sx * c - sy * sn + viewTransform.x, y: sx * sn + sy * c + viewTransform.y };
-        };
+        const toScreen = (p: Point2D) => planDrawingToScreen(p, planTransform);
         // A fitting-line point is stored in the underlay's own coordinates and
         // has to be placed before it can be drawn beside the model's.
         const place = (p: Point2D | null | undefined) => (

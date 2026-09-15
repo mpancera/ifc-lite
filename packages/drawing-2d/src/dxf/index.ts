@@ -20,6 +20,7 @@ export { parseDxf, readDxfPairs, decodeDxfText, stripMtextFormatting } from './p
 export { convertDxfToUnderlay, applyDxfPlacement, type DxfConvertOptions } from './convert.js';
 export { prealignDxf, type PrealignResult, type Polyline } from './prealign.js';
 export { repivotDxfPlacement } from './repivot.js';
+export { adoptDxfPlacement, effectiveDxfScale } from './adopt.js';
 export { aciToCss } from './aci-colors.js';
 export { DEFAULT_DXF_PLACEMENT } from './types.js';
 export type {

@@ -50,6 +50,7 @@ import { importDxf } from '@ifc-lite/drawing-2d';
 import { useViewerStore } from '@/store';
 import { toast } from '@/components/ui/toast';
 import { resolveDxfExportGeoreference } from '@/hooks/dxfExportGeoref';
+import { loadDxfPlacements, recallPlacement } from '@/lib/dxf/placementMemory';
 
 export function isDxfFileName(name: string): boolean {
   return name.toLowerCase().endsWith('.dxf');
@@ -121,7 +122,23 @@ export async function ingestDxfFile(file: File): Promise<void> {
   // not auto) so a later-loaded georeferenced model can't silently apply
   // that compounded error, and tell the user why in the toast below.
   const georeferenced: boolean | 'auto' = assumedMm ? false : 'auto';
-  store.addDxfUnderlay(underlay, { georeferenced });
+  const id = store.addDxfUnderlay(underlay, { georeferenced });
+
+  // Put it back where this project last had it. Fitting a plan onto a model is
+  // minutes of careful work and it used to be thrown away by every reload
+  // (Marc, 2026-09-15). Keyed by file name within the project: a revised plan
+  // re-exported under the same name is exactly the case worth restoring, since
+  // it comes from the same CAD origin as the one that was fitted.
+  //
+  // Only the placement is remembered, never the drawing — see
+  // `lib/dxf/placementMemory.ts` for what that does and does not promise.
+  const recalled = recallPlacement(
+    loadDxfPlacements(store.currentProjectKey()), file.name, underlay.unitScale,
+  );
+  if (recalled) {
+    store.updateDxfUnderlayPlacement(id, recalled.placement);
+    if (recalled.storeyId !== undefined) store.setDxfUnderlayStorey(id, recalled.storeyId);
+  }
 
   // For the import toast's wording ONLY — this does not seed the toggle
   // (that is seeded above: 'auto' normally, explicit `false` when the
@@ -144,6 +161,9 @@ export async function ingestDxfFile(file: File): Promise<void> {
     ? ' (unitless file, assumed mm — georeference alignment left off to avoid compounding the unit guess with a map-coordinate subtraction; enable it manually once you\'ve confirmed the units)'
     : '';
   const georefNote = georeference ? ', aligned to the model georeference' : '';
+  // Said out loud, because a plan that lands somewhere other than the file's
+  // own coordinates without explanation reads as an import bug.
+  const recalledNote = recalled ? ', placed as it was last time' : '';
   if (store.models.size > 0) {
     // Surface the result immediately: the underlay renders in the 2D drawing
     // panel, so open it (the user still picks/moves the section).
@@ -154,11 +174,11 @@ export async function ingestDxfFile(file: File): Promise<void> {
     // a window the user then has to find and close (Marc, 2026-09-15).
     if (store.viewMode !== '2d') store.setDrawing2DPanelVisible(true);
     toast.success(
-      `"${file.name}" imported as reference layer: ${count} elements on ${layerCount} layer${layerCount === 1 ? '' : 's'}${unitsNote}${georefNote}.`,
+      `"${file.name}" imported as reference layer: ${count} elements on ${layerCount} layer${layerCount === 1 ? '' : 's'}${unitsNote}${georefNote}${recalledNote}.`,
     );
   } else {
     toast.success(
-      `"${file.name}" imported as reference layer${unitsNote}. Load a model and open the 2D section view to see it.`,
+      `"${file.name}" imported as reference layer${unitsNote}${recalledNote}. Load a model and open the 2D section view to see it.`,
     );
   }
 }

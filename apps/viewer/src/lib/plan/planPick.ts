@@ -221,6 +221,36 @@ export function planScreenToDrawing(
 }
 
 /**
+ * Drawing point to screen point — the exact inverse of
+ * {@link planScreenToDrawing}.
+ *
+ * Every overlay that draws something AT a drawing coordinate needs this, and
+ * before it existed each one wrote the four lines out again. That is how a
+ * plan's DXF underlay came to be painted without the view rotation while the
+ * model beside it was painted with it: the copy in the canvas simply left the
+ * rotation out, which is invisible until somebody turns the plan and then
+ * grows with distance from the origin (Marc, 2026-09-15 — he found it from the
+ * snap dots sitting beside the drawing they belonged to).
+ *
+ * One function, tested against its own inverse, is what stops the next copy.
+ */
+export function planDrawingToScreen(
+  point: Point2D,
+  transform: { x: number; y: number; scale: number; rotation?: number },
+): Point2D {
+  const sx = point.x * transform.scale;
+  const sy = point.y * transform.scale;
+  const rotation = transform.rotation ?? 0;
+  if (rotation === 0) return { x: sx + transform.x, y: sy + transform.y };
+  const c = Math.cos(rotation);
+  const s = Math.sin(rotation);
+  return {
+    x: sx * c - sy * s + transform.x,
+    y: sx * s + sy * c + transform.y,
+  };
+}
+
+/**
  * A point on the plan, as a point in the renderer's world.
  *
  * The section cutter projects a down-cut with `getProjectionAxes('y')`, which

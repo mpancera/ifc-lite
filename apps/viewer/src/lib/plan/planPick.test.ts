@@ -4,7 +4,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { pickInPlan, planScreenToDrawing, planPointToRenderer, planPointToStoreyLocal } from './planPick.js';
+import { pickInPlan, planDrawingToScreen, planScreenToDrawing, planPointToRenderer, planPointToStoreyLocal } from './planPick.js';
 import { projectTo2D } from '@ifc-lite/drawing-2d';
 import type {
   Drawing2D, DrawingLine, DrawingPolygon, LineCategory, Point2D,
@@ -255,5 +255,41 @@ describe('planPointToStoreyLocal', () => {
     const local = planPointToStoreyLocal({ x: 5, y: -6 });
     assert.equal(local[0], 5);
     assert.equal(local[1], 6);
+  });
+});
+
+describe('planDrawingToScreen', () => {
+  const TURNED = { x: 340, y: 210, scale: 37.5, rotation: 0.412 };
+
+  it('undoes planScreenToDrawing exactly, turned', () => {
+    // The two are used at opposite ends of the same loop — a click becomes a
+    // drawing point, a drawing point becomes a marker — so any disagreement
+    // shows up as a marker that does not sit where it was placed.
+    const screen = { x: 812, y: 133 };
+    const back = planDrawingToScreen(
+      planScreenToDrawing(screen.x, screen.y, TURNED), TURNED,
+    );
+
+    assert.ok(Math.hypot(back.x - screen.x, back.y - screen.y) < 1e-9,
+      `round trip landed at ${JSON.stringify(back)}`);
+  });
+
+  it('undoes it straight as well', () => {
+    const flat = { x: 10, y: -4, scale: 2 };
+    const back = planDrawingToScreen(planScreenToDrawing(99, 51, flat), flat);
+
+    assert.ok(Math.hypot(back.x - 99, back.y - 51) < 1e-9);
+  });
+
+  it('actually turns — a rotation that changed nothing would pass a round trip', () => {
+    // Both directions could omit the rotation and still round-trip perfectly.
+    // That is exactly the bug this pair was extracted to end, so one assertion
+    // has to pin the picture itself.
+    const straight = planDrawingToScreen({ x: 1, y: 0 }, { x: 0, y: 0, scale: 1 });
+    const turned = planDrawingToScreen({ x: 1, y: 0 }, { x: 0, y: 0, scale: 1, rotation: Math.PI / 2 });
+
+    assert.ok(Math.hypot(straight.x - 1, straight.y - 0) < 1e-12);
+    assert.ok(Math.hypot(turned.x - 0, turned.y - 1) < 1e-12,
+      `quarter turn landed at ${JSON.stringify(turned)}`);
   });
 });

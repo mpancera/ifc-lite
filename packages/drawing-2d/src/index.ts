@@ -473,6 +473,8 @@ export {
   applyDxfPlacement,
   prealignDxf,
   repivotDxfPlacement,
+  adoptDxfPlacement,
+  effectiveDxfScale,
   aciToCss,
   DEFAULT_DXF_PLACEMENT,
 } from './dxf/index.js';

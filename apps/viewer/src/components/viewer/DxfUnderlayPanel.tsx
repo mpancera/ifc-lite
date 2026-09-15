@@ -50,7 +50,7 @@ import {
   alignmentPairs, alignmentPrompt, isLineComplete,
 } from '@/lib/heights/alignmentSession';
 import { describeSolvedScale, solveDxfPlacement } from '@ifc-lite/drawing-2d';
-import { repivotDxfPlacement } from '@ifc-lite/drawing-2d';
+import { repivotDxfPlacement, adoptDxfPlacement } from '@ifc-lite/drawing-2d';
 import { toast } from '@/components/ui/toast';
 import { posthog } from '@/lib/analytics';
 import { ingestDxfFile } from '@/hooks/ingest/dxfIngest';
@@ -137,6 +137,31 @@ function UnderlayCard({
 
   const [layersOpen, setLayersOpen] = useState(false);
   const [placementOpen, setPlacementOpen] = useState(false);
+
+  /**
+   * Give this plan's placement to every other loaded plan.
+   *
+   * Storey plans out of one CAD export share an origin — that is what makes
+   * them stack — so the placement fitted on one of them is already the answer
+   * for the rest, and fitting each separately is work that answers a question
+   * already answered (Marc, 2026-09-15).
+   *
+   * Not automatic on import. Two plans with the same name in a project are the
+   * same drawing and get their own memory; two DIFFERENT drawings sharing an
+   * origin is a guess, and a guess that silently moves a plan somebody placed
+   * by hand is worse than a button.
+   */
+  const siblings = useViewerStore((s) => s.dxfUnderlays).filter((u) => u.id !== state.id);
+  const passPlacementOn = () => {
+    for (const other of siblings) {
+      updateDxfUnderlayPlacement(other.id, adoptDxfPlacement(
+        state.placement, state.underlay.unitScale, other.underlay.unitScale,
+      ));
+    }
+    toast.success(siblings.length === 1
+      ? 'Platzierung auf den anderen Plan übertragen.'
+      : `Platzierung auf ${siblings.length} weitere Pläne übertragen.`);
+  };
 
   const session = useViewerStore((s) => s.dxfAlignment);
   const startDxfAlignment = useViewerStore((s) => s.startDxfAlignment);
@@ -552,6 +577,19 @@ function UnderlayCard({
               }}
             />
           </div>
+          {siblings.length > 0 && (
+            <div className="pl-2 pr-1 pt-2">
+              <Button variant="outline" size="sm" className="w-full h-6 text-xs"
+                      onClick={passPlacementOn}>
+                Platzierung auf die anderen Pläne übertragen
+              </Button>
+              <p className="pt-1 text-[10px] leading-snug text-muted-foreground">
+                Für Geschosspläne aus demselben Export: gleicher Ursprung, also
+                gleiche Platzierung. Ein abweichender Einheiten-Faktor der
+                Zieldatei wird verrechnet.
+              </p>
+            </div>
+          )}
         </CollapsibleContent>
       </Collapsible>
     </div>

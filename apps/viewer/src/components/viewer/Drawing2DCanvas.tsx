@@ -1229,15 +1229,21 @@ export function Drawing2DCanvas({
       };
 
       // DXF reference underlays render first, beneath the cut geometry
-      // (issue #1782). Data is pre-mapped drawing space and exists only
-      // for plan ('down') sections, where the direct mapping has no axis
-      // flips — so the plain drawing→screen transform applies. Drawn in
-      // screen space (like the IFC annotation overlay) so stroke widths
-      // and text stay in pixels.
+      // (issue #1782). Data is pre-mapped drawing space, so what is left is
+      // the drawing→screen transform — `toScreenPt`, THE SAME ONE the cut
+      // geometry uses.
+      //
+      // It used to be a hand-written copy of that transform without the
+      // rotation, which is invisible until somebody turns the plan: the model
+      // swings, the underlay does not, and the two drift apart by more the
+      // further from the origin you look. Marc found it from the other end
+      // (2026-09-15) — the snap dots sat beside the plan they belonged to,
+      // because the dots are placed through the rotating transform and the
+      // plan was not. Sharing the function is what makes them agree.
       drawDxfUnderlaysScreenSpace(
         ctx,
         dxfUnderlays,
-        (x, y) => ({ x: x * transform.scale + transform.x, y: y * transform.scale + transform.y }),
+        toScreenPt,
         (mm) => Math.max(0.5, mm * transform.scale * 0.3),
         (worldHeight) => worldHeight * transform.scale,
       );
