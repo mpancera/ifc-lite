@@ -31,6 +31,7 @@ import { SpaceMousePanel } from './SpaceMousePanel';
 import { useSolarEnvironment } from '@/hooks/useSolarEnvironment';
 import { useSolarSweep } from '@/hooks/useSolarSweep';
 import { useDxfPlacementMemory } from '@/hooks/useDxfPlacementMemory';
+import { useHeightSystemMemory } from '@/hooks/useHeightSystemMemory';
 import { getViewerStoreApi, useViewerStore } from '@/store';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import { collectIfcBuildingStoreyElementsWithIfcSpace } from '@/store/basketVisibleSet';
@@ -435,6 +436,10 @@ export function ViewportContainer() {
   // in the DXF panel because a plan is moved on the canvas as much as in the
   // panel, and the panel is usually shut by the time it looks right.
   useDxfPlacementMemory();
+
+  // The height system, likewise. Deriving it is a click; correcting what the
+  // model got wrong is the work, and it used to last only as long as the tab.
+  useHeightSystemMemory();
 
   // Determine whether Cesium button should be visible (model has georef or user added it via mutations).
   // Runs independently of cesiumEnabled so the button appears/disappears reactively.

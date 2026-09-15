@@ -92,3 +92,48 @@ export function danglingUnderlays(
 ): string[] {
   return placeUnderlays(underlays, system).filter((p) => p.dangling).map((p) => p.underlayId);
 }
+
+/**
+ * Whether a plan assigned to a storey belongs on the sheet being drawn.
+ *
+ * A DXF filed under the basement was drawn over every floor — not a
+ * preference but a wrong drawing: the sheet says storey 00 and shows the
+ * basement's walls (Marc, 2026-09-15).
+ *
+ * `sheetStoreyId` is the height system's key for the storey on the sheet,
+ * `${modelId}:${expressId}`, or `null` when the sheet has no storey.
+ *
+ * ## Everything uncertain stays VISIBLE
+ *
+ * The comparison is made on ids and on nothing else. Elevations would be the
+ * obvious fallback and are a trap: the sheet reads `IfcBuildingStorey.
+ * Elevation` in the file's own length unit, the height system holds metres,
+ * and a centimetre model would silently match the wrong floor — a wrong
+ * drawing that looks right, which is the failure this is fixing.
+ *
+ * So four cases are shown rather than guessed at:
+ *
+ * - The plan has no storey. It has not been filed yet, and hiding it would
+ *   hide the drawing somebody just imported before they can reach the field
+ *   that would bring it back.
+ * - The plan names a storey the system no longer has. A broken assignment is
+ *   something to repair, not a reason to make a drawing vanish.
+ * - The sheet has no storey.
+ * - The sheet's storey is not in the height system at all — a system built by
+ *   hand, or derived from a different model. Nothing here can say whether the
+ *   two mean the same floor, so nothing here hides anything.
+ */
+export function underlayBelongsOnSheet(
+  underlay: UnderlayAssignment,
+  system: HeightSystem | null,
+  sheetStoreyId: string | null,
+): boolean {
+  if (underlay.storeyId === undefined) return true;
+  if (sheetStoreyId === null) return true;
+
+  const storeys = system?.storeys ?? [];
+  if (!storeys.some((s) => s.id === underlay.storeyId)) return true;
+  if (!storeys.some((s) => s.id === sheetStoreyId)) return true;
+
+  return underlay.storeyId === sheetStoreyId;
+}

@@ -25,7 +25,7 @@ export {
 
 export {
   canBindFolder, folderDisplayName, folderHasFile, folderPermission, pickFolder,
-  restoreFolderAccess, writeFileToFolder,
+  restoreFolderAccess, writeFileToFolder, readFileFromFolder,
   type FolderBinding, type FolderPermission,
 } from './folder.js';
 

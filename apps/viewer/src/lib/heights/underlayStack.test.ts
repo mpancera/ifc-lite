@@ -6,7 +6,10 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createEmptyHeightSystem } from './derive.js';
 import { addStorey } from './edit.js';
-import { assignableStoreys, danglingUnderlays, placeUnderlays } from './underlayStack.js';
+import {
+  assignableStoreys, danglingUnderlays, placeUnderlays, underlayBelongsOnSheet,
+} from './underlayStack.js';
+import type { HeightSystem } from './types.js';
 
 const system = [
   { name: 'UG', elevation: -3 },
@@ -110,5 +113,55 @@ describe('danglingUnderlays', () => {
 
   it('is empty when every assignment still resolves', () => {
     assert.deepEqual(danglingUnderlays([{ id: 'a', storeyId: eg.id }], system), []);
+  });
+});
+
+describe('underlayBelongsOnSheet', () => {
+  const system: HeightSystem = {
+    formatVersion: 1,
+    derivedFrom: {},
+    updatedAt: '2026-09-15T00:00:00Z',
+    referenceLevels: [],
+    storeys: [
+      { id: 'm1:10', name: 'U1', elevation: -3, source: 'ifc-elevation-attribute' },
+      { id: 'm1:20', name: '00', elevation: 0, source: 'ifc-elevation-attribute' },
+    ],
+  };
+
+  it('keeps a basement plan off the ground-floor sheet', () => {
+    // The report: a DXF filed under U1 drawn over every storey, so the sheet
+    // says 00 and shows the basement's walls.
+    assert.equal(underlayBelongsOnSheet({ id: 'u', storeyId: 'm1:10' }, system, 'm1:20'), false);
+  });
+
+  it('draws it on its own sheet', () => {
+    assert.equal(underlayBelongsOnSheet({ id: 'u', storeyId: 'm1:10' }, system, 'm1:10'), true);
+  });
+
+  it('shows a plan that has not been filed yet', () => {
+    // Hiding it would hide the drawing somebody just imported, before they can
+    // reach the field that would bring it back.
+    assert.equal(underlayBelongsOnSheet({ id: 'u' }, system, 'm1:20'), true);
+  });
+
+  it('shows one whose storey has been deleted', () => {
+    // A broken assignment is something to repair, not a reason to make a
+    // drawing vanish with no explanation.
+    assert.equal(underlayBelongsOnSheet({ id: 'u', storeyId: 'm1:99' }, system, 'm1:20'), true);
+  });
+
+  it('shows everything on a sheet with no storey', () => {
+    assert.equal(underlayBelongsOnSheet({ id: 'u', storeyId: 'm1:10' }, system, null), true);
+  });
+
+  it('shows everything when the sheet\'s storey is not in the system', () => {
+    // A system built by hand, or derived from a different model of the same
+    // building. Nothing here can say whether the two mean the same floor, so
+    // nothing here hides anything.
+    assert.equal(underlayBelongsOnSheet({ id: 'u', storeyId: 'm1:10' }, system, 'm2:7'), true);
+  });
+
+  it('shows everything with no system at all', () => {
+    assert.equal(underlayBelongsOnSheet({ id: 'u', storeyId: 'm1:10' }, null, 'm1:20'), true);
   });
 });

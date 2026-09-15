@@ -50,7 +50,8 @@ import { importDxf } from '@ifc-lite/drawing-2d';
 import { useViewerStore } from '@/store';
 import { toast } from '@/components/ui/toast';
 import { resolveDxfExportGeoreference } from '@/hooks/dxfExportGeoref';
-import { loadDxfPlacements, recallPlacement } from '@/lib/dxf/placementMemory';
+import { isPlaced, loadDxfPlacements, recallPlacement } from '@/lib/dxf/placementMemory';
+import { adoptDxfPlacement } from '@ifc-lite/drawing-2d';
 
 export function isDxfFileName(name: string): boolean {
   return name.toLowerCase().endsWith('.dxf');
@@ -135,9 +136,30 @@ export async function ingestDxfFile(file: File): Promise<void> {
   const recalled = recallPlacement(
     loadDxfPlacements(store.currentProjectKey()), file.name, underlay.unitScale,
   );
+
+  // Failing a memory of its own: the placement of a plan already fitted in
+  // this session. Storey plans out of one CAD export share an origin — that is
+  // what makes them stack — so the first one fitted answers for the rest, and
+  // this is the order the work actually happens in: fit the basement, then
+  // fetch the floors above (Marc, 2026-09-15).
+  //
+  // A guess, and treated as one: it is announced in the toast, it is undone by
+  // one drag, and it never overrides a remembered placement or a plan the
+  // person has already moved. Landing every new plan at the file's own raw
+  // coordinates — a kilometre off, invisibly — is not the safer default, it is
+  // just the one that says nothing.
+  // `store` was read BEFORE the new entry was added, so this list is exactly
+  // the siblings.
+  const donor = recalled ? null : store.dxfUnderlays.find((u) => isPlaced(u.placement));
+  const adopted = donor
+    ? adoptDxfPlacement(donor.placement, donor.underlay.unitScale, underlay.unitScale)
+    : null;
+
   if (recalled) {
     store.updateDxfUnderlayPlacement(id, recalled.placement);
     if (recalled.storeyId !== undefined) store.setDxfUnderlayStorey(id, recalled.storeyId);
+  } else if (adopted) {
+    store.updateDxfUnderlayPlacement(id, adopted);
   }
 
   // For the import toast's wording ONLY — this does not seed the toggle
@@ -163,7 +185,9 @@ export async function ingestDxfFile(file: File): Promise<void> {
   const georefNote = georeference ? ', aligned to the model georeference' : '';
   // Said out loud, because a plan that lands somewhere other than the file's
   // own coordinates without explanation reads as an import bug.
-  const recalledNote = recalled ? ', placed as it was last time' : '';
+  const recalledNote = recalled
+    ? ', placed as it was last time'
+    : (donor ? `, placed like "${donor.name}"` : '');
   if (store.models.size > 0) {
     // Surface the result immediately: the underlay renders in the 2D drawing
     // panel, so open it (the user still picks/moves the section).

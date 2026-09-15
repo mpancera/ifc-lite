@@ -28,6 +28,7 @@ import { useMemo } from 'react';
 import type { Point2D } from '@ifc-lite/drawing-2d';
 import type { GeometryResult } from '@ifc-lite/geometry';
 import { useViewerStore } from '@/store';
+import { underlayBelongsOnSheet } from '@/lib/heights/underlayStack';
 import { buildDxfMapToWorldTransform, resolveDxfExportGeoreference } from './dxfExportGeoref';
 import {
   dxfElevationRenderY,
@@ -98,22 +99,35 @@ export function useDxfUnderlaysForDrawing(params: {
   isCustomPlane: boolean;
   flipped: boolean;
   coordinateInfo: GeometryResult['coordinateInfo'] | undefined;
+  /**
+   * The height-system id of the storey this sheet shows, so a plan filed under
+   * one storey is not drawn over the others.
+   *
+   * `undefined` means no filtering at all, which is what a free section wants:
+   * a vertical cut has no single storey. `null` is a sheet that HAS no storey,
+   * which also shows everything — see `underlayBelongsOnSheet`.
+   */
+  sheetStoreyId?: string | null;
 }): readonly DxfUnderlayRenderData[] {
-  const { enabled, sectionAxis, isCustomPlane, flipped, coordinateInfo } = params;
+  const { enabled, sectionAxis, isCustomPlane, flipped, coordinateInfo, sheetStoreyId } = params;
   const dxfUnderlays = useViewerStore((s) => s.dxfUnderlays);
+  const heightSystem = useViewerStore((s) => s.heightSystem);
   const { transform: mapToWorld, available: georeferenceAvailable } = useDxfMapToWorldTransform();
-
   return useMemo(() => {
     // Plan-view content only: elevation/section/custom planes have no
     // meaningful mapping for a 2D site plan.
     if (!enabled || sectionAxis !== 'down' || isCustomPlane) return [];
-    const visible = dxfUnderlays.filter((u) => u.visible && u.opacity > 0);
+    const visible = dxfUnderlays.filter((u) => u.visible && u.opacity > 0
+      && (sheetStoreyId === undefined
+        || underlayBelongsOnSheet({ id: u.id, storeyId: u.storeyId }, heightSystem, sheetStoreyId)));
     if (visible.length === 0) return [];
     const shift = dxfWorldShift(coordinateInfo);
     // Cardinal flipped sections mirror the drawing's X axis (see
     // projectTo2D's flipped-U rule); the underlay must follow.
     return visible.map((u) => dxfUnderlayToDrawing(u, shift, flipped, mapToWorld, georeferenceAvailable));
-  }, [enabled, sectionAxis, isCustomPlane, flipped, coordinateInfo, dxfUnderlays, mapToWorld, georeferenceAvailable]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, sectionAxis, isCustomPlane, flipped, coordinateInfo, dxfUnderlays,
+    mapToWorld, georeferenceAvailable, heightSystem, sheetStoreyId]);
 }
 
 /**

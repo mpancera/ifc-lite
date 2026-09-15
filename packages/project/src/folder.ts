@@ -147,6 +147,32 @@ export async function writeFileToFolder(
   }
 }
 
+/**
+ * Read a file back out of the bound folder, or `null` when it is not there.
+ *
+ * The counterpart to {@link writeFileToFolder}, and the reason a placement
+ * fitted on one machine can be found again: a file that is only ever written
+ * is a file nobody reads.
+ *
+ * Absence is `null`, not an exception. A project folder that has never held
+ * this sidecar is the ordinary starting state, and making the caller catch for
+ * it would put a try/catch around every read of a normal condition.
+ */
+export async function readFileFromFolder(
+  folder: FileSystemDirectoryHandle,
+  fileName: string,
+  options: { dir?: string } = {},
+): Promise<string | null> {
+  try {
+    const place = options.dir ? await folder.getDirectoryHandle(options.dir) : folder;
+    const handle = await place.getFileHandle(fileName);
+    return await (await handle.getFile()).text();
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'NotFoundError') return null;
+    throw err;
+  }
+}
+
 /** Whether the folder already holds this file. For "this will replace an
  *  existing file" before writing one. */
 export async function folderHasFile(

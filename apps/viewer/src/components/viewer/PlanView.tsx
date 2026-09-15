@@ -1018,6 +1018,13 @@ export function PlanView({
     isCustomPlane: false,
     flipped: false,
     coordinateInfo: geometryResult?.coordinateInfo,
+    // A plan filed under a storey belongs on that storey's sheet and nowhere
+    // else. The height system keys storeys as `modelId:expressId`, which is
+    // what the DXF panel's dropdown writes, so the sheet spells its own the
+    // same way rather than inventing a second convention.
+    sheetStoreyId: storeyModelId !== null && storey
+      ? `${storeyModelId}:${storey.expressId}`
+      : null,
   });
 
   // ── Measuring and annotating ────────────────────────────────────────────

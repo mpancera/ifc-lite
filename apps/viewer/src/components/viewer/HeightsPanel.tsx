@@ -42,7 +42,7 @@ import {
 } from '@/lib/project/saveSidecar';
 import { toast } from '@/components/ui/toast';
 import { describeAllUnits } from '@ifc-lite/parser';
-import { sidecarFileName } from '@ifc-lite/project';
+import { sidecarFileName, DEFAULT_SIDECAR_PREFIX, SIDECAR_DIR } from '@ifc-lite/project';
 import type { ElevationSource } from '@/lib/heights/types';
 
 /** Millimetre resolution: the honest precision for a building level, and it
@@ -242,9 +242,17 @@ export function HeightsPanel({ onClose }: HeightsPanelProps) {
               </Button>
             </TooltipTrigger>
             <TooltipContent>
-              Als {heightsFileName()} sichern — alle Längen in Metern, bezogen auf
-              ±0.00. Jederzeit wiederholbar; die Datei trägt den Zeitpunkt ihrer
-              Erzeugung.
+              {/* WHERE, before the click. A file that lands in the downloads
+                  folder when somebody expected it in the project folder is
+                  only discovered afterwards, by going looking for it (Marc,
+                  2026-09-15). The binding lives under Daten › Projektordner. */}
+              {folder
+                ? <>Schreibt <span className="font-mono">{SIDECAR_DIR}/{heightsFileName()
+                    .replace(DEFAULT_SIDECAR_PREFIX, '')}</span> in {folder.label?.trim() || folder.name}.</>
+                : <>Kein Projektordner gebunden — die Datei landet im
+                   Download-Ordner. Binden unter Daten › Projektordner.</>}
+              {' '}Alle Längen in Metern, bezogen auf ±0.00. Jederzeit
+              wiederholbar; die Datei trägt den Zeitpunkt ihrer Erzeugung.
             </TooltipContent>
           </Tooltip>
           <Tooltip>

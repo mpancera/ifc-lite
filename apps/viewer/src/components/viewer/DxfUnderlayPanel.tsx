@@ -577,19 +577,23 @@ function UnderlayCard({
               }}
             />
           </div>
-          {siblings.length > 0 && (
-            <div className="pl-2 pr-1 pt-2">
-              <Button variant="outline" size="sm" className="w-full h-6 text-xs"
-                      onClick={passPlacementOn}>
-                Platzierung auf die anderen Pläne übertragen
-              </Button>
-              <p className="pt-1 text-[10px] leading-snug text-muted-foreground">
-                Für Geschosspläne aus demselben Export: gleicher Ursprung, also
-                gleiche Platzierung. Ein abweichender Einheiten-Faktor der
-                Zieldatei wird verrechnet.
-              </p>
-            </div>
-          )}
+          {/* Shown even with nothing to transfer to, disabled and saying why.
+              Hidden, it looked like the feature was missing rather than like
+              there was only one plan loaded (Marc, 2026-09-15). */}
+          <div className="pl-2 pr-1 pt-2">
+            <Button variant="outline" size="sm" className="w-full h-6 text-xs"
+                    disabled={siblings.length === 0} onClick={passPlacementOn}>
+              Platzierung auf die anderen Pläne übertragen
+            </Button>
+            <p className="pt-1 text-[10px] leading-snug text-muted-foreground">
+              {siblings.length === 0
+                ? 'Kein weiterer Plan geladen. Ein neu importierter Plan übernimmt '
+                  + 'diese Platzierung ohnehin automatisch.'
+                : 'Für Geschosspläne aus demselben Export: gleicher Ursprung, also '
+                  + 'gleiche Platzierung. Ein abweichender Einheiten-Faktor der '
+                  + 'Zieldatei wird verrechnet.'}
+            </p>
+          </div>
         </CollapsibleContent>
       </Collapsible>
     </div>
