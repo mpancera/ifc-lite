@@ -24,6 +24,7 @@
 import { type StateCreator } from 'zustand';
 import type { ViewerState } from '../index.js';
 import { loadPlanRotation, savePlanRotation } from '@/lib/plan/planRotationStore';
+import { loadPlanDisplay, savePlanDisplay } from '@/lib/plan/planDisplayStore';
 
 /**
  * Two modes, not three. The schematic view (PROJECT.md §V35) was briefly a
@@ -183,19 +184,21 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
   planRotation: 0,
   planRotationPicking: false,
   planRotationProject: null,
-  planShowRoomLabels: true,
-  planShowOpeningSymbols: true,
-  planShowDoorLabels: true,
+  // Which derived layers the plan draws. The DEFAULTS are in
+  // `planDisplayStore.ts` beside the code that remembers them, so a switch
+  // cannot be given one value here and remembered against another:
+  //   - room labels, opening symbols, door tags and device marks: on, the
+  //     ordinary architectural plan;
+  //   - zone outlines and compartments: off. A fire-plan convention, not part
+  //     of an architectural drawing, and the heaviest lines on the sheet — a
+  //     Feuerwehrlageplan wants both layers, an architectural plan neither,
+  //     and a Meldeplan only the zones.
+  // Read back from the last session: six switches to set again on every
+  // reload is how switches stop being used (Marc, 2026-09-16).
+  ...loadPlanDisplay(),
   showSpaceGraph: false,
-  planShowDeviceMarks: true,
   // Off means "the product filters", which is the point of choosing one.
   planProductClassFilterOff: false,
-  // Off by default: it is a fire-plan convention, not part of an
-  // architectural drawing, and it is the heaviest line on the sheet.
-  planShowZoneOutlines: false,
-  // Off for the same reason, and separately: a Feuerwehrlageplan wants both
-  // layers, an architectural plan neither, and a Meldeplan only the zones.
-  planShowCompartments: false,
 
   setViewMode: (viewMode) => {
     if (get().viewMode === viewMode) return;
@@ -250,16 +253,40 @@ export const createViewModeSlice: StateCreator<ViewerState, [], [], ViewModeSlic
 
   setPlanRotationPicking: (planRotationPicking) => set({ planRotationPicking }),
 
-  setPlanShowRoomLabels: (planShowRoomLabels) => set({ planShowRoomLabels }),
+  // Each of the six remembered switches writes the whole set, read back from
+  // the store AFTER the change: a setter that saved only its own field would
+  // have to know the others' current values, and would drift the moment one of
+  // them was changed anywhere else.
+  setPlanShowRoomLabels: (planShowRoomLabels) => {
+    set({ planShowRoomLabels });
+    savePlanDisplay(get());
+  },
+  setPlanShowOpeningSymbols: (planShowOpeningSymbols) => {
+    set({ planShowOpeningSymbols });
+    savePlanDisplay(get());
+  },
+  setPlanShowDoorLabels: (planShowDoorLabels) => {
+    set({ planShowDoorLabels });
+    savePlanDisplay(get());
+  },
+  setPlanShowDeviceMarks: (planShowDeviceMarks) => {
+    set({ planShowDeviceMarks });
+    savePlanDisplay(get());
+  },
+  setPlanShowZoneOutlines: (planShowZoneOutlines) => {
+    set({ planShowZoneOutlines });
+    savePlanDisplay(get());
+  },
+  setPlanShowCompartments: (planShowCompartments) => {
+    set({ planShowCompartments });
+    savePlanDisplay(get());
+  },
 
-  setPlanShowOpeningSymbols: (planShowOpeningSymbols) => set({ planShowOpeningSymbols }),
-  setPlanShowDoorLabels: (planShowDoorLabels) => set({ planShowDoorLabels }),
+  // Not remembered. The space graph is an analysis overlay somebody switches
+  // on to answer a question, and the product filter belongs to the product
+  // that is active — neither is a standing preference about how plans look.
   setShowSpaceGraph: (showSpaceGraph) => set({ showSpaceGraph }),
-
-  setPlanShowDeviceMarks: (planShowDeviceMarks) => set({ planShowDeviceMarks }),
   setPlanProductClassFilterOff: (planProductClassFilterOff) => set({ planProductClassFilterOff }),
-  setPlanShowZoneOutlines: (planShowZoneOutlines) => set({ planShowZoneOutlines }),
-  setPlanShowCompartments: (planShowCompartments) => set({ planShowCompartments }),
 
   restorePlanRotationForProject: () => {
     const project = get().currentProjectKey();

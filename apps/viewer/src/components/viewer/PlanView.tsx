@@ -277,10 +277,19 @@ export function PlanView({
 
   // Adopt this project's saved rotation when the plan opens. A working state,
   // not model content: nothing is written into the IFC.
+  //
+  // `models` is in the dependencies, and that is the whole fix: with no folder
+  // bound the project key is DERIVED from the loaded model names, so a plan
+  // that is already open when a model finishes loading asked before there was
+  // a project to ask about, got null, and never asked again. The angle was
+  // written every time and restored never — which is indistinguishable from
+  // not being saved at all (Marc, 2026-09-16: "Die Rotation scheint nicht
+  // gespeichert zu bleiben"). The action's own once-per-project guard is what
+  // keeps the extra calls from costing anything.
   const restorePlanRotationForProject = useViewerStore((s) => s.restorePlanRotationForProject);
   useEffect(() => {
     if (active) restorePlanRotationForProject();
-  }, [active, restorePlanRotationForProject]);
+  }, [active, restorePlanRotationForProject, models]);
 
   // Where each model says its IFC (0,0,0) is. Same derivation the 3D
   // basepoint markers use — a plan that disagreed with the 3D view about the

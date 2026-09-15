@@ -4,7 +4,10 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { pickInPlan, planDrawingToScreen, planScreenToDrawing, planPointToRenderer, planPointToStoreyLocal } from './planPick.js';
+import {
+  pickInPlan, planDrawingToScreen, planScreenToDrawing, planPointToRenderer,
+  planPointToStoreyLocal,
+} from './planPick.js';
 import { projectTo2D } from '@ifc-lite/drawing-2d';
 import type {
   Drawing2D, DrawingLine, DrawingPolygon, LineCategory, Point2D,
@@ -291,5 +294,48 @@ describe('planDrawingToScreen', () => {
     assert.ok(Math.hypot(straight.x - 1, straight.y - 0) < 1e-12);
     assert.ok(Math.hypot(turned.x - 0, turned.y - 1) < 1e-12,
       `quarter turn landed at ${JSON.stringify(turned)}`);
+  });
+});
+
+describe('placing on a turned plan', () => {
+  // The question Marc's misplaced rooms raised: does the view rotation leak
+  // into what gets STORED? It must not — the angle is how somebody chose to
+  // look at the building, and a room drawn on a turned plan has to land on the
+  // walls it was drawn along, not turned away from them.
+  const TURNED = { x: 640, y: 360, scale: 40, rotation: -0.2617993877991494 }; // -15°
+
+  it('stores the point that was clicked, whatever the plan is turned to', () => {
+    // Drawn straight and drawn turned: the same spot on the building, so the
+    // same world point. Screen coordinates differ; the stored point may not.
+    const straight = { ...TURNED, rotation: 0 };
+    const target = { x: 12.5, y: -7.25 };
+
+    const onScreen = planDrawingToScreen(target, TURNED);
+    const stored = planPointToRenderer(
+      planScreenToDrawing(onScreen.x, onScreen.y, TURNED), 4.42);
+    const storedStraight = planPointToRenderer(
+      planScreenToDrawing(
+        planDrawingToScreen(target, straight).x,
+        planDrawingToScreen(target, straight).y,
+        straight), 4.42);
+
+    assert.ok(Math.hypot(stored.x - target.x, stored.z - target.y) < 1e-9,
+      `stored ${JSON.stringify(stored)} for target ${JSON.stringify(target)}`);
+    assert.ok(Math.hypot(stored.x - storedStraight.x, stored.z - storedStraight.z) < 1e-9);
+  });
+
+  it('keeps a drawn rectangle square to the building on a turned plan', () => {
+    // The visible symptom was a room sitting at an angle to the walls. Four
+    // corners of an axis-aligned rectangle, clicked on a turned plan, have to
+    // come back axis-aligned.
+    const corners = [{ x: 0, y: 0 }, { x: 6, y: 0 }, { x: 6, y: 4 }, { x: 0, y: 4 }];
+    const stored = corners.map((c) => {
+      const s = planDrawingToScreen(c, TURNED);
+      return planScreenToDrawing(s.x, s.y, TURNED);
+    });
+
+    assert.ok(Math.abs(stored[0].y - stored[1].y) < 1e-9, 'bottom edge is not horizontal');
+    assert.ok(Math.abs(stored[1].x - stored[2].x) < 1e-9, 'right edge is not vertical');
+    assert.ok(Math.abs((stored[1].x - stored[0].x) - 6) < 1e-9, 'width changed');
   });
 });
