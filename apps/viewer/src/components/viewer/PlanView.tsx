@@ -106,7 +106,7 @@ import { describePrealign, prealignUnderlay, PREALIGN_MIN_FIT } from '@/hooks/dx
 import { applyDxfPlacement } from '@ifc-lite/drawing-2d';
 import { resolveAlignmentPick } from '@/lib/dxf/alignmentPick';
 import { alignmentStep, alignmentTarget, constrainToAxis } from '@/lib/heights/alignmentSession';
-import { snapToUnderlay, underlayVerticesNear } from '@/lib/heights/underlaySnap';
+import { snapToUnderlay, underlaySnapTargetsNear } from '@/lib/heights/underlaySnap';
 import {
   COMPARTMENT_LAYER, FIRE_TRIGGER_LAYER, GAS_TRIGGER_LAYER,
 } from '@/lib/zoneOutline/zoneLayers';
@@ -1490,7 +1490,8 @@ export function PlanView({
   }, [planTransform, updateDxfUnderlayPlacement]);
 
   /**
-   * Where a click on the plan COULD catch, near the cursor.
+   * Where a click on the plan COULD catch, near the cursor — crossings
+   * included, because those are what a wall corner usually is.
    *
    * Drawn so the hunt stops being blind. Only while the fitting line is being
    * collected: the reference line snaps to the model, which has its own
@@ -1502,8 +1503,22 @@ export function PlanView({
     const drawn = dxfUnderlayData.find((u) => u.id === dxfAlignment.underlayId);
     // Sixty screen pixels: far enough to show where to aim, near enough that
     // the dots do not become a second drawing.
-    return underlayVerticesNear(drawn, alignmentCursor.at, 60 / planTransform.scale);
+    return underlaySnapTargetsNear(drawn, alignmentCursor.at, 60 / planTransform.scale);
   }, [dxfAlignment, alignmentCursor, dxfUnderlayData, planTransform.scale]);
+
+  /**
+   * The middle of what is on screen, in drawing space.
+   *
+   * What a turn or a resize of the underlay happens about, so the detail being
+   * looked at stays put instead of the whole plan swinging away from an origin
+   * two and a half million metres off.
+   */
+  const viewCentre = useCallback((): Point2D | null => {
+    const container = containerRef.current;
+    if (!container) return null;
+    const rect = container.getBoundingClientRect();
+    return planScreenToDrawing(rect.width / 2, rect.height / 2, planTransform);
+  }, [planTransform]);
 
   const takeAlignmentClick = useCallback((clientX: number, clientY: number, shiftKey: boolean): boolean => {
     if (!dxfAlignment) return false;
@@ -2437,6 +2452,7 @@ export function PlanView({
       {dxfPanelOpen && (
         <div className="absolute top-0 right-0 bottom-0 w-80 z-50 shadow-xl">
           <DxfUnderlayPanel
+            pivot={viewCentre}
             onClose={() => setDxfPanelOpen(false)}
             onCenterOnModel={centerDxfUnderlay}
             // A plan IS the cardinal plan view the underlays are for, always.

@@ -15,7 +15,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { snapToUnderlay, underlayVerticesNear, type SnapLines } from './underlaySnap.js';
+import { snapToUnderlay, underlaySnapTargetsNear, type SnapLines } from './underlaySnap.js';
 
 /** One underlay's lines, as the render hook hands them over. */
 function drawn(...lines: { x: number; y: number }[][]): SnapLines {
@@ -63,6 +63,39 @@ describe('snapToUnderlay', () => {
     assert.equal(snapToUnderlay(undefined, { x: 0, y: 0 }, 0.5), null);
   });
 
+  it('catches where two wall lines CROSS, which has no vertex at all', () => {
+    // The failure this was rewritten for. A CAD plan runs wall faces through
+    // a junction, so the corner you see is a crossing and the nearest vertex
+    // is metres away at the end of the line.
+    const crossing = drawn(
+      [{ x: -5, y: 2 }, { x: 5, y: 2 }],
+      [{ x: 2, y: -5 }, { x: 2, y: 5 }],
+    );
+
+    assert.deepEqual(snapToUnderlay(crossing, { x: 2.05, y: 2.05 }, 0.5), { x: 2, y: 2 });
+  });
+
+  it('does not invent a crossing off the end of a line', () => {
+    // Two lines whose EXTENSIONS would meet have nothing at that point on
+    // either drawing, so offering it would be offering a place to mis-aim at.
+    const apart = drawn(
+      [{ x: -5, y: 2 }, { x: -1, y: 2 }],
+      [{ x: 2, y: -5 }, { x: 2, y: -1 }],
+    );
+
+    assert.equal(snapToUnderlay(apart, { x: 2, y: 2 }, 0.5), null);
+  });
+
+  it('prefers a crossing to a lone end that is nearer', () => {
+    const mixed = drawn(
+      [{ x: -5, y: 0 }, { x: 5, y: 0 }],
+      [{ x: 0, y: -5 }, { x: 0, y: 5 }],
+      [{ x: 0.1, y: 0.1 }, { x: 0.3, y: 0.3 }],
+    );
+
+    assert.deepEqual(snapToUnderlay(mixed, { x: 0.08, y: 0.08 }, 0.5), { x: 0, y: 0 });
+  });
+
   it('prefers a corner over a nearer hatch stroke', () => {
     // The failure this rule exists for. A hatch is drawn as hundreds of
     // separate strokes, so the NEAREST vertex inside a hatched room is always
@@ -97,11 +130,23 @@ describe('snapToUnderlay', () => {
   });
 });
 
-describe('underlayVerticesNear', () => {
+describe('underlaySnapTargetsNear', () => {
+  it('offers the crossings too, because that is what the snap takes', () => {
+    // Dots that showed only vertices would point at the ends of wall lines
+    // while the snap took the crossing between them.
+    const cross = drawn(
+      [{ x: -5, y: 0 }, { x: 5, y: 0 }],
+      [{ x: 0, y: -5 }, { x: 0, y: 5 }],
+    );
+
+    assert.ok(underlaySnapTargetsNear(cross, { x: 0, y: 0 }, 1)
+      .some((p) => Math.hypot(p.x, p.y) < 1e-9));
+  });
+
   it('lists what a click could catch, nearest first', () => {
     const plan = drawn([{ x: 0, y: 0 }, { x: 1, y: 0 }], [{ x: 3, y: 0 }, { x: 9, y: 0 }]);
 
-    assert.deepEqual(underlayVerticesNear(plan, { x: 1.2, y: 0 }, 5),
+    assert.deepEqual(underlaySnapTargetsNear(plan, { x: 1.2, y: 0 }, 5),
       [{ x: 1, y: 0 }, { x: 0, y: 0 }, { x: 3, y: 0 }]);
   });
 
@@ -111,23 +156,23 @@ describe('underlayVerticesNear', () => {
     const corner = { x: 5, y: 5 };
     const meeting = drawn([{ x: 0, y: 5 }, corner], [corner, { x: 5, y: 0 }]);
 
-    assert.deepEqual(underlayVerticesNear(meeting, corner, 1), [corner]);
+    assert.deepEqual(underlaySnapTargetsNear(meeting, corner, 1), [corner]);
   });
 
   it('keeps out of reach what a click could not catch', () => {
     const plan = drawn([{ x: 0, y: 0 }, { x: 100, y: 0 }]);
 
-    assert.deepEqual(underlayVerticesNear(plan, { x: 50, y: 0 }, 5), []);
+    assert.deepEqual(underlaySnapTargetsNear(plan, { x: 50, y: 0 }, 5), []);
   });
 
   it('caps the list, because a dense plan has thousands', () => {
     const many: { x: number; y: number }[][] = [];
     for (let i = 0; i < 200; i += 1) many.push([{ x: i * 0.01, y: 0 }, { x: i * 0.01, y: 1 }]);
 
-    assert.equal(underlayVerticesNear(drawn(...many), { x: 1, y: 0.5 }, 100, 40).length, 40);
+    assert.equal(underlaySnapTargetsNear(drawn(...many), { x: 1, y: 0.5 }, 100, 40).length, 40);
   });
 
   it('answers nothing for an underlay that has gone', () => {
-    assert.deepEqual(underlayVerticesNear(null, { x: 0, y: 0 }, 5), []);
+    assert.deepEqual(underlaySnapTargetsNear(null, { x: 0, y: 0 }, 5), []);
   });
 });

@@ -1450,6 +1450,12 @@ export function Section2DPanel({
       {dxfPanelOpen && (
         <div className="absolute top-0 right-0 bottom-0 w-72 z-50 shadow-xl">
           <DxfUnderlayPanel
+            pivot={() => {
+              const rect = containerRef.current?.getBoundingClientRect();
+              return rect
+                ? measureHandlers.screenToDrawing(rect.width / 2, rect.height / 2)
+                : null;
+            }}
             onClose={() => setDxfPanelOpen(false)}
             onCenterOnModel={handleCenterDxfUnderlay}
             planViewActive={sectionPlane.axis === 'down' && sectionPlane.custom === undefined}

@@ -50,6 +50,7 @@ import {
   alignmentPairs, alignmentPrompt, isLineComplete,
 } from '@/lib/heights/alignmentSession';
 import { describeSolvedScale, solveDxfPlacement } from '@ifc-lite/drawing-2d';
+import { repivotDxfPlacement } from '@ifc-lite/drawing-2d';
 import { toast } from '@/components/ui/toast';
 import { posthog } from '@/lib/analytics';
 import { ingestDxfFile } from '@/hooks/ingest/dxfIngest';
@@ -60,6 +61,14 @@ interface DxfUnderlayPanelProps {
   onClose: () => void;
   /** Centre the underlay on the generated drawing (offset adjustment). */
   onCenterOnModel: (id: string) => void;
+  /**
+   * The point a turn or a resize should happen ABOUT, in drawing space —
+   * normally the centre of what is on screen. Without it the placement turns
+   * about the origin, which for a georeferenced plan is millions of metres
+   * away: a one degree correction then throws the drawing out of the country
+   * (Marc, 2026-09-15).
+   */
+  pivot?: () => { x: number; y: number } | null;
   /** False when the current section is not a cardinal plan view. */
   planViewActive: boolean;
   /**
@@ -104,11 +113,13 @@ function UnderlayCard({
   onCenterOnModel,
   planViewActive,
   georeferenceAvailable,
+  pivot,
 }: {
   state: DxfUnderlayState;
   onCenterOnModel: (id: string) => void;
   planViewActive: boolean;
   georeferenceAvailable: boolean;
+  pivot?: () => { x: number; y: number } | null;
 }): React.ReactElement {
   const removeDxfUnderlay = useViewerStore((s) => s.removeDxfUnderlay);
   const setDxfUnderlayVisible = useViewerStore((s) => s.setDxfUnderlayVisible);
@@ -485,6 +496,23 @@ function UnderlayCard({
               drag does. */}
           <p className="pl-2 pr-1 pt-1 text-[10px] leading-snug text-muted-foreground">
             Im Grundriss verschiebt <kbd className="font-mono">Alt</kbd> + Ziehen den Plan.
+            Drehung und Massstab wirken um die Bildmitte.
+          </p>
+          {/* The EFFECTIVE factor, which is not the one in the field below.
+              A DXF carries no reliable unit, so the import already applied a
+              guess from $INSUNITS; the field only holds what was done on top
+              of it. Two numbers that both call themselves "scale" and differ
+              by a thousand is exactly the thing to state rather than leave to
+              be discovered. */}
+          <p className="pl-2 pr-1 pt-1 text-[10px] leading-snug text-muted-foreground">
+            Effektiv:{' '}
+            <span className="font-mono text-foreground">
+              {(underlay.unitScale * placement.scale).toPrecision(6)}
+            </span>
+            {' '}m je Zeichnungseinheit
+            {underlay.unitScale !== 1 && (
+              <> — davon {underlay.unitScale} aus der Datei</>
+            )}
           </p>
           <div className="grid grid-cols-2 gap-1.5 pl-2 pr-1 pt-1">
             <PlacementField
@@ -500,18 +528,27 @@ function UnderlayCard({
               step={0.1}
               onCommit={(v) => updateDxfUnderlayPlacement(state.id, { offsetY: -v })}
             />
+            {/* Turned and resized ABOUT the visible centre, not the origin —
+                see the `pivot` prop. The offsets change with them, which is
+                what keeps the drawing where it can be seen. */}
             <PlacementField
               label="Rotation (°)"
               value={placement.rotationDeg}
-              step={1}
-              onCommit={(v) => updateDxfUnderlayPlacement(state.id, { rotationDeg: v })}
+              step={0.25}
+              onCommit={(v) => updateDxfUnderlayPlacement(
+                state.id, repivotDxfPlacement(placement, { rotationDeg: v }, pivot?.()),
+              )}
             />
             <PlacementField
               label="Scale"
               value={placement.scale}
-              step={0.1}
+              step={0.01}
               onCommit={(v) => {
-                if (v > 0) updateDxfUnderlayPlacement(state.id, { scale: v });
+                if (v > 0) {
+                  updateDxfUnderlayPlacement(
+                    state.id, repivotDxfPlacement(placement, { scale: v }, pivot?.()),
+                  );
+                }
               }}
             />
           </div>
@@ -521,7 +558,7 @@ function UnderlayCard({
   );
 }
 
-export function DxfUnderlayPanel({ onClose, onCenterOnModel, planViewActive, georeferenceAvailable }: DxfUnderlayPanelProps): React.ReactElement {
+export function DxfUnderlayPanel({ onClose, onCenterOnModel, planViewActive, georeferenceAvailable, pivot }: DxfUnderlayPanelProps): React.ReactElement {
   const dxfUnderlays = useViewerStore((s) => s.dxfUnderlays);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -598,7 +635,7 @@ export function DxfUnderlayPanel({ onClose, onCenterOnModel, planViewActive, geo
         )}
 
         {dxfUnderlays.map((state) => (
-          <UnderlayCard key={state.id} state={state} onCenterOnModel={onCenterOnModel} planViewActive={planViewActive} georeferenceAvailable={georeferenceAvailable} />
+          <UnderlayCard key={state.id} state={state} onCenterOnModel={onCenterOnModel} planViewActive={planViewActive} georeferenceAvailable={georeferenceAvailable} pivot={pivot} />
         ))}
       </div>
     </div>

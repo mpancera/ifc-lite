@@ -37,61 +37,117 @@ export interface SnapLines {
 }
 
 /**
- * A vertex of the drawn plan within `tolerance`, or `null`.
+ * A point of the drawn plan worth catching, within `tolerance`, or `null`.
  *
- * **Vertices only, not points along an edge.** A person aligning two drawings
- * picks corners, and an edge snap sliding along a wall would land somewhere
- * that cannot be found again on the other drawing — which is exactly what has
- * to match.
+ * Three kinds of candidate, and the order between them is the whole point:
  *
- * **A SHARED vertex beats a nearer lone one.** The nearest vertex is the wrong
- * answer on a real drawing: a hatch is drawn as hundreds of separate strokes,
- * so within ten pixels of anywhere inside a hatched room there are dozens of
- * stroke ends and the corner you are aiming at is never the closest of them.
- * On the plan this was found with, 8207 of 11864 lines were hatch strokes —
- * two thirds of the drawing, all of it noise for this purpose (Marc,
- * 2026-09-15: "die Passlinie kann immer noch nicht gesnappt werden").
+ * 1. **Where lines CROSS.** A CAD plan draws wall faces as long lines that run
+ *    through a junction; the corner you see is where two of them cross, and
+ *    there is no vertex there at all. Snapping to vertices alone left a clean
+ *    wall corner catching nothing (Marc, 2026-09-15: "sitzt sauber auf einer
+ *    Wandecke des DXF"), which is the failure this was rewritten for.
+ * 2. **A SHARED vertex**, where two or more lines end at the same place. Also
+ *    a corner, drawn by a plan that trims its lines instead of crossing them.
+ * 3. **A lone vertex** last. On a real drawing most of these are hatch strokes
+ *    — 8207 of 11864 lines on the plan this was found with — and they are the
+ *    reason a nearest-point rule catches noise: they are everywhere, and one
+ *    of them is always closer than the corner.
  *
- * Where lines MEET is what a corner is. A stroke end belongs to one line, a
- * wall corner to two or more, and ranking by that costs one pass and needs to
- * know nothing about layers or line types — a drawing that names its hatch
- * layer something else is handled by the same rule.
+ * Never a point along an edge. A point picked halfway down a wall cannot be
+ * found again on the other drawing, and finding the same feature twice is the
+ * entire job of a two-point alignment.
  */
+/** Rank of a candidate: a crossing and a shared end are corners, a lone end
+ *  is usually noise. Distance only breaks ties within a rank. */
+const RANK_CROSSING = 3;
+const RANK_SHARED = 2;
+const RANK_LONE = 1;
+
+interface Segment { a: Point; b: Point }
+
+/** Segments whose own extent comes near `point` — the only ones that can
+ *  contribute a candidate, and a cheap way to avoid comparing 12000 lines
+ *  against each other. */
+function segmentsNear(drawn: SnapLines | null | undefined, point: Point, reach: number): Segment[] {
+  const out: Segment[] = [];
+  for (const line of drawn?.lines ?? []) {
+    // A one-point path — a marker, a POINT entity — is a place worth catching
+    // and has no segment. Emitted as a degenerate one so the vertex pass sees
+    // it; `crossing` rejects it, which is right, as it crosses nothing.
+    if (line.points.length === 1) {
+      const p = line.points[0];
+      if (Math.abs(p.x - point.x) <= reach && Math.abs(p.y - point.y) <= reach) {
+        out.push({ a: p, b: p });
+      }
+      continue;
+    }
+    for (let i = 0; i + 1 < line.points.length; i += 1) {
+      const a = line.points[i];
+      const b = line.points[i + 1];
+      if (Math.min(a.x, b.x) - reach > point.x || Math.max(a.x, b.x) + reach < point.x) continue;
+      if (Math.min(a.y, b.y) - reach > point.y || Math.max(a.y, b.y) + reach < point.y) continue;
+      out.push({ a, b });
+    }
+  }
+  return out;
+}
+
+/** Where two segments cross, or `null` — parallel, or crossing outside their
+ *  own extents. An "apparent" intersection off the end of a line is somewhere
+ *  neither drawing has anything, so it is not offered. */
+function crossing(p: Segment, q: Segment): Point | null {
+  const r = { x: p.b.x - p.a.x, y: p.b.y - p.a.y };
+  const s = { x: q.b.x - q.a.x, y: q.b.y - q.a.y };
+  const denominator = r.x * s.y - r.y * s.x;
+  if (Math.abs(denominator) < 1e-12) return null;
+  const dx = q.a.x - p.a.x;
+  const dy = q.a.y - p.a.y;
+  const t = (dx * s.y - dy * s.x) / denominator;
+  const u = (dx * r.y - dy * r.x) / denominator;
+  if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+  return { x: p.a.x + r.x * t, y: p.a.y + r.y * t };
+}
+
 export function snapToUnderlay(
   drawn: SnapLines | null | undefined,
   point: Point,
   tolerance: number,
 ): Point | null {
-  const lines = drawn?.lines ?? [];
+  let best: Point | null = null;
+  let bestRank = 0;
+  let bestDist = Infinity;
 
-  // How many line ENDS meet at each vertex. Quantised to a millimetre, because
-  // two lines that share a corner in the drawing rarely share the bit pattern.
-  const shared = new Map<string, number>();
-  const key = (p: Point) => `${Math.round(p.x * 1000)},${Math.round(p.y * 1000)}`;
-  for (const line of lines) {
-    for (const vertex of line.points) {
-      const k = key(vertex);
-      shared.set(k, (shared.get(k) ?? 0) + 1);
+  const consider = (candidate: Point, rank: number) => {
+    const dist = Math.hypot(candidate.x - point.x, candidate.y - point.y);
+    if (dist >= tolerance) return;
+    if (rank > bestRank || (rank === bestRank && dist < bestDist)) {
+      best = candidate;
+      bestRank = rank;
+      bestDist = dist;
     }
-  }
+  };
 
   // Hidden layers need no special case: a layer switched off is not in the
   // drawn lines, so it cannot be caught.
-  let best: Point | null = null;
-  let bestRank = -1;
-  let bestDist = tolerance;
-  for (const line of lines) {
-    for (const vertex of line.points) {
-      const dist = Math.hypot(vertex.x - point.x, vertex.y - point.y);
-      if (dist >= tolerance) continue;
-      const rank = shared.get(key(vertex)) ?? 1;
-      // Rank first, distance second. A corner slightly further away is the
-      // point being aimed at; the nearer stroke end is not.
-      if (rank > bestRank || (rank === bestRank && dist < bestDist)) {
-        bestRank = rank;
-        bestDist = dist;
-        best = vertex;
-      }
+  const near = segmentsNear(drawn, point, tolerance);
+
+  // How many line ends meet at each place. Quantised to a millimetre, because
+  // two lines that share a corner rarely share the bit pattern.
+  const shared = new Map<string, number>();
+  const key = (p: Point) => `${Math.round(p.x * 1000)},${Math.round(p.y * 1000)}`;
+  for (const line of drawn?.lines ?? []) {
+    for (const vertex of line.points) shared.set(key(vertex), (shared.get(key(vertex)) ?? 0) + 1);
+  }
+
+  for (const segment of near) {
+    for (const vertex of [segment.a, segment.b]) {
+      consider(vertex, (shared.get(key(vertex)) ?? 1) > 1 ? RANK_SHARED : RANK_LONE);
+    }
+  }
+  for (let i = 0; i < near.length; i += 1) {
+    for (let j = i + 1; j < near.length; j += 1) {
+      const hit = crossing(near[i], near[j]);
+      if (hit) consider(hit, RANK_CROSSING);
     }
   }
 
@@ -99,40 +155,48 @@ export function snapToUnderlay(
 }
 
 /**
- * The vertices near `point` that a click could catch, nearest first.
+ * Every place near `point` that a click would actually catch, nearest first.
  *
- * So they can be DRAWN. Vertices-only snapping is the right rule — a point
- * picked halfway along a wall cannot be found again on the other drawing, and
- * the two-point solve needs the same feature twice — but it leaves somebody
- * hunting for targets they cannot see: the middle of a wall catches nothing,
- * and a vertex of line work that is faint or hidden behind the model catches
- * for no visible reason (Marc, 2026-09-15: "der Fang scheinbar im Nirvana").
+ * The same three kinds `snapToUnderlay` takes, so what is drawn and what is
+ * caught cannot disagree. Showing vertices alone would point at the ends of
+ * wall lines while the snap takes the crossings between them — advice that is
+ * worse than none.
  *
- * Showing the candidates turns that hunt into a list of places to aim at, and
- * it makes the invisible-geometry case explain itself the moment it happens.
- *
- * `limit` because a dense plan has thousands within any radius worth drawing,
+ * `limit` because a dense plan has hundreds within any radius worth drawing,
  * and a screen full of dots is its own kind of blindness.
  */
-export function underlayVerticesNear(
+export function underlaySnapTargetsNear(
   drawn: SnapLines | null | undefined,
   point: Point,
   radius: number,
   limit = 40,
 ): Point[] {
+  const near = segmentsNear(drawn, point, radius);
   const found: Array<{ p: Point; d: number }> = [];
   const seen = new Set<string>();
-  for (const line of drawn?.lines ?? []) {
-    for (const vertex of line.points) {
-      const d = Math.hypot(vertex.x - point.x, vertex.y - point.y);
-      if (d > radius) continue;
-      // One dot per place, however many lines end there.
-      const key = `${Math.round(vertex.x * 1000)},${Math.round(vertex.y * 1000)}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      found.push({ p: vertex, d });
+  const key = (p: Point) => `${Math.round(p.x * 1000)},${Math.round(p.y * 1000)}`;
+
+  const add = (candidate: Point) => {
+    const d = Math.hypot(candidate.x - point.x, candidate.y - point.y);
+    if (d > radius) return;
+    const k = key(candidate);
+    // One dot per place, however many lines meet there.
+    if (seen.has(k)) return;
+    seen.add(k);
+    found.push({ p: candidate, d });
+  };
+
+  for (const segment of near) {
+    add(segment.a);
+    add(segment.b);
+  }
+  for (let i = 0; i < near.length; i += 1) {
+    for (let j = i + 1; j < near.length; j += 1) {
+      const hit = crossing(near[i], near[j]);
+      if (hit) add(hit);
     }
   }
+
   found.sort((a, b) => a.d - b.d);
   return found.slice(0, limit).map((f) => f.p);
 }

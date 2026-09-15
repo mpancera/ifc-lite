@@ -472,6 +472,7 @@ export {
   convertDxfToUnderlay,
   applyDxfPlacement,
   prealignDxf,
+  repivotDxfPlacement,
   aciToCss,
   DEFAULT_DXF_PLACEMENT,
 } from './dxf/index.js';
