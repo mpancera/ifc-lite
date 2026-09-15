@@ -1420,7 +1420,8 @@ export function PlanView({
    * corner I am aiming at — to be answered by placing the point and looking
    * afterwards.
    */
-  const [alignmentCursor, setAlignmentCursor] = useState<{ at: Point2D; snapped: boolean } | null>(null);
+  const [alignmentCursor, setAlignmentCursor] = useState<
+    { at: Point2D; snapped: boolean; target: 'reference' | 'fit' } | null>(null);
   const alignedUnderlay = useMemo(
     () => (dxfAlignment ? dxfUnderlays.find((u) => u.id === dxfAlignment.underlayId) : undefined),
     [dxfAlignment, dxfUnderlays],
@@ -1642,10 +1643,16 @@ export function PlanView({
       // will use — a preview that catches something the click would not is
       // worse than no preview.
       const step = alignmentStep(dxfAlignment);
-      const snapped = step.kind === 'ready'
-        ? null
-        : (step.target === 'reference' ? measureHandlers.findSnapPoint(raw) : snapUnderlay(raw));
-      setAlignmentCursor({ at: snapped ?? raw, snapped: snapped !== null });
+      if (step.kind === 'ready') {
+        // Nothing is being collected: a marker here would invite a click that
+        // does nothing.
+        setAlignmentCursor(null);
+        return;
+      }
+      const snapped = step.target === 'reference'
+        ? measureHandlers.findSnapPoint(raw)
+        : snapUnderlay(raw);
+      setAlignmentCursor({ at: snapped ?? raw, snapped: snapped !== null, target: step.target });
       return;
     }
     if (planRotationPicking && !rotationLine) {
@@ -2178,14 +2185,24 @@ export function PlanView({
               );
             })}
             {/* Filled when it caught a vertex, hollow when the point would be
-                taken as-is. Two shapes, one question answered before the click
-                rather than after it. */}
-            {cursor && (
-              <rect x={cursor.x - 5} y={cursor.y - 5} width={10} height={10}
-                    className={alignmentCursor?.snapped
-                      ? 'fill-violet-500 stroke-violet-700'
-                      : 'fill-none stroke-violet-400'}
-                    strokeWidth={1.5} />
+                taken as-is — and COLOURED AND NAMED by which drawing it is
+                collecting. The two lines snap to different drawings, so a
+                marker that does not say which one leaves "it will not catch"
+                and "it is catching the other drawing, correctly" looking
+                identical. That cost three rounds of guessing. */}
+            {cursor && alignmentCursor && (
+              <g>
+                <rect x={cursor.x - 5} y={cursor.y - 5} width={10} height={10}
+                      className={alignmentCursor.target === 'reference'
+                        ? (alignmentCursor.snapped ? 'fill-sky-500 stroke-sky-700' : 'fill-none stroke-sky-400')
+                        : (alignmentCursor.snapped ? 'fill-amber-500 stroke-amber-700' : 'fill-none stroke-amber-400')}
+                      strokeWidth={1.5} />
+                <text x={cursor.x + 9} y={cursor.y - 7} fontSize={11}
+                      className={alignmentCursor.target === 'reference'
+                        ? 'fill-sky-600' : 'fill-amber-600'}>
+                  {alignmentCursor.target === 'reference' ? 'Referenz · Modell' : 'Passlinie · Plan'}
+                </text>
+              </g>
             )}
           </svg>
         );
