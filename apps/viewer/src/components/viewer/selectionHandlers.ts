@@ -423,24 +423,35 @@ export function storeyOfElement(
 
 export function rendererPointToIfcStoreyLocal(
   point: { x: number; y: number; z: number },
-  storey?: { modelId: string; storeyId: number },
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _storey?: { modelId: string; storeyId: number },
 ): [number, number, number] {
-  // Without a storey named, the old bare axis swap — which is the right answer
-  // exactly when the storey's placement chain is the identity, and is what
-  // every caller relied on before there was anything better. Kept so a caller
-  // that genuinely has no storey (the wall-endpoint overlay reading back a
-  // point it just wrote) behaves as it always did.
-  if (!storey) return [point.x, -point.z, 0];
-
-  // With one: through the storey's REAL frame. A surveyed model puts the
-  // building under a site placement with a RefDirection, and writing a plan
-  // click straight into storey-local coordinates then buries that turn in the
-  // geometry — the room comes back sitting at an angle to its own walls, while
-  // the edit handles, reading the same numbers back through the same missing
-  // conversion, agree with where it was drawn (Marc, 2026-09-16).
-  const state = useViewerStore.getState();
-  const frame = storeyFrameOf(state.models.get(storey.modelId)?.ifcDataStore, storey.storeyId);
-  return rendererToStoreyLocal(point, frame, worldShiftOf(state.geometryResult?.coordinateInfo));
+  // PARKED (Marc, 2026-09-16), and deliberately back to the bare axis swap.
+  //
+  // This briefly converted through the storey's real frame, which fixed rooms
+  // drawn on the PLAN of a surveyed building — they had been coming out turned
+  // nine degrees, because the building hangs under a site placement with a
+  // RefDirection. It broke placement by 3D CLICK in the same move: a detector
+  // landed 2.6 million metres away, one whole coordinate shift out.
+  //
+  // The cause is older than that change and is the thing to fix: the two
+  // callers hand this function points in DIFFERENT frames. A 3D raycast
+  // returns world coordinates; the plan hands over `planPointToRenderer`'s
+  // output, which is drawing space — world minus the render-frame shift. One
+  // function cannot be right for both, and no argument here can tell them
+  // apart.
+  //
+  // So it goes back to what it did before today: right for the 3D click,
+  // wrong by the storey's rotation for a plan click. That is the state this
+  // has been in all along, and it is the safer of the two — a room turned nine
+  // degrees is visible and fixable, an object two and a half million metres
+  // out wrecks every bounding box and every export that includes it.
+  //
+  // The real fix is to give this ONE kind of point: have the plan path add the
+  // shift when it builds its renderer point, and drop it from here. The
+  // storey argument is kept so the call sites already passing it do not have
+  // to be rewritten when that happens.
+  return [point.x, -point.z, 0];
 }
 
 /**
