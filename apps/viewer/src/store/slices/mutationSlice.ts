@@ -220,6 +220,7 @@ function materialiseGeneratedSpaces(
     if (dataStore.spatialHierarchy) {
       registerAuthoredElement(
         dataStore.spatialHierarchy, storeyExpressId, result.spaceId, 'IfcSpace', name,
+        undefined, dataStore.entities,
       );
     }
     // The baked outline, not the centreline one: the mesh has to be the solid
@@ -1651,6 +1652,7 @@ function runInStoreElementBuilder(
     const containerId = view ? overlayContainerOf(view, entityId) : undefined;
     registerAuthoredElement(
       dataStore.spatialHierarchy, storeyExpressId, entityId, ifcType, name, containerId,
+      dataStore.entities,
     );
 
     // Rule-driven properties run HERE, after registration: they read the

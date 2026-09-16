@@ -229,3 +229,49 @@ describe('EntityTable typeRanges derived from interleaved columns', () => {
     expect(rebuilt.getByType(IfcTypeEnum.IfcSpace)).toEqual([2, 4]);
   });
 });
+
+describe('setNameOverride', () => {
+  it('answers with the override instead of the parsed name', () => {
+    const { table } = buildSampleTable();
+    table.setNameOverride(101, 'Rauchmelder');
+
+    expect(table.getName(101)).toBe('Rauchmelder');
+  });
+
+  it('names an entity the table has no row for at all', () => {
+    // The case it exists for: an entity authored AFTER the parse. The
+    // columnar table is built once and never sees the overlay, so without
+    // this a detector placed a moment ago reads as `Unknown #116260`.
+    const { table } = buildSampleTable();
+    table.setNameOverride(999999, 'Handfeuermelder');
+    table.setTypeOverride(999999, 'IFCALARM');
+
+    expect(table.getName(999999)).toBe('Handfeuermelder');
+    expect(table.getTypeName(999999)).toBe('IfcAlarm');
+  });
+
+  it('gives the parsed name back when cleared', () => {
+    const { table } = buildSampleTable();
+    table.setNameOverride(101, 'Temporary');
+    table.setNameOverride(101, null);
+
+    expect(table.getName(101)).toBe('Wall-A');
+  });
+
+  it('keeps the name exactly as typed', () => {
+    // Unlike the type, which is canonicalised because predicates match its
+    // spelling. A name has one consumer — a label — and changing its casing
+    // would be changing what somebody wrote.
+    const { table } = buildSampleTable();
+    table.setNameOverride(101, 'WC Besucher / Vorplatz');
+
+    expect(table.getName(101)).toBe('WC Besucher / Vorplatz');
+  });
+
+  it('leaves every other entity alone', () => {
+    const { table } = buildSampleTable();
+    table.setNameOverride(101, 'Renamed');
+
+    expect(table.getName(102)).toBe('Wall-B');
+  });
+});

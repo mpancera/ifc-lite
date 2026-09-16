@@ -91,6 +91,9 @@ export function useOverlayAutosave() {
         if (store.spatialHierarchy) {
           registerAuthoredElement(
             store.spatialHierarchy, storeyExpressId, expressId, ifcType, name, containerExpressId,
+            // A restored session is authored work like any other: without the
+            // table it would come back from IndexedDB as `Unknown #…` too.
+            store.entities,
           );
         }
       },

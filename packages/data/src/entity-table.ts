@@ -73,6 +73,21 @@ export interface EntityTable {
    */
   setTypeOverride(expressId: number, typeName: string | null): void;
 
+  /**
+   * Override the displayed NAME for an entity, on the same additive terms as
+   * {@link setTypeOverride}. `null` clears it.
+   *
+   * What this is for: an entity AUTHORED in this session has no row in the
+   * columnar table at all — the table is built at parse time and never sees
+   * the overlay. Every reader that asks the store for a name got '' and every
+   * reader that asks for a class got 'Unknown', so a detector placed a moment
+   * ago read as `Unknown #116260` in the tree until it had been exported and
+   * the file reopened (Marc, 2026-09-16). The overrides are where an authored
+   * entity can be given the two strings a reader needs, without inventing a
+   * second name resolver beside this one.
+   */
+  setNameOverride(expressId: number, name: string | null): void;
+
   /** Get expressId by IFC GlobalId string (22-char GUID). Returns -1 if not found. */
   getExpressIdByGlobalId(globalId: string): number;
 }
@@ -281,6 +296,8 @@ export function entityTableFromColumns(
   // class name. Left empty unless the host sets one; the original columnar
   // type is never modified.
   const typeOverrides = new Map<number, string>();
+  /** Additive display-NAME overrides — see `setNameOverride`. */
+  const nameOverrides = new Map<number, string>();
 
   // GlobalId → expressId for BCF integration. Only populated for entities
   // that actually have a non-empty GlobalId string.
@@ -312,6 +329,8 @@ export function entityTableFromColumns(
       return idx >= 0 ? strings.get(globalId[idx]) : '';
     },
     getName: (id) => {
+      const override = nameOverrides.get(id);
+      if (override !== undefined) return override;
       const idx = indexOfId(id);
       return idx >= 0 ? strings.get(name[idx]) : '';
     },
@@ -367,6 +386,13 @@ export function entityTableFromColumns(
       // form. Storing the raw casing made every retyped entity invisible
       // to those case-sensitive name predicates.
       else typeOverrides.set(id, normalizeIfcUpperCase(typeName.toUpperCase()));
+    },
+
+    setNameOverride: (id, value) => {
+      // Not canonicalised, unlike the type: a name is what somebody typed, and
+      // the only consumer is a label.
+      if (value === null) nameOverrides.delete(id);
+      else nameOverrides.set(id, value);
     },
 
     getExpressIdByGlobalId: (gid) => globalIdToExpressId.get(gid) ?? -1,

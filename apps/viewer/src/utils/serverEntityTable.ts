@@ -104,6 +104,7 @@ export function buildEntityTable(
 
   // Additive display-class overrides (UI retype). See entity-table.ts.
   const typeOverrides = new Map<number, string>();
+  const nameOverrides = new Map<number, string>();
 
   /** One interned-string column accessor, shared by every string getter. */
   const strCol = (col: Uint32Array) => (id: number) => {
@@ -126,7 +127,7 @@ export function buildEntityTable(
     geometryIndex: geometryIndexArr,
     typeRanges: new Map(), // Deprecated - use getByType which uses typeGroups directly
     getGlobalId: strCol(globalIdArr),
-    getName: strCol(nameArr),
+    getName: (id) => nameOverrides.get(id) ?? strCol(nameArr)(id),
     getDescription: strCol(descriptionArr),
     getObjectType: strCol(objectTypeArr),
     getTag: strCol(tagArr),
@@ -164,6 +165,15 @@ export function buildEntityTable(
       const i = indexOfId(id);
       return i >= 0 ? typeEnumArr[i] as IfcTypeEnum : IfcTypeEnum.Unknown;
     },
+    // Same additive override as the other two tables — see `setNameOverride`
+    // in packages/data. All three implementations have to answer alike, or an
+    // authored element reads as `Unknown #…` on whichever parse path the model
+    // happened to come in through.
+    setNameOverride: (id, value) => {
+      if (value === null) nameOverrides.delete(id);
+      else nameOverrides.set(id, value);
+    },
+
     setTypeOverride: (id, typeName) => {
       if (typeName === null) typeOverrides.delete(id);
       // Canonicalise on the way in, matching `entityTableFromColumns`

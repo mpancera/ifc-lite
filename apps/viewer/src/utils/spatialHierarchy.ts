@@ -264,8 +264,24 @@ export function registerAuthoredElement(
   ifcTypeName: string,
   name: string,
   containerExpressId?: number,
+  /**
+   * The store's entity table, so the authored entity also gets a CLASS and a
+   * NAME — not only a place.
+   *
+   * Optional because this function's own job is containment and a caller with
+   * no table should still be able to file an element. But every caller that
+   * has one should pass it: without it the element is in the tree and reads
+   * `Unknown #116260`, because the columnar table is built at parse time and
+   * has no row for anything authored since (Marc, 2026-09-16).
+   */
+  entities?: Pick<EntityTable, 'setTypeOverride' | 'setNameOverride'>,
 ): void {
   hierarchy.elementToStorey.set(entityId, storeyExpressId);
+
+  // Before any of the containment work below, and unconditionally: a reader
+  // that finds the element asks these two whatever container it came from.
+  entities?.setTypeOverride(entityId, ifcTypeName);
+  if (name) entities?.setNameOverride(entityId, name);
 
   // The IFC containment may point at a ROOM rather than the storey. Recording
   // only the storey leaves "which room is this in" unanswerable for anything
