@@ -14,26 +14,18 @@
  * the product's `Representation`, and the graph has to arrive here with every
  * express id renumbered into this model's space.
  *
- * # !! NOT USABLE YET — THE INPUT IT WANTS DOES NOT EXIST !!
- * This takes a `SourceEntity` whose references are distinguishable from its
- * numbers. `EntityExtractor.extractEntity` does NOT give that:
- * `IFCEXTRUDEDAREASOLID(#10,#2,$,3.)` reads back as `[10, 2, null, 3]`, and
- * `IFCSPHERE(#2,3.)` as `[2, 3]`. A reference and a plain number are the same
- * JavaScript number, so feeding extractor output to this would copy an
- * extrusion DEPTH of 3 as a reference to entity #3 — silently, into a file
- * that then looks plausible.
+ * # The reader must come from the RAW TEXT
+ * `EntityExtractor.extractEntity` cannot feed this, and that is not a detail:
+ * it reads `IFCEXTRUDEDAREASOLID(#10,#2,$,3.)` back as `[10, 2, null, 3]`, so
+ * a reference and a plain number are the same JavaScript number. Fed that,
+ * this would copy an extrusion DEPTH of 3 as a reference to entity #3 —
+ * silently, into a file that then looks plausible. `step-arguments.ts` reads
+ * the record's own text, where `#10` and `3.` are still different things, and
+ * its output is what belongs here.
  *
- * So no caller may hand it extractor output. The reader it needs must come
- * from the record's RAW STEP text, where `#10` and `3.` are still different
- * things, and that reader is the next piece of work. Nothing calls this today.
- * (Same root cause as the `Representation` defect fixed in `duplicate.ts`.)
- *
- * # Parser-free, on purpose
- * The source is reached through a `ReadSourceEntity` callback, exactly as
- * `duplicate.ts` takes already-extracted attributes: `@ifc-lite/create` has no
- * parser dependency and should not grow one. The caller parses, this copies.
- * It also makes the whole thing testable from a plain object map, which is how
- * the cases below are pinned.
+ * The source is reached through a `ReadSourceEntity` callback rather than a
+ * store, so `@ifc-lite/create` keeps its shape and the cases below can be
+ * pinned from a plain object map.
  *
  * # Substitution is the whole idea
  * A naive deep copy would drag the source file's representation CONTEXT, its
@@ -53,19 +45,10 @@
 
 import type { IfcAttributeValue, StoreEditor } from '@ifc-lite/mutations';
 
-/** One entity of the SOURCE file, as `EntityExtractor.extractEntity` gives it. */
+/** One entity of the SOURCE file, as `parseStepRecord` gives it. */
 export interface SourceEntity {
   type: string;
   attributes: IfcAttributeValue[];
-  /**
-   * Which attributes the SOURCE spelled as bare enums (`.USERDEFINED.`).
-   *
-   * The extractor's token-kind side channel. Without it a `Name` whose text is
-   * literally `.FOO.` cannot be told from an enum, and the copy would write it
-   * as one. Optional, because a producer may not track it — then the
-   * conservative reading applies and such a string is quoted.
-   */
-  enumAttrIndices?: readonly number[];
 }
 
 /** Read an entity out of the source file. `null` for an id that is not there. */
@@ -103,40 +86,19 @@ export interface CopySubgraphOptions {
 const MAX_DEPTH = 64;
 
 /**
- * The id a reference points at — and in the SOURCE, a reference is a NUMBER.
+ * The id a reference points at.
  *
- * THE TWO SIDES SPELL IT DIFFERENTLY, and it cost a wrong first version of
- * this file to notice. `EntityExtractor.extractEntity` hands a reference back
- * as a plain number (`resolve-source.ts`'s `asNumber` reads it the same way),
- * while an entity AUTHORED through the overlay must carry the string `"#42"`:
- * a number in that slot is a STEP integer, `authoredEntityRefs` sees no
- * reference, and the child silently drops out of the export closure.
- *
- * So this reads the source's spelling and {@link copySubgraph} writes the
- * overlay's. A STRING that looks like `#42` is deliberately NOT a reference
- * here — in extractor output that is a Name whose text happens to look like
- * one, and treating it as a reference is how it would be destroyed.
+ * `"#42"`, the spelling `step-arguments.ts` produces AND the one the overlay
+ * writes — the two agree, which is the point of reading the raw text. A plain
+ * number here is a plain number: an extrusion depth, a dimension count, an
+ * ordinal. Treating one as a reference is exactly the corruption this whole
+ * path exists to avoid.
  */
 function referencedId(value: IfcAttributeValue): number | null {
-  if (typeof value !== 'number') return null;
-  return Number.isInteger(value) && value > 0 ? value : null;
+  if (typeof value !== 'string' || value.charCodeAt(0) !== 0x23 /* # */) return null;
+  const id = Number(value.slice(1));
+  return Number.isInteger(id) && id > 0 ? id : null;
 }
-
-/**
- * A string that STEP would read as something other than a string.
- *
- * The extractor hands back strings UNQUOTED, so a `Name` whose text happens to
- * be `.FOO.` or `#12` arrives indistinguishable from an enum or a reference —
- * and the overlay would write it as one. The serializer's own comment names
- * this ("a Name of `#12` would silently become an entity reference"), so the
- * few that look like a token get the explicit quotes that force a string.
- *
- * Enums are safe without this: the extractor returns them dotted AND the
- * attribute is a real enum, so writing it back dotted is right. Only a string
- * that merely LOOKS dotted needs protecting, which is why this is applied to
- * attributes the source did not mark as enums.
- */
-const LOOKS_LIKE_TOKEN = /^(?:#\d+|\$|\*|\.[A-Za-z0-9_]+\.)$/;
 
 /**
  * Copy `rootId` and everything below it, returning its new express id.
@@ -180,10 +142,7 @@ export function copySubgraph(
     }
 
     onPath.add(id);
-    const enums = new Set(source.enumAttrIndices ?? []);
-    const attributes = source.attributes.map((value, index) =>
-      remap(value, depth + 1, enums.has(index)),
-    );
+    const attributes = source.attributes.map((value) => remap(value, depth + 1));
     onPath.delete(id);
 
     const target = editor.addEntity(source.type, attributes).expressId;
@@ -198,11 +157,7 @@ export function copySubgraph(
     return source !== null && drop.has(source.type);
   };
 
-  const remap = (
-    value: IfcAttributeValue,
-    depth: number,
-    isEnum = false,
-  ): IfcAttributeValue => {
+  const remap = (value: IfcAttributeValue, depth: number): IfcAttributeValue => {
     if (Array.isArray(value)) {
       const members: IfcAttributeValue[] = [];
       for (const member of value) {
@@ -223,10 +178,6 @@ export function copySubgraph(
       // entities the caller knows to be optional decoration.
       if (dropped(id)) return null;
       return `#${copy(id, depth)}`;
-    }
-    // Force the quotes on a string that STEP would otherwise read as a token.
-    if (!isEnum && typeof value === 'string' && LOOKS_LIKE_TOKEN.test(value.trim())) {
-      return `'${value}'`;
     }
     return value;
   };

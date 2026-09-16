@@ -48,6 +48,12 @@ export {
   type RepresentationMapParams,
 } from './in-store/mapped-library-object.js';
 export {
+  parseStepRecord,
+  splitStepArguments,
+  stepArgumentValue,
+  type StepRecord,
+} from './in-store/step-arguments.js';
+export {
   copySubgraph,
   type CopySubgraphOptions,
   type ReadSourceEntity,

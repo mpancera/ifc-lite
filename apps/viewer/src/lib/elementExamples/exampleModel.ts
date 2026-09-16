@@ -26,8 +26,7 @@
  */
 
 import type { IfcDataStore } from '@ifc-lite/parser';
-import { EntityExtractor } from '@ifc-lite/parser';
-import type { ReadSourceEntity, SourceEntity } from '@ifc-lite/create';
+import { parseStepRecord, type ReadSourceEntity } from '@ifc-lite/create';
 
 /** Products that are never the device, however the file is put together. */
 const NEVER_THE_DEVICE = new Set(['IFCANNOTATION', 'IFCVIRTUALELEMENT']);
@@ -67,17 +66,11 @@ export interface ExampleModel {
   contextIds: number[];
 }
 
-/**
- * The id a reference points at.
- *
- * `EntityExtractor` hands a reference back as a plain NUMBER, not as `"#42"`
- * — the same convention `resolve-source.ts` reads and the opposite of what an
- * entity authored through the overlay carries. Everything in this file reads
- * extractor output, so a number it is.
- */
+/** `"#42"` → `42`, the spelling `parseStepRecord` produces. */
 function refId(value: unknown): number | null {
-  if (typeof value !== 'number') return null;
-  return Number.isInteger(value) && value > 0 ? value : null;
+  if (typeof value !== 'string' || value.charCodeAt(0) !== 0x23) return null;
+  const id = Number(value.slice(1));
+  return Number.isInteger(id) && id > 0 ? id : null;
 }
 
 /** A STEP string attribute without its quotes, or `null` for `$`. */
@@ -96,19 +89,24 @@ function enumValue(value: unknown): string | null {
 }
 
 /**
- * Build a reader over a parsed store.
+ * Build a reader over a parsed store, reading each record's RAW TEXT.
  *
- * `EntityExtractor` wants an `EntityRef` (byte offsets), not an id, so the id
- * index is the hop in between. An id the file does not have reads as `null`,
- * which `copySubgraph` turns into a refusal rather than a hole.
+ * Deliberately NOT `EntityExtractor.extractEntity`. That loses the distinction
+ * a copy depends on — it reads `IFCEXTRUDEDAREASOLID(#10,#2,$,3.)` back as
+ * `[10, 2, null, 3]`, where a reference and a plain number are the same
+ * JavaScript number. `parseStepRecord` reads the text, where they are not.
+ *
+ * The index gives the byte range; `decodeUtf8` gives the record. An id the
+ * file does not have reads as `null`, which `copySubgraph` turns into a
+ * refusal rather than a hole.
  */
 export function makeSourceReader(store: IfcDataStore): ReadSourceEntity {
-  const extractor = new EntityExtractor(store.source);
-  return (expressId: number): SourceEntity | null => {
+  return (expressId: number) => {
     const ref = store.entityIndex.byId.get(expressId);
     if (!ref) return null;
-    const entity = extractor.extractEntity(ref);
-    return entity ? { type: entity.type, attributes: entity.attributes } : null;
+    return parseStepRecord(
+      store.source.decodeUtf8(ref.byteOffset, ref.byteOffset + ref.byteLength),
+    );
   };
 }
 

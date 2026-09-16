@@ -5,6 +5,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { IfcParser } from '@ifc-lite/parser';
+import { MutablePropertyView, StoreEditor } from '@ifc-lite/mutations';
+import { StepExporter } from '@ifc-lite/export';
+import { copySubgraph } from '@ifc-lite/create';
 import { readExampleModel } from './exampleModel.js';
 
 /**
@@ -131,5 +134,73 @@ END-ISO-10303-21;
       .then((store) => {
         assert.equal(readExampleModel(store, 1), null);
       });
+  });
+});
+
+describe('copying an example’s geometry, end to end', () => {
+  /**
+   * The whole chain in one place: real STEP → raw reader → `copySubgraph` →
+   * overlay → exported STEP. Every earlier mistake in this area was invisible
+   * to a test that stopped short of one of those hops.
+   */
+  async function copyDeviceBody() {
+    const store = await new IfcParser().parseColumnar(exampleFile());
+    const model = readExampleModel(store, 1);
+    assert.ok(model);
+
+    const view = new MutablePropertyView(null, 'ziel');
+    const editor = new StoreEditor(store as never, view);
+
+    // The target's own body context stands in for the source's.
+    const substitutions = new Map(model.contextIds.map((id) => [id, 3]));
+    const body = model.device.representations.find((r) => r.identifier === 'Body')!;
+    const copied = copySubgraph(editor, model.read, body.expressId, { substitutions });
+
+    const exported = await new StepExporter(store as never, view as never).export({
+      applyMutations: true,
+      schema: 'IFC4',
+    });
+    const raw = (exported as { content: unknown }).content;
+    const content = typeof raw === 'string'
+      ? raw
+      : new TextDecoder().decode(raw as Uint8Array);
+    return { copied, view, lines: content.split(/\r?\n/) };
+  }
+
+  it('keeps the extrusion depth a number, not a reference', async () => {
+    // The defect this whole path was rebuilt for. `IFCEXTRUDEDAREASOLID(...,0.5)`
+    // copied through the extractor would have pointed the depth at entity #0.5
+    // — or, for a whole number, at a real and unrelated entity.
+    const { lines } = await copyDeviceBody();
+    // The file holds two solids to begin with (the device's, depth 0.5, and
+    // the clearance's, 0.8); only the device's was copied, so its depth must
+    // now appear twice and unchanged.
+    const halfMetre = lines.filter(
+      (l) => l.includes('IFCEXTRUDEDAREASOLID') && /,0\.5\)/.test(l),
+    );
+    assert.equal(halfMetre.length, 2, 'the source solid and its copy');
+    // And no solid ended up with a reference where its depth belongs.
+    for (const solid of lines.filter((l) => l.includes('IFCEXTRUDEDAREASOLID'))) {
+      assert.doesNotMatch(solid, /,#\d+\);?$/, `depth must not be a reference: ${solid}`);
+    }
+  });
+
+  it('points the copy at the target’s context, not the source’s', async () => {
+    const { copied, view } = await copyDeviceBody();
+    const entity = view.getNewEntities().find((e) => e.expressId === copied)!;
+    assert.equal(entity.type, 'IFCSHAPEREPRESENTATION');
+    assert.equal(entity.attributes[0], '#3');
+  });
+
+  it('renumbers the copied geometry out of the source’s id space', async () => {
+    const { view } = await copyDeviceBody();
+    const created = view.getNewEntities();
+    // Everything new sits above the source's highest id, and nothing new
+    // still refers to a source id below it.
+    for (const entity of created) {
+      assert.ok(entity.expressId > 41, `#${entity.expressId} must be a fresh id`);
+    }
+    const profile = created.find((e) => e.type === 'IFCCIRCLEPROFILEDEF');
+    assert.ok(profile, 'the profile came along');
   });
 });
