@@ -31,8 +31,11 @@
  * (never bundled/committed — see `FileImportCatalogProvider`).
  * `aas`: a live Asset Administration Shell registry — not implemented
  * yet, reserved so entries don't need reshaping once it is.
+ * `dictionary-example`: a product-NEUTRAL Elementbeispiel synced from the
+ * Swiss Data Dictionary. Alone among these, such an entry brings REAL
+ * geometry — see `exampleUrl`.
  */
-export type CatalogSourceKind = 'local-seed' | 'file-import' | 'aas';
+export type CatalogSourceKind = 'local-seed' | 'file-import' | 'aas' | 'dictionary-example';
 
 export interface CatalogProvenance {
   source: CatalogSourceKind;
@@ -104,6 +107,23 @@ export interface CatalogEntry {
   globalAssetId?: string;
   /** The product's type AAS, when one is attached. See `CatalogAasLink`. */
   aas?: CatalogAasLink;
+  /**
+   * The published IFC file of an Elementbeispiel, when this entry is one.
+   *
+   * THE ONE FIELD THAT CHANGES WHAT PLACING DOES. Every other entry is placed
+   * as a box from `geometry`; an entry with this is placed by fetching the
+   * file and copying what somebody modelled — profiles, booleans, styles, and
+   * the companion bodies (a clearance, a detection area, a plan symbol) as
+   * their own related products.
+   *
+   * It carries the difference alone, on purpose: listing, searching, filtering
+   * and picking must not care where an element's geometry comes from, or there
+   * would be two ways to do one thing. Only the placement branches, once.
+   *
+   * `geometry` is then a PLACEHOLDER, not a measurement — an example's extent
+   * is only known once its file is fetched.
+   */
+  exampleUrl?: string;
   provenance: CatalogProvenance;
 }
 

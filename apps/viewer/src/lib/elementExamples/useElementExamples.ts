@@ -10,12 +10,15 @@
  * in the viewer store would make every read a store subscription for data that
  * changes on the scale of weeks.
  *
- * # Not persisted, unlike the class catalogue
- * That one is stored because it backs a picker used all the time and is large
- * enough that re-fetching would be felt. This list is small, is read only
- * while a dialog is open, and — unlike a classification — an example's FILE is
- * fetched fresh at placement anyway. A stored copy would only add a way to be
- * quietly out of date.
+ * # Persisted, unlike an earlier draft of this file
+ * It said a stored copy would only add a way to be quietly out of date, which
+ * was right while the list lived in one dialog. Since the examples sit in the
+ * Add Element library and are placed by click (Marc, 2026-09-16), a picker
+ * cannot reach out to the network every time somebody opens it. Syncing is the
+ * user's action; what it yields has to survive until the next one.
+ *
+ * Only the LIST is stored. An example's IFC file is fetched fresh at
+ * placement, because that is the moment its geometry matters.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -25,8 +28,38 @@ import {
   type ElementExampleCatalog,
 } from './elementExamples.js';
 import { externalRequestsAllowed } from '@/lib/privacy/externalRequests';
+import { loadStoredElementExamples, storeElementExamples } from './elementExamplesStorage.js';
 
 let current: ElementExampleCatalog | null = null;
+let loadedFromStorage = false;
+const listeners = new Set<(catalog: ElementExampleCatalog | null) => void>();
+
+function publish(catalog: ElementExampleCatalog | null): void {
+  current = catalog;
+  for (const listener of listeners) listener(catalog);
+}
+
+/** Read what was synced, once per session. */
+async function ensureLoaded(): Promise<void> {
+  if (loadedFromStorage) return;
+  loadedFromStorage = true;
+  const stored = await loadStoredElementExamples();
+  if (stored && !current) publish(stored);
+}
+
+/** The synced list as it stands, without subscribing. */
+export function getElementExamples(): ElementExampleCatalog | null {
+  return current;
+}
+
+/** Subscribe to syncs. Returns an unsubscribe function. */
+export function subscribeElementExamples(
+  listener: (catalog: ElementExampleCatalog | null) => void,
+): () => void {
+  listeners.add(listener);
+  void ensureLoaded();
+  return () => { listeners.delete(listener); };
+}
 
 export interface ElementExamplesState {
   readonly catalog: ElementExampleCatalog | null;
@@ -67,16 +100,29 @@ export function useElementExamples(enabled: boolean, url = DEFAULT_ELEMENT_EXAMP
         // On failure the PREVIOUS list stays in place — same reasoning as the
         // class catalogue: emptying the panel because a server was briefly
         // down is worse than showing a copy a few minutes old.
-        current = parsed;
+        publish(parsed);
         setCatalog(parsed);
+        // Written after publishing, not before: a failed write should cost the
+        // next session's head start, never this session's list.
+        void storeElementExamples(parsed).catch((err: Error) => {
+          console.error('[elementExamples] Sync could not be stored:', err);
+        });
       })
       .catch((err: Error) => setError(`Die Sammlung war nicht erreichbar: ${err.message}`))
       .finally(() => setLoading(false));
   }, [url]);
 
   useEffect(() => {
-    if (!enabled || current) return;
-    load();
+    if (!enabled) return;
+    let cancelled = false;
+    // A stored sync first: opening the panel should show what is already
+    // there, and only fetch when there is nothing at all.
+    void ensureLoaded().then(() => {
+      if (cancelled) return;
+      if (current) setCatalog(current);
+      else load();
+    });
+    return () => { cancelled = true; };
   }, [enabled, load]);
 
   return { catalog, loading, error, load };
@@ -85,4 +131,6 @@ export function useElementExamples(enabled: boolean, url = DEFAULT_ELEMENT_EXAMP
 /** Test seam: drop the session's copy so the next read fetches again. */
 export function resetElementExamplesForTests(): void {
   current = null;
+  loadedFromStorage = false;
+  listeners.clear();
 }

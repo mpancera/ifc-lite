@@ -16,6 +16,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Box, Cog, DoorOpen, Home, Layers, Library, Minus, Search, Siren, Square, SquareDashedBottom, Wand2, X } from 'lucide-react';
 import { toast } from '@/components/ui/toast';
+import { fetchExampleModel } from '@/lib/elementExamples/fetchExampleModel';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -979,6 +980,7 @@ function PlaceBySpaceSection({ type, modelId, storeyId }: PlaceBySpaceSectionPro
   const selection = useViewerStore((s) => s.addElementLibrarySelection);
   const addSensor = useViewerStore((s) => s.addSensor);
   const addLibraryElement = useViewerStore((s) => s.addLibraryElement);
+  const placeElementExample = useViewerStore((s) => s.placeElementExample);
   const [busy, setBusy] = useState(false);
 
   // A sensor is its own product; a library element is whichever one is picked,
@@ -1001,17 +1003,35 @@ function PlaceBySpaceSection({ type, modelId, storeyId }: PlaceBySpaceSectionPro
   const canRun = ready && !busy && plan.placements.length > 0
     && (type === 'sensor' || selection !== null);
 
-  const run = () => {
+  const run = async () => {
     if (!canRun || modelId === null || storeyId === null) return;
     setBusy(true);
     try {
+      // An Elementbeispiel's file is fetched ONCE for the whole run, not per
+      // room. Twenty detectors in twenty rooms are twenty occurrences of the
+      // same object, and its geometry is copied once into the overlay anyway —
+      // re-fetching per spot would be twenty requests for one answer.
+      let example = null as Awaited<ReturnType<typeof fetchExampleModel>> | null;
+      if (type === 'library' && selection?.exampleUrl) {
+        example = await fetchExampleModel(selection.exampleUrl);
+        if (!example.ok) {
+          toast.error(example.error);
+          return;
+        }
+      }
       let placed = 0;
       let failure: string | null = null;
       for (const spot of plan.placements) {
         // Drawing space to the storey's own frame — the same conversion the
         // click path makes (`rendererPointToIfcStoreyLocal`), plus the height.
         const Position: [number, number, number] = [spot.at.x, -spot.at.y, z];
-        const result = type === 'sensor'
+        const result = example?.ok
+          ? placeElementExample(modelId, storeyId, {
+            example: example.model,
+            position: Position,
+            exampleId: selection!.id,
+          })
+          : type === 'sensor'
           ? addSensor(modelId, storeyId, {
             Position,
             Width: sensorParams.Width,
@@ -1047,6 +1067,11 @@ function PlaceBySpaceSection({ type, modelId, storeyId }: PlaceBySpaceSectionPro
         toast.error(placed === 0 ? failure : `Placed ${placed}, then stopped: ${failure}`);
       } else {
         toast.success(`Placed ${placed} in ${rooms} room${rooms === 1 ? '' : 's'}.`);
+        if (example?.ok) {
+          // The file is right and the picture is not yet: overlay-created
+          // geometry is not re-meshed in session.
+          toast.info(`${selection!.label}: sichtbar nach Export und Neuladen.`);
+        }
       }
     } finally {
       setBusy(false);
@@ -1146,7 +1171,7 @@ function PlaceBySpaceSection({ type, modelId, storeyId }: PlaceBySpaceSectionPro
       <Button
         variant="default"
         size="sm"
-        onClick={run}
+        onClick={() => void run()}
         disabled={!canRun}
         className="h-8 w-full text-[11px] font-mono bg-emerald-600 hover:bg-emerald-700"
       >

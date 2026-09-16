@@ -10,20 +10,18 @@
  * a loading and a failure state. Folding that into the panel would put three
  * unrelated lifecycles in one component.
  *
- * Placing copies the example's REAL geometry into the open model — the
- * profiles, booleans and styles somebody modelled, as a representation map on
- * the type and a mapped item per occurrence — together with the companions
- * (clearance, detection area, plan symbol) as their own related products.
+ * This tab SYNCS and shows; it does not place. Placing happens where every
+ * other element is placed — Add element → Library — because it is the same
+ * act: pick, resolve a storey from where the cursor falls, snap, drop. A
+ * second placement surface here would be two ways to do one thing, differing
+ * only in where the geometry came from (Marc, 2026-09-16).
  *
- * What it does not do yet is show the result immediately: overlay-created
- * geometry is not re-meshed in session, so a placed example appears after an
- * export and reload. The toast says so rather than leaving the user looking
- * for it.
+ * A sync is kept between sessions, so the picker never has to reach out to the
+ * network while somebody is using it. Only the LIST is stored; an example's
+ * IFC file is fetched at placement, which is when its geometry matters.
  */
 
-import { useState } from 'react';
-import { Download, Loader2, MapPin, RefreshCw } from 'lucide-react';
-import { toast } from '@/components/ui/toast';
+import { Download, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
@@ -38,76 +36,16 @@ import { useElementExamples } from '@/lib/elementExamples/useElementExamples';
 import {
   DEFAULT_ELEMENT_EXAMPLES_URL,
   exampleFileUrl,
-  type ElementExample,
 } from '@/lib/elementExamples/elementExamples';
-import { fetchExampleModel } from '@/lib/elementExamples/fetchExampleModel';
-import { useViewerStore } from '@/store';
 
 interface ElementExamplesTabProps {
   /** The dialog being open — what counts as the user asking for the list. */
   open: boolean;
-  /** Close the dialog once something has been placed. */
-  onPlaced?: () => void;
 }
 
-export function ElementExamplesTab({ open, onPlaced }: ElementExamplesTabProps) {
+export function ElementExamplesTab({ open }: ElementExamplesTabProps) {
   const { catalog, loading, error, load } = useElementExamples(open);
   const entries = catalog?.entries ?? [];
-
-  const activeModelId = useViewerStore((s) => s.activeModelId);
-  const models = useViewerStore((s) => s.models);
-  const placeElementExample = useViewerStore((s) => s.placeElementExample);
-  const [placing, setPlacing] = useState<string | null>(null);
-
-  /**
-   * The storey to place into: the first one the model has.
-   *
-   * A stand-in for a proper pick, and a stated one. Placing by CLICK — the
-   * Add-Element flow's `addElementType`, which resolves the storey from where
-   * the cursor lands — is the right home for this and needs a place-mode of
-   * its own; until then the object lands at the model origin of the first
-   * storey, where it can be moved.
-   */
-  const firstStoreyId = (() => {
-    const store = activeModelId ? models.get(activeModelId)?.ifcDataStore : null;
-    const storeys = store?.entityIndex.byType.get('IFCBUILDINGSTOREY');
-    return storeys?.[0] ?? null;
-  })();
-
-  const place = async (entry: ElementExample) => {
-    if (!activeModelId || firstStoreyId === null) {
-      toast.error('Kein Modell offen, in das platziert werden könnte.');
-      return;
-    }
-    setPlacing(entry.id);
-    try {
-      const fetched = await fetchExampleModel(
-        exampleFileUrl(DEFAULT_ELEMENT_EXAMPLES_URL, entry.id),
-      );
-      if (!fetched.ok) {
-        toast.error(fetched.error);
-        return;
-      }
-      const result = placeElementExample(activeModelId, firstStoreyId, {
-        example: fetched.model,
-        position: [0, 0, 0],
-        exampleId: entry.id,
-      });
-      if ('error' in result) {
-        toast.error(result.error);
-        return;
-      }
-      const companions = fetched.model.companions.length;
-      toast.success(
-        companions > 0
-          ? `${entry.name} platziert — mit ${companions} zugehörigen Körper${companions === 1 ? '' : 'n'}. Im Bild sichtbar nach Export und Neuladen.`
-          : `${entry.name} platziert. Im Bild sichtbar nach Export und Neuladen.`,
-      );
-      onPlaced?.();
-    } finally {
-      setPlacing(null);
-    }
-  };
 
   return (
     <>
@@ -115,10 +53,11 @@ export function ElementExamplesTab({ open, onPlaced }: ElementExamplesTabProps) 
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={load} disabled={loading}>
             <RefreshCw className={`h-3 w-3 mr-2 ${loading ? 'animate-spin' : ''}`} />
-            {catalog ? 'Neu laden' : 'Laden'}
+            {catalog ? 'Neu synchronisieren' : 'Synchronisieren'}
           </Button>
           <span className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400">
-            Produktneutral, aus dem Swiss Data Dictionary.
+            Produktneutral, aus dem Swiss Data Dictionary — platziert wird über
+            <span className="text-zinc-700 dark:text-zinc-300"> Add element → Library</span>.
           </span>
         </div>
         <span className="text-[10px] font-mono uppercase tracking-wide text-zinc-400 dark:text-zinc-600">
@@ -140,13 +79,12 @@ export function ElementExamplesTab({ open, onPlaced }: ElementExamplesTabProps) 
               <TableHead className="font-mono text-[10px] uppercase">Geändert</TableHead>
               <TableHead className="font-mono text-[10px] uppercase">Herausgeber</TableHead>
               <TableHead className="font-mono text-[10px] uppercase">Modell</TableHead>
-              <TableHead className="font-mono text-[10px] uppercase"> </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {entries.length === 0 && (
               <TableRow>
-                <TableCell colSpan={7} className="text-center text-[11px] font-mono text-zinc-500 py-6">
+                <TableCell colSpan={6} className="text-center text-[11px] font-mono text-zinc-500 py-6">
                   {loading ? 'Wird geladen …' : error ? 'Nichts geladen.' : 'Keine Elementbeispiele.'}
                 </TableCell>
               </TableRow>
@@ -161,9 +99,8 @@ export function ElementExamplesTab({ open, onPlaced }: ElementExamplesTabProps) 
                 <TableCell className="font-mono text-[10px] text-zinc-500">{entry.changed}</TableCell>
                 <TableCell className="font-mono text-[10px] text-zinc-500">{entry.organisation}</TableCell>
                 <TableCell>
-                  {/* The file stays on offer beside the button: an example is
-                      useful to download and study even when there is no model
-                      open to place it into. */}
+                  {/* The file stays on offer: an example is worth downloading
+                      and studying even with no model open. */}
                   <a
                     href={exampleFileUrl(DEFAULT_ELEMENT_EXAMPLES_URL, entry.id)}
                     download
@@ -172,20 +109,6 @@ export function ElementExamplesTab({ open, onPlaced }: ElementExamplesTabProps) 
                     <Download className="h-3 w-3" />
                     {entry.id}.ifc
                   </a>
-                </TableCell>
-                <TableCell>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-6 px-2 text-[10px] font-mono"
-                    disabled={placing !== null || !activeModelId || firstStoreyId === null}
-                    onClick={() => void place(entry)}
-                  >
-                    {placing === entry.id
-                      ? <Loader2 className="h-3 w-3 animate-spin" />
-                      : <MapPin className="h-3 w-3 mr-1" />}
-                    Platzieren
-                  </Button>
                 </TableCell>
               </TableRow>
             ))}

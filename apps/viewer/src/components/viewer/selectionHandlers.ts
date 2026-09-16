@@ -15,6 +15,7 @@ import { fromGlobalIdFromModels, toGlobalIdFromModels } from '@/store/globalId';
 import { pointInPolygon } from '@/lib/polygon-clip';
 import { toast } from '@/components/ui/toast';
 import { notifyWallSplit } from './wallSplitNotice.js';
+import { fetchExampleModel } from '@/lib/elementExamples/fetchExampleModel';
 import { raycastForPolylinePoint, isNearPolylineStart,
   isDuplicateClickPoint,
 } from './measureHandlers.js';
@@ -958,6 +959,34 @@ export async function handleAddElementDrop(
       return;
     }
     const ifc = rendererPointToIfcStoreyLocal(point);
+
+    // An Elementbeispiel is placed with the geometry somebody modelled, not as
+    // a box from the entry's placeholder extent. The one branch in this file
+    // that `exampleUrl` causes — everything before it (picking the entry,
+    // resolving the storey, snapping, the click itself) is shared, which is the
+    // point of putting the examples in this library at all.
+    if (entry.exampleUrl) {
+      const fetched = await fetchExampleModel(entry.exampleUrl);
+      if (!fetched.ok) {
+        toast.error(`Couldn't add ${entry.label.toLowerCase()}: ${fetched.error}`);
+        return;
+      }
+      finishAddElement(
+        state.placeElementExample(modelId, storeyId, {
+          example: fetched.model,
+          position: ifc,
+          exampleId: entry.id,
+        }),
+        modelId,
+        entry.label,
+      );
+      // Said once, on the way out: the file is right and the picture is not
+      // yet. Overlay-created geometry is not re-meshed in session, so the real
+      // shape appears after an export and reload.
+      toast.info(`${entry.label}: Geometrie liegt im Modell — sichtbar nach Export und Neuladen.`);
+      return;
+    }
+
     const p = state.addElementLibraryParams;
     finishAddElement(state.addLibraryElement(modelId, storeyId, {
       IfcEntity: entry.ifc.entity,
