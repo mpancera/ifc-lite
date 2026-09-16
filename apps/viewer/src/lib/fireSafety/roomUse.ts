@@ -56,20 +56,37 @@ const STAIR_WORDS = [
 /**
  * Words that name circulation.
  *
- * `Vorraum` is in, `Vorzimmer` is not: a Vorraum in this vocabulary is the
- * space you pass through to reach somewhere, while a Vorzimmer is a room
- * somebody sits in. The line is genuinely thin, and a wrong call here shows up
- * as a room in the corridor compartment — visible, and one click to move.
+ * Exactly what Marc named as escape corridors — Korridore, Vorplätze,
+ * Erschliessung — plus the words that are the same thing under another office's
+ * spelling.
+ *
+ * `Vorraum` was in and is out (Marc, 2026-09-16). It reads as circulation and
+ * in this building it is not: "U.01 Vorraum Depot", "1.02a Vorraum WC",
+ * "1.13a Vorraum Atelier" are rooms belonging to the thing they are named
+ * after. A Vorraum that IS a lobby will now be missed, which is the cheaper of
+ * the two errors: a room wrongly OUT of the escape-route compartment is a room
+ * somebody adds, while a room wrongly IN it carries FireExit — a claim that
+ * people leave the building through it.
  */
 const CORRIDOR_WORDS = [
   'korridor', 'gang', 'flur', 'vorplatz', 'erschliessung', 'erschließung',
-  'vorraum', 'vestibül', 'vestibul', 'foyer', 'diele', 'schleuse', 'passage',
+  'vestibül', 'vestibul', 'vorhalle', 'foyer', 'diele', 'schleuse', 'passage',
   'durchgang',
 ];
 
-/** Split a name into lowercase words, so a compound is judged by its parts. */
+/**
+ * Split a name into lowercase words, so a compound is judged by its parts.
+ *
+ * QUOTED text is dropped first. In this model's convention the quotes hold a
+ * proper name, not a use: `Ausstellung "Halle"`, `Ausstellung "Salon"`,
+ * `Ausstellung "Bibliothek"` — and `Ausstellung "Durchgang"`, which is an
+ * exhibition room called Durchgang and was being read as a passage (Marc,
+ * 2026-09-16). What a room is called is not what a room is, and the quotes are
+ * the author saying so.
+ */
 function words(text: string): string[] {
   return text
+    .replace(/[„“”"'»«][^„“”"'»«]*[„“”"'»«]/g, ' ')
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .split(' ')

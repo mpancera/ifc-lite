@@ -21,7 +21,7 @@ describe('roomUseFromName', () => {
   it('finds circulation', () => {
     for (const name of [
       'Korridor Keller', 'Erschliessung', 'Erschließung', 'Vorplatz',
-      'Vorraum Depot', 'Vorhalle/Vestibül', 'Gang', 'Flur', 'Durchgang Küche',
+      'Vorhalle/Vestibül', 'Gang', 'Flur', 'Durchgang Küche',
     ]) {
       assert.equal(roomUseFromName(name), 'escape-corridor', name);
     }
@@ -32,6 +32,25 @@ describe('roomUseFromName', () => {
       'Ausstellung "Halle"', 'Möbeldepot 1', 'Küche', 'Werkstatt', 'Bad',
       'Lager Museum', 'Technik/ Server', 'Veranda Cafe', 'Kunstvermittlung',
     ]) {
+      assert.equal(roomUseFromName(name), 'ordinary', name);
+    }
+  });
+
+  it('reads a quoted name as a NAME, not as a use', () => {
+    // `Ausstellung "Durchgang"` is an exhibition room called Durchgang. The
+    // quotes are the author saying that what it is called is not what it is
+    // (Marc, 2026-09-16).
+    assert.equal(roomUseFromName('0.07', 'Ausstellung "Durchgang"'), 'ordinary');
+    assert.equal(roomUseFromName('Ausstellung „Korridor"'), 'ordinary');
+    // And the passage that really is one keeps its role.
+    assert.equal(roomUseFromName('U.12a', 'Durchgang'), 'escape-corridor');
+  });
+
+  it('does not read a Vorraum as circulation', () => {
+    // It reads as a lobby and in this building it is not: a Vorraum belongs to
+    // the thing it is named after. Wrongly OUT is a room somebody adds;
+    // wrongly IN carries FireExit, which claims people leave through it.
+    for (const name of ['Vorraum Depot', 'Vorraum WC', 'Vorraum Atelier']) {
       assert.equal(roomUseFromName(name), 'ordinary', name);
     }
   });
