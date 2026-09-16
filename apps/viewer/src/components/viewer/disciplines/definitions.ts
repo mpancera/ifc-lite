@@ -685,6 +685,36 @@ export const DISCIPLINE_TABS: readonly DisciplineTab[] = [
               for (const line of result.summary) toast.info(line);
             },
           },
+          {
+            // Its own command, not part of the derivation above: the zones are
+            // a classification somebody corrects by repainting, the detectors
+            // are geometry somebody corrects by dragging. One action would
+            // mean undoing 140 devices to move one room.
+            id: 'placeFireDetectors',
+            kind: 'action',
+            label: 'Melder platzieren',
+            ribbonLabel: 'Melder plat­zieren',
+            tooltip: 'Rauchmelder im 4-m-Raster an jede Raumdecke und Handfeuermelder auf 1.2 m '
+              + 'in die Fluchtkorridore — danach "Meldergruppen bilden"',
+            icon: Radio,
+            needsModel: true,
+            needsAuthor: true,
+            run: (s) => {
+              const modelId = s.activeModelId ?? [...s.models.keys()][0];
+              if (!modelId) { toast.error('Kein aktives Modell.'); return; }
+              const result = s.placeFireDetectors(modelId);
+              if ('error' in result) { toast.error(result.error); return; }
+              toast.success(
+                `${result.detectors} Rauchmelder, ${result.callPoints} Handfeuermelder platziert`,
+              );
+              // Never folded into the success line: a room skipped for want of
+              // an outline is a hole in the coverage, and a hole nobody is
+              // told about is one nobody closes.
+              if (result.skippedRooms > 0) {
+                toast.info(`${result.skippedRooms} Räume ohne Umriss — ohne Melder`);
+              }
+            },
+          },
         ],
       },
       {

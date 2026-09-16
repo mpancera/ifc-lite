@@ -46,6 +46,18 @@ function prop(psetName: string, propName: string): ListDefinition['columns'][0] 
   };
 }
 
+/** A spatial reading — `Storey`, `Container`, `Building`. */
+function spatial(which: string): ListDefinition['columns'][0] {
+  return {
+    id: `spatial-${which.toLowerCase()}`, source: 'spatial', propertyName: which, label: which,
+  };
+}
+
+/** The colour a zone gives the row, painted rather than written. */
+function colour(): ListDefinition['columns'][0] {
+  return { id: 'colour-active', source: 'colour', propertyName: '', label: 'Farbe' };
+}
+
 function quant(qsetName: string, quantName: string): ListDefinition['columns'][0] {
   return {
     id: `quant-${qsetName}-${quantName}`.toLowerCase().replace(/\s+/g, '-'),
@@ -57,6 +69,73 @@ function quant(qsetName: string, quantName: string): ListDefinition['columns'][0
 }
 
 export const LIST_PRESETS: ListDefinition[] = [
+  /**
+   * The two lists the fire-safety derivation produces work for.
+   *
+   * Presets rather than something each person rebuilds: after "Abschnitte
+   * ableiten" the first question is always "which room ended up where", and
+   * after "Melder platzieren" it is "how many hang in which group". Both are
+   * one grouped list, and both were being built by hand every time (Marc,
+   * 2026-09-16).
+   *
+   * Grouped by storey first, then by zone. A fire compartment does not cross a
+   * storey, so storey-then-zone is the order the building has — and it keeps
+   * the numbering visible, since the group number's first position IS the
+   * storey.
+   */
+  {
+    ...makePreset(
+      'Brandabschnitte',
+      'Räume nach Geschoss und Brandabschnitt, mit Fluchtweg-Kennzeichen und Zonenfarbe',
+      [IfcTypeEnum.IfcSpace],
+      [
+        spatial('Storey'),
+        group('Zone'),
+        attr('Name'),
+        attr('LongName'),
+        // `FireExit` lives in the fire-safety set, not in `Pset_SpaceCommon`
+        // — which has no such property. The schema check in this package's
+        // own test suite is what said so.
+        prop('Pset_SpaceFireSafetyRequirements', 'FireExit'),
+        prop('Pset_SpaceCommon', 'IsExternal'),
+        quant('Qto_SpaceBaseQuantities', 'NetFloorArea'),
+        colour(),
+      ],
+    ),
+    grouping: {
+      columnId: 'spatial-storey',
+      columnIds: ['spatial-storey', 'group-zone'],
+      // The area, because "how big is this compartment" is the number the
+      // whole classification is judged against.
+      sumColumnIds: ['quant-qto_spacebasequantities-netfloorarea'],
+    },
+  },
+
+  {
+    ...makePreset(
+      'Meldergruppen',
+      'Melder nach Geschoss und Meldergruppe, mit Raum und Gruppenfarbe',
+      [IfcTypeEnum.IfcSensor, IfcTypeEnum.IfcAlarm],
+      [
+        spatial('Storey'),
+        group('All'),
+        attr('Name'),
+        attr('PredefinedType'),
+        attr('Tag'),
+        spatial('Container'),
+        colour(),
+      ],
+    ),
+    grouping: {
+      columnId: 'spatial-storey',
+      // `group-all`, not `group-zone`: a detector belongs to its Meldergruppe
+      // through an `IfcGroup`, and an alarm zone is an `IfcZone` — filtering
+      // to zones alone would show the rooms' grouping and hide the devices'.
+      columnIds: ['spatial-storey', 'group-all'],
+      sumColumnIds: [],
+    },
+  },
+
   makePreset(
     'Wall Schedule',
     'All walls with common properties and base quantities',

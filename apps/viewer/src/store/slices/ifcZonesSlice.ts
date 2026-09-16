@@ -22,9 +22,12 @@ import type { Mutation } from '@ifc-lite/mutations';
 import { PropertyValueType } from '@ifc-lite/data';
 import { COMPARTMENT_PSET } from '@/lib/fireSafety/compartmentRequirements';
 import {
-  describeFirePlan, planFireZones, type PlanRoom, type ZoneToCreate,
+  describeFirePlan, planFireZones, SPACE_FIRE_PSET,
+  type PlanRoom, type ZoneToCreate,
 } from '@/lib/fireSafety/firePlan';
 import { resolveEntityLongName } from '@/lib/entity-predefined-type';
+import { layOutCallPoint, layOutDetectors } from '@/lib/fireSafety/detectorLayout';
+import { roomUseFromName } from '@/lib/fireSafety/roomUse';
 import {
   createZone as createZoneInStore,
   deleteZone as deleteZoneInStore,
@@ -104,6 +107,28 @@ export interface IfcZonesSlice {
    * make — see `lib/fireSafety/firePlan.ts` for what it would be deciding.
    */
   proposeFireZones: (modelId: string) => FireZonesResult | { error: string };
+
+  /**
+   * Hang a smoke detector on every room's ceiling and a call point on the wall
+   * of every escape corridor.
+   *
+   * Separate from `proposeFireZones` because the two fail differently and a
+   * person wants them separately: the zones are a classification somebody
+   * corrects by repainting, the detectors are geometry somebody corrects by
+   * dragging. Running them as one action would mean undoing 140 devices to
+   * change one compartment.
+   *
+   * Refuses when the model already carries detectors of this installation, for
+   * the same reason the zones do.
+   */
+  placeFireDetectors: (modelId: string) => FireDevicesResult | { error: string };
+}
+
+export interface FireDevicesResult {
+  detectors: number;
+  callPoints: number;
+  /** Rooms whose outline would not resolve — skipped, not guessed at. */
+  skippedRooms: number;
 }
 
 export interface FireZonesResult {
@@ -356,15 +381,92 @@ export const createIfcZonesSlice: StateCreator<ViewerState, [], [], IfcZonesSlic
       let roomsFlagged = 0;
       for (const { roomId, value } of plan.fireExit) {
         const written = get().setProperty(
-          modelId, roomId, 'Pset_SpaceCommon', 'FireExit', value, PropertyValueType.Boolean,
+          modelId, roomId, SPACE_FIRE_PSET, 'FireExit', value, PropertyValueType.Boolean,
         );
         if (written) roomsFlagged += 1;
       }
 
       return { compartments, alarmGroups, roomsFlagged, summary: describeFirePlan(plan) };
     },
+
+    placeFireDetectors: (modelId) => {
+      const ctx = writable(modelId);
+      if (!ctx) return { error: 'Für dieses Modell ist Schreiben nicht möglich.' };
+
+      // Same refusal as the zones: a second run would hang a second detector
+      // beside every first one, and "which of these two is current" is not a
+      // question the model can answer.
+      const already = ctx.entities.filter((e) => e.type === 'IfcSensor').length;
+      if (already > 0) {
+        return {
+          error: `Das Modell hat schon ${already} Melder aus dieser Sitzung. `
+            + 'Zuerst löschen, dann neu platzieren.',
+        };
+      }
+
+      const rooms = collectPlanRooms(get, modelId);
+      if (rooms.length === 0) return { error: 'Keine Räume mit Umriss gefunden.' };
+
+      let detectors = 0;
+      let callPoints = 0;
+      let skippedRooms = 0;
+
+      for (const room of rooms) {
+        const footprint = get().readSlabFootprint(modelId, room.expressId);
+        if (!footprint || footprint.footprint.length < 3) { skippedRooms += 1; continue; }
+        const ring = footprint.footprint.map(([x, y]) => ({ x, y }));
+
+        // Just under the ceiling. `thickness` is the room's own extrusion, so
+        // a low basement and a high hall each get their own — and a room whose
+        // height is missing or absurd falls back to a storey height rather
+        // than hanging its detectors in the floor.
+        const height = footprint.thickness > 0.5 && footprint.thickness < 20
+          ? footprint.thickness : DEFAULT_ROOM_HEIGHT_M;
+        const z = Math.max(0, height - DETECTOR_DROP_M);
+
+        for (const at of layOutDetectors(ring)) {
+          const result = get().addSensor(modelId, room.storeyExpressId, {
+            Position: [at.x, at.y, z],
+            PredefinedType: 'SMOKESENSOR',
+            Name: 'Rauchmelder',
+            Tag: 'RM',
+          });
+          if (!('error' in result)) detectors += 1;
+        }
+
+        if (roomUseFromName(room.name, room.longName) !== 'escape-corridor') continue;
+        const callPoint = layOutCallPoint(ring);
+        if (!callPoint) continue;
+        const placed = get().addLibraryElement(modelId, room.storeyExpressId, {
+          IfcEntity: 'IfcAlarm',
+          // The IFC class for a Handfeuermelder. Not an IfcSensor: a sensor
+          // detects, a manual pull box is pressed, and the panel treats the
+          // two differently — an alarm from one is a fire, from the other a
+          // person saying there is one.
+          PredefinedType: 'MANUALPULLBOX',
+          Position: [callPoint.at.x, callPoint.at.y, callPoint.height],
+          Width: 0.1, Depth: 0.05, Height: 0.1,
+          Discipline: 'fire',
+          Name: 'Handfeuermelder',
+          // The id the Type is found-or-created under, so every call point in
+          // the building shares one `IfcAlarmType` instead of each carrying
+          // its own copy of the same attributes.
+          CatalogEntryId: 'fire.manual-call-point',
+          CatalogEntryTag: 'HFM',
+        });
+        if (!('error' in placed)) callPoints += 1;
+      }
+
+      return { detectors, callPoints, skippedRooms };
+    },
   };
 };
+
+/** Where a detector hangs below the ceiling, metres. */
+const DETECTOR_DROP_M = 0.05;
+
+/** For a room whose own height the file does not give. */
+const DEFAULT_ROOM_HEIGHT_M = 2.8;
 
 /**
  * Every room with an outline, with the storey it is on.

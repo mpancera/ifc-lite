@@ -55,13 +55,26 @@ export interface ZoneToCreate {
 export interface FirePlan {
   compartmentZones: ZoneToCreate[];
   alarmZones: ZoneToCreate[];
-  /** `Pset_SpaceCommon.FireExit`, stated for every room either way. */
+  /** {@link SPACE_FIRE_PSET}`.FireExit`, stated for every room either way. */
   fireExit: Array<{ roomId: number; value: boolean }>;
   /** Compartments the numbering could not express — reported, not renamed. */
   unnumbered: string[];
   /** Per storey, for the summary a person reads before accepting. */
   perStorey: Array<{ storeyName: string; proposal: CompartmentProposal }>;
 }
+
+/**
+ * Where `FireExit` actually lives.
+ *
+ * NOT `Pset_SpaceCommon`, which was the first guess and does not have the
+ * property at all — its members are Category, IsExternal, floor and ceiling
+ * coverings and the like. `Pset_SpaceFireSafetyRequirements` is the IFC4 set
+ * that does, applicable to `IfcSpace`, `IfcSpatialZone` AND `IfcZone`, and it
+ * carries `SprinklerProtection` beside it, which is where the sprinklered
+ * rooms belong too. Caught by the preset suite's schema check rather than by
+ * anybody reading the export (2026-09-16).
+ */
+export const SPACE_FIRE_PSET = 'Pset_SpaceFireSafetyRequirements';
 
 /** `themes.ts`'s `fire-compartment`, spelled out so this module reads alone. */
 const COMPARTMENT_OBJECT_TYPE = 'FireCompartment';
