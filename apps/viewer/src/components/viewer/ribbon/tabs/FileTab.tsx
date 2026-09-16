@@ -11,6 +11,10 @@ import React from 'react';
 import { Trash2 as Discard } from 'lucide-react';
 import { AddFile, CloudSources, Loading, OpenFile, Refresh, Share, CollabsRoom } from '@/icons';
 import { toast } from '@/components/ui/toast';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from '@/components/ui/dialog';
 import { collectChangedModels, totalChangeCount } from '@/lib/export/model-changes';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -45,18 +49,20 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
     [mutationVersion],
   );
 
+  /**
+   * Asked in the app's own dialog, not with `window.confirm`.
+   *
+   * The native one silently returns false once a person has ticked Chrome's
+   * "prevent this page from creating additional dialogs", and a page that has
+   * shown one dialog can hit that at any time. The button then does nothing at
+   * all, with no error and nothing on screen — which is exactly what Marc saw
+   * (2026-09-16). A confirmation that can be switched off without telling the
+   * caller is not a confirmation.
+   */
+  const [confirming, setConfirming] = React.useState(false);
+
   const discardChanges = React.useCallback(() => {
-    // Asked once, plainly, with the number in it. This is the only
-    // irreversible thing on the tab — every export can be repeated.
-    const ok = globalThis.confirm(
-      `${changeCount} Änderungen dieser Sitzung verwerfen?
-
-`
-      + 'Das lässt sich nicht rückgängig machen. Die IFC-Datei auf der Platte '
-      + 'bleibt unverändert; neu geladen wird sie so, wie sie dort steht.',
-    );
-    if (!ok) return;
-
+    setConfirming(false);
     const state = useViewerStore.getState();
     for (const modelId of state.models.keys()) state.clearMutations(modelId);
     // The saved session goes with it: `clearMutations` bumps the mutation
@@ -64,7 +70,7 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
     // which is the documented path, not a side effect to rely on quietly.
     toast.success('Änderungen verworfen — Seite neu laden, damit auch die '
       + 'erzeugte Geometrie aus der Ansicht verschwindet');
-  }, [changeCount]);
+  }, []);
 
   // Collaboration: the Share cluster is gated behind the collab feature flag.
   // The ShareDialog itself (and its `ifc-lite:open-share-dialog` listener)
@@ -128,7 +134,7 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
             tooltip={`Alle ${changeCount} Änderungen dieser Sitzung verwerfen — `
               + 'auch den gespeicherten Stand. Die Datei auf der Platte bleibt unberührt'}
             disabled={loading || changeCount === 0}
-            onClick={discardChanges}
+            onClick={() => setConfirming(true)}
           />
         </RibbonSmallStack>
       </RibbonGroup>
@@ -174,6 +180,32 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
           </RibbonGroup>
         </>
       )}
+
+      {/* Discarding is the only irreversible thing on this tab — every export
+          can simply be repeated — so it asks, and it says the number and what
+          stays untouched. */}
+      <Dialog open={confirming} onOpenChange={setConfirming}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-base">Änderungen verwerfen?</DialogTitle>
+            <DialogDescription>
+              {changeCount} Änderung{changeCount === 1 ? '' : 'en'} dieser Sitzung, samt dem
+              gespeicherten Stand. Das lässt sich nicht rückgängig machen.
+              <br />
+              Die IFC-Datei auf der Platte bleibt unverändert — neu geladen wird sie so,
+              wie sie dort steht.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>
+              Abbrechen
+            </Button>
+            <Button variant="destructive" size="sm" onClick={discardChanges}>
+              Endgültig verwerfen
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
