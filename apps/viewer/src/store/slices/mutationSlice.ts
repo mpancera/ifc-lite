@@ -15,6 +15,8 @@ import type { IfcDataStore } from '@ifc-lite/parser';
 import { StoreEditor } from '@ifc-lite/mutations';
 import type { Mutation, ChangeSet, PropertyValue } from '@ifc-lite/mutations';
 import { PropertyValueType, QuantityType, RelationshipType } from '@ifc-lite/data';
+import type { ExampleModel } from '@/lib/elementExamples/exampleModel';
+import { placeExampleInStore } from '@/lib/elementExamples/placeExample';
 import {
   addBeamToStore,
   addColumnToStore,
@@ -1006,6 +1008,32 @@ export interface MutationSlice {
        * the product data instead of only copying it.
        */
       Aas?: CatalogEntry['aas'];
+    }
+  ) => { expressId: number } | { error: string };
+  /**
+   * Place a product-neutral Elementbeispiel from the dictionary, WITH ITS REAL
+   * GEOMETRY.
+   *
+   * Unlike `addLibraryElement`, which builds a box of the right size from a
+   * catalogue entry, this copies what somebody modelled: the profiles,
+   * booleans and styles of the published file, as an `IfcRepresentationMap` on
+   * the type and an `IfcMappedItem` per occurrence. The example's companions —
+   * a clearance body, a detection area, a plan symbol — come along as their
+   * own products, related to the device.
+   *
+   * The example must already be fetched and read (`fetchExampleModel`): this
+   * half is synchronous so it can sit inside the shared builder, with its role
+   * gate, its overlay and its spatial registration.
+   */
+  placeElementExample: (
+    modelId: string,
+    storeyExpressId: number,
+    params: {
+      example: ExampleModel;
+      /** Storey-local metres. */
+      position: [number, number, number];
+      /** The dictionary's id, kept on the type. */
+      exampleId?: string;
     }
   ) => { expressId: number } | { error: string };
   /**
@@ -3422,6 +3450,42 @@ export const createMutationSlice: StateCreator<
         ifcEntity: ifcParams.IfcEntity,
         discipline: Discipline,
       },
+    );
+  },
+
+  placeElementExample: (modelId, storeyExpressId, params) => {
+    const { example, position, exampleId } = params;
+    return runInStoreElementBuilder(
+      get, set, modelId, storeyExpressId, example.device.type, 'place the element example',
+      (editor, anchor) => {
+        // The device goes in the room it actually sits in, when the model has
+        // one there — the same rule `addLibraryElement` follows, and for the
+        // same reason: "which detectors are in this room" should be answerable
+        // from the file alone.
+        const store = get().models.get(modelId)?.ifcDataStore ?? get().ifcDataStore;
+        const spaceId = resolveSpaceForPlacement(
+          store, storeyExpressId, position,
+          get().mutationViews.get(modelId), get().mutationVersion,
+        );
+        const placed = placeExampleInStore(editor, anchor, example, {
+          position,
+          // The TARGET's unit. The example states its own; the ratio of the
+          // two is what the occurrence's transformation operator carries.
+          targetLengthUnitScale: getModelLengthUnitScale(store),
+          containerId: spaceId ?? undefined,
+          exampleId,
+        });
+
+        joinActiveDisciplineSystem(get, editor, anchor, modelId, placed.deviceId);
+
+        return placed.deviceId;
+      },
+      // No preview mesh, deliberately. The other builders hand one over
+      // because they KNOW the shape they just made — a box, a wall, a slab.
+      // Here the shape is whatever somebody modelled, and the only honest
+      // preview would be to run the geometry pipeline over the copied
+      // subgraph. A stand-in box would be the very thing this feature exists
+      // to avoid: something that looks placed and is not what was placed.
     );
   },
 

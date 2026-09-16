@@ -173,7 +173,7 @@ export function ProductLibraryPanel({ trigger }: ProductLibraryPanelProps) {
           </TabsContent>
 
           <TabsContent value="examples" className="flex-1 overflow-hidden flex flex-col px-6 pb-6 pt-3 gap-3">
-            <ElementExamplesTab open={open} />
+            <ElementExamplesTab open={open} onPlaced={() => setOpen(false)} />
           </TabsContent>
 
           <TabsContent value="products" className="flex-1 overflow-hidden flex flex-col px-6 pb-6 pt-3 gap-2">

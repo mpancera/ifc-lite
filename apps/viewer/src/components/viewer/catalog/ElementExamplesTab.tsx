@@ -10,12 +10,20 @@
  * a loading and a failure state. Folding that into the panel would put three
  * unrelated lifecycles in one component.
  *
- * What it does NOT do yet is place an example. The row therefore offers the
- * file rather than a button that would look like placement and do something
- * lesser — see the note on the download link.
+ * Placing copies the example's REAL geometry into the open model — the
+ * profiles, booleans and styles somebody modelled, as a representation map on
+ * the type and a mapped item per occurrence — together with the companions
+ * (clearance, detection area, plan symbol) as their own related products.
+ *
+ * What it does not do yet is show the result immediately: overlay-created
+ * geometry is not re-meshed in session, so a placed example appears after an
+ * export and reload. The toast says so rather than leaving the user looking
+ * for it.
  */
 
-import { Download, RefreshCw } from 'lucide-react';
+import { useState } from 'react';
+import { Download, Loader2, MapPin, RefreshCw } from 'lucide-react';
+import { toast } from '@/components/ui/toast';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
@@ -30,16 +38,76 @@ import { useElementExamples } from '@/lib/elementExamples/useElementExamples';
 import {
   DEFAULT_ELEMENT_EXAMPLES_URL,
   exampleFileUrl,
+  type ElementExample,
 } from '@/lib/elementExamples/elementExamples';
+import { fetchExampleModel } from '@/lib/elementExamples/fetchExampleModel';
+import { useViewerStore } from '@/store';
 
 interface ElementExamplesTabProps {
   /** The dialog being open — what counts as the user asking for the list. */
   open: boolean;
+  /** Close the dialog once something has been placed. */
+  onPlaced?: () => void;
 }
 
-export function ElementExamplesTab({ open }: ElementExamplesTabProps) {
+export function ElementExamplesTab({ open, onPlaced }: ElementExamplesTabProps) {
   const { catalog, loading, error, load } = useElementExamples(open);
   const entries = catalog?.entries ?? [];
+
+  const activeModelId = useViewerStore((s) => s.activeModelId);
+  const models = useViewerStore((s) => s.models);
+  const placeElementExample = useViewerStore((s) => s.placeElementExample);
+  const [placing, setPlacing] = useState<string | null>(null);
+
+  /**
+   * The storey to place into: the first one the model has.
+   *
+   * A stand-in for a proper pick, and a stated one. Placing by CLICK — the
+   * Add-Element flow's `addElementType`, which resolves the storey from where
+   * the cursor lands — is the right home for this and needs a place-mode of
+   * its own; until then the object lands at the model origin of the first
+   * storey, where it can be moved.
+   */
+  const firstStoreyId = (() => {
+    const store = activeModelId ? models.get(activeModelId)?.ifcDataStore : null;
+    const storeys = store?.entityIndex.byType.get('IFCBUILDINGSTOREY');
+    return storeys?.[0] ?? null;
+  })();
+
+  const place = async (entry: ElementExample) => {
+    if (!activeModelId || firstStoreyId === null) {
+      toast.error('Kein Modell offen, in das platziert werden könnte.');
+      return;
+    }
+    setPlacing(entry.id);
+    try {
+      const fetched = await fetchExampleModel(
+        exampleFileUrl(DEFAULT_ELEMENT_EXAMPLES_URL, entry.id),
+      );
+      if (!fetched.ok) {
+        toast.error(fetched.error);
+        return;
+      }
+      const result = placeElementExample(activeModelId, firstStoreyId, {
+        example: fetched.model,
+        position: [0, 0, 0],
+        exampleId: entry.id,
+      });
+      if ('error' in result) {
+        toast.error(result.error);
+        return;
+      }
+      const companions = fetched.model.companions.length;
+      toast.success(
+        companions > 0
+          ? `${entry.name} platziert — mit ${companions} zugehörigen Körper${companions === 1 ? '' : 'n'}. Im Bild sichtbar nach Export und Neuladen.`
+          : `${entry.name} platziert. Im Bild sichtbar nach Export und Neuladen.`,
+      );
+      onPlaced?.();
+    } finally {
+      setPlacing(null);
+    }
+  };
 
   return (
     <>
@@ -72,12 +140,13 @@ export function ElementExamplesTab({ open }: ElementExamplesTabProps) {
               <TableHead className="font-mono text-[10px] uppercase">Geändert</TableHead>
               <TableHead className="font-mono text-[10px] uppercase">Herausgeber</TableHead>
               <TableHead className="font-mono text-[10px] uppercase">Modell</TableHead>
+              <TableHead className="font-mono text-[10px] uppercase"> </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {entries.length === 0 && (
               <TableRow>
-                <TableCell colSpan={6} className="text-center text-[11px] font-mono text-zinc-500 py-6">
+                <TableCell colSpan={7} className="text-center text-[11px] font-mono text-zinc-500 py-6">
                   {loading ? 'Wird geladen …' : error ? 'Nichts geladen.' : 'Keine Elementbeispiele.'}
                 </TableCell>
               </TableRow>
@@ -92,13 +161,9 @@ export function ElementExamplesTab({ open }: ElementExamplesTabProps) {
                 <TableCell className="font-mono text-[10px] text-zinc-500">{entry.changed}</TableCell>
                 <TableCell className="font-mono text-[10px] text-zinc-500">{entry.organisation}</TableCell>
                 <TableCell>
-                  {/* A link to the file, not a "place" button.
-                      Placing an example means copying its real geometry into
-                      this model's overlay, which is not built yet. A button
-                      that dropped a box of the right size instead would look
-                      like it had worked and quietly throw away the modelling
-                      the example exists for. Until the real thing is here, the
-                      honest offer is the file. */}
+                  {/* The file stays on offer beside the button: an example is
+                      useful to download and study even when there is no model
+                      open to place it into. */}
                   <a
                     href={exampleFileUrl(DEFAULT_ELEMENT_EXAMPLES_URL, entry.id)}
                     download
@@ -107,6 +172,20 @@ export function ElementExamplesTab({ open }: ElementExamplesTabProps) {
                     <Download className="h-3 w-3" />
                     {entry.id}.ifc
                   </a>
+                </TableCell>
+                <TableCell>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 px-2 text-[10px] font-mono"
+                    disabled={placing !== null || !activeModelId || firstStoreyId === null}
+                    onClick={() => void place(entry)}
+                  >
+                    {placing === entry.id
+                      ? <Loader2 className="h-3 w-3 animate-spin" />
+                      : <MapPin className="h-3 w-3 mr-1" />}
+                    Platzieren
+                  </Button>
                 </TableCell>
               </TableRow>
             ))}
