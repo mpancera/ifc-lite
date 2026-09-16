@@ -105,8 +105,14 @@ export const EXTERNAL_SOURCES: readonly ExternalSourceInfo[] = [
   },
   {
     id: 'catalog',
-    label: 'Objekt- und Symbolkatalog',
-    purpose: 'Fachklassen und Plansymbole samt Zeichnungen, nur auf Anforderung. Gesendet wird kein Modellinhalt.',
+    label: 'Objekt-, Symbol- und Beispielkatalog',
+    // Die Elementbeispiele kamen 2026-09-16 dazu. Dieselbe Herkunft, dieselbe
+    // Art Inhalt und derselbe Satz "gesendet wird kein Modellinhalt" - aber
+    // der Text muss trotzdem nachgezogen werden, denn er ist die Grundlage,
+    // auf der jemand hier zustimmt. Eine Zustimmung stillschweigend auf mehr
+    // auszudehnen, als dasteht, waere genau das, wogegen die Aufteilung nach
+    // Quellen gebaut ist.
+    purpose: 'Fachklassen, Plansymbole samt Zeichnungen und produktneutrale Elementbeispiele, nur auf Anforderung. Gesendet wird kein Modellinhalt.',
     hosts: ['data-dictionary.ch'],
   },
 ];

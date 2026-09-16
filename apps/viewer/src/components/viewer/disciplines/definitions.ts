@@ -174,7 +174,7 @@ const PRODUCT_LIBRARY: DisciplineItem = {
   kind: 'dialog',
   Dialog: ProductLibraryPanel,
   label: 'Product Library',
-  tooltip: 'Den Firmenkatalog durchsehen und nachschlagen, welche Produkte in diesem Projekt verbaut sind',
+  tooltip: 'Firmenkatalog und produktneutrale Elementbeispiele durchsehen, und nachschlagen, welche Produkte in diesem Projekt verbaut sind',
   icon: Library,
 };
 

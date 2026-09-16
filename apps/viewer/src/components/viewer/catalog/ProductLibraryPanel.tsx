@@ -5,12 +5,21 @@
 /**
  * Product Library dialog — a bigger, dedicated surface for the element
  * catalog, complementing (not replacing) the Add Element panel's compact
- * picker. Two tabs:
+ * picker. Three tabs:
  *   - Firmenbibliothek: browse/import/reset the active catalog.
+ *   - Elementbeispiele: product-NEUTRAL reference objects published by the
+ *     dictionary, for the stage of a project where no article has been chosen
+ *     yet (see `lib/elementExamples/elementExamples.ts` for why that is a
+ *     different question from the one the Firmenbibliothek answers, and not a
+ *     poorer version of it).
  *   - Projekt-Produkte: which catalog products are actually placed in the
  *     current model, one row per shared `IfcXxxType`, instances underneath
  *     (see `lib/catalog/projectProducts.ts` for what this does and doesn't
  *     cover yet).
+ *
+ * The order is deliberate: neutral before specific reads backwards, but a
+ * user who HAS a company catalogue wants it first, and one who has not gets
+ * the seed data in that tab anyway and finds the examples in the next.
  *
  * A `Dialog` (matching `DataConnector`/`BulkPropertyEditor`'s pattern) so
  * it needs no integration with the workspace-panel registry's per-panel
@@ -43,6 +52,7 @@ import { toGlobalIdFromModels } from '@/store/globalId';
 import { useCatalogEntries } from '@/lib/catalog';
 import { getProjectProducts } from '@/lib/catalog/projectProducts';
 import { CatalogImportControls } from './CatalogImportControls';
+import { ElementExamplesTab } from './ElementExamplesTab';
 import { AasLinkCell } from './AasLinkCell';
 import { AAS_KIND } from '@/lib/aas/connectorPset';
 
@@ -106,6 +116,7 @@ export function ProductLibraryPanel({ trigger }: ProductLibraryPanelProps) {
         <Tabs defaultValue="library" className="flex-1 flex flex-col overflow-hidden">
           <TabsList className="mx-6 mt-4 w-fit shrink-0">
             <TabsTrigger value="library" className="font-mono text-xs">Firmenbibliothek</TabsTrigger>
+            <TabsTrigger value="examples" className="font-mono text-xs">Elementbeispiele</TabsTrigger>
             <TabsTrigger value="products" className="font-mono text-xs">Projekt-Produkte ({products.length})</TabsTrigger>
           </TabsList>
 
@@ -159,6 +170,10 @@ export function ProductLibraryPanel({ trigger }: ProductLibraryPanelProps) {
                 </TableBody>
               </Table>
             </ScrollArea>
+          </TabsContent>
+
+          <TabsContent value="examples" className="flex-1 overflow-hidden flex flex-col px-6 pb-6 pt-3 gap-3">
+            <ElementExamplesTab open={open} />
           </TabsContent>
 
           <TabsContent value="products" className="flex-1 overflow-hidden flex flex-col px-6 pb-6 pt-3 gap-2">
