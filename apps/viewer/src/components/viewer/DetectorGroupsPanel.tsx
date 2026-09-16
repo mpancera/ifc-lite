@@ -22,8 +22,7 @@ import { toast } from '@/components/ui/toast';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useViewerStore } from '@/store';
-import { readZones } from '@/lib/ifcZones/membership';
-import { themeOfZone } from '@/lib/ifcZones/themes';
+import { readInstallation } from '@/lib/detectorGroups/installation';
 import { authoredEntities } from '@/lib/mutations/authoredEntities';
 import { CIRCUIT_OBJECT_TYPE, readCircuits } from '@/lib/detectorGroups/circuits';
 import { findDisciplineSystem } from '@/lib/roles/disciplineRoles';
@@ -43,18 +42,24 @@ export function DetectorGroupsPanel({ onClose }: DetectorGroupsPanelProps) {
   const system = findDisciplineSystem(roleId);
   const theme = system?.objectType === 'GasDetection' ? 'gas-trigger' : 'fire-trigger';
 
-  const { zones, circuits } = useMemo(() => {
-    const view = activeModelId ? mutationViews.get(activeModelId) : undefined;
-    const entities = view ? authoredEntities(view) : [];
-    return {
-      zones: readZones(entities).filter((z) => themeOfZone(z.objectType)?.id === theme),
-      // Meldergruppen only — a Melderkreis is the same IFC class and a
-      // different thing; see `readCircuits`.
-      circuits: readCircuits(entities, CIRCUIT_OBJECT_TYPE),
-    };
-    // `mutationVersion` is the dependency that matters — both read the overlay.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeModelId, mutationViews, mutationVersion, theme]);
+  /**
+   * The file's zones and groups AND this session's, through the same reader
+   * the build action uses.
+   *
+   * Reading only the session was the defect: after exporting the work and
+   * opening the result, everything was in the file and this panel said the
+   * model had no trigger zone at all (Marc, 2026-09-16). One reader now, so
+   * the panel and the button it sits above cannot disagree about what exists.
+   */
+  const models = useViewerStore((s) => s.models);
+  const { zones, circuits } = useMemo(() => readInstallation(
+    activeModelId ? models.get(activeModelId)?.ifcDataStore : undefined,
+    activeModelId ? mutationViews.get(activeModelId) : undefined,
+    theme,
+  ),
+  // `mutationVersion`: both halves change with every edit.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [activeModelId, models, mutationViews, mutationVersion, theme]);
 
   const membersOf = useMemo(() => {
     const byName = new Map(circuits.map((c) => [c.name, c.memberIds.length]));

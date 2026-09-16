@@ -83,6 +83,7 @@ import {
   disciplineSystemName, findDisciplineSystem, normalizeRoleId, parsedDisciplineSystemOf,
 } from '@/lib/roles/disciplineRoles';
 import { parsedZonesOf, readZones, readZonesForDisplay } from '@/lib/ifcZones/membership';
+import { readInstallation } from '@/lib/detectorGroups/installation';
 import { themeOfZone } from '@/lib/ifcZones/themes';
 import { authoredEntities } from '@/lib/mutations/authoredEntities';
 import { overlayAttribute } from '@/lib/mutations/overlayAttribute';
@@ -3879,16 +3880,12 @@ export const createMutationSlice: StateCreator<
     // one fire compartment AND one Auslösezone, and building groups from both
     // would put every detector in two.
     const theme = system.objectType === 'GasDetection' ? 'gas-trigger' : 'fire-trigger';
-    // The file's zones AND this session's. Reading only the session was a real
-    // defect, and an invisible one: zones painted, exported and reloaded are
-    // parsed from then on, so the panel reported "keine Auslösezone gefunden"
-    // on a model that visibly had eighteen of them. Writing stays restricted
-    // to the session — see `readZonesForDisplay`; only READING is widened.
-    const zones = readZonesForDisplay(
-      parsedZonesOf(dataStore, RelationshipType.AssignsToGroup),
-      readZones(entities),
-    )
-      .filter((zone) => themeOfZone(zone.objectType)?.id === theme)
+    // The file's zones AND this session's, through `readInstallation` — the one
+    // reader the panel above this button also uses. Each having its own copy
+    // is how the panel came to say "keine Auslösezone im Modell" about a model
+    // whose zones this action could see perfectly well.
+    const installation = readInstallation(dataStore, view, theme);
+    const zones = installation.zones
       .map((zone) => ({ expressId: zone.expressId, name: zone.name, memberIds: zone.memberIds }));
     if (zones.length === 0) {
       return { error: 'Keine Auslösezone gefunden — zuerst Zonen anlegen und Räume hineinmalen.' };
@@ -3938,11 +3935,7 @@ export const createMutationSlice: StateCreator<
     // any other IfcDistributionCircuit in the file belongs to somebody else
     // and must not be extended. Without this, the second run after a reload
     // built a duplicate group for every zone.
-    const circuits = mergeOwnCircuits(
-      parsedCircuitsOf(dataStore, RelationshipType.AssignsToGroup, CIRCUIT_OBJECT_TYPE, 'IFCGROUP'),
-      readCircuits(entities, CIRCUIT_OBJECT_TYPE),
-    );
-    const plan = planCircuits({ zones, devices, circuits });
+    const plan = planCircuits({ zones, devices, circuits: installation.circuits });
 
     const touched = plan.entries.flatMap((entry) => entry.deviceIds);
     if (touched.length === 0) {
