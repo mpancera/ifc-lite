@@ -39,6 +39,12 @@ export { addWindowToStore, type WindowInStoreParams, type WindowBuildResult } fr
 export { addSensorToStore, type SensorInStoreParams, type SensorBuildResult, type SensorPredefinedType } from './in-store/sensor.js';
 export { addAnnotationToStore, type AnnotationInStoreParams, type AnnotationBuildResult, type AnnotationGeometry, type AnnotationPoint2D } from './in-store/annotation.js';
 export { addLibraryElementToStore, type LibraryElementInStoreParams, type LibraryElementBuildResult } from './in-store/library-element.js';
+export {
+  copySubgraph,
+  type CopySubgraphOptions,
+  type ReadSourceEntity,
+  type SourceEntity,
+} from './in-store/copy-subgraph.js';
 export { addLibraryTypeToStore, emitRelDefinesByType, type LibraryTypeInStoreParams, type LibraryTypeBuildResult } from './in-store/library-type.js';
 /**
  * Profile emit, for surfaces that RESHAPE an element rather than build one.
