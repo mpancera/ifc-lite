@@ -51,6 +51,17 @@ export interface LibraryTypeInStoreParams {
   ElementType?: string;
   /** PredefinedType enum value (without dots). Ignored on IFC2X3. */
   PredefinedType?: string;
+  /**
+   * `IfcRepresentationMap`s this type's occurrences show, for a library object
+   * whose geometry is written once and mapped per placement
+   * (`mapped-library-object.ts`).
+   *
+   * Given at CONSTRUCTION rather than patched in afterwards. A positional
+   * override would reach the exported file — the effective index applies it —
+   * but `getNewEntities()` would keep reporting the original `$`, and that is
+   * what the viewer reads for its own bookkeeping. One truth per entity.
+   */
+  RepresentationMapIds?: readonly number[];
   /** Flat "Technical Data"-style property bag, attached as a Pset once the Type entity exists. */
   TechnicalData?: Record<string, string | number | boolean>;
   /** Pset name for `TechnicalData`. Deliberately not `Pset_`-prefixed — that prefix is reserved for buildingSMART-standard sets. */
@@ -81,7 +92,9 @@ export function addLibraryTypeToStore(
     params.Description ?? null,
     null, // ApplicableOccurrence
     null, // HasPropertySets — see file doc: attached via editor.addPropertySet instead
-    null, // RepresentationMaps
+    params.RepresentationMapIds?.length
+      ? params.RepresentationMapIds.map((id) => `#${id}`)
+      : null, // RepresentationMaps
     params.Tag ?? null,
     params.ElementType ?? null,
   ];

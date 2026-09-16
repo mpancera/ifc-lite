@@ -40,6 +40,14 @@ export { addSensorToStore, type SensorInStoreParams, type SensorBuildResult, typ
 export { addAnnotationToStore, type AnnotationInStoreParams, type AnnotationBuildResult, type AnnotationGeometry, type AnnotationPoint2D } from './in-store/annotation.js';
 export { addLibraryElementToStore, type LibraryElementInStoreParams, type LibraryElementBuildResult } from './in-store/library-element.js';
 export {
+  addRepresentationMapToStore,
+  addMappedOccurrenceToStore,
+  emitRelAssignsToProduct,
+  type MappedOccurrenceParams,
+  type MappedOccurrenceResult,
+  type RepresentationMapParams,
+} from './in-store/mapped-library-object.js';
+export {
   copySubgraph,
   type CopySubgraphOptions,
   type ReadSourceEntity,
