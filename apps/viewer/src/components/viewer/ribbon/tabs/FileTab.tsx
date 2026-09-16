@@ -8,7 +8,10 @@
  */
 
 import React from 'react';
+import { Trash2 as Discard } from 'lucide-react';
 import { AddFile, CloudSources, Loading, OpenFile, Refresh, Share, CollabsRoom } from '@/icons';
+import { toast } from '@/components/ui/toast';
+import { collectChangedModels, totalChangeCount } from '@/lib/export/model-changes';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
 import { isCollabEnabled } from '@/lib/collab/config';
@@ -27,6 +30,41 @@ import {
 export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
   const { handleOpenClick, handleAddModelClick, handleRefresh, canRefresh, hasModelsLoaded, openShareDialog } = fileCommands;
   const { loading, models } = useIfc();
+
+  /**
+   * How much would be thrown away, and the throwing.
+   *
+   * The count is the same one the amber Export Changes button shows, read
+   * through the same collector: a Verwerfen that disagreed with it about how
+   * much there is would be the worst possible button.
+   */
+  const mutationVersion = useViewerStore((s) => s.mutationVersion);
+  const changeCount = React.useMemo(
+    () => totalChangeCount(collectChangedModels(useViewerStore.getState())),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mutationVersion is the edit signal
+    [mutationVersion],
+  );
+
+  const discardChanges = React.useCallback(() => {
+    // Asked once, plainly, with the number in it. This is the only
+    // irreversible thing on the tab — every export can be repeated.
+    const ok = globalThis.confirm(
+      `${changeCount} Änderungen dieser Sitzung verwerfen?
+
+`
+      + 'Das lässt sich nicht rückgängig machen. Die IFC-Datei auf der Platte '
+      + 'bleibt unverändert; neu geladen wird sie so, wie sie dort steht.',
+    );
+    if (!ok) return;
+
+    const state = useViewerStore.getState();
+    for (const modelId of state.models.keys()) state.clearMutations(modelId);
+    // The saved session goes with it: `clearMutations` bumps the mutation
+    // version, the autosave sees an empty overlay and deletes the snapshot —
+    // which is the documented path, not a side effect to rely on quietly.
+    toast.success('Änderungen verworfen — Seite neu laden, damit auch die '
+      + 'erzeugte Geometrie aus der Ansicht verschwindet');
+  }, [changeCount]);
 
   // Collaboration: the Share cluster is gated behind the collab feature flag.
   // The ShareDialog itself (and its `ifc-lite:open-share-dialog` listener)
@@ -76,6 +114,21 @@ export function FileTab({ fileCommands }: { fileCommands: FileCommands }) {
             tooltip={models.size > 1 ? 'Refresh models from disk' : 'Refresh model from disk'}
             disabled={loading || !canRefresh}
             onClick={() => { void handleRefresh(); }}
+          />
+          {/* The counterpart to Export Changes, and it was missing.
+              Reloading the page does NOT discard: a session authored against
+              the same bytes is restored without asking, by design — that case
+              is a recovered tab, not a decision. So the only way back to the
+              file as it is on disk was to undo every step one at a time
+              (Marc, 2026-09-16, after a derivation wrote the wrong property
+              onto ninety-two rooms). */}
+          <RibbonSmallButton
+            icon={Discard}
+            label="Verwerfen"
+            tooltip={`Alle ${changeCount} Änderungen dieser Sitzung verwerfen — `
+              + 'auch den gespeicherten Stand. Die Datei auf der Platte bleibt unberührt'}
+            disabled={loading || changeCount === 0}
+            onClick={discardChanges}
           />
         </RibbonSmallStack>
       </RibbonGroup>
