@@ -34,8 +34,8 @@ describe('copySubgraph', () => {
     const editor = makeEditor();
     const read = reader({
       10: { type: 'IfcCartesianPoint', attributes: [[0, 0, 0]] },
-      11: { type: 'IfcAxis2Placement3D', attributes: ['#10', null, null] },
-      12: { type: 'IfcCircleProfileDef', attributes: ['.AREA.', null, '#11', 0.1] },
+      11: { type: 'IfcAxis2Placement3D', attributes: [10, null, null] },
+      12: { type: 'IfcCircleProfileDef', attributes: ['.AREA.', null, 11, 0.1] },
     });
 
     const root = copySubgraph(editor, read, 12, { substitutions: new Map() });
@@ -59,7 +59,7 @@ describe('copySubgraph', () => {
     const editor = makeEditor();
     const read = reader({
       20: { type: 'IfcGeometricRepresentationContext', attributes: [null, "'Model'", 3, 1e-5] },
-      21: { type: 'IfcShapeRepresentation', attributes: ['#20', "'Body'", "'SweptSolid'", []] },
+      21: { type: 'IfcShapeRepresentation', attributes: [20, 'Body', 'SweptSolid', []] },
     });
 
     const substitutions = new Map([[20, 2]]); // #2 is the target's own context
@@ -78,9 +78,9 @@ describe('copySubgraph', () => {
     const editor = makeEditor();
     const read = reader({
       30: { type: 'IfcCircleProfileDef', attributes: ['.AREA.', null, null, 0.1] },
-      31: { type: 'IfcExtrudedAreaSolid', attributes: ['#30', null, null, 0.5] },
-      32: { type: 'IfcExtrudedAreaSolid', attributes: ['#30', null, null, 0.8] },
-      33: { type: 'IfcBooleanResult', attributes: ['.DIFFERENCE.', '#31', '#32'] },
+      31: { type: 'IfcExtrudedAreaSolid', attributes: [30, null, null, 0.5] },
+      32: { type: 'IfcExtrudedAreaSolid', attributes: [30, null, null, 0.8] },
+      33: { type: 'IfcBooleanResult', attributes: ['.DIFFERENCE.', 31, 32] },
     });
 
     copySubgraph(editor, read, 33, { substitutions: new Map() });
@@ -96,8 +96,8 @@ describe('copySubgraph', () => {
     const editor = makeEditor();
     const read = reader({
       40: { type: 'IfcCircleProfileDef', attributes: ['.AREA.', null, null, 0.1] },
-      41: { type: 'IfcExtrudedAreaSolid', attributes: ['#40', null, null, 0.5] },
-      42: { type: 'IfcExtrudedAreaSolid', attributes: ['#40', null, null, 0.8] },
+      41: { type: 'IfcExtrudedAreaSolid', attributes: [40, null, null, 0.5] },
+      42: { type: 'IfcExtrudedAreaSolid', attributes: [40, null, null, 0.8] },
     });
 
     const substitutions = new Map<number, number>();
@@ -115,7 +115,7 @@ describe('copySubgraph', () => {
     const read = reader({
       50: { type: 'IfcCartesianPoint', attributes: [[0, 0, 0]] },
       51: { type: 'IfcPresentationLayerAssignment', attributes: ["'Layer'", null, [], null] },
-      52: { type: 'IfcShapeRepresentation', attributes: [null, "'Body'", "'Brep'", ['#50', '#51']] },
+      52: { type: 'IfcShapeRepresentation', attributes: [null, 'Body', 'Brep', [50, 51]] },
     });
 
     const root = copySubgraph(editor, read, 52, {
@@ -131,8 +131,8 @@ describe('copySubgraph', () => {
   it('refuses a cyclic graph rather than paste something wrong', () => {
     const editor = makeEditor();
     const read = reader({
-      60: { type: 'IfcBooleanResult', attributes: ['.UNION.', '#61', null] },
-      61: { type: 'IfcBooleanResult', attributes: ['.UNION.', '#60', null] },
+      60: { type: 'IfcBooleanResult', attributes: ['.UNION.', 61, null] },
+      61: { type: 'IfcBooleanResult', attributes: ['.UNION.', 60, null] },
     });
 
     expect(() => copySubgraph(editor, read, 60, { substitutions: new Map() }))
@@ -144,7 +144,7 @@ describe('copySubgraph', () => {
     // a solid with no profile, which renders as nothing and reads as fine.
     const editor = makeEditor();
     const read = reader({
-      70: { type: 'IfcExtrudedAreaSolid', attributes: ['#71', null, null, 0.5] },
+      70: { type: 'IfcExtrudedAreaSolid', attributes: [71, null, null, 0.5] },
     });
 
     expect(() => copySubgraph(editor, read, 70, { substitutions: new Map() }))
@@ -155,7 +155,7 @@ describe('copySubgraph', () => {
     const editor = makeEditor();
     const read = reader({
       80: { type: 'IfcCartesianPoint', attributes: [[0, 0, 0]] },
-      81: { type: 'IfcPolyline', attributes: [['#80', '#80']] },
+      81: { type: 'IfcPolyline', attributes: [[80, 80]] },
     });
 
     const root = copySubgraph(editor, read, 81, { substitutions: new Map() });
@@ -165,5 +165,48 @@ describe('copySubgraph', () => {
     // reference. A reader checking for closure on reference equality must
     // still see it closed after the copy.
     expect(points[0]).toBe(points[1]);
+  });
+  it('writes a reference as "#n", though the source spells it as a number', () => {
+    // THE TWO SIDES DISAGREE, and a first version of this file got it wrong.
+    // `extractEntity` hands a reference back as a plain NUMBER; an entity
+    // authored through the overlay must carry the STRING. A number written
+    // into the slot is a STEP integer, `authoredEntityRefs` sees no reference
+    // there, and the child drops out of the export closure — leaving a solid
+    // whose profile is missing from the file.
+    const editor = makeEditor();
+    const read = reader({
+      90: { type: 'IfcCartesianPoint', attributes: [[0, 0, 0]] },
+      91: { type: 'IfcPolyline', attributes: [[90, 90]] },
+    });
+
+    const root = copySubgraph(editor, read, 91, { substitutions: new Map() });
+    const points = written(editor).get(root)!.attributes[0] as string[];
+
+    expect(points).toHaveLength(2);
+    for (const point of points) expect(point).toMatch(/^#\d+$/);
+    expect(points[0]).toBe(points[1]);
+  });
+
+  it('quotes a string that STEP would otherwise read as a token', () => {
+    // The extractor hands strings back UNQUOTED, so a Name whose text happens
+    // to be `#12` or `.FOO.` arrives indistinguishable from a reference or an
+    // enum. The serializer's own comment names this one.
+    const editor = makeEditor();
+    const read = reader({
+      95: {
+        type: 'IfcSensor',
+        attributes: ['0guid', null, '#12', '.NOTAREALENUM.', null, null, null, null, '.SMOKESENSOR.'],
+        // Only the LAST attribute was a bare enum in the source.
+        enumAttrIndices: [8],
+      },
+    });
+
+    const root = copySubgraph(editor, read, 95, { substitutions: new Map() });
+    const sensor = written(editor).get(root)!;
+
+    expect(sensor.attributes[2]).toBe("'#12'");
+    expect(sensor.attributes[3]).toBe("'.NOTAREALENUM.'");
+    // The real enum keeps its dots and stays an enum.
+    expect(sensor.attributes[8]).toBe('.SMOKESENSOR.');
   });
 });

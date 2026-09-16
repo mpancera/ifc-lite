@@ -43,6 +43,15 @@ import type { IfcAttributeValue, StoreEditor } from '@ifc-lite/mutations';
 export interface SourceEntity {
   type: string;
   attributes: IfcAttributeValue[];
+  /**
+   * Which attributes the SOURCE spelled as bare enums (`.USERDEFINED.`).
+   *
+   * The extractor's token-kind side channel. Without it a `Name` whose text is
+   * literally `.FOO.` cannot be told from an enum, and the copy would write it
+   * as one. Optional, because a producer may not track it — then the
+   * conservative reading applies and such a string is quoted.
+   */
+  enumAttrIndices?: readonly number[];
 }
 
 /** Read an entity out of the source file. `null` for an id that is not there. */
@@ -79,12 +88,41 @@ export interface CopySubgraphOptions {
  */
 const MAX_DEPTH = 64;
 
-/** `"#42"` → `42`, for anything else `null`. */
+/**
+ * The id a reference points at — and in the SOURCE, a reference is a NUMBER.
+ *
+ * THE TWO SIDES SPELL IT DIFFERENTLY, and it cost a wrong first version of
+ * this file to notice. `EntityExtractor.extractEntity` hands a reference back
+ * as a plain number (`resolve-source.ts`'s `asNumber` reads it the same way),
+ * while an entity AUTHORED through the overlay must carry the string `"#42"`:
+ * a number in that slot is a STEP integer, `authoredEntityRefs` sees no
+ * reference, and the child silently drops out of the export closure.
+ *
+ * So this reads the source's spelling and {@link copySubgraph} writes the
+ * overlay's. A STRING that looks like `#42` is deliberately NOT a reference
+ * here — in extractor output that is a Name whose text happens to look like
+ * one, and treating it as a reference is how it would be destroyed.
+ */
 function referencedId(value: IfcAttributeValue): number | null {
-  if (typeof value !== 'string' || value.charCodeAt(0) !== 0x23 /* # */) return null;
-  const id = Number(value.slice(1));
-  return Number.isInteger(id) && id > 0 ? id : null;
+  if (typeof value !== 'number') return null;
+  return Number.isInteger(value) && value > 0 ? value : null;
 }
+
+/**
+ * A string that STEP would read as something other than a string.
+ *
+ * The extractor hands back strings UNQUOTED, so a `Name` whose text happens to
+ * be `.FOO.` or `#12` arrives indistinguishable from an enum or a reference —
+ * and the overlay would write it as one. The serializer's own comment names
+ * this ("a Name of `#12` would silently become an entity reference"), so the
+ * few that look like a token get the explicit quotes that force a string.
+ *
+ * Enums are safe without this: the extractor returns them dotted AND the
+ * attribute is a real enum, so writing it back dotted is right. Only a string
+ * that merely LOOKS dotted needs protecting, which is why this is applied to
+ * attributes the source did not mark as enums.
+ */
+const LOOKS_LIKE_TOKEN = /^(?:#\d+|\$|\*|\.[A-Za-z0-9_]+\.)$/;
 
 /**
  * Copy `rootId` and everything below it, returning its new express id.
@@ -128,7 +166,10 @@ export function copySubgraph(
     }
 
     onPath.add(id);
-    const attributes = source.attributes.map((value) => remap(value, depth + 1));
+    const enums = new Set(source.enumAttrIndices ?? []);
+    const attributes = source.attributes.map((value, index) =>
+      remap(value, depth + 1, enums.has(index)),
+    );
     onPath.delete(id);
 
     const target = editor.addEntity(source.type, attributes).expressId;
@@ -143,7 +184,11 @@ export function copySubgraph(
     return source !== null && drop.has(source.type);
   };
 
-  const remap = (value: IfcAttributeValue, depth: number): IfcAttributeValue => {
+  const remap = (
+    value: IfcAttributeValue,
+    depth: number,
+    isEnum = false,
+  ): IfcAttributeValue => {
     if (Array.isArray(value)) {
       const members: IfcAttributeValue[] = [];
       for (const member of value) {
@@ -158,12 +203,18 @@ export function copySubgraph(
       return members;
     }
     const id = referencedId(value);
-    if (id === null) return value;
-    // At a single-valued slot a dropped reference becomes `$`. That is only
-    // correct where the attribute is OPTIONAL, which is why `drop` is for
-    // entities the caller knows to be optional decoration.
-    if (dropped(id)) return null;
-    return `#${copy(id, depth)}`;
+    if (id !== null) {
+      // At a single-valued slot a dropped reference becomes `$`. That is only
+      // correct where the attribute is OPTIONAL, which is why `drop` is for
+      // entities the caller knows to be optional decoration.
+      if (dropped(id)) return null;
+      return `#${copy(id, depth)}`;
+    }
+    // Force the quotes on a string that STEP would otherwise read as a token.
+    if (!isEnum && typeof value === 'string' && LOOKS_LIKE_TOKEN.test(value.trim())) {
+      return `'${value}'`;
+    }
+    return value;
   };
 
   return copy(rootId, 0);
