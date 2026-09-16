@@ -205,8 +205,32 @@ export function duplicateInStore(
     : null;                                                       // OwnerHistory (preserved; null when source omitted it)
   cloned[2] = duplicateName;                                      // Name
   cloned[5] = `#${placement.expressId}`;         // ObjectPlacement
-  // cloned[6] (Representation) intentionally untouched — share geometry.
+  // Representation: the SAME geometry, but respelled as a reference.
+  //
+  // "Intentionally untouched" is what stood here, and it was wrong. The
+  // extractor hands a reference back as a plain NUMBER, while an entity
+  // authored through the overlay must carry the STRING `"#13"` — a number in
+  // that slot serialises as a STEP INTEGER. The duplicate therefore exported
+  // as `IFCWALL(...,$,$,#43,13,'W1',.STANDARD.)` where the source has `#13`:
+  // an integer where the schema wants an `IfcProductRepresentation`, so a
+  // strict reader rejects the record and a lenient one shows a duplicate with
+  // no geometry.
+  //
+  // It went unnoticed because the unit test hand-writes its source attributes
+  // with string references (`'#99'`) — a shape the parser never produces, so
+  // the test pinned the fixture's spelling rather than the parser's. The
+  // regression test for this goes through the real parser end to end.
+  cloned[6] = source.representationId !== null ? `#${source.representationId}` : null;
   // cloned[7] (Tag) — leave the source tag; STEP allows duplicate tags.
+  //
+  // WHAT THIS STILL DOES NOT FIX, and cannot from here: any OTHER
+  // reference-valued attribute beyond index 8. In extractor output a
+  // reference and an integer are the same JavaScript number — `IFCSPHERE(#2,3.)`
+  // reads as `[2, 3]` — so nothing at this level can tell one from the other.
+  // `representationId` is fixable only because `resolveDuplicateSource`
+  // resolved it separately, on the parser side, where the raw text was still
+  // there. A product subtype with a further reference attribute would still
+  // copy it as an integer.
 
   const duplicate = editor.addEntity(source.type, cloned);
 

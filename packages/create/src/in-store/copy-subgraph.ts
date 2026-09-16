@@ -14,6 +14,20 @@
  * the product's `Representation`, and the graph has to arrive here with every
  * express id renumbered into this model's space.
  *
+ * # !! NOT USABLE YET — THE INPUT IT WANTS DOES NOT EXIST !!
+ * This takes a `SourceEntity` whose references are distinguishable from its
+ * numbers. `EntityExtractor.extractEntity` does NOT give that:
+ * `IFCEXTRUDEDAREASOLID(#10,#2,$,3.)` reads back as `[10, 2, null, 3]`, and
+ * `IFCSPHERE(#2,3.)` as `[2, 3]`. A reference and a plain number are the same
+ * JavaScript number, so feeding extractor output to this would copy an
+ * extrusion DEPTH of 3 as a reference to entity #3 — silently, into a file
+ * that then looks plausible.
+ *
+ * So no caller may hand it extractor output. The reader it needs must come
+ * from the record's RAW STEP text, where `#10` and `3.` are still different
+ * things, and that reader is the next piece of work. Nothing calls this today.
+ * (Same root cause as the `Representation` defect fixed in `duplicate.ts`.)
+ *
  * # Parser-free, on purpose
  * The source is reached through a `ReadSourceEntity` callback, exactly as
  * `duplicate.ts` takes already-extracted attributes: `@ifc-lite/create` has no
