@@ -160,7 +160,9 @@ export async function handleSelectionClick(ctx: MouseHandlerContext, e: MouseEve
         toast.error("Couldn't read cut point");
         return;
       }
-      const cursorIfc = rendererPointToIfcStoreyLocal(cutPoint);
+      const cursorIfc = rendererPointToIfcStoreyLocal(
+        cutPoint, storeyOfElement(targetModelId, targetExpressId),
+      );
       const result = state.splitSlabByLine(
         targetModelId,
         targetExpressId,
@@ -226,7 +228,9 @@ export async function handleSelectionClick(ctx: MouseHandlerContext, e: MouseEve
         toast.error("Couldn't read anchor point");
         return;
       }
-      const anchorIfc = rendererPointToIfcStoreyLocal(anchorPoint);
+      const anchorIfc = rendererPointToIfcStoreyLocal(
+        anchorPoint, storeyOfElement(targetModelId, targetExpressId),
+      );
       state.setSlabCutAnchor(
         [anchorIfc[0], anchorIfc[1]],
         slabFootprint.footprint,
@@ -400,6 +404,23 @@ function resolveActiveModelId(): string | null {
  * the floor — matches construction-tool placement intuition. Refine
  * via the Raw STEP tab if needed.
  */
+/**
+ * The storey an element sits in, for callers that hold an element rather than a
+ * storey — the split tool, the wall-endpoint handles.
+ *
+ * `null` for an element outside the spatial structure, which makes
+ * `rendererPointToIfcStoreyLocal` fall back to the identity: no worse than
+ * before, and the only honest answer when nothing says which floor it is on.
+ */
+export function storeyOfElement(
+  modelId: string,
+  expressId: number,
+): { modelId: string; storeyId: number } | undefined {
+  const dataStore = useViewerStore.getState().models.get(modelId)?.ifcDataStore;
+  const storeyId = dataStore?.spatialHierarchy?.elementToStorey.get(expressId);
+  return storeyId === undefined ? undefined : { modelId, storeyId };
+}
+
 export function rendererPointToIfcStoreyLocal(
   point: { x: number; y: number; z: number },
   storey?: { modelId: string; storeyId: number },
@@ -618,7 +639,9 @@ export function handleSplitHover(ctx: MouseHandlerContext, x: number, y: number)
         if (store.splitMode === 'aiming') store.clearSplitHover();
         return;
       }
-      const cursorIfc = rendererPointToIfcStoreyLocal(worldPoint);
+      const cursorIfc = rendererPointToIfcStoreyLocal(
+        worldPoint, storeyOfElement(targetModelId, targetExpressId),
+      );
 
       // Project onto the target. Try wall (1D), then linear (1D),
       // then slab (2D — uses the cursor XY directly as a candidate

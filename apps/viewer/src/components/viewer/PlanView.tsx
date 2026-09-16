@@ -118,7 +118,8 @@ import {
   RAD_TO_DEG, DEG_TO_RAD,
 } from '@/lib/plan/planRotation';
 import {
-  drawingDeltaToStoreyLocal, storeyFrameOf,
+  drawingDeltaToStoreyLocal, drawingToStoreyLocal, storeyFrameOf, storeyLocalToDrawing,
+  worldShiftOf,
 } from '@/lib/placement/storeyFrameForModel';
 import { pickInPlan, planDrawingToScreen, planScreenToDrawing, planPointToRenderer, planPointToStoreyLocal } from '@/lib/plan/planPick';
 import { isPlanControlTarget } from '@/lib/plan/planControlTarget';
@@ -403,16 +404,17 @@ export function PlanView({
    * The storey's own frame — a turn about Z plus a shift, read from the
    * placement chain. See `lib/placement/storeyFrame.ts`.
    *
-   * Used here only by the move gizmo, which sends a DELTA: the placement it
-   * writes into is expressed in this frame, so a drag to the right on screen
-   * has to be turned into the frame before it means "to the right" there.
-   *
-   * The reshape handles deliberately do NOT use it — see the note where the
-   * outline is read.
+   * Every conversion between what is DRAWN and what is WRITTEN goes through
+   * it: the reshape handles, both reading and committing, and the move gizmo,
+   * which sends a delta.
    */
   const storeyFrame = useMemo(
     () => storeyFrameOf(models.get(storeyModelId ?? '')?.ifcDataStore, storey?.expressId),
     [models, storeyModelId, storey],
+  );
+  const worldShift = useMemo(
+    () => worldShiftOf(geometryResult?.coordinateInfo),
+    [geometryResult],
   );
 
   const roomShape = useMemo(() => {
@@ -425,26 +427,24 @@ export function PlanView({
     if (type !== 'IfcSpace') return null;
     const fp = readSlabFootprint(storeyModelId, selectedEntity.expressId);
     if (!fp || fp.footprint.length < 3) return null;
-    // Storey-local IFC XY to drawing space: drawing y is IFC y negated.
+    // Storey-local IFC XY to drawing space, through the STOREY'S OWN FRAME.
     //
-    // NOT through the storey frame, deliberately, and this is a retreat. Read
-    // and commit were both moved onto the frame — a pair that is exact on
-    // paper and round-trips to the micrometre in isolation. On a real model it
-    // moved a room that nobody had dragged (Marc, 2026-09-16, after a clean
-    // reload). Something between here and `reshapeRoomOutline` does not agree
-    // with this mapping, and until it is MEASURED rather than reasoned about,
-    // the pair goes back to the one that has always been self-consistent.
-    //
-    // The cost is a known display fault: on a building turned on its site the
-    // handles sit where the room was drawn rather than where its mesh is. That
-    // is visible and harmless. The alternative was a gesture that silently
-    // moves correct geometry, which is neither.
+    // This was tried, retreated from when a room appeared to move on an
+    // open-and-close, and restored once the move was MEASURED rather than
+    // argued about: replaying `resolveSlabEditChain` → `reshapeRoomOutline`
+    // over all 92 rooms of the real file showed the stored coordinates coming
+    // back bit-identical every time. Nothing was ever written wrong. What
+    // moved was the PREVIEW mesh, which `buildElementMesh` rebuilt without the
+    // placement chain — so the room jumped to where the identity mapping puts
+    // it and returned on the next reload. That is fixed at its source, and
+    // these handles can now sit on the mesh instead of beside it.
     return {
       expressId: selectedEntity.expressId,
-      outline: fp.footprint.map(([x, y]) => ({ x, y: -y })),
+      outline: fp.footprint.map((xy) => storeyLocalToDrawing(xy, storeyFrame, worldShift)),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomShapeEditKey, selectedEntity, storeyModelId, models, readSlabFootprint, mutationVersion]);
+  }, [roomShapeEditKey, selectedEntity, storeyModelId, models, readSlabFootprint, mutationVersion,
+    storeyFrame, worldShift]);
 
   /**
    * Where the move gizmo sits: the selected object's centre, in drawing space.
@@ -508,15 +508,16 @@ export function PlanView({
     return {
       expressId: selectedEntity.expressId,
       unit,
-      start: { x: ends.start[0] * unit, y: -ends.start[1] * unit },
-      end: { x: ends.end[0] * unit, y: -ends.end[1] * unit },
+      start: storeyLocalToDrawing([ends.start[0] * unit, ends.start[1] * unit], storeyFrame, worldShift),
+      end: storeyLocalToDrawing([ends.end[0] * unit, ends.end[1] * unit], storeyFrame, worldShift),
       // The HEIGHT is carried through untouched, in the file's own unit — a
       // plan has nothing to say about it.
       startZ: ends.start[2],
       endZ: ends.end[2],
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomShapeEditKey, selectedEntity, storeyModelId, models, readWallEndpoints, mutationVersion]);
+  }, [roomShapeEditKey, selectedEntity, storeyModelId, models, readWallEndpoints, mutationVersion,
+    storeyFrame, worldShift]);
 
   /**
    * What a dragged corner can land on: the CUT lines, which at plan height are
@@ -2101,11 +2102,12 @@ export function PlanView({
             const result = resizeWall(
               storeyModelId,
               wallEnds.expressId,
-              // Back to IFC's frame AND the file's unit, with each end's own
-              // height preserved. Deliberately the plain inverse of the read
-              // above — see the room outline's note.
-              [a.x / wallEnds.unit, -a.y / wallEnds.unit, wallEnds.startZ],
-              [b.x / wallEnds.unit, -b.y / wallEnds.unit, wallEnds.endZ],
+              // Back through the storey's frame AND into the file's unit,
+              // with each end's own height preserved.
+              [...drawingToStoreyLocal(a, storeyFrame, worldShift)
+                .map((v) => v / wallEnds.unit) as [number, number], wallEnds.startZ],
+              [...drawingToStoreyLocal(b, storeyFrame, worldShift)
+                .map((v) => v / wallEnds.unit) as [number, number], wallEnds.endZ],
             );
             if (result.ok) toast.success(`Wand geändert — ${result.newLength.toFixed(2)} m`);
             else toast.error(result.reason);
@@ -2128,10 +2130,13 @@ export function PlanView({
             const result = reshapeSpace(
               storeyModelId,
               roomShape.expressId,
-              // The exact inverse of how the outline was read, and nothing
-              // more — see the note there. Opening the handles and closing
-              // them again must write back what it read.
-              next.map((p) => ({ x: p.x, y: -p.y })),
+              // The exact inverse of how the outline was read — opening the
+              // handles and closing them again writes back what it read, to
+              // the micrometre.
+              next.map((p) => {
+                const [x, y] = drawingToStoreyLocal(p, storeyFrame, worldShift);
+                return { x, y };
+              }),
             );
             if ('error' in result) toast.error(result.error);
             else toast.success(`Raum umgeformt — ${result.area.toFixed(2)} m²`);

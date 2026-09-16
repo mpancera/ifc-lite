@@ -150,3 +150,42 @@ describe('the identity frame', () => {
     assert.deepEqual(worldToStoreyLocal(IDENTITY_STOREY_FRAME, p), p);
   });
 });
+
+describe('the pair the reshape handles use', () => {
+  // Read one way, commit the other. This pair is what decides whether opening
+  // the shape editor and closing it again leaves a room where it was — the
+  // question that cost a day, and the answer that has to stay pinned.
+  const FRAME = { origin: [2665486, 1259317.35, 381.3] as const, rotationRad: NINE_DEGREES };
+  const SHIFT = { x: 2665490.9, y: 1259320.2 };
+
+  function toDrawing(p: readonly [number, number]) {
+    const world = storeyLocalToWorld(FRAME, [p[0], p[1], 0]);
+    return { x: world[0] - SHIFT.x, y: -(world[1] - SHIFT.y) };
+  }
+  function toLocal(p: { x: number; y: number }): [number, number] {
+    const local = worldToStoreyLocal(FRAME, [p.x + SHIFT.x, -p.y + SHIFT.y, 0]);
+    return [local[0], local[1]];
+  }
+
+  it('returns a room outline unchanged when nothing was dragged', () => {
+    const outline: Array<readonly [number, number]> = [
+      [14.89, 10.06], [19.32, 10.06], [19.32, 17.68], [14.89, 17.68],
+    ];
+
+    for (const p of outline) {
+      const back = toLocal(toDrawing(p));
+      assert.ok(Math.hypot(back[0] - p[0], back[1] - p[1]) < 1e-6,
+        `${JSON.stringify(p)} came back as ${JSON.stringify(back)}`);
+    }
+  });
+
+  it('does not creep over repeated open-and-close', () => {
+    // The failure mode that matters is not a jump, it is a drift nobody
+    // notices until the room is metres from its walls.
+    let p: [number, number] = [14.89, 10.06];
+    for (let i = 0; i < 50; i += 1) p = toLocal(toDrawing(p));
+
+    assert.ok(Math.hypot(p[0] - 14.89, p[1] - 10.06) < 1e-6,
+      `after 50 round trips: ${JSON.stringify(p)}`);
+  });
+});

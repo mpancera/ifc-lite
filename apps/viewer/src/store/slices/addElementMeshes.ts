@@ -22,6 +22,7 @@
  */
 
 import type { MeshData } from '@ifc-lite/geometry';
+import { storeyLocalToWorld, type StoreyFrame } from '@/lib/placement/storeyFrame';
 import type {
   AddElementType,
   AddElementWallParams,
@@ -94,6 +95,22 @@ export interface ElementBuildContext {
   storeyElevation: number;
   /** Per-element-type discriminated params + click points. */
   payload: ElementMeshPayload;
+  /**
+   * The storey's own frame — a turn about Z plus a shift, from its placement
+   * chain. Omitted means the identity, which is what this always assumed.
+   *
+   * Everything below reads STOREY-LOCAL coordinates and writes renderer-world
+   * vertices, and the step between the two was missing: a building turned on
+   * its site has a `RefDirection` on the site placement, and the real geometry
+   * pipeline honours it while this preview mesh did not. So a room that had
+   * just been reshaped jumped to where the identity mapping puts it, and came
+   * back on the next reload — the file was never wrong, only the picture
+   * (Marc, 2026-09-16).
+   *
+   * Applied to the INPUT points, before the IFC→renderer axis swap, because
+   * that is the space the frame is expressed in.
+   */
+  frame?: StoreyFrame;
 }
 
 export type ElementMeshPayload =
@@ -115,7 +132,8 @@ export type ElementMeshPayload =
  * Returns `null` when the payload is degenerate (zero-length wall etc.).
  */
 export function buildElementMesh(ctx: ElementBuildContext): MeshData | null {
-  const { type, globalId, storeyElevation, payload } = ctx;
+  const { type, globalId, storeyElevation } = ctx;
+  const payload = placePayload(ctx.payload, ctx.frame);
   switch (payload.type) {
     case 'wall':
     case 'beam':
@@ -162,6 +180,35 @@ export function buildElementMesh(ctx: ElementBuildContext): MeshData | null {
       return buildPolygonExtrusion(globalId, type, payload.corners, height, storeyElevation, /* extrudeUp */ true);
     }
   }
+}
+
+/** One storey-local point, in the world the renderer draws. Z is untouched:
+ *  the frame's own elevation is already in `storeyElevation`. */
+function place(p: Vec3, frame: StoreyFrame | undefined): Vec3 {
+  if (!frame) return p;
+  const [x, y] = storeyLocalToWorld(frame, [p[0], p[1], 0]);
+  return [x, y, p[2]];
+}
+
+/**
+ * The payload with every point moved into the world.
+ *
+ * Done here, once, rather than in each builder: there are four shapes of
+ * payload and nine element types, and a frame applied in eight of them is a
+ * bug that only shows on one kind of element.
+ */
+function placePayload(
+  payload: ElementMeshPayload,
+  frame: StoreyFrame | undefined,
+): ElementMeshPayload {
+  if (!frame) return payload;
+  if ('corners' in payload) {
+    return { ...payload, corners: payload.corners.map((c) => place(c, frame)) };
+  }
+  if ('start' in payload) {
+    return { ...payload, start: place(payload.start, frame), end: place(payload.end, frame) };
+  }
+  return { ...payload, position: place(payload.position, frame) };
 }
 
 /**

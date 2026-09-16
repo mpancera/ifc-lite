@@ -106,6 +106,7 @@ import { overlayContainerOf } from '@/lib/persistence/storeAdapter';
 import { applySmartPropertyRules } from '@/lib/smartProperties/applyRules';
 import { toGlobalIdFromModels } from '../globalId.js';
 import { buildElementMesh, type ElementMeshPayload } from './addElementMeshes.js';
+import { storeyFrameOf } from '@/lib/placement/storeyFrameForModel';
 import { roomsByStorey, storeysOfElements } from '@/lib/roomTransfer/read-rooms';
 import { dominantAxis } from '@/lib/roomTransfer/plan-axis';
 import { liftSelectionToWholes } from '@/lib/decomposition/whole-of';
@@ -226,6 +227,7 @@ function materialiseGeneratedSpaces(
       type: 'space',
       globalId: toGlobalIdFromModels(get().models, modelId, result.spaceId),
       storeyElevation,
+      frame: storeyFrameOf(dataStore, storeyExpressId),
       payload: {
         type: 'space',
         // Width/Depth are the rectangle mode's inputs; the polygon branch
@@ -1669,6 +1671,7 @@ function runInStoreElementBuilder(
       type: meshPayload.type,
       globalId,
       storeyElevation,
+      frame: storeyFrameOf(dataStore, storeyExpressId),
       payload: meshPayload,
     });
     if (mesh) {
@@ -2465,8 +2468,21 @@ export const createMutationSlice: StateCreator<
     // found — a room dragged in the plan left its edit handles behind, halfway
     // between where it had been and where it was drawn.
     const unit = get().models.get(modelId)?.ifcDataStore?.lengthUnitScale ?? 1;
+    // ...and TURNED by the storey's frame. `delta` is expressed in the frame
+    // the placement is written in; the renderer draws in the world. On a
+    // building turned on its site the two differ by that turn, and without it
+    // the mesh slid off at an angle to the drag while the file recorded the
+    // right move — the picture and the numbers disagreeing again.
+    const moveFrame = storeyFrameOf(
+      dataStore,
+      dataStore.spatialHierarchy?.elementToStorey.get(expressId),
+    );
+    const c = Math.cos(moveFrame.rotationRad);
+    const sn = Math.sin(moveFrame.rotationRad);
+    const dxWorld = (delta[0] * c - delta[1] * sn) * unit;
+    const dyWorld = (delta[0] * sn + delta[1] * c) * unit;
     const rendererDelta: [number, number, number] = [
-      delta[0] * unit, delta[2] * unit, -delta[1] * unit,
+      dxWorld, delta[2] * unit, -dyWorld,
     ];
     get().setPendingMeshTranslations(new Map([[globalId, rendererDelta]]));
     // ...and the same delta into the mesh list, or every reader derived from it
@@ -2731,6 +2747,10 @@ export const createMutationSlice: StateCreator<
         type: 'wall',
         globalId,
         storeyElevation: bounds?.min.y ?? 0, // renderer Y base = IFC Z storey elevation
+        frame: storeyFrameOf(
+          get().models.get(modelId)?.ifcDataStore,
+          get().models.get(modelId)?.ifcDataStore?.spatialHierarchy?.elementToStorey.get(expressId),
+        ),
         payload: {
           type: 'wall',
           params: { Thickness: chain.thickness * unit, Height: chain.height * unit },
@@ -3507,6 +3527,7 @@ export const createMutationSlice: StateCreator<
       type: 'column',
       globalId: columnGlobalId,
       storeyElevation: storeyElevationCol,
+      frame: storeyFrameOf(dataStore, storeyExpressId),
       payload: {
         type: 'column',
         params: { Width: params.Width, Depth: params.Depth, Height: params.Height },
@@ -3802,6 +3823,7 @@ export const createMutationSlice: StateCreator<
       type: 'space',
       globalId,
       storeyElevation,
+      frame: storeyFrameOf(dataStore, storeyId),
       payload: {
         type: 'space',
         params: { Width: 0, Depth: 0, Height: result.height },

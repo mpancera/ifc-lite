@@ -43,7 +43,7 @@ import { useMemo, useRef } from 'react';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
 import { useCameraTickSubscription } from '@/hooks/useCameraTickSubscription';
-import { rendererPointToIfcStoreyLocal } from '../selectionHandlers';
+import { rendererPointToIfcStoreyLocal, storeyOfElement } from '../selectionHandlers';
 
 type Vec2 = { x: number; y: number };
 type Vec3 = { x: number; y: number; z: number };
@@ -168,7 +168,12 @@ export function WallEndpointOverlay() {
     if (typeof pickFn !== 'function') return null;
     const world = pickFn(clientX, clientY, drag.storeyElevation);
     if (!world) return null;
-    return rendererPointToIfcStoreyLocal(world);
+    // Through the wall's OWN storey frame: `resizeWall` writes these numbers
+    // into a placement expressed in it, and on a building turned on its site
+    // the identity conversion drags the end off at an angle to the cursor.
+    return rendererPointToIfcStoreyLocal(
+      world, storeyOfElement(endpoints.modelId, endpoints.expressId),
+    );
   };
 
   const onDragMove = (e: React.PointerEvent<SVGElement>) => {
