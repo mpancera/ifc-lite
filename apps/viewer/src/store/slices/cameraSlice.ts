@@ -42,6 +42,29 @@ export interface CameraSlice {
   /** Interactive orbit/pan/zoom restriction (embed `?controls=`, #2934). */
   interactionMode: ControlsMode;
   setInteractionMode: (mode: ControlsMode) => void;
+  /**
+   * The camera has been DELIBERATELY placed for the model now arriving, so the
+   * geometry pipeline must not frame it.
+   *
+   * Auto-fit exists because a viewer handed an unfamiliar model has to show
+   * it, and it runs from `useGeometryStreaming` — twice, once as soon as
+   * bounds are known and once when streaming finishes. Both happen LONG after
+   * the load call returned, so anything that positioned the camera around the
+   * load is overwritten afterwards, silently, and looks like the placement
+   * never happened.
+   *
+   * `userMovedCamera` is the existing guard and cannot answer this: it asks
+   * whether the pose drifted from a snapshot by more than half a metre, which
+   * is a sensible question about a building and the wrong one about a
+   * fire extinguisher a metre tall. "Was it placed on purpose" is not a
+   * distance.
+   *
+   * Set by whoever did the placing, cleared by the session reset — so it
+   * always speaks about the model on screen now, and a stale `true` cannot
+   * outlive the file it was set for.
+   */
+  cameraPlacedForModel: boolean;
+  setCameraPlacedForModel: (placed: boolean) => void;
   /** Same replay pattern as {@link pendingCameraRotation} — the embed applies
    *  `?controls=` on mount, before `Viewport` has registered its callbacks. */
   pendingInteractionMode: ControlsMode | null;
@@ -66,6 +89,7 @@ export const createCameraSlice: StateCreator<CameraSlice, [], [], CameraSlice> =
   projectionMode: DEFAULT_PROJECTION_MODE,
   interactionMode: DEFAULT_CONTROLS_MODE,
   pendingInteractionMode: null,
+  cameraPlacedForModel: false,
   onCameraRotationChange: null,
   cameraRotationListeners: new Set(),
   onScaleChange: null,
@@ -101,6 +125,7 @@ export const createCameraSlice: StateCreator<CameraSlice, [], [], CameraSlice> =
     actuator?.(interactionMode);
     set({ interactionMode, pendingInteractionMode: actuator ? null : interactionMode });
   },
+  setCameraPlacedForModel: (cameraPlacedForModel) => set({ cameraPlacedForModel }),
   setProjectionMode: (projectionMode) => {
     get().cameraCallbacks.setProjectionMode?.(projectionMode);
     set({ projectionMode });
@@ -195,6 +220,7 @@ export const cameraTeardown = defineSliceTeardown(
     'projectionMode',
     'interactionMode',
     'pendingInteractionMode',
+    'cameraPlacedForModel',
   ],
   {
     'session-reset': () => ({
@@ -203,6 +229,10 @@ export const cameraTeardown = defineSliceTeardown(
       projectionMode: DEFAULT_PROJECTION_MODE,
       interactionMode: DEFAULT_CONTROLS_MODE,
       pendingInteractionMode: null,
+      // Cleared here so the flag can only ever describe the model being
+      // loaded NOW. Whoever places the camera for the incoming file sets it
+      // after this reset has run.
+      cameraPlacedForModel: false,
     }),
     'model-removed': notApplicable,
     'all-models-cleared': notApplicable,

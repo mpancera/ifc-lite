@@ -39,6 +39,7 @@ import { resolvePresentationIds } from '@/lib/presentation/resolvePresentationId
 import { useViewerStore } from '@/store';
 import { toHostHiddenIfcTypes } from '@/lib/host-hidden-ifc-types.js';
 import type { EmbedViewerUrlParams } from '../bridge/urlParams.js';
+import { setKeepCamera } from '../bridge/keptViewpoint.js';
 
 /**
  * The host's `hideTypes` list, normalised, and PUBLISHED to the viewer store.
@@ -113,4 +114,14 @@ export function useEmbedUrlParams(urlParams: EmbedViewerUrlParams, modelReady: b
     controlsApplied.current = true;
     useViewerStore.getState().setInteractionMode(urlParams.controls);
   }, [urlParams.controls]);
+
+  // `?keepCamera=` likewise names no entity and must not wait for a model.
+  //
+  // It is armed AFTER the component's auto-load effect has already run, and
+  // that costs nothing: the first load is framed either way, and
+  // `captureViewpoint` finds no geometry on screen to keep. Every load after
+  // it goes through a bridge command, long past mount.
+  useEffect(() => {
+    setKeepCamera(urlParams.keepCamera === true);
+  }, [urlParams.keepCamera]);
 }

@@ -16,6 +16,7 @@
 import { useEffect, useRef } from 'react';
 import { useViewerStore } from '@/store';
 import { emitEvent } from '../bridge/handler.js';
+import { destructiveLoadRunning } from '../bridge/cameraIntent.js';
 
 /** Minimum spacing between two outbound CAMERA_CHANGED events (10Hz). */
 const CAMERA_EMIT_INTERVAL_MS = 100;
@@ -130,6 +131,16 @@ export function useEmbedBridgeEvents(): void {
     };
 
     const report = (rotation: CameraRotationLike) => {
+      // Nothing the camera does DURING a scene-replacing load is the user
+      // moving it: the session reset writes `cameraRotation` back to
+      // CAMERA_DEFAULTS, and the renderer echoes that through the realtime
+      // feed. Both arrive here looking exactly like an orbit.
+      //
+      // Both entry points are guarded at this one choke point rather than at
+      // the two call sites, because the store effect and the realtime feed
+      // deliver the SAME bogus pose by different routes, and a guard on one
+      // of them only halves the problem. See `destructiveLoadRunning`.
+      if (destructiveLoadRunning()) return;
       const previous = pending ?? lastSent;
       if (previous && previous.azimuth === rotation.azimuth && previous.elevation === rotation.elevation) {
         return;

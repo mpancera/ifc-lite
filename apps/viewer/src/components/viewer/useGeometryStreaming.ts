@@ -541,6 +541,15 @@ export function useGeometryStreaming(params: UseGeometryStreamingParams): void {
     // whether the data is actually usable, not just whether the
     // property exists.
     if (!cameraFittedRef.current) {
+      // Was the camera deliberately placed for this model? Then the fit below
+      // must leave it alone — but everything ELSE the branch does must still
+      // happen. `setSceneBounds` is the only place the camera learns the
+      // model's extent, and the orbit pivot and the near/far clipping hang off
+      // it, so skipping the branch would trade a framing bug for a clipping
+      // bug. The pose is put back instead of the fit being suppressed.
+      const placedPose = useViewerStore.getState().cameraPlacedForModel
+        ? poseOf(renderer)
+        : null;
       // The adaptive fit picks an SE-isometric pose for compact models
       // (today's behaviour) but switches to a side-on-along-the-alignment
       // pose for high-aspect-ratio bboxes (railway / road corridors).
@@ -604,6 +613,10 @@ export function useGeometryStreaming(params: UseGeometryStreamingParams): void {
       }
       if (fitted) {
         cameraFittedRef.current = true;
+        // Put the deliberate pose back, before the snapshot below records it.
+        // Recording the FIT's pose instead would tell the streaming-complete
+        // refit that nothing had moved, and it would fit a second time.
+        if (placedPose) restorePose(renderer, placedPose);
         // Populate the camera's cached scene bounds. The viewer streams meshes
         // directly (not via Renderer.loadGeometry), so this is the only place
         // the camera learns the bounds — consumers like the orbit-pivot
@@ -689,7 +702,15 @@ export function useGeometryStreaming(params: UseGeometryStreamingParams): void {
             r.getCamera().setOrbitAnchorBounds(robust);
             console.log(`[GeomStream] computeBounds: ${(performance.now() - t0).toFixed(0)}ms`);
             if (exactBounds) {
-              if (!userMovedCamera(r, cameraSnapshotRef.current)) {
+              // The placement flag is asked FIRST and separately from
+              // `userMovedCamera`: that guard measures a distance (half a
+              // metre), which answers well for a building and not at all for
+              // an object a metre tall, where a deliberate close-in view sits
+              // far inside the epsilon.
+              if (
+                !useViewerStore.getState().cameraPlacedForModel &&
+                !userMovedCamera(r, cameraSnapshotRef.current)
+              ) {
                 const canvas = r.getCanvas();
                 const canvasShort = Math.min(canvas?.height ?? 0, canvas?.width ?? 0);
                 const policy = r.getCamera().fitBoundsAdaptive(
@@ -1001,6 +1022,26 @@ function computeBounds(meshes: MeshData[]): Bounds | null {
   const maxSize = Math.max(maxX - minX, maxY - minY, maxZ - minZ);
   if (minX === Infinity || maxSize <= 0 || !Number.isFinite(maxSize)) return null;
   return { min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ } };
+}
+
+/** The camera's pose right now — position, target and up. */
+function poseOf(renderer: Renderer) {
+  const camera = renderer.getCamera();
+  return { position: camera.getPosition(), target: camera.getTarget(), up: camera.getUp() };
+}
+
+/**
+ * Put a pose back, without animating.
+ *
+ * Used to undo an auto-fit that had to RUN (the branch around it computes the
+ * scene bounds every consumer of clipping and the orbit pivot depends on) but
+ * must not be SEEN, because the camera was already placed on purpose.
+ */
+function restorePose(renderer: Renderer, pose: ReturnType<typeof poseOf>): void {
+  const camera = renderer.getCamera();
+  camera.setPosition(pose.position.x, pose.position.y, pose.position.z);
+  camera.setTarget(pose.target.x, pose.target.y, pose.target.z);
+  camera.setUp(pose.up.x, pose.up.y, pose.up.z);
 }
 
 function userMovedCamera(

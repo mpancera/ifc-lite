@@ -21,6 +21,7 @@ import { useViewerStore } from '@/store';
 import type { ViewerState } from '@/store';
 import { emitEvent } from '../bridge/handler.js';
 import { hostPoseAppliedToCurrentModel } from '../bridge/cameraIntent.js';
+import { hasKeptViewpoint } from '../bridge/keptViewpoint.js';
 import type { EmbedViewerUrlParams } from '../bridge/urlParams.js';
 
 export function useEmbedPostLoad(
@@ -69,7 +70,16 @@ export function useEmbedPostLoad(
       // so it preserves the orientation just asked for. The reverse order loses
       // the rotation, because `home`/`fitAll` animate and the snap would be
       // tweened away.
-      if (hostPoseAppliedToCurrentModel()) {
+      if (hasKeptViewpoint()) {
+        // `?keepCamera=1`: the view this model arrived into was deliberately
+        // carried over from the last one, so there is nothing to frame. Even
+        // `fitAll` would undo it — it keeps the direction but sets the
+        // distance, which is half of what was kept.
+        //
+        // Reachable on the first load only in one case: a host that swaps
+        // models in an embed that has already shown one. Which is exactly the
+        // case the flag is for.
+      } else if (hostPoseAppliedToCurrentModel()) {
         // The host commanded a pose for this very model while it was loading
         // (#3390) and `aroundDestructiveLoad` has already applied it. That
         // outranks the static URL params — and `home()` below would tween it

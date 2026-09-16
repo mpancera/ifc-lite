@@ -146,6 +146,13 @@ export function parseUrlParams(): EmbedViewerUrlParams {
   const view = params.get('view') as ViewPreset;
   if (VALID_VIEWS.includes(view)) result.view = view;
 
+  // Opt-IN, and spelled like the other booleans here: only an explicit
+  // `true`/`1` arms it. A host that reloads the same object wants this; a host
+  // showing an unfamiliar model wants the model framed, which is what every
+  // absent or malformed value keeps.
+  const keepCamera = params.get('keepCamera');
+  if (keepCamera === 'true' || keepCamera === '1') result.keepCamera = true;
+
   // Optional inbound origin allowlist (comma-separated full origins).
   // When set, the bridge only accepts postMessage commands from these origins.
   const allowOrigin = params.get('allowOrigin');

@@ -87,9 +87,21 @@
 import type { GeometryResult } from '@ifc-lite/geometry';
 
 import type { CameraRotation } from '@/store/types.js';
+import {
+  captureViewpoint,
+  dropKeptViewpoint,
+  restoreViewpoint,
+  type KeptViewpointState,
+} from './keptViewpoint.js';
 
-/** The slice of the store this module reads and drives. */
-interface CameraIntentState {
+/** The slice of the store this module reads and drives.
+ *
+ *  Extends {@link KeptViewpointState} because `aroundDestructiveLoad` is the
+ *  one place that knows a destructive load is running, and that is what BOTH
+ *  camera concerns hang off: the host's queued pose, and — for an editing
+ *  host — the view to carry across (`keptViewpoint.ts`). One wrapper, one
+ *  getState, so the two cannot be wrapped in different places and drift. */
+interface CameraIntentState extends KeptViewpointState {
   pendingCameraRotation: CameraRotation | null;
   setCameraRotation: (rotation: CameraRotation) => void;
   /**
@@ -171,6 +183,27 @@ export function hostPoseAppliedToCurrentModel(): boolean {
   return poseAppliedToCurrentModel;
 }
 
+/**
+ * Is a scene-replacing load running right now?
+ *
+ * Asked by the outbound `CAMERA_CHANGED` feed, which must stay silent while
+ * one is: `resetViewerState()` puts `cameraRotation` back to
+ * `CAMERA_DEFAULTS` mid-load, and that write is indistinguishable, at the
+ * store, from the user having orbited there. Reported as news it is worse
+ * than noise — a host that follows the documented contract and remembers the
+ * last `CAMERA_CHANGED` in order to restore the user's angle ends up
+ * remembering the DEFAULT angle, so the very machinery meant to preserve the
+ * view is what destroys it. Measured in the Elementbeispiel editor on
+ * data-dictionary.ch: `{azimuth: 45, elevation: 25}` on every keystroke.
+ *
+ * The event's own documentation already excludes this case — it lists an
+ * orbit drag, the orbit keys, the ViewCube, the preset views and a
+ * programmatic `SET_CAMERA`. A teardown is none of them.
+ */
+export function destructiveLoadRunning(): boolean {
+  return destructiveLoadsInFlight > 0;
+}
+
 /** Clamped, because a test can call `resetCameraIntent` between cases while a
  *  load is still pending; a negative count would leave every later pose
  *  unqueueable. */
@@ -239,6 +272,10 @@ export async function aroundDestructiveLoad<A extends unknown[], R>(
   // A new model is arriving, so whatever the outgoing one was framed for stops
   // being the answer to "did the host pose this?".
   poseAppliedToCurrentModel = false;
+  // Lift the view out here, at the ENTRY, for the same reason the pose below
+  // is lifted here: `loadFile`'s reset is a whole fetch away, so this is the
+  // last moment the OUTGOING model's camera is still the one on screen.
+  captureViewpoint(getState);
   // Lift an unactuated pose out of the store before the reset can clear it.
   // The store copy is deliberately left alone: on a load that fails no reset
   // runs, and the store's own replay must keep working as it did.
@@ -278,8 +315,15 @@ export async function aroundDestructiveLoad<A extends unknown[], R>(
   try {
     const result = await load(...args);
     endDestructiveLoad();
-    // Past `loadFile`, so past `resetViewerState()`: the pose can go to the
-    // store now and nothing is left to discard it.
+    // Past `loadFile`, so past `resetViewerState()`: the view and the pose can
+    // go to the camera now and nothing is left to discard them.
+    //
+    // The kept view goes back FIRST and the host's queued pose lands on top.
+    // A pose the host commanded for this very model is a deliberate act; the
+    // kept view is the ABSENCE of one, so it must not overwrite it. In that
+    // order the two also compose: the view restores target and distance, and
+    // `setCameraRotation` then turns the camera without touching either.
+    restoreViewpoint(getState);
     if (releaseQueuedPose(getState)) poseAppliedToCurrentModel = true;
     return result;
   } catch (err) {
@@ -291,6 +335,11 @@ export async function aroundDestructiveLoad<A extends unknown[], R>(
     // would be worse than losing it: it would surface on some later load and
     // aim a model the host never asked about. The framing bit stays false —
     // no model arrived to frame.
+    //
+    // The kept view is dropped rather than applied: nothing was replaced, so
+    // it is still the view on screen and restoring it would be a move onto
+    // itself — while keeping it held would surface it at some later load.
+    dropKeptViewpoint();
     releaseQueuedPose(getState);
     throw err;
   }

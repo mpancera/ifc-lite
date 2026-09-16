@@ -301,6 +301,7 @@ describe('EmbedUrlParams parity', () => {
     hideTypes: 'hideTypes=IfcSpace',
     camera: 'camera=45,30',
     view: 'view=front',
+    keepCamera: 'keepCamera=1',
   };
 
   it('emits every field the public type declares', () => {

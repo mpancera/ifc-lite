@@ -64,6 +64,7 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 const { EmbedViewer } = await import('./EmbedViewer.js');
 const { useViewerStore } = await import('@/store/index.js');
+const { aroundDestructiveLoad, resetCameraIntent } = await import('../bridge/cameraIntent.js');
 
 /** Mirrors CAMERA_EMIT_INTERVAL_MS in useEmbedBridgeEvents.ts. */
 const INTERVAL_MS = 100;
@@ -107,12 +108,34 @@ async function settle(): Promise<void> {
   });
 }
 
+/**
+ * Clear the pose this file's own `afterEach` leaves armed.
+ *
+ * `Viewport` is mocked away here, so no renderer actuator is ever registered
+ * and `setCameraRotation({0,0})` does not move a camera -- it arms
+ * `pendingCameraRotation` instead (cameraSlice). `aroundDestructiveLoad` then
+ * does exactly what it is supposed to: it reads an unactuated pose as intent
+ * for the model now arriving, lifts it past the reset and applies it on the
+ * way out, which emits a perfectly legitimate CAMERA_CHANGED {0,0}.
+ *
+ * That is harness residue from the PREVIOUS case, not part of the scenario
+ * under test. Dropped here rather than in `afterEach`, because the residue is
+ * the store's business and the cases above depend on that line staying as it
+ * is.
+ */
+function armedPoseFromPreviousCase(): void {
+  useViewerStore.setState({ pendingCameraRotation: null });
+}
+
 function cameraPayloads(): unknown[] {
   return posted.filter((m) => m.type === 'CAMERA_CHANGED').map((m) => m.data);
 }
 
 beforeEach(() => {
   posted = [];
+  // The load counter is module state and a test that leaves it raised would
+  // silence every later case in this file.
+  resetCameraIntent();
   Object.defineProperty(window, 'parent', {
     configurable: true,
     value: { postMessage: (msg: EmbedMessageEnvelope) => posted.push(msg) },
@@ -217,5 +240,58 @@ describe('CAMERA_CHANGED reports live navigation', () => {
     }
 
     expect(cameraPayloads()).toEqual([]);
+  });
+});
+
+describe('CAMERA_CHANGED stays silent through a destructive load', () => {
+  /**
+   * The load's session reset writes `cameraRotation` back to CAMERA_DEFAULTS
+   * (45/25) and the renderer echoes that through the realtime feed. At the
+   * store, neither is distinguishable from the user having orbited there.
+   *
+   * Reported as news it is worse than noise. A host that follows this event's
+   * documented contract - remember the last CAMERA_CHANGED, hand it back with
+   * SET_CAMERA after MODEL_LOADED, so the author keeps the angle they were
+   * working at - ends up remembering the DEFAULT angle. The machinery meant to
+   * preserve the view is then exactly what destroys it, once per keystroke.
+   * Measured in the Elementbeispiel editor on data-dictionary.ch before this.
+   */
+  it('does not report the session reset as a camera change', async () => {
+    mount();
+    await settle();
+    drag(60, 10);
+    await settle();
+    posted.length = 0;
+    armedPoseFromPreviousCase();
+
+    await act(async () => {
+      await aroundDestructiveLoad(useViewerStore.getState, async () => {
+        // What `resetViewerState()` does to the camera, by both routes.
+        useViewerStore.setState({ cameraRotation: { azimuth: 45, elevation: 25 } });
+        useViewerStore.getState().updateCameraRotationRealtime({ azimuth: 45, elevation: 25 });
+      });
+    });
+    await settle();
+
+    expect(cameraPayloads()).toEqual([]);
+  });
+
+  it('reports again once the load is over', async () => {
+    // The gate is the load, not the event: silence afterwards would be a
+    // different bug, and a host would stop hearing the user orbit.
+    mount();
+    await settle();
+    posted.length = 0;
+    armedPoseFromPreviousCase();
+
+    await act(async () => {
+      await aroundDestructiveLoad(useViewerStore.getState, async () => {
+        useViewerStore.getState().updateCameraRotationRealtime({ azimuth: 45, elevation: 25 });
+      });
+    });
+    drag(61, 11);
+    await settle();
+
+    expect(cameraPayloads()).toContainEqual({ azimuth: 61, elevation: 11 });
   });
 });

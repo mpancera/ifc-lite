@@ -332,6 +332,29 @@ export interface EmbedUrlParams {
   camera?: { azimuth: number; elevation: number; zoom?: number };
   /** Preset view direction. Takes precedence over `camera`. */
   view?: ViewPreset;
+  /**
+   * Keep the camera exactly where it is across a model load, instead of
+   * framing the incoming model.
+   *
+   * For a host that reloads THE SAME object over and over: an editor whose
+   * preview is the file it is building. There, every keystroke is a
+   * destructive load, and the default behaviour — reset the session, frame
+   * what arrives — throws away the view the author was working in. `false`
+   * (the default) stays right for a viewer that is handed an unfamiliar
+   * model and must show it.
+   *
+   * This keeps the WHOLE view: orientation, target, distance and projection.
+   * That is deliberately more than `SET_CAMERA` can express, and it is why
+   * the flag is a flag rather than a pose on the wire. A pose would have to
+   * name a target and a distance in some unit, which is exactly the question
+   * `camera.zoom` could not answer; here the numbers never cross the
+   * boundary. The viewer reads its own camera before the load and puts it
+   * back afterwards, and the host says only whether it wants that.
+   *
+   * The FIRST load is framed regardless — there is no view worth keeping
+   * before a model has ever been shown.
+   */
+  keepCamera?: boolean;
 }
 
 // ============================================================================
