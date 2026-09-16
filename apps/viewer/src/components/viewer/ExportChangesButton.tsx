@@ -33,6 +33,8 @@ import {
   saveTargetsSupported, saveTargetKey, loadSaveTarget, rememberSaveTarget, forgetSaveTarget,
   ensureWritable, writeIntoTarget, type DirectoryTarget,
 } from '@/lib/export/saveTarget';
+import { recordExportedInto } from '@/lib/persistence/recordExported';
+import { computeFullSourceHash } from '@/utils/sourceContentHash';
 import {
   ExportChangesReviewDialog,
   buildReviewGroups,
@@ -334,6 +336,23 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
       }
       if (!wroteTo) {
         for (const file of named) downloadFile(file.content, file.name, file.mime);
+      }
+
+      // Tell each model's saved session which file it now lives in, so the
+      // restore dialog stops offering work that is already on disk. The
+      // reconciler cannot work this out on its own for a session whose
+      // authored objects are geometry — points and profiles have no GlobalId
+      // to ask about — and the export is the one place the answer is a fact
+      // rather than a guess. See `recordExportedInto`.
+      //
+      // After the write, not before: a session must not be marked as exported
+      // into a file that a permission refusal never produced.
+      for (const file of files) {
+        const store = useViewerStore.getState().models.get(file.modelId)?.ifcDataStore;
+        if (!store) continue;
+        void recordExportedInto(
+          await computeFullSourceHash(store.source.materialize()), file.content,
+        );
       }
 
       setExportStatus('success');
