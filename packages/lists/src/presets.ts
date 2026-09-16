@@ -93,9 +93,13 @@ export const LIST_PRESETS: ListDefinition[] = [
         group('Zone'),
         attr('Name'),
         attr('LongName'),
-        // `FireExit` lives in the fire-safety set, not in `Pset_SpaceCommon`
-        // — which has no such property. The schema check in this package's
-        // own test suite is what said so.
+        // The IG BIM&BS enumeration first — it tells the vertical escape from
+        // the horizontal one, which is the reading a fire-safety engineer
+        // wants. `FireExit` beside it is the standard-IFC projection of the
+        // same answer, and lives in the fire-safety set rather than in
+        // `Pset_SpaceCommon`, which has no such property: the schema check in
+        // this package's own test suite is what said so.
+        prop('CHIBB_FireCompartmentRequirements', 'EscapeRouteType'),
         prop('Pset_SpaceFireSafetyRequirements', 'FireExit'),
         prop('Pset_SpaceCommon', 'IsExternal'),
         quant('Qto_SpaceBaseQuantities', 'NetFloorArea'),

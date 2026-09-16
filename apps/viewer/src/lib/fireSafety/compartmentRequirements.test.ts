@@ -23,7 +23,10 @@ import {
 
 /** Transcribed from the exchange requirement's own check, 3.2.1. */
 const SPECIFIED: Record<string, string[]> = {
-  EscapeRouteType: ['Horizontal', 'Vertical', 'NONE'],
+  // The IG BIM&BS tokens, and `None` rather than `NONE` on purpose: a
+  // checker matching the string does not care what the fire-rating lists
+  // in this file happen to look like (Marc, 2026-09-16).
+  EscapeRouteType: ['HorizontalEscape', 'VerticalEscape', 'None'],
   FireRatingSlabs: [
     'E30', 'E30-Glas', 'E60', 'EI30', 'EI30-Glas', 'EI30-RF1', 'EI60', 'EI60-Glas',
     'EI60-RF1', 'EI90', 'EI90-Glas', 'EI90-RF1', 'REI120', 'REI180', 'REI60', 'REI90',
@@ -82,8 +85,15 @@ describe('the compartment requirements', () => {
   });
 
   it('lets every requirement be answered with "nothing required"', () => {
+    // Spelled `NONE` by the fire ratings and `None` by the escape route: the
+    // two lists come from different specifications and neither gets to
+    // normalise the other's tokens. What matters is that every requirement HAS
+    // the answer, not that they agree on how to write it.
     for (const requirement of COMPARTMENT_REQUIREMENTS) {
-      assert.ok(requirement.values.includes('NONE'), requirement.name);
+      assert.ok(
+        requirement.values.includes('NONE') || requirement.values.includes('None'),
+        requirement.name,
+      );
     }
   });
 });
@@ -116,9 +126,9 @@ describe('summariseRequirements', () => {
     assert.equal(summariseRequirements(new Map()), '');
   });
 
-  it('keeps NONE, because it is an answer', () => {
-    const line = summariseRequirements(new Map([['EscapeRouteType', 'NONE']]));
+  it('keeps "no requirement", because it is an answer', () => {
+    const line = summariseRequirements(new Map([['EscapeRouteType', 'None']]));
 
-    assert.match(line, /NONE/);
+    assert.match(line, /None/);
   });
 });

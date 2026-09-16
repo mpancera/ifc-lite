@@ -32,6 +32,8 @@
  * first, so a compound is decided by which word it actually carries.
  */
 
+import type { EscapeRouteType } from './compartmentRequirements';
+
 /** What a room does, for the purpose of laying out compartments. */
 export type RoomUse =
   /** A stair serving as an escape route. Its own compartment, always. */
@@ -111,7 +113,20 @@ export function roomUseFromName(name: string | undefined, longName?: string): Ro
   return 'ordinary';
 }
 
-/** Whether a room of this use is part of an escape route (`FireExit = TRUE`). */
+/** Whether a room of this use is part of an escape route at all. */
 export function isEscapeRoute(use: RoomUse): boolean {
   return use === 'escape-stair' || use === 'escape-corridor';
+}
+
+/**
+ * The IG BIM&BS `EscapeRouteType` for a room of this use.
+ *
+ * The stair is the VERTICAL escape and the corridors the HORIZONTAL one —
+ * which is the whole reason the two roles are found separately in the first
+ * place, and the distinction a boolean `FireExit` cannot carry.
+ */
+export function escapeRouteTypeOf(use: RoomUse): EscapeRouteType {
+  if (use === 'escape-stair') return 'VerticalEscape';
+  if (use === 'escape-corridor') return 'HorizontalEscape';
+  return 'None';
 }

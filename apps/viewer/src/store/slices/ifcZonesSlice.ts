@@ -20,9 +20,8 @@ import { type StateCreator } from 'zustand';
 import { findOwnerHistoryId } from '@ifc-lite/create';
 import type { Mutation } from '@ifc-lite/mutations';
 import { PropertyValueType } from '@ifc-lite/data';
-import { COMPARTMENT_PSET } from '@/lib/fireSafety/compartmentRequirements';
 import {
-  describeFirePlan, planFireZones, SPACE_FIRE_PSET,
+  describeFirePlan, planFireZones, COMPARTMENT_PSET, SPACE_FIRE_PSET,
   type PlanRoom, type ZoneToCreate,
 } from '@/lib/fireSafety/firePlan';
 import { resolveEntityLongName } from '@/lib/entity-predefined-type';
@@ -370,6 +369,16 @@ export const createIfcZonesSlice: StateCreator<ViewerState, [], [], IfcZonesSlic
         });
         if (zoneId === null) return false;
         get().paintIfcZone(modelId, zoneId, zone.roomIds, 'add');
+        // The requirement goes on the ZONE too, not only on its rooms: the
+        // zone is where a fire-safety engineer reads and edits a requirement,
+        // the rooms are where a checker walking the spatial structure finds
+        // it. `Pset_SpaceFireSafetyRequirements` lists `IfcZone` among its
+        // applicable entities for exactly this.
+        if (zone.escapeType) {
+          get().setProperty(
+            modelId, zoneId, COMPARTMENT_PSET, 'EscapeRouteType', zone.escapeType,
+          );
+        }
         return true;
       };
 
@@ -379,9 +388,16 @@ export const createIfcZonesSlice: StateCreator<ViewerState, [], [], IfcZonesSlic
       for (const zone of plan.alarmZones) if (paint(zone)) alarmGroups += 1;
 
       let roomsFlagged = 0;
-      for (const { roomId, value } of plan.fireExit) {
+      for (const { roomId, type, fireExit } of plan.escapeRoute) {
+        // The IG BIM&BS enumeration is the statement — it tells the vertical
+        // escape from the horizontal one, which a boolean cannot. The standard
+        // `FireExit` goes beside it for anything reading plain IFC, derived
+        // from the same answer so the two cannot be written disagreeing.
         const written = get().setProperty(
-          modelId, roomId, SPACE_FIRE_PSET, 'FireExit', value, PropertyValueType.Boolean,
+          modelId, roomId, COMPARTMENT_PSET, 'EscapeRouteType', type,
+        );
+        get().setProperty(
+          modelId, roomId, SPACE_FIRE_PSET, 'FireExit', fireExit, PropertyValueType.Boolean,
         );
         if (written) roomsFlagged += 1;
       }

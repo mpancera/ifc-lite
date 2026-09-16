@@ -64,11 +64,13 @@ describe('planFireZones', () => {
     assert.deepEqual(plan.alarmZones.map((z) => z.name), ['01', '02', '03']);
   });
 
-  it('carries the colour on the alarm zone, not on the compartment', () => {
+  it('colours the two layers by different rules', () => {
+    // The alarm zone's colour identifies the GROUP and is always present; the
+    // compartment's says what kind of escape route it is, so most have none.
     const plan = planFireZones([storey('00')]);
 
     assert.ok(plan.alarmZones.every((z) => /^#[0-9a-f]{6}$/.test(z.colour ?? '')));
-    assert.ok(plan.compartmentZones.every((z) => z.colour === null));
+    assert.ok(plan.compartmentZones.some((z) => z.colour === null));
   });
 
   it('gives both zones of a compartment the same rooms', () => {
@@ -86,26 +88,48 @@ describe('planFireZones', () => {
       ['01', '02', '03', '11', '12', '13']);
   });
 
-  it('states FireExit for EVERY room, not only the escape routes', () => {
-    // A room with no property says nobody looked; `FireExit = FALSE` says
-    // somebody did and the answer was no. In a fire-safety deliverable that
-    // difference is the deliverable.
+  it('states the escape route for EVERY room, not only the escape routes', () => {
+    // A room with no property says nobody looked; `None` says somebody did and
+    // the answer was no. In a fire-safety deliverable that difference is the
+    // deliverable.
     const one = storey('00');
     const plan = planFireZones([one]);
 
-    assert.equal(plan.fireExit.length, one.rooms.length);
-    assert.equal(new Set(plan.fireExit.map((f) => f.roomId)).size, one.rooms.length);
+    assert.equal(plan.escapeRoute.length, one.rooms.length);
+    assert.equal(new Set(plan.escapeRoute.map((f) => f.roomId)).size, one.rooms.length);
   });
 
-  it('says true for the stair and the corridor, false for the rest', () => {
+  it('tells the vertical escape from the horizontal one', () => {
+    // The distinction a boolean cannot carry, and the reason the two roles are
+    // found separately: the stair is the vertical escape, the corridors the
+    // horizontal one, and they are drawn in different greens.
     const one = storey('00');
-    const plan = planFireZones([one]);
-    const byId = new Map(plan.fireExit.map((f) => [f.roomId, f.value]));
+    const byId = new Map(planFireZones([one]).escapeRoute.map((f) => [f.roomId, f.type]));
 
-    assert.equal(byId.get(one.rooms[0].expressId), true, 'Treppenhaus');
-    assert.equal(byId.get(one.rooms[1].expressId), true, 'Korridor');
-    assert.equal(byId.get(one.rooms[2].expressId), false, 'Ausstellung');
-    assert.equal(byId.get(one.rooms[3].expressId), false, 'Möbeldepot');
+    assert.equal(byId.get(one.rooms[0].expressId), 'VerticalEscape', 'Treppenhaus');
+    assert.equal(byId.get(one.rooms[1].expressId), 'HorizontalEscape', 'Korridor');
+    assert.equal(byId.get(one.rooms[2].expressId), 'None', 'Ausstellung');
+    assert.equal(byId.get(one.rooms[3].expressId), 'None', 'Möbeldepot');
+  });
+
+  it('keeps the standard boolean agreeing with the enumeration', () => {
+    // `FireExit` is the enum's projection for anything reading plain IFC. Two
+    // statements of one fact can only be worth having if they cannot be
+    // written disagreeing.
+    for (const row of planFireZones([storey('00')]).escapeRoute) {
+      assert.equal(row.fireExit, row.type !== 'None', row.type);
+    }
+  });
+
+  it('paints the escape compartments in the FKS greens, and nothing else', () => {
+    // Straight off the legend: dark green vertical, light green horizontal.
+    // A compartment that is neither is not painted, because the greens MEAN
+    // escape route.
+    const zones = planFireZones([storey('00')]).compartmentZones;
+
+    assert.equal(zones.find((z) => z.escapeType === 'VerticalEscape')?.colour, '#1e7b3c');
+    assert.equal(zones.find((z) => z.escapeType === 'HorizontalEscape')?.colour, '#8fe0a8');
+    assert.equal(zones.find((z) => z.escapeType === 'None')?.colour, null);
   });
 
   it('reports a storey it cannot number instead of writing a wrong number', () => {
@@ -129,7 +153,7 @@ describe('planFireZones', () => {
 
     assert.deepEqual(plan.compartmentZones, []);
     assert.deepEqual(plan.alarmZones, []);
-    assert.deepEqual(plan.fireExit, []);
+    assert.deepEqual(plan.escapeRoute, []);
   });
 
   it('keeps the compartment name on the alarm zone, where it is readable', () => {

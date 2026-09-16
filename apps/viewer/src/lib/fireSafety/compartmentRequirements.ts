@@ -67,6 +67,37 @@ const OPENINGS = [
 const LOAD_BEARING = ['R30', 'R60', 'R90', 'R120', 'R180', 'R0', 'NONE'] as const;
 
 /**
+ * What kind of escape route a compartment IS — the IG BIM&BS answer to a
+ * question `Pset_SpaceFireSafetyRequirements.FireExit` can only answer yes or
+ * no to (Marc, 2026-09-16).
+ *
+ * The distinction is not decoration. A vertical escape is a stair and a
+ * horizontal one is a corridor; they carry different requirements, they are
+ * drawn in different greens on an FKS orientation plan, and a boolean that
+ * collapses them throws away the half of the answer somebody needs.
+ *
+ * `None` rather than `NONE`: these are the IG BIM&BS tokens, and a checker
+ * matching the string does not care what the other value lists in this file
+ * happen to look like.
+ */
+export const ESCAPE_ROUTE_TYPES = ['HorizontalEscape', 'VerticalEscape', 'None'] as const;
+
+export type EscapeRouteType = typeof ESCAPE_ROUTE_TYPES[number];
+
+/**
+ * How an FKS orientation plan paints each kind.
+ *
+ * Straight off the legend: "vertikaler Fluchtweg" dark green, "horizontaler
+ * Fluchtweg" light green. A compartment that is neither is not painted — the
+ * greens mean escape route, and a third green would mean a third kind of one.
+ */
+export const ESCAPE_ROUTE_COLOURS: Record<EscapeRouteType, string | null> = {
+  VerticalEscape: '#1e7b3c',
+  HorizontalEscape: '#8fe0a8',
+  None: null,
+};
+
+/**
  * The five, in the order an author fills them.
  *
  * Not the order the specification lists them in: that is alphabetical by
@@ -74,7 +105,7 @@ const LOAD_BEARING = ['R30', 'R60', 'R90', 'R120', 'R180', 'R0', 'NONE'] as cons
  * Ordering is a reading decision and ours to make — the NAMES are not.
  */
 export const COMPARTMENT_REQUIREMENTS: readonly CompartmentRequirement[] = [
-  { name: 'EscapeRouteType', label: 'Fluchtweg', values: ['Horizontal', 'Vertical', 'NONE'] },
+  { name: 'EscapeRouteType', label: 'Fluchtweg', values: ESCAPE_ROUTE_TYPES },
   { name: 'FireRatingWalls', label: 'Feuerwiderstand Wände', values: SEPARATING },
   { name: 'FireRatingSlabs', label: 'Feuerwiderstand Decken', values: SEPARATING },
   { name: 'FireRatingOpenings', label: 'Feuerwiderstand Öffnungen', values: OPENINGS },

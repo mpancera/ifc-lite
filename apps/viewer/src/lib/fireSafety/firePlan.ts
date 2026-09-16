@@ -30,7 +30,10 @@
  */
 
 import { proposeCompartments, type ProposalRoom, type CompartmentProposal } from './compartmentProposal';
-import { isEscapeRoute, roomUseFromName } from './roomUse';
+import { escapeRouteTypeOf, isEscapeRoute, roomUseFromName } from './roomUse';
+import {
+  COMPARTMENT_PSET, ESCAPE_ROUTE_COLOURS, type EscapeRouteType,
+} from './compartmentRequirements';
 import {
   numberAlarmZones, type AlarmZoneLabel, type GroupToNumber,
 } from './alarmZoneNaming';
@@ -49,14 +52,32 @@ export interface ZoneToCreate {
   /** `#rrggbb`, or `null` for the compartment layer, which is not coloured. */
   colour: string | null;
   description: string;
+  /**
+   * `CHIBB_FireCompartmentRequirements.EscapeRouteType`, written on the zone
+   * as well as on its rooms. The zone is where a fire-safety engineer reads
+   * and edits a requirement; the rooms are where a checker walking the spatial
+   * structure finds it.
+   */
+  escapeType?: EscapeRouteType;
   roomIds: number[];
 }
 
 export interface FirePlan {
   compartmentZones: ZoneToCreate[];
   alarmZones: ZoneToCreate[];
-  /** {@link SPACE_FIRE_PSET}`.FireExit`, stated for every room either way. */
-  fireExit: Array<{ roomId: number; value: boolean }>;
+  /**
+   * What each room is, as the IG BIM&BS enumeration, and the same answer as
+   * the standard boolean beside it.
+   *
+   * Both, because they serve different readers: `EscapeRouteType` is the
+   * statement — it distinguishes the stair from the corridors, which is the
+   * half `FireExit` cannot carry — and `FireExit` is its projection for
+   * anything reading plain IFC. The enum is authoritative; the boolean is
+   * derived from it here and nowhere else, so the two cannot be written
+   * disagreeing. They CAN be edited into disagreement afterwards, which is the
+   * price of stating a thing twice and worth knowing about.
+   */
+  escapeRoute: Array<{ roomId: number; type: EscapeRouteType; fireExit: boolean }>;
   /** Compartments the numbering could not express — reported, not renamed. */
   unnumbered: string[];
   /** Per storey, for the summary a person reads before accepting. */
@@ -75,6 +96,9 @@ export interface FirePlan {
  * anybody reading the export (2026-09-16).
  */
 export const SPACE_FIRE_PSET = 'Pset_SpaceFireSafetyRequirements';
+
+/** Re-exported so a caller writing the plan needs one import, not two. */
+export { COMPARTMENT_PSET };
 
 /** `themes.ts`'s `fire-compartment`, spelled out so this module reads alone. */
 const COMPARTMENT_OBJECT_TYPE = 'FireCompartment';
@@ -116,14 +140,16 @@ export function planFireZones(
 
   const compartmentZones: ZoneToCreate[] = [];
   const alarmZones: ZoneToCreate[] = [];
-  const fireExit: Array<{ roomId: number; value: boolean }> = [];
+  const escapeRoute: FirePlan['escapeRoute'] = [];
   const unnumbered: string[] = [];
 
   for (const { rooms } of storeys) {
     for (const room of rooms) {
-      fireExit.push({
+      const use = roomUseFromName(room.name, room.longName);
+      escapeRoute.push({
         roomId: room.expressId,
-        value: isEscapeRoute(roomUseFromName(room.name, room.longName)),
+        type: escapeRouteTypeOf(use),
+        fireExit: isEscapeRoute(use),
       });
     }
   }
@@ -131,11 +157,22 @@ export function planFireZones(
   for (const { proposal } of perStorey) {
     for (const c of proposal.compartments) {
       const roomIds = c.rooms.map((r) => r.expressId);
+      // The compartment's own escape type follows the rooms it was built from:
+      // the stair compartment holds the stair, the corridor compartment the
+      // corridors, and everything else is neither by construction.
+      const escapeType: EscapeRouteType = c.use === 'escape-stair'
+        ? 'VerticalEscape'
+        : c.use === 'escape-corridor' ? 'HorizontalEscape' : 'None';
       compartmentZones.push({
         name: c.name,
         objectType: COMPARTMENT_OBJECT_TYPE,
-        colour: null,
-        description: c.fireExit ? 'Fluchtweg' : '',
+        // Dark green for the stair, light green for the corridors, nothing for
+        // the rest — the FKS orientation plan's own legend. A compartment that
+        // is not an escape route is not painted, because the greens MEAN
+        // escape route.
+        colour: ESCAPE_ROUTE_COLOURS[escapeType],
+        description: c.name,
+        escapeType,
         roomIds,
       });
 
@@ -157,7 +194,7 @@ export function planFireZones(
     }
   }
 
-  return { compartmentZones, alarmZones, fireExit, unnumbered, perStorey };
+  return { compartmentZones, alarmZones, escapeRoute, unnumbered, perStorey };
 }
 
 /** What the plan would do, in lines somebody reads before saying yes. */
