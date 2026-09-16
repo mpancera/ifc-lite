@@ -22,6 +22,10 @@ import type { Mutation } from '@ifc-lite/mutations';
 import { PropertyValueType } from '@ifc-lite/data';
 import { COMPARTMENT_PSET } from '@/lib/fireSafety/compartmentRequirements';
 import {
+  describeFirePlan, planFireZones, type PlanRoom, type ZoneToCreate,
+} from '@/lib/fireSafety/firePlan';
+import { resolveEntityLongName } from '@/lib/entity-predefined-type';
+import {
   createZone as createZoneInStore,
   deleteZone as deleteZoneInStore,
   paintZone as paintZoneInStore,
@@ -84,6 +88,31 @@ export interface IfcZonesSlice {
   paintIfcZone: (
     modelId: string, zoneId: number, spaceIds: readonly number[], mode: PaintMode,
   ) => { added: number[]; removed: number[] } | null;
+
+  /**
+   * Derive the fire compartments and the Meldergruppen from the rooms, and
+   * write them.
+   *
+   * One action rather than a script the panel drives, because the three parts
+   * have to land together or not at all: a compartment zone with no alarm zone
+   * is a proposal half-applied, and a `FireExit` written onto rooms whose
+   * compartment was refused is a claim with nothing behind it.
+   *
+   * Refuses outright when the model already carries zones of either theme.
+   * Re-deriving on top of them would double every compartment, and deciding
+   * which of two overlapping proposals is current is not a decision code can
+   * make — see `lib/fireSafety/firePlan.ts` for what it would be deciding.
+   */
+  proposeFireZones: (modelId: string) => FireZonesResult | { error: string };
+}
+
+export interface FireZonesResult {
+  compartments: number;
+  alarmGroups: number;
+  /** Rooms that got a `Pset_SpaceCommon.FireExit`, true or false. */
+  roomsFlagged: number;
+  /** Lines for the toast — see `describeFirePlan`. */
+  summary: string[];
 }
 
 /** `modelId:expressId`, so a zone stays identified across federated models. */
@@ -270,5 +299,117 @@ export const createIfcZonesSlice: StateCreator<ViewerState, [], [], IfcZonesSlic
         : null);
       return { added: result.added, removed: result.removed };
     },
+
+    proposeFireZones: (modelId) => {
+      const ctx = writable(modelId);
+      if (!ctx) return { error: 'Für dieses Modell ist Schreiben nicht möglich.' };
+
+      // Refused rather than merged. Two proposals over one building is a state
+      // nobody can read, and the undo stack is not a migration plan.
+      const existing = readZones(ctx.entities).filter(
+        (z) => z.objectType === 'FireCompartment' || z.objectType === 'TriggerZoneFire',
+      );
+      if (existing.length > 0) {
+        return {
+          error: `Das Modell hat schon ${existing.length} Brandschutz-Zonen. `
+            + 'Zuerst löschen, dann neu ableiten.',
+        };
+      }
+
+      const rooms = collectPlanRooms(get, modelId);
+      if (rooms.length === 0) {
+        return { error: 'Keine Räume mit Umriss gefunden.' };
+      }
+
+      // Grouped by storey, storeys in elevation order: the numbering runs per
+      // storey and reads the storey's NAME, so the order here is only what
+      // decides which floor is written first.
+      const byStorey = new Map<number, PlanRoom[]>();
+      for (const room of rooms) {
+        const list = byStorey.get(room.storeyExpressId);
+        if (list) list.push(room); else byStorey.set(room.storeyExpressId, [room]);
+      }
+      const elevations = ctx.dataStore.spatialHierarchy?.storeyElevations;
+      const ordered = [...byStorey.entries()]
+        .sort((a, b) => (elevations?.get(a[0]) ?? 0) - (elevations?.get(b[0]) ?? 0))
+        .map(([, list]) => ({ storeyName: list[0].storeyName, rooms: list }));
+
+      const plan = planFireZones(ordered);
+
+      const paint = (zone: ZoneToCreate) => {
+        const zoneId = get().createIfcZone(modelId, {
+          name: zone.name,
+          description: zone.description,
+          colour: zone.colour,
+          objectType: zone.objectType,
+        });
+        if (zoneId === null) return false;
+        get().paintIfcZone(modelId, zoneId, zone.roomIds, 'add');
+        return true;
+      };
+
+      let compartments = 0;
+      for (const zone of plan.compartmentZones) if (paint(zone)) compartments += 1;
+      let alarmGroups = 0;
+      for (const zone of plan.alarmZones) if (paint(zone)) alarmGroups += 1;
+
+      let roomsFlagged = 0;
+      for (const { roomId, value } of plan.fireExit) {
+        const written = get().setProperty(
+          modelId, roomId, 'Pset_SpaceCommon', 'FireExit', value, PropertyValueType.Boolean,
+        );
+        if (written) roomsFlagged += 1;
+      }
+
+      return { compartments, alarmGroups, roomsFlagged, summary: describeFirePlan(plan) };
+    },
   };
 };
+
+/**
+ * Every room with an outline, with the storey it is on.
+ *
+ * `readSlabFootprint` is the same read the reshape handles use, so a room's
+ * outline here is the one a person would see if they opened its handles —
+ * there is no second derivation to disagree with the first.
+ *
+ * A room without a resolvable outline is skipped rather than given a guessed
+ * position: the proposal groups by WHERE a room is, and a room placed at the
+ * origin would drag a compartment across the building.
+ */
+function collectPlanRooms(get: () => ViewerState, modelId: string): PlanRoom[] {
+  const dataStore = get().models.get(modelId)?.ifcDataStore;
+  if (!dataStore) return [];
+  const elementToStorey = dataStore.spatialHierarchy?.elementToStorey;
+  const out: PlanRoom[] = [];
+
+  for (const expressId of dataStore.entityIndex?.byType?.get('IFCSPACE') ?? []) {
+    const storeyExpressId = elementToStorey?.get(expressId);
+    if (storeyExpressId === undefined) continue;
+    const footprint = get().readSlabFootprint(modelId, expressId);
+    if (!footprint || footprint.footprint.length < 3) continue;
+
+    const ring = footprint.footprint;
+    let acc = 0;
+    let cx = 0;
+    let cy = 0;
+    for (let i = 0; i < ring.length; i += 1) {
+      const p = ring[i];
+      const q = ring[(i + 1) % ring.length];
+      acc += p[0] * q[1] - q[0] * p[1];
+      cx += p[0];
+      cy += p[1];
+    }
+
+    out.push({
+      expressId,
+      name: dataStore.entities?.getName?.(expressId) || undefined,
+      longName: resolveEntityLongName(dataStore, expressId),
+      area: Math.abs(acc) / 2,
+      centre: { x: cx / ring.length, y: cy / ring.length },
+      storeyExpressId,
+      storeyName: String(dataStore.entities?.getName?.(storeyExpressId) ?? storeyExpressId),
+    });
+  }
+  return out;
+}

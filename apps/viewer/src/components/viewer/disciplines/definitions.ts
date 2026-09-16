@@ -654,7 +654,39 @@ export const DISCIPLINE_TABS: readonly DisciplineTab[] = [
     groups: [
       roleGroup('fire'),
       { label: 'Devices', items: [ADD_ELEMENT, PRODUCT_LIBRARY] },
-      { label: 'Compartments', items: [COMPARTMENTS] },
+      {
+        label: 'Compartments',
+        items: [
+          COMPARTMENTS,
+          {
+            // A derivation, not a drawing tool, so it sits beside the brush
+            // rather than in it: what it writes is what somebody would have
+            // painted, and they still have to look at it afterwards.
+            id: 'proposeFireZones',
+            kind: 'action',
+            label: 'Abschnitte ableiten',
+            ribbonLabel: 'Abschnitte ab­leiten',
+            tooltip: 'Aus den Raumnamen je Geschoss Brandabschnitte und Meldergruppen vorschlagen '
+              + '(Fluchttreppenhaus und Fluchtkorridore eigene Abschnitte), mit FKS-Nummer und -Farbe',
+            icon: Flame,
+            needsModel: true,
+            needsAuthor: true,
+            run: (s) => {
+              const modelId = s.activeModelId ?? [...s.models.keys()][0];
+              if (!modelId) { toast.error('Kein aktives Modell.'); return; }
+              const result = s.proposeFireZones(modelId);
+              if ('error' in result) { toast.error(result.error); return; }
+              toast.success(
+                `${result.compartments} Brandabschnitte, ${result.alarmGroups} Meldergruppen, `
+                + `${result.roomsFlagged} Räume mit FireExit`,
+              );
+              // The per-storey lines separately: the headline is the number a
+              // person checks, the breakdown is what they check it against.
+              for (const line of result.summary) toast.info(line);
+            },
+          },
+        ],
+      },
       {
         label: 'Escape',
         items: [
