@@ -25,6 +25,7 @@
  */
 
 import { LocalSeedCatalogProvider, type CatalogEntry } from '@/lib/catalog';
+import { libraryTypeKey } from '@/lib/catalog/libraryTypeKey';
 import { EDITOR_ROLE_ID } from '@/lib/roles/disciplineRoles';
 import { EVENT_LOAD_FILE } from '@/lib/tours/events';
 import { createBlankIfcFile } from '@/utils/createBlankIfc';
@@ -186,6 +187,7 @@ export function placeFromCatalogue(
     Height: entry.geometry?.height,
     Discipline: entry.discipline,
     CatalogEntryId: entry.id,
+    CatalogTypeKey: libraryTypeKey(entry),
     CatalogEntryTag: entry.tag,
     TechnicalData: entry.technicalData,
   });

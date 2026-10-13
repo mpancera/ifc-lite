@@ -17,6 +17,7 @@ import { StepExporter } from '@ifc-lite/export';
 import type { SpatialAnchor } from '@ifc-lite/create';
 import { readExampleModel } from './exampleModel.js';
 import { placeExampleInStore } from './placeExample.js';
+import { forgetExampleGeometry } from './exampleGeometryReuse.js';
 
 const EXAMPLE = `ISO-10303-21;
 HEADER;
@@ -58,7 +59,10 @@ function anchorFor(lengthUnitScale: number): SpatialAnchor {
   };
 }
 
-async function place(targetLengthUnitScale = 1) {
+const KEY = 'https://data-dictionary.ch/public/elementbeispiele/handfeuerloescher';
+
+/** A parsed example and an empty target model to place it into. */
+async function prepare() {
   const store = await new IfcParser().parseColumnar(
     new TextEncoder().encode(EXAMPLE).buffer as ArrayBuffer,
   );
@@ -67,12 +71,11 @@ async function place(targetLengthUnitScale = 1) {
 
   const view = new MutablePropertyView(null, 'ziel');
   const editor = new StoreEditor(store as never, view);
-  const result = placeExampleInStore(editor, anchorFor(targetLengthUnitScale), model, {
-    position: [2, 3, 0],
-    targetLengthUnitScale,
-    exampleId: 'handfeuerloescher',
-  });
+  return { store, model, view, editor };
+}
 
+/** Export and slice into lines, so every assertion reads real STEP. */
+async function exportOf(store: unknown, view: MutablePropertyView) {
   const exported = await new StepExporter(store as never, view as never).export({
     applyMutations: true,
     schema: 'IFC4',
@@ -80,8 +83,31 @@ async function place(targetLengthUnitScale = 1) {
   const raw = (exported as { content: unknown }).content;
   const content = typeof raw === 'string' ? raw : new TextDecoder().decode(raw as Uint8Array);
   const lines = content.split(/\r?\n/);
-  const find = (type: string) => lines.filter((l) => l.includes(`=${type}(`));
-  return { result, view, lines, find };
+  return { lines, find: (type: string) => lines.filter((l) => l.includes(`=${type}(`)) };
+}
+
+async function place(targetLengthUnitScale = 1) {
+  const { store, model, view, editor } = await prepare();
+  const result = placeExampleInStore(editor, anchorFor(targetLengthUnitScale), model, {
+    position: [2, 3, 0],
+    targetLengthUnitScale,
+    typeKey: KEY,
+  });
+  return { result, view, ...(await exportOf(store, view)) };
+}
+
+/** The same example twice into one model — what a second detector does. */
+async function placeTwice() {
+  const { store, model, view, editor } = await prepare();
+  const at = (position: [number, number, number]) =>
+    placeExampleInStore(editor, anchorFor(1), model, {
+      position,
+      targetLengthUnitScale: 1,
+      typeKey: KEY,
+    });
+  const first = at([2, 3, 0]);
+  const second = at([7, 3, 0]);
+  return { first, second, view, ...(await exportOf(store, view)) };
 }
 
 describe('placing an example', () => {
@@ -173,6 +199,80 @@ describe('placing an example', () => {
     for (const body of bodies) assert.equal(body.attributes[0], '#3');
   });
 
+  it('defines the geometry once and instances it, placed twice', async () => {
+    // The accessory rule: a second Handfeuerlöscher is another OCCURRENCE of
+    // the first one's definition. Before this, each placement copied the whole
+    // example and built its own type — two hundred devices meant two hundred
+    // definitions of one body.
+    const { find } = await placeTwice();
+
+    assert.equal(find('IFCREPRESENTATIONMAP').length, 2, 'one per product, not per placement');
+    assert.equal(find('IFCFIRESUPPRESSIONTERMINALTYPE').length, 1, 'one type for the product');
+    assert.equal(
+      find('IFCEXTRUDEDAREASOLID').length, 4,
+      'two in the source and two copies — the second placement copies nothing',
+    );
+
+    // What DOES double: the occurrences and the transforms that put them in
+    // two different places.
+    assert.equal(find('IFCMAPPEDITEM').length, 4);
+    assert.equal(find('IFCCARTESIANTRANSFORMATIONOPERATOR3D').length, 4);
+    assert.equal(find('IFCFIRESUPPRESSIONTERMINAL').length, 3, 'the source plus two placed');
+  });
+
+  it('relates both placements to the one type', async () => {
+    const { find, first, second } = await placeTwice();
+    assert.equal(first.typeId, second.typeId, 'the same type answered twice');
+    const relations = find('IFCRELDEFINESBYTYPE');
+    assert.equal(relations.length, 2, 'one per occurrence');
+    for (const relation of relations) {
+      assert.ok(relation.includes(`#${first.typeId}`), `names the shared type: ${relation}`);
+    }
+  });
+
+  it('writes the identity on the type, where the next placement looks', async () => {
+    const { find } = await placeTwice();
+    const type = find('IFCFIRESUPPRESSIONTERMINALTYPE')[0];
+    assert.match(type, /data-dictionary\.ch/, 'the key, not the bare id');
+  });
+
+  it('finds the type again when the session note is gone', async () => {
+    // What a page reload does: the overlay survives, the note does not. The
+    // type carries the key and its maps, so the device half comes back from
+    // the model itself rather than being defined a second time.
+    const { store, model, view, editor } = await prepare();
+    const at = (position: [number, number, number]) =>
+      placeExampleInStore(editor, anchorFor(1), model, {
+        position, targetLengthUnitScale: 1, typeKey: KEY,
+      });
+    const first = at([2, 3, 0]);
+    forgetExampleGeometry(editor);
+    const second = at([7, 3, 0]);
+
+    assert.equal(second.typeId, first.typeId, 'the overlay answered');
+    const { find } = await exportOf(store, view);
+    assert.equal(find('IFCFIRESUPPRESSIONTERMINALTYPE').length, 1, 'no second definition');
+    // The device's body is not copied again; the companion's is, because an
+    // IfcVirtualElement has no type to have been found on.
+    const solids = find('IFCEXTRUDEDAREASOLID');
+    assert.equal(solids.filter((l) => /,0\.5\)/.test(l)).length, 2, 'source + the one copy');
+    assert.equal(solids.filter((l) => /,0\.8\)/.test(l)).length, 3, 'source + two companion copies');
+  });
+
+  it('keeps two different examples apart', async () => {
+    // Same editor, two keys: nothing may be shared between them.
+    const { editor, model, view, store } = await prepare();
+    placeExampleInStore(editor, anchorFor(1), model, {
+      position: [0, 0, 0], targetLengthUnitScale: 1, typeKey: 'urn:test:a',
+    });
+    placeExampleInStore(editor, anchorFor(1), model, {
+      position: [5, 0, 0], targetLengthUnitScale: 1, typeKey: 'urn:test:b',
+    });
+    const { find } = await exportOf(store, view);
+    assert.equal(find('IFCREPRESENTATIONMAP').length, 4, 'two products × two examples');
+    assert.equal(find('IFCFIRESUPPRESSIONTERMINALTYPE').length, 2);
+  });
+
   it('refuses a unit relation that cannot mean anything', async () => {
     const store = await new IfcParser().parseColumnar(
       new TextEncoder().encode(EXAMPLE).buffer as ArrayBuffer,
@@ -184,6 +284,7 @@ describe('placing an example', () => {
       () => placeExampleInStore(editor, anchorFor(1), model, {
         position: [0, 0, 0],
         targetLengthUnitScale: 1,
+        typeKey: 'egal',
       }),
       /unit/i,
     );

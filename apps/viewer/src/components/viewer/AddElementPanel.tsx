@@ -17,6 +17,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Box, Cog, DoorOpen, Home, Layers, Library, Minus, Search, Siren, Square, SquareDashedBottom, Wand2, X } from 'lucide-react';
 import { toast } from '@/components/ui/toast';
 import { fetchExampleModel } from '@/lib/elementExamples/fetchExampleModel';
+import { libraryTypeKey } from '@/lib/catalog/libraryTypeKey';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -1029,7 +1030,7 @@ function PlaceBySpaceSection({ type, modelId, storeyId }: PlaceBySpaceSectionPro
           ? placeElementExample(modelId, storeyId, {
             example: example.model,
             position: Position,
-            exampleId: selection!.id,
+            typeKey: libraryTypeKey(selection!),
           })
           : type === 'sensor'
           ? addSensor(modelId, storeyId, {
@@ -1050,6 +1051,7 @@ function PlaceBySpaceSection({ type, modelId, storeyId }: PlaceBySpaceSectionPro
             Discipline: selection!.discipline,
             Name: selection!.label,
             CatalogEntryId: selection!.id,
+            CatalogTypeKey: libraryTypeKey(selection!),
             CatalogEntryTag: selection!.tag,
             TechnicalData: selection!.technicalData,
             Aas: selection!.aas,

@@ -998,7 +998,19 @@ export interface MutationSlice {
     storeyExpressId: number,
     params: LibraryElementInStoreParams & {
       Discipline: CatalogEntry['discipline'];
+      /** The entry's own id — readable, and the fallback for the drawing tag. */
       CatalogEntryId: string;
+      /**
+       * What makes two placements the same product: one `IfcXxxType` is shared
+       * across every occurrence carrying this key. Built by `libraryTypeKey`,
+       * which borrows the AAS's split between a type's `globalAssetId` and an
+       * instance's `specificAssetIds` — see that module.
+       *
+       * Separate from `CatalogEntryId` because they answer to different
+       * readers: the key is namespaced so two catalogues cannot collide, the
+       * id stays short enough to print beside a symbol.
+       */
+      CatalogTypeKey: string;
       /** The product's short designation — `RM`, `WM`, `HFM`. */
       CatalogEntryTag?: string;
       TechnicalData?: CatalogEntry['technicalData'];
@@ -1032,8 +1044,13 @@ export interface MutationSlice {
       example: ExampleModel;
       /** Storey-local metres. */
       position: [number, number, number];
-      /** The dictionary's id, kept on the type. */
-      exampleId?: string;
+      /**
+       * The library entry's identity — see `libraryTypeKey`. The example's
+       * geometry and its type are written once per key and reused by every
+       * later placement, so a wrong key costs a duplicate definition, not a
+       * wrong model.
+       */
+      typeKey: string;
     }
   ) => { expressId: number } | { error: string };
   /**
@@ -3356,7 +3373,9 @@ export const createMutationSlice: StateCreator<
   ),
 
   addLibraryElement: (modelId, storeyExpressId, params) => {
-    const { Discipline, CatalogEntryId, CatalogEntryTag, TechnicalData, Aas, ...ifcParams } = params;
+    const {
+      Discipline, CatalogEntryId, CatalogTypeKey, CatalogEntryTag, TechnicalData, Aas, ...ifcParams
+    } = params;
     return runInStoreElementBuilder(
       get, set, modelId, storeyExpressId, ifcParams.IfcEntity.toUpperCase(), `add ${ifcParams.IfcEntity}`,
       (editor, anchor) => {
@@ -3379,18 +3398,18 @@ export const createMutationSlice: StateCreator<
 
         // Share one IfcXxxType per catalog product across all its placed
         // instances instead of repeating attributes per instance — find an
-        // existing Type tagged with this catalog entry's id first (only
-        // overlay-created entities can carry our tag convention; a
-        // source-authored file wouldn't happen to match it).
+        // existing Type carrying this entry's key first (only overlay-created
+        // entities can carry our convention; a source-authored file wouldn't
+        // happen to match it).
         const typeEntity = `${ifcParams.IfcEntity}Type`;
         const view = get().mutationViews.get(modelId);
         let typeId: number | null = null;
         if (view) {
           for (const entity of view.getNewEntities()) {
-            // Matched on ElementType (index 8), which is where the catalogue
-            // id lives. `Tag` used to be the key and now carries the short
+            // Matched on ElementType (index 8), which is where the identity
+            // lives. `Tag` used to be the key and now carries the short
             // designation, which two products may legitimately share.
-            if (entity.type === typeEntity && entity.attributes[8] === CatalogEntryId) {
+            if (entity.type === typeEntity && entity.attributes[8] === CatalogTypeKey) {
               typeId = entity.expressId;
               break;
             }
@@ -3400,8 +3419,10 @@ export const createMutationSlice: StateCreator<
           typeId = addLibraryTypeToStore(editor, anchor, {
             IfcEntity: typeEntity,
             Name: ifcParams.Name,
+            // Tag is read off a drawing, so it keeps the short, readable id;
+            // ElementType carries the identity two placements match on.
             Tag: CatalogEntryTag || CatalogEntryId,
-            ElementType: CatalogEntryId,
+            ElementType: CatalogTypeKey,
             PredefinedType: ifcParams.PredefinedType,
             TechnicalData,
           }).typeId;
@@ -3454,7 +3475,7 @@ export const createMutationSlice: StateCreator<
   },
 
   placeElementExample: (modelId, storeyExpressId, params) => {
-    const { example, position, exampleId } = params;
+    const { example, position, typeKey } = params;
     return runInStoreElementBuilder(
       get, set, modelId, storeyExpressId, example.device.type, 'place the element example',
       (editor, anchor) => {
@@ -3473,7 +3494,7 @@ export const createMutationSlice: StateCreator<
           // two is what the occurrence's transformation operator carries.
           targetLengthUnitScale: getModelLengthUnitScale(store),
           containerId: spaceId ?? undefined,
-          exampleId,
+          typeKey,
         });
 
         joinActiveDisciplineSystem(get, editor, anchor, modelId, placed.deviceId);

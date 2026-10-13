@@ -11,14 +11,25 @@
  * anchor and a position, and can be tested by reading the STEP it produces.
  *
  * # What lands in the model
- * Per product of the example (the device, then each companion):
+ * The FIRST time an example is placed, per product (the device, then each
+ * companion):
  *   - its representation(s), copied entity by entity with every express id
  *     renumbered and the source's context replaced by this model's;
  *   - an `IfcRepresentationMap` over each copied representation;
- *   - an occurrence that shows the map through an `IfcMappedItem`, placed at
- *     the click point and carrying the unit factor.
- * Then, for the device, an `IfcXxxType` holding the maps, and finally the
- * companions related to the device with `IfcRelAssignsToProduct`.
+ * plus, for the device, an `IfcXxxType` holding its maps.
+ *
+ * Every placement, including the first:
+ *   - an occurrence per product that shows the map through an `IfcMappedItem`,
+ *     placed at the click point and carrying the unit factor;
+ *   - the type related to the device with `IfcRelDefinesByType`;
+ *   - the companions related to the device with `IfcRelAssignsToProduct`.
+ *
+ * # One definition, many instances
+ * The split above is the point: a library entry is an accessory, like a block
+ * in a CAD tool, and the second Handfeuerlöscher in a building is another
+ * OCCURRENCE of the first one's definition — not a second definition that
+ * happens to look the same. What makes the two placements the same product is
+ * `typeKey`; `exampleGeometryReuse.ts` holds what the first one built.
  *
  * # The unit factor, once
  * `source metres-per-unit / target metres-per-unit`. A metre example in a
@@ -40,6 +51,12 @@ import {
 import type { StoreEditor } from '@ifc-lite/mutations';
 import { ENTITIES_IFC4 } from '@ifc-lite/data';
 import type { ExampleModel, ExampleProduct } from './exampleModel.js';
+import {
+  findPlacedType,
+  rememberExampleGeometry,
+  reuseExampleGeometry,
+  type ExampleGeometryRecord,
+} from './exampleGeometryReuse.js';
 
 export interface PlaceExampleParams {
   /** Where the example's own origin lands, in storey-local metres. */
@@ -48,8 +65,14 @@ export interface PlaceExampleParams {
   targetLengthUnitScale: number;
   /** Spatial element to contain the occurrences in. Defaults to the storey. */
   containerId?: number;
-  /** The dictionary's id, kept on the type so a second placement can find it. */
-  exampleId?: string;
+  /**
+   * The library entry's identity — what makes two placements the same product.
+   *
+   * Written onto the type as `ElementType` and used to find that type again.
+   * Built by `lib/catalog/libraryTypeKey.ts`, which borrows the AAS's split
+   * between a type's `globalAssetId` and an instance's `specificAssetIds`.
+   */
+  typeKey: string;
 }
 
 export interface PlaceExampleResult {
@@ -98,22 +121,34 @@ function mapsFor(
   return maps;
 }
 
-export function placeExampleInStore(
+/**
+ * The example's definition in this model: reused when it is already there,
+ * written once when it is not.
+ *
+ * A remembered record is only taken when it describes the SAME example — the
+ * companion count has to line up, or an example that changed between two
+ * placements in one session would place its new clearance against its old
+ * symbol. Cheap to check and the only thing that can drift under one key.
+ */
+function ensureExampleGeometry(
   editor: StoreEditor,
   anchor: SpatialAnchor,
   model: ExampleModel,
-  params: PlaceExampleParams,
-): PlaceExampleResult {
-  const target = params.targetLengthUnitScale || 1;
-  const scale = model.lengthUnitScale / target;
-  if (!Number.isFinite(scale) || scale <= 0) {
-    throw new Error(
-      `placeExampleInStore: cannot relate the example's unit (${model.lengthUnitScale}) to the model's (${target})`,
-    );
+  typeKey: string,
+): ExampleGeometryRecord {
+  const remembered = reuseExampleGeometry(editor, typeKey);
+  if (remembered && remembered.companionMapIds.length === model.companions.length) {
+    return remembered;
   }
 
-  // One map for the whole placement, so geometry shared between the device and
-  // a companion is copied once — and so the context substitution below is
+  const typeEntity = typeEntityFor(model.device.type);
+  // No note, but the overlay may still hold the type from before a page
+  // reload. Its maps are the device's, so only the companions are copied
+  // again — see `findPlacedType`.
+  const placed = typeEntity ? findPlacedType(editor, typeEntity, typeKey) : null;
+
+  // One substitution map for the whole example, so geometry shared between the
+  // device and a companion is copied once — and so the context substitution is
   // stated in a single place.
   //
   // Every representation context of the source maps to this model's BODY
@@ -128,27 +163,53 @@ export function placeExampleInStore(
   // Only `IfcRoot` subtypes do, and none is copied — the occurrences are built
   // fresh, with this model's.
 
-  const deviceMaps = mapsFor(editor, model, model.device, substitutions);
+  const deviceMapIds = placed
+    ? placed.deviceMapIds
+    : mapsFor(editor, model, model.device, substitutions);
+  const companionMapIds = model.companions.map(
+    (companion) => mapsFor(editor, model, companion, substitutions),
+  );
 
-  const typeEntity = typeEntityFor(model.device.type);
-  const typeId = typeEntity
+  const typeId = placed?.typeId ?? (typeEntity
     ? addLibraryTypeToStore(editor, anchor, {
         IfcEntity: typeEntity,
         Name: model.device.name ?? undefined,
-        // The dictionary's id, in the slot this codebase already uses for a
-        // catalogue key — `projectProducts.ts` reads `ElementType` to group
-        // occurrences under the product they came from.
-        ElementType: params.exampleId,
+        // The identity, in the slot this codebase already uses for a catalogue
+        // key — `addLibraryElement` matches its own types on the same one.
+        ElementType: typeKey,
         PredefinedType: model.device.predefinedType ?? undefined,
-        RepresentationMapIds: deviceMaps,
+        RepresentationMapIds: deviceMapIds,
       }).typeId
-    : null;
+    : null);
+
+  const record: ExampleGeometryRecord = { typeId, deviceMapIds, companionMapIds };
+  rememberExampleGeometry(editor, typeKey, record);
+  return record;
+}
+
+export function placeExampleInStore(
+  editor: StoreEditor,
+  anchor: SpatialAnchor,
+  model: ExampleModel,
+  params: PlaceExampleParams,
+): PlaceExampleResult {
+  const target = params.targetLengthUnitScale || 1;
+  const scale = model.lengthUnitScale / target;
+  if (!Number.isFinite(scale) || scale <= 0) {
+    throw new Error(
+      `placeExampleInStore: cannot relate the example's unit (${model.lengthUnitScale}) to the model's (${target})`,
+    );
+  }
+
+  const { typeId, deviceMapIds, companionMapIds } = ensureExampleGeometry(
+    editor, anchor, model, params.typeKey,
+  );
 
   const device = addMappedOccurrenceToStore(editor, anchor, {
     IfcEntity: model.device.type,
     // A product with several representations is shown through the first; the
     // rest stay on the type, where another view can reach them.
-    mapId: deviceMaps[0],
+    mapId: deviceMapIds[0],
     Position: params.position,
     Scale: scale,
     PredefinedType: model.device.predefinedType ?? undefined,
@@ -164,8 +225,8 @@ export function placeExampleInStore(
   }
 
   const companionIds: number[] = [];
-  for (const companion of model.companions) {
-    const maps = mapsFor(editor, model, companion, substitutions);
+  for (const [index, companion] of model.companions.entries()) {
+    const maps = companionMapIds[index] ?? [];
     if (maps.length === 0) continue;
     const placed = addMappedOccurrenceToStore(editor, anchor, {
       IfcEntity: companion.type,

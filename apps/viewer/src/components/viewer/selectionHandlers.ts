@@ -16,6 +16,7 @@ import { pointInPolygon } from '@/lib/polygon-clip';
 import { toast } from '@/components/ui/toast';
 import { notifyWallSplit } from './wallSplitNotice.js';
 import { fetchExampleModel } from '@/lib/elementExamples/fetchExampleModel';
+import { libraryTypeKey } from '@/lib/catalog/libraryTypeKey';
 import { raycastForPolylinePoint, isNearPolylineStart,
   isDuplicateClickPoint,
 } from './measureHandlers.js';
@@ -975,7 +976,7 @@ export async function handleAddElementDrop(
         state.placeElementExample(modelId, storeyId, {
           example: fetched.model,
           position: ifc,
-          exampleId: entry.id,
+          typeKey: libraryTypeKey(entry),
         }),
         modelId,
         entry.label,
@@ -997,6 +998,7 @@ export async function handleAddElementDrop(
       Discipline: entry.discipline,
       Name: entry.label,
       CatalogEntryId: entry.id,
+      CatalogTypeKey: libraryTypeKey(entry),
       CatalogEntryTag: entry.tag,
       TechnicalData: entry.technicalData,
       Aas: entry.aas,
