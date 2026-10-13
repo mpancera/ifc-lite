@@ -18,6 +18,7 @@ import { Box, Cog, DoorOpen, Home, Layers, Library, Minus, Search, Siren, Square
 import { toast } from '@/components/ui/toast';
 import { fetchExampleModel } from '@/lib/elementExamples/fetchExampleModel';
 import { libraryTypeKey } from '@/lib/catalog/libraryTypeKey';
+import { ensureExampleMeshes } from '@/lib/elementExamples/exampleMeshes';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -1013,12 +1014,16 @@ function PlaceBySpaceSection({ type, modelId, storeyId }: PlaceBySpaceSectionPro
       // same object, and its geometry is copied once into the overlay anyway —
       // re-fetching per spot would be twenty requests for one answer.
       let example = null as Awaited<ReturnType<typeof fetchExampleModel>> | null;
+      let drawable = false;
       if (type === 'library' && selection?.exampleUrl) {
         example = await fetchExampleModel(selection.exampleUrl);
         if (!example.ok) {
           toast.error(example.error);
           return;
         }
+        // Once for the whole run, like the fetch above it: twenty detectors in
+        // twenty rooms are twenty occurrences of ONE meshed body.
+        drawable = await ensureExampleMeshes(libraryTypeKey(selection), example.bytes);
       }
       let placed = 0;
       let failure: string | null = null;
@@ -1069,9 +1074,10 @@ function PlaceBySpaceSection({ type, modelId, storeyId }: PlaceBySpaceSectionPro
         toast.error(placed === 0 ? failure : `Placed ${placed}, then stopped: ${failure}`);
       } else {
         toast.success(`Placed ${placed} in ${rooms} room${rooms === 1 ? '' : 's'}.`);
-        if (example?.ok) {
-          // The file is right and the picture is not yet: overlay-created
-          // geometry is not re-meshed in session.
+        if (example?.ok && !drawable) {
+          // The file is right and the picture is not: overlay-authored
+          // geometry is never re-meshed in session, and the pipeline run
+          // did not come through.
           toast.info(`${selection!.label}: sichtbar nach Export und Neuladen.`);
         }
       }
