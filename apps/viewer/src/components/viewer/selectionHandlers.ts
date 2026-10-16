@@ -17,6 +17,7 @@ import { toast } from '@/components/ui/toast';
 import { notifyWallSplit } from './wallSplitNotice.js';
 import { fetchExampleModel } from '@/lib/elementExamples/fetchExampleModel';
 import { libraryTypeKey } from '@/lib/catalog/libraryTypeKey';
+import { ensureExampleMeshes } from '@/lib/elementExamples/exampleMeshes';
 import { raycastForPolylinePoint, isNearPolylineStart,
   isDuplicateClickPoint,
 } from './measureHandlers.js';
@@ -972,19 +973,26 @@ export async function handleAddElementDrop(
         toast.error(`Couldn't add ${entry.label.toLowerCase()}: ${fetched.error}`);
         return;
       }
+      // Through the geometry pipeline before placing, so the real shape
+      // reaches the scene with the entity. Skipped when the library has
+      // already been updated — this is the same cupboard.
+      const typeKey = libraryTypeKey(entry);
+      const drawable = await ensureExampleMeshes(typeKey, fetched.bytes);
       finishAddElement(
         state.placeElementExample(modelId, storeyId, {
           example: fetched.model,
           position: ifc,
-          typeKey: libraryTypeKey(entry),
+          typeKey,
         }),
         modelId,
         entry.label,
       );
-      // Said once, on the way out: the file is right and the picture is not
-      // yet. Overlay-created geometry is not re-meshed in session, so the real
-      // shape appears after an export and reload.
-      toast.info(`${entry.label}: Geometrie liegt im Modell — sichtbar nach Export und Neuladen.`);
+      // Only when there is nothing to look at. Overlay-authored geometry is
+      // never re-meshed in session, so without the pipeline run above the
+      // real shape appears after an export and reload.
+      if (!drawable) {
+        toast.info(`${entry.label}: Geometrie liegt im Modell — sichtbar nach Export und Neuladen.`);
+      }
       return;
     }
 

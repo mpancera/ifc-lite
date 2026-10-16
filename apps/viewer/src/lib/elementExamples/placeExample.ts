@@ -82,6 +82,16 @@ export interface PlaceExampleResult {
   companionIds: number[];
   /** The type carrying the shared geometry, when the entity has one. */
   typeId: number | null;
+  /**
+   * Which product of the EXAMPLE each placed entity came from.
+   *
+   * Stated rather than inferred from the order of `companionIds`: a companion
+   * with no representation is skipped, so the two lists do not line up, and a
+   * caller matching them by index would hang a clearance's body on a plan
+   * symbol. The meshed picture is looked up by the source id
+   * (`instanceExampleMeshes`), which is what makes this pairing necessary.
+   */
+  products: { sourceExpressId: number; elementId: number }[];
 }
 
 /** Memoised `IFCSENSOR` → `IFCSENSORTYPE`, from the schema's own table. */
@@ -224,6 +234,8 @@ export function placeExampleInStore(
     emitRelDefinesByType(editor, anchor.ownerHistoryId, [device.elementId], typeId, anchor.guidRandom);
   }
 
+  const products = [{ sourceExpressId: model.device.expressId, elementId: device.elementId }];
+
   const companionIds: number[] = [];
   for (const [index, companion] of model.companions.entries()) {
     const maps = companionMapIds[index] ?? [];
@@ -242,6 +254,7 @@ export function placeExampleInStore(
       ContainerId: params.containerId,
     });
     companionIds.push(placed.elementId);
+    products.push({ sourceExpressId: companion.expressId, elementId: placed.elementId });
   }
 
   if (companionIds.length > 0) {
@@ -254,5 +267,5 @@ export function placeExampleInStore(
     );
   }
 
-  return { deviceId: device.elementId, companionIds, typeId };
+  return { deviceId: device.elementId, companionIds, typeId, products };
 }
