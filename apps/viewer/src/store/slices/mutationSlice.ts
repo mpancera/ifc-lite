@@ -17,6 +17,8 @@ import type { Mutation, ChangeSet, PropertyValue } from '@ifc-lite/mutations';
 import { PropertyValueType, QuantityType, RelationshipType } from '@ifc-lite/data';
 import type { ExampleModel } from '@/lib/elementExamples/exampleModel';
 import { placeExampleInStore } from '@/lib/elementExamples/placeExample';
+import { storedExampleMeshes } from '@/lib/elementExamples/exampleMeshes';
+import { instanceExampleMeshes } from '@/lib/elementExamples/instanceExampleMeshes';
 import {
   addBeamToStore,
   addColumnToStore,
@@ -3499,14 +3501,40 @@ export const createMutationSlice: StateCreator<
 
         joinActiveDisciplineSystem(get, editor, anchor, modelId, placed.deviceId);
 
+        // The picture, when the library has been through the pipeline.
+        //
+        // No `meshPayload` is handed to the builder: that argument builds ONE
+        // box from three numbers, and an example is several bodies somebody
+        // modelled. What goes to the scene here is the example's own meshed
+        // geometry, moved to the click point — see `instanceExampleMeshes`.
+        //
+        // Nothing to show is an ordinary outcome, not a failure: the cupboard
+        // is filled by an explicit update, and a placement must not wait on a
+        // wasm run. The caller says so afterwards.
+        const meshes = storedExampleMeshes(typeKey);
+        if (meshes) {
+          const storeyElevation =
+            store?.spatialHierarchy?.storeyElevations?.get(storeyExpressId) ?? 0;
+          const batch = instanceExampleMeshes(
+            meshes,
+            placed.products.map((product) => ({
+              sourceExpressId: product.sourceExpressId,
+              globalId: toGlobalIdFromModels(get().models, modelId, product.elementId),
+            })),
+            position,
+            storeyElevation,
+          );
+          if (batch.length > 0) {
+            const cross = get() as unknown as {
+              appendGeometryBatch?: (meshes: MeshData[]) => void;
+            };
+            cross.appendGeometryBatch?.(batch);
+            revealAddedGeometryInModelView(get);
+          }
+        }
+
         return placed.deviceId;
       },
-      // No preview mesh, deliberately. The other builders hand one over
-      // because they KNOW the shape they just made — a box, a wall, a slab.
-      // Here the shape is whatever somebody modelled, and the only honest
-      // preview would be to run the geometry pipeline over the copied
-      // subgraph. A stand-in box would be the very thing this feature exists
-      // to avoid: something that looks placed and is not what was placed.
     );
   },
 

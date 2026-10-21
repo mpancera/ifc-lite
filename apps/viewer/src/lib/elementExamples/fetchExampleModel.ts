@@ -21,7 +21,18 @@ import { externalRequestsAllowed } from '@/lib/privacy/externalRequests';
 import { readExampleModel, type ExampleModel } from './exampleModel.js';
 
 export type FetchExampleResult =
-  | { readonly ok: true; readonly model: ExampleModel }
+  | {
+      readonly ok: true;
+      readonly model: ExampleModel;
+      /**
+       * The file as it came off the wire.
+       *
+       * Kept alongside the read model because the geometry pipeline wants the
+       * BYTES — `exampleMeshes.ts` runs them to get the real shape on screen,
+       * which nothing above the parser can reconstruct.
+       */
+      readonly bytes: ArrayBuffer;
+    }
   | { readonly ok: false; readonly error: string };
 
 /**
@@ -54,7 +65,7 @@ export async function fetchExampleModel(url: string): Promise<FetchExampleResult
     if (!model) {
       return { ok: false, error: 'Diese Datei enthält kein platzierbares Objekt.' };
     }
-    return { ok: true, model };
+    return { ok: true, model, bytes: buffer };
   } catch (err) {
     return { ok: false, error: `Das Beispiel liess sich nicht lesen: ${(err as Error).message}` };
   }
