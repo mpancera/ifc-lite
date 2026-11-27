@@ -24,6 +24,7 @@ import { GeometryProcessor, type MeshData } from '@ifc-lite/geometry';
 import {
   createClashEngine,
   disciplineMatrixRules,
+  sortClashes,
   type Clash,
   type ClashMode,
   type ClashResult,
@@ -114,7 +115,7 @@ async function runRules(m: LoadedModel, rules: ClashRule[], ctx: ToolContext): P
 
 /** Project a `Clash` down to a compact, JSON-friendly display row. */
 /** Exported for direct unit testing (see clash.test.ts distanceKind coverage). */
-export function displayClash(c: Clash): Record<string, unknown> {
+export function displayClash(c: Clash) {
   return {
     id: c.id,
     rule: c.rule,
@@ -137,18 +138,22 @@ export function displayClash(c: Clash): Record<string, unknown> {
  * capped for display. Returns the rows plus an explicit `truncated` note when
  * capped.
  *
- * Sort by RAW distance ascending, not |distance|: hard clashes carry a negative
- * penetration depth, so most-negative-first surfaces the DEEPEST penetrations
- * (the worst, most actionable rows) instead of burying them past the cap;
- * clearance/touch gaps are positive, so the same order surfaces the tightest
- * gaps first. (An |distance| sort inverted the hard-mode order — issue caught in
- * review.)
+ * The ordering itself lives in `@ifc-lite/clash`'s `sortClashes(..., 'distance')`
+ * — the same helper the viewer's clash panel and the CLI summary use, so a
+ * "top N" list means the same N rows through every surface. It sorts by RAW
+ * distance ascending, not |distance|: hard clashes carry a negative penetration
+ * depth, so most-negative-first surfaces the DEEPEST penetrations (the worst,
+ * most actionable rows) instead of burying them past the cap; clearance/touch
+ * gaps are positive, so the same order surfaces the tightest gaps first. (An
+ * |distance| sort inverted the hard-mode order — issue caught in review.) It
+ * also breaks ties on the stable clash id, which this local copy did not, so
+ * equal-distance rows no longer reshuffle between runs.
  */
 function topClashes(clashes: Clash[], cap: number): {
-  rows: Record<string, unknown>[];
+  rows: ReturnType<typeof displayClash>[];
   truncated: { shown: number; dropped: number; total: number } | null;
 } {
-  const sorted = [...clashes].sort((x, y) => x.distance - y.distance);
+  const sorted = sortClashes(clashes, 'distance');
   const shown = sorted.slice(0, cap);
   const rows = shown.map(displayClash);
   if (sorted.length > cap) {
@@ -157,13 +162,13 @@ function topClashes(clashes: Clash[], cap: number): {
   return { rows, truncated: null };
 }
 
-const clashCheck: Tool = {
+export const clashCheck = {
   name: 'clash_check',
   description:
     'Clash detection on a single model. Omit BOTH a and b to detect ALL clashes inside the model '
     + '(every element vs every other — no discipline matrix needed). Give only a TYPE selector for a to '
     + 'self-clash within a group (a="IfcDuct*"), or both a and b for a pairwise check (a="IfcDuct*", b="IfcWall*"). '
-    + 'Meshes the model headlessly and returns a summary plus the top clashes by |distance|.',
+    + 'Meshes the model headlessly and returns a summary plus the top clashes by distance ascending, so deepest penetration first in hard mode and tightest gap first in clearance mode.',
   scope: 'read',
   inputSchema: {
     type: 'object',
@@ -203,7 +208,7 @@ const clashCheck: Tool = {
 
     const settings = { a, b: b ?? null, mode, tolerance: tolerance ?? null, clearance: clearance ?? null };
     const capNote = truncated
-      ? ` Showing top ${truncated.shown} by |distance|; ${truncated.dropped} more not shown.`
+      ? ` Showing top ${truncated.shown} by distance; ${truncated.dropped} more not shown.`
       : '';
     return okResult(
       `Found ${result.summary.total} clash(es) for ${label} (mode=${mode}).${capNote}`,
@@ -217,13 +222,14 @@ const clashCheck: Tool = {
       },
     );
   },
-};
+} satisfies Tool;
 
 const clashMatrix: Tool = {
   name: 'clash_matrix',
   description:
     'Run the standard discipline clash matrix (MEP x STR, HVAC x ARCH, ...) over the whole model. '
-    + 'Returns per-rule and per-severity breakdowns plus a sample of the worst clashes.',
+    + 'Returns per-rule and per-severity breakdowns over EVERY clash, plus a sample of clashes '
+    + 'selected and capped by distance ascending -- so the breakdowns are complete and the sample is not.',
   scope: 'read',
   inputSchema: {
     type: 'object',
@@ -244,7 +250,7 @@ const clashMatrix: Tool = {
     const { rows, truncated } = topClashes(result.clashes, CLASH_DISPLAY_CAP);
 
     const capNote = truncated
-      ? ` Sampling top ${truncated.shown} by |distance|; ${truncated.dropped} more not shown.`
+      ? ` Sampling top ${truncated.shown} by distance; ${truncated.dropped} more not shown.`
       : '';
     return okResult(
       `Discipline matrix (mode=${mode}, ${rules.length} rules): ${result.summary.total} clash(es).${capNote}`,

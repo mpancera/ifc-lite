@@ -16,42 +16,46 @@ import type { IfcDataStore } from '@ifc-lite/parser';
 import { RelationshipType } from '@ifc-lite/data';
 import {
   extractEntityAttributesOnDemand,
-  extractPropertiesOnDemand,
   extractTypePropertiesOnDemand,
-  extractQuantitiesOnDemand,
+  extractTypeQuantitiesOnDemand,
   extractClassificationsOnDemand,
   extractMaterialsOnDemand,
   extractAllMaterialsOnDemand,
   mergeInheritedPropertySets,
+  mergeInheritedQuantitySets,
 } from '@ifc-lite/parser';
-import { resolveEntityPredefinedType } from '@/lib/entity-predefined-type';
-import { buildOverlayRelationIndex } from '@/lib/mutations/overlayRelationIndex';
+import { resolveCapturedEntityScope, resolveEntityPredefinedType } from '@ifc-lite/rules';
+import { lensMaterialNames } from '@ifc-lite/rules';
+import {
+  ownPropertySetsFor,
+  typePropertySetsFor,
+  quantitySetsFor,
+  mutatedAttributeValue,
+} from '@ifc-lite/rules';
+import { toGlobalIdFromModels } from '@/store/globalId';
 import { readZones } from '@/lib/ifcZones/membership';
 import { themeOfZone } from '@/lib/ifcZones/themes';
 import { authoredEntities } from '@/lib/mutations/authoredEntities';
 import { groupBucketValue } from '@ifc-lite/lens';
-import { resolveOverlayDefiningTypeId } from '@/lib/mutations/overlayTypeLink';
-import { lensMaterialNames } from '@/lib/lens-material-names';
-import { toGlobalIdFromModels } from '@/store/globalId';
 import type { FederatedModel } from '@/store/types';
+import { computeMaxExpressId, effectiveRows, resolveGlobalId, type ModelEntry, type ModelRef } from './adapter-entities.js';
+import { effectiveGroupIds, effectiveGroupRecord, effectiveGroups, type EffectiveGroups } from './adapter-groups.js';
 
-interface ModelEntry {
-  id: string;
-  name: string;
-  ifcDataStore: IfcDataStore;
-  idOffset: number;
-  maxExpressId: number;
-}
-
-/** Scan entity array to find the actual maximum expressId */
-function computeMaxExpressId(dataStore: IfcDataStore): number {
-  const entities = dataStore.entities;
-  if (!entities || entities.count === 0) return 0;
-  let max = 0;
-  for (let i = 0; i < entities.count; i++) {
-    if (entities.expressId[i] > max) max = entities.expressId[i];
-  }
-  return max;
+/** `expressId`'s type-inherited psets, mutation-aware (#5207); mirrors
+ *  `filter-evaluate.ts`'s `getInheritedTypePsets`. */
+function resolveTypePropertySets(
+  store: IfcDataStore,
+  expressId: number,
+  mutationView: MutablePropertyView | undefined,
+): PropertySetInfo[] {
+  if (!store.relationships) return [];
+  const typeIds = store.relationships.getRelated(expressId, RelationshipType.DefinesByType, 'inverse');
+  if (typeIds.length === 0) return [];
+  const typeId = typeIds[0];
+  const base = (store.source && store.source.length > 0
+    ? extractTypePropertiesOnDemand(store, expressId)?.properties ?? []
+    : (store.properties?.getForEntity?.(typeId) ?? [])) as Parameters<typeof typePropertySetsFor>[0];
+  return typePropertySetsFor(base, typeId, mutationView) as PropertySetInfo[];
 }
 
 /** An authored entity the overlay contributes, indexed by federated global id. */
@@ -72,14 +76,17 @@ const OVERLAY_ATTR_INDEX: Record<string, number> = {
  *
  * @param models - Loaded federated models (may be empty in legacy mode)
  * @param legacyDataStore - Single-model data store (fallback)
- * @param mutationViews - Per-model authoring overlays. Supplied, elements
- *   placed and attributes edited this session take part in colouring; omitted,
- *   the provider reads the parsed file exactly as before.
+ * @param mutationViews - Live per-model overlay, keyed by model id (#5207);
+ *   omitted or missing an entry reads base-only, unchanged from before.
+ * @param resolveRef - The viewer store's `resolveGlobalIdFromModels` callback.
+ *   Live federated callers pass it so overlay-allocated ids above a model's
+ *   parsed range resolve back to that model. Source-only callers may omit it.
  */
 export function createLensDataProvider(
   models: Map<string, FederatedModel>,
   legacyDataStore: IfcDataStore | null,
-  mutationViews?: Map<string, MutablePropertyView>,
+  mutationViews?: ReadonlyMap<string, MutablePropertyView>,
+  resolveRef?: (globalId: number) => ModelRef | null,
 ): LensDataProvider {
   // Build a flat array for fast iteration
   const entries: ModelEntry[] = [];
@@ -92,6 +99,7 @@ export function createLensDataProvider(
           ifcDataStore: model.ifcDataStore,
           idOffset: model.idOffset ?? 0,
           maxExpressId: model.maxExpressId ?? 0,
+          mutationView: mutationViews?.get(model.id),
         });
       }
     }
@@ -102,147 +110,57 @@ export function createLensDataProvider(
       ifcDataStore: legacyDataStore,
       idOffset: 0,
       maxExpressId: computeMaxExpressId(legacyDataStore),
+      mutationView: mutationViews?.get('legacy'),
     });
   }
 
-  // ── Authoring overlay ──
-  // Elements placed and attributes edited this session live in the mutation
-  // overlay, not in the parsed store the rest of this adapter reads. Index them
-  // by federated global id once, so every accessor below is an O(1) lookup.
-  const overlayById = new Map<number, OverlayEntity>();
-  const overlayTombstones = new Set<number>();
-  /** modelId → (local expressId → the zones it was painted into this session). */
-  const overlayZonesByModel = new Map<string, Map<number, Array<{ id: number; name?: string; type: string; objectType?: string }>>>();
-  /** Auto-colour bucket value → the zone's own colour, for `getValueColor`. */
-  const zoneColourByValue = new Map<string, string>();
-  const offsets = new Map(entries.map((entry) => [entry.id, { idOffset: entry.idOffset }]));
-  if (mutationViews) {
-    for (const entry of entries) {
-      const view = mutationViews.get(entry.id);
-      if (!view) continue;
-      const toGlobal = (expressId: number) => toGlobalIdFromModels(offsets, entry.id, expressId);
-      // Authoring an element also creates its placement/profile/solid entities.
-      // Only the product is registered in the spatial structure, and only
-      // products may reach the colour map — otherwise auto-colour legend counts
-      // are inflated by geometry plumbing that never renders.
-      //
-      // Asked of the OVERLAY as well as the parse. The parsed hierarchy knows
-      // only what came out of the file, so a building authored in this session
-      // — every element of it — answered "not a product" and reached nothing:
-      // the by-zone lens went active over freshly painted zones and coloured
-      // nothing at all. Measured on a model built entirely in one session.
-      const overlayContained = new Set<number>();
-      const relIndex = buildOverlayRelationIndex([...view.getNewEntities()]);
-      if (relIndex.size > 0) {
-        for (const entity of view.getNewEntities()) {
-          // Contained in a storey, or aggregated into one — a space arrives by
-          // the second route and a wall by the first.
-          const containers = relIndex.related(entity.expressId, 'IfcRelContainedInSpatialStructure', 'inverse');
-          const parents = relIndex.related(entity.expressId, 'IfcRelAggregates', 'inverse');
-          if (containers.length > 0 || parents.length > 0) overlayContained.add(entity.expressId);
-        }
-      }
-      const isProduct = (expressId: number) =>
-        (entry.ifcDataStore.spatialHierarchy?.elementToStorey.has(expressId) ?? false)
-        || overlayContained.has(expressId);
-      for (const entity of view.getNewEntities()) {
-        if (!isProduct(entity.expressId)) continue;
-        overlayById.set(toGlobal(entity.expressId), {
-          type: entity.type,
-          attributes: entity.attributes,
-          modelId: entry.id,
-          expressId: entity.expressId,
-        });
-      }
-      for (const expressId of view.getTombstones()) overlayTombstones.add(toGlobal(expressId));
+  const groupOverlays = new Map<string, EffectiveGroups | null>();
 
-      // Zones painted this session and their members. Indexed per model
-      // because express ids are local to one file. `authoredEntities` rather
-      // than `getNewEntities` — recolouring or repainting a zone edits it
-      // positionally, and the raw creation record would still show the
-      // original colour and the original member list.
-      const zones = readZones(authoredEntities(view));
-      const perModel = new Map<number, Array<{ id: number; name?: string; type: string; objectType?: string }>>();
-      for (const zone of zones) {
-        const ref = {
-          id: zone.expressId,
-          name: zone.name || undefined,
-          type: 'IfcZone',
-          objectType: zone.objectType || undefined,
-        };
-        // Keyed by the bucket the engine will actually form, not by the name —
-        // an unnamed zone buckets as `IfcZone #id` and still deserves its colour.
-        if (zone.colour) zoneColourByValue.set(groupBucketValue(ref), zone.colour);
-        for (const memberId of zone.memberIds) {
-          const list = perModel.get(memberId) ?? [];
-          list.push(ref);
-          perModel.set(memberId, list);
-        }
-      }
-      overlayZonesByModel.set(entry.id, perModel);
+  // Fork: zones painted this session (overlay), per model, and their colours.
+  const paintedZones = new Map<string, Set<number>>();
+  const paintedZoneIds = (modelId: string, view: MutablePropertyView | undefined): Set<number> => {
+    let ids = paintedZones.get(modelId);
+    if (!ids) {
+      ids = new Set(view ? readZones(authoredEntities(view)).map((zone) => zone.expressId) : []);
+      paintedZones.set(modelId, ids);
     }
-  }
-
-  /** Zones the overlay assigns to this element, or an empty list. */
-  function overlayGroupsOf(
-    modelId: string,
-    expressId: number,
-  ): ReadonlyArray<{ id: number; name?: string; type: string; objectType?: string }> {
-    return overlayZonesByModel.get(modelId)?.get(expressId) ?? [];
-  }
-
-  /**
-   * An entity's own property sets, with authored ones merged in.
-   * `MutablePropertyView.getForEntity` already returns base ∪ overlay (its base
-   * extractor is wired to the same on-demand path), so it replaces the plain
-   * extractor wholesale rather than layering on top of it.
-   */
-  function instancePropertySets(entry: ModelEntry, expressId: number): PropertySetInfo[] {
-    const view = mutationViews?.get(entry.id);
-    if (view) return view.getForEntity(expressId) as PropertySetInfo[];
-    return extractPropertiesOnDemand(entry.ifcDataStore, expressId) as PropertySetInfo[];
-  }
-
-  /**
-   * Property sets on the `IfcXxxType` an element was typed by THIS session.
-   * The parsed store's relationship graph is built once at load, so an
-   * `IfcRelDefinesByType` authored now is invisible to `extractTypeProperties-
-   * OnDemand` and the type's defaults (a catalogue product's technical data)
-   * would never reach the occurrence.
-   */
-  function overlayTypePropertySets(entry: ModelEntry, expressId: number): PropertySetInfo[] {
-    const view = mutationViews?.get(entry.id);
-    const typeId = resolveOverlayDefiningTypeId(view, expressId);
-    return typeId === null ? [] : (view!.getForEntity(typeId) as PropertySetInfo[]);
-  }
-
-  /** The overlay's value for a named attribute, or `undefined` to fall through. */
-  function overlayAttribute(globalId: number, attrName: string): string | undefined {
-    const resolved = resolveGlobalId(globalId, entries);
-    const view = resolved ? mutationViews?.get(resolved.entry.id) : undefined;
-    if (resolved && view) {
-      for (const m of view.getAttributeMutationsForEntity(resolved.expressId)) {
-        if (m.name === attrName) return m.value || undefined;
+    return ids;
+  };
+  let zoneColourByValue: Map<string, string> | null = null;
+  const zoneColours = (): Map<string, string> => {
+    if (zoneColourByValue) return zoneColourByValue;
+    zoneColourByValue = new Map();
+    for (const view of mutationViews?.values() ?? []) {
+      for (const zone of readZones(authoredEntities(view))) {
+        if (!zone.colour) continue;
+        const ref = { id: zone.expressId, name: zone.name || undefined, type: 'IfcZone', objectType: zone.objectType || undefined };
+        zoneColourByValue.set(groupBucketValue(ref), zone.colour);
       }
     }
-    const authored = overlayById.get(globalId);
-    if (!authored) return undefined;
-    if (attrName === 'Type') return authored.type;
-    if (attrName === 'PredefinedType') {
-      const last = authored.attributes[authored.attributes.length - 1];
-      return typeof last === 'string' && /^\.[A-Z0-9_]+\.$/.test(last) ? last.slice(1, -1) : undefined;
-    }
-    const index = OVERLAY_ATTR_INDEX[attrName];
-    if (index === undefined) return undefined;
-    const raw = authored.attributes[index];
-    return typeof raw === 'string' && raw ? raw : undefined;
-  }
+    return zoneColourByValue;
+  };
+
+  // Lens evaluation reads several fields inside forEachEntity's callback.
+  // Carry that exact model-local ref through the callback so a million-row
+  // lens does not ask modelSlice to sort the federation for every field read.
+  const current = { entry: null as unknown as ModelEntry, expressId: 0 };
+  let currentGlobalId: number | null = null;
+  const resolve = (globalId: number) => currentGlobalId === globalId
+    ? current
+    : resolveGlobalId(globalId, entries, models.size > 0 ? resolveRef : undefined);
 
   return {
+    resolveCapturedScope(scope) {
+      const candidates = resolveCapturedEntityScope(scope, [...models].map(([id, model]) => ({
+        id, filterIdentity: model.sourceFingerprint, sourceContentHash: model.sourceContentHash,
+        store: model.ifcDataStore, mutationView: mutationViews?.get(id),
+      })));
+      return new Set([...candidates].flatMap(([modelId, ids]) => [...ids].map(id => toGlobalIdFromModels(models, modelId, id))));
+    },
     getEntityCount(): number {
       let count = 0;
       for (const entry of entries) {
-        count += entry.ifcDataStore.entities?.count ?? 0;
+        for (const _row of effectiveRows(entry)) count++;
       }
       return count + overlayById.size;
     },
@@ -250,12 +168,11 @@ export function createLensDataProvider(
     forEachEntity(callback: (globalId: number, modelId: string) => void): void {
       const models = new Map(entries.map((entry) => [entry.id, { idOffset: entry.idOffset }]));
       for (const entry of entries) {
-        const entities = entry.ifcDataStore.entities;
-        if (!entities) continue;
-        for (let i = 0; i < entities.count; i++) {
-          const expressId = entities.expressId[i];
+        for (const { expressId } of effectiveRows(entry)) {
           const globalId = toGlobalIdFromModels(models, entry.id, expressId);
-          if (overlayTombstones.has(globalId)) continue;
+          currentGlobalId = globalId;
+          current.entry = entry;
+          current.expressId = expressId;
           callback(globalId, entry.id);
         }
       }
@@ -263,11 +180,12 @@ export function createLensDataProvider(
     },
 
     getEntityType(globalId: number): string | undefined {
-      const authored = overlayById.get(globalId);
-      if (authored) return authored.type;
-      const resolved = resolveGlobalId(globalId, entries);
+      const resolved = resolve(globalId);
       if (!resolved) return undefined;
-      return resolved.entry.ifcDataStore.entities?.getTypeName?.(resolved.expressId);
+      const { mutationView, ifcDataStore } = resolved.entry;
+      return mutationView?.getEntityTypeMutation(resolved.expressId)?.newType
+        ?? mutationView?.getNewEntity(resolved.expressId)?.type
+        ?? ifcDataStore.entities?.getTypeName?.(resolved.expressId);
     },
 
     getPropertyValue(
@@ -275,64 +193,45 @@ export function createLensDataProvider(
       propertySetName: string,
       propertyName: string,
     ): unknown {
-      const resolved = resolveGlobalId(globalId, entries);
+      const resolved = resolve(globalId);
       if (!resolved) return undefined;
-      const store = resolved.entry.ifcDataStore;
+      const { ifcDataStore: store, mutationView } = resolved.entry;
       const id = resolved.expressId;
-
-      // On-demand extraction path: pre-built table is empty for client-parsed
-      // stores, so iterate the same psets we expose via getPropertySets.
-      if (store.onDemandPropertyMap && store.source?.length > 0) {
-        const instancePsets = instancePropertySets(resolved.entry, id);
-        for (const pset of instancePsets) {
-          if (pset.name !== propertySetName) continue;
-          for (const prop of pset.properties) {
-            if (prop.name === propertyName) return prop.value;
-          }
-        }
-        // Fall through to type-inherited psets (Pset_*Common is typically
-        // attached to IfcSpaceType / IfcWallType, not the instance).
-        const typeProps = extractTypePropertiesOnDemand(store, id)?.properties ?? [];
-        const inherited = typeProps.length > 0
-          ? (typeProps as PropertySetInfo[])
-          : overlayTypePropertySets(resolved.entry, id);
-        for (const pset of inherited) {
+      const findValue = (psets: PropertySetInfo[]): unknown => {
+        for (const pset of psets) {
           if (pset.name !== propertySetName) continue;
           for (const prop of pset.properties) {
             if (prop.name === propertyName) return prop.value;
           }
         }
         return undefined;
+      };
+
+      // Mutation-aware (#5207) via filter-evaluate-mutations.ts's
+      // ownPropertySetsFor, which handles both extraction modes internally.
+      if (mutationView || (store.onDemandPropertyMap && store.source?.length > 0)) {
+        const own = findValue(ownPropertySetsFor(store, id, mutationView) as PropertySetInfo[]);
+        if (own !== undefined) return own;
+        // Type-inherited (Pset_*Common is typically on IfcSpaceType/IfcWallType).
+        return findValue(resolveTypePropertySets(store, id, mutationView));
       }
 
       return store.properties?.getPropertyValue?.(id, propertySetName, propertyName);
     },
 
     getPropertySets(globalId: number): PropertySetInfo[] {
-      const resolved = resolveGlobalId(globalId, entries);
+      const resolved = resolve(globalId);
       if (!resolved) return [];
-      const store = resolved.entry.ifcDataStore;
+      const { ifcDataStore: store, mutationView } = resolved.entry;
       const id = resolved.expressId;
 
       // Properties are extracted lazily — the pre-built table is empty unless
-      // server-parsed. Mirror the quantity path and use the on-demand extractor,
-      // which itself falls back to the eager table when no on-demand map exists.
-      if (store.onDemandPropertyMap && store.source?.length > 0) {
-        const instancePsets = instancePropertySets(resolved.entry, id);
-        // Merge type-inherited psets (Pset_*Common lives on the type entity for
-        // occurrences). Instance properties win per PROPERTY, not per set: both
-        // sides routinely carry a same-named set holding different properties,
-        // and replacing the whole set hid the type-only ones (#1913).
-        //
-        // Both sources stay overlay-aware: an edited value has to beat the
-        // parsed one, which is what instancePropertySets and
-        // overlayTypePropertySets are for. Only the merge rule comes from
-        // upstream.
-        const typeProps = extractTypePropertiesOnDemand(store, id)?.properties ?? [];
-        const inherited = typeProps.length > 0
-          ? (typeProps as PropertySetInfo[])
-          : overlayTypePropertySets(resolved.entry, id);
-        return mergeInheritedPropertySets(instancePsets, inherited);
+      // server-parsed, falling back to the eager table when no on-demand map
+      // exists. Mutation-aware (#5207) via ownPropertySetsFor. Instance
+      // properties win per PROPERTY, not per set (#1913).
+      if (mutationView || (store.onDemandPropertyMap && store.source?.length > 0)) {
+        const instancePsets = ownPropertySetsFor(store, id, mutationView) as PropertySetInfo[];
+        return mergeInheritedPropertySets(instancePsets, resolveTypePropertySets(store, id, mutationView));
       }
 
       const psets = store.properties?.getForEntity?.(id);
@@ -341,16 +240,14 @@ export function createLensDataProvider(
     },
 
     getEntityAttribute(globalId: number, attrName: string): string | undefined {
-      // An edited or authored value wins; everything else falls through to the
-      // parsed file, so an unedited model reads exactly as it did before.
-      const fromOverlay = overlayAttribute(globalId, attrName);
-      if (fromOverlay !== undefined) return fromOverlay;
-      if (overlayById.has(globalId)) return undefined;
-
-      const resolved = resolveGlobalId(globalId, entries);
+      const resolved = resolve(globalId);
       if (!resolved) return undefined;
-      const store = resolved.entry.ifcDataStore;
+      const { ifcDataStore: store, mutationView } = resolved.entry;
       const id = resolved.expressId;
+
+      // Live edit wins (#5207), same lookup filter-evaluate.ts uses.
+      const edited = mutatedAttributeValue(mutationView, id, attrName);
+      if (edited !== undefined) return edited;
 
       // Fast path: columnar attributes stored during initial parse
       switch (attrName) {
@@ -396,66 +293,73 @@ export function createLensDataProvider(
       qsetName: string,
       quantName: string,
     ): number | string | undefined {
-      const resolved = resolveGlobalId(globalId, entries);
+      const resolved = resolve(globalId);
       if (!resolved) return undefined;
-      const store = resolved.entry.ifcDataStore;
+      const { ifcDataStore: store, mutationView } = resolved.entry;
       const id = resolved.expressId;
-
-      // On-demand quantity extraction
-      if (store.onDemandQuantityMap && store.source?.length > 0) {
-        const qsets = extractQuantitiesOnDemand(store, id);
+      const findIn = (qsets: ReadonlyArray<{ name: string; quantities: ReadonlyArray<{ name: string; value: number | string }> }>) => {
         for (const qset of qsets) {
-          if (qset.name === qsetName) {
-            for (const q of qset.quantities) {
-              if (q.name === quantName) return q.value;
-            }
-          }
-        }
-        return undefined;
-      }
-
-      // Fallback: pre-built quantity tables
-      const qsets = store.quantities?.getForEntity?.(id);
-      if (!qsets) return undefined;
-      for (const qset of qsets) {
-        if (qset.name === qsetName) {
+          if (qset.name !== qsetName) continue;
           for (const q of qset.quantities) {
             if (q.name === quantName) return q.value;
           }
         }
+        return undefined;
+      };
+
+      // Mutation-aware occurrence read (#5207). Type-inherited quantities
+      // stay base-only below: search's own qtysFor has no type-quantity
+      // overlay to mirror, so this doesn't out-run that model.
+      const own = findIn(quantitySetsFor(store, id, mutationView));
+      if (own !== undefined) return own;
+
+      // Type-inherited qsets (Qto_*BaseQuantities is sometimes attached to
+      // the IfcTypeProduct rather than the occurrence) — base-only.
+      if (store.onDemandQuantityMap && store.source?.length > 0) {
+        const typeQtys = extractTypeQuantitiesOnDemand(store, id);
+        return typeQtys ? findIn(typeQtys.quantities) : undefined;
       }
-      return undefined;
+      const typeIds = store.relationships?.getRelated(id, RelationshipType.DefinesByType, 'inverse') ?? [];
+      const typeId = typeIds[0];
+      if (typeId === undefined) return undefined;
+      return findIn(store.quantities?.getForEntity?.(typeId) ?? []);
     },
 
     getClassifications(globalId: number): ClassificationInfo[] {
-      const resolved = resolveGlobalId(globalId, entries);
+      const resolved = resolve(globalId);
       if (!resolved) return [];
       const store = resolved.entry.ifcDataStore;
-      return extractClassificationsOnDemand(store, resolved.expressId);
+      return extractClassificationsOnDemand(store, resolved.expressId, resolved.entry.mutationView);
     },
 
     getQuantitySets(globalId: number): ReadonlyArray<{
       name: string;
       quantities: ReadonlyArray<{ name: string }>;
     }> {
-      const resolved = resolveGlobalId(globalId, entries);
+      const resolved = resolve(globalId);
       if (!resolved) return [];
-      const store = resolved.entry.ifcDataStore;
+      const { ifcDataStore: store, mutationView } = resolved.entry;
       const id = resolved.expressId;
 
-      // On-demand quantity extraction
+      // Occurrence qsets, mutation-aware (#5207); merged with type-inherited
+      // qsets, base-only (see getQuantityValue), occurrence wins per QUANTITY.
+      const instanceQsets = quantitySetsFor(store, id, mutationView) as ReadonlyArray<{ name: string; quantities: ReadonlyArray<{ name: string }> }>;
+      let typeQsets: ReadonlyArray<{ name: string; quantities: ReadonlyArray<{ name: string }> }> = [];
       if (store.onDemandQuantityMap && store.source?.length > 0) {
-        return extractQuantitiesOnDemand(store, id);
+        const typeQtys = extractTypeQuantitiesOnDemand(store, id);
+        typeQsets = (typeQtys?.quantities ?? []) as typeof typeQsets;
+      } else {
+        const typeIds = store.relationships?.getRelated(id, RelationshipType.DefinesByType, 'inverse') ?? [];
+        const typeId = typeIds[0];
+        typeQsets = typeId !== undefined
+          ? (store.quantities?.getForEntity?.(typeId) ?? []) as typeof typeQsets
+          : [];
       }
-
-      // Fallback: pre-built quantity tables
-      const qsets = store.quantities?.getForEntity?.(id);
-      if (!qsets) return [];
-      return qsets as ReadonlyArray<{ name: string; quantities: ReadonlyArray<{ name: string }> }>;
+      return mergeInheritedQuantitySets(instanceQsets, typeQsets);
     },
 
     getMaterialName(globalId: number): string | undefined {
-      const resolved = resolveGlobalId(globalId, entries);
+      const resolved = resolve(globalId);
       if (!resolved) return undefined;
       const store = resolved.entry.ifcDataStore;
       // Primary association only — this accessor is single-valued by contract.
@@ -473,7 +377,7 @@ export function createLensDataProvider(
     },
 
     getMaterialNames(globalId: number): string[] {
-      const resolved = resolveGlobalId(globalId, entries);
+      const resolved = resolve(globalId);
       if (!resolved) return [];
       const store = resolved.entry.ifcDataStore;
       // Union across ALL associations (elements may carry several).
@@ -485,7 +389,7 @@ export function createLensDataProvider(
     },
 
     getModelId(globalId: number): string | undefined {
-      const resolved = resolveGlobalId(globalId, entries);
+      const resolved = resolve(globalId);
       if (!resolved) return undefined;
       return resolved.entry.id;
     },
@@ -499,74 +403,30 @@ export function createLensDataProvider(
       globalId: number,
       filter?: string,
     ): ReadonlyArray<{ id: number; name?: string; type: string; objectType?: string }> {
-      const resolved = resolveGlobalId(globalId, entries);
+      const resolved = resolve(globalId);
       if (!resolved) return [];
-      const store = resolved.entry.ifcDataStore;
-      // Inverse IfcRelAssignsToGroup: entity → the groups/zones it belongs to.
-      // The parsed graph predates this session, so a zone painted just now is
-      // invisible to it — the same overlay blindness that hid authored elements
-      // from Lists, Solo and the Relationships tab. An element with no parsed
-      // membership at all still has to reach the overlay lookup below.
-      const groupIds = store.relationships?.getRelated(
-        resolved.expressId, RelationshipType.AssignsToGroup, 'inverse',
-      ) ?? [];
-      // Overlay zones come FIRST. Auto-colour picks the first `IfcZone` it
-      // finds, and a room the user just painted is usually already in some
-      // zone the file shipped with — leaving the parsed one in front would
-      // make painting look like it did nothing at all.
-      const out: Array<{ id: number; name?: string; type: string; objectType?: string }> =
-        [...overlayGroupsOf(resolved.entry.id, resolved.expressId)];
-      for (const gid of groupIds) {
-        const name = store.entities?.getName(gid);
-        // Canonical IfcPascalCase so the "By Zone" lens can match `IfcZone`
-        // deterministically; `byId.get(gid).type` is the raw STEP token. (#1075)
-        const type = store.entities?.getTypeName?.(gid) || store.entityIndex?.byId.get(gid)?.type || 'Unknown';
-        // ObjectType carries the system designation for unnamed groups; the
-        // lens legend falls back to it when Name/LongName are empty. (#1075)
-        const objectType = store.entities?.getObjectType?.(gid);
-        out.push({ id: gid, name: name || undefined, type, objectType: objectType || undefined });
+      const { ifcDataStore: store, mutationView: view } = resolved.entry;
+      if (!groupOverlays.has(resolved.entry.id)) {
+        groupOverlays.set(resolved.entry.id, effectiveGroups(store, view));
       }
-      if (!filter) return out;
-      // The filter is a zone-theme id: keep only the zones ABOUT that subject,
-      // so "one zone per room" holds again and the legend matches the picture.
-      // A grouping whose ObjectType follows a convention we do not know is
-      // dropped rather than guessed into the wrong theme.
-      return out.filter((g) => themeOfZone(g.objectType)?.id === filter);
+      const groups = effectiveGroupIds(store, view, resolved.expressId, groupOverlays.get(resolved.entry.id) ?? null)
+        .map((id) => effectiveGroupRecord(store, view, id));
+      // Fork: zones painted this session come FIRST. Auto-colour picks the first
+      // IfcZone it finds, and a painted room is usually already in a zone the
+      // file shipped with.
+      const painted = paintedZoneIds(resolved.entry.id, view);
+      const ordered = painted.size > 0
+        ? [...groups.filter((g) => painted.has(g.id)), ...groups.filter((g) => !painted.has(g.id))]
+        : groups;
+      if (!filter) return ordered;
+      // Fork: the filter is a zone-theme id; keep only the zones about it.
+      return ordered.filter((g) => themeOfZone(g.objectType)?.id === filter);
     },
 
-    /**
-     * A zone dictates its own colour, so painting keeps it stable.
-     *
-     * Only the `group` source has an opinion: everything else leaves the
-     * palette alone. The colour lives in the zone's Description as a
-     * `ZoneDisplay=` token — see `lib/ifcZones/zoneDisplay.ts`.
-     */
+    /** Fork: a zone dictates its own colour (`ZoneDisplay=` token), so painting keeps it stable. */
     getValueColor(value: string, source: string): string | null {
       if (source !== 'group') return null;
-      return zoneColourByValue.get(value) ?? null;
+      return zoneColours().get(value) ?? null;
     },
   };
-}
-
-/**
- * Resolve a global ID to (entry, local expressId).
- * O(m) where m = model count (typically 1–5).
- * Reuses a single result object to avoid per-call allocation during
- * hot-loop lens evaluation (100k+ calls).
- */
-const _resolved = { entry: null as unknown as ModelEntry, expressId: 0 };
-
-function resolveGlobalId(
-  globalId: number,
-  entries: ModelEntry[],
-): typeof _resolved | null {
-  for (const entry of entries) {
-    const localId = globalId - entry.idOffset;
-    if (localId >= 0 && localId <= entry.maxExpressId) {
-      _resolved.entry = entry;
-      _resolved.expressId = localId;
-      return _resolved;
-    }
-  }
-  return null;
 }

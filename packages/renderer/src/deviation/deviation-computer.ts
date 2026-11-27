@@ -18,10 +18,14 @@
 
 import { DeviationPipeline } from './deviation-pipeline.js';
 import { buildTriangleBVH } from './triangle-bvh.js';
+import { exactPlacement } from '../pointcloud/point-cloud-placement.js';
 import type { MeshData } from '@ifc-lite/geometry';
 import type { WebGPUDevice } from '../device.js';
 import type { Scene } from '../scene.js';
 import type { PointCloudRenderer } from '../pointcloud/point-cloud-renderer.js';
+import type { PointCloudNode } from '../pointcloud/point-cloud-node.js';
+import { readDeviationAssetStats, readDeviationDistances, type DeviationAssetStats } from './deviation-readback.js';
+import type { DeviationDistances } from './deviation-statistics.js';
 
 /**
  * Build a deterministic fingerprint of the BVH input mesh set so
@@ -38,7 +42,7 @@ function computeBvhFingerprint(meshes: ReadonlyArray<MeshData>): string {
         const mi = m.modelIndex ?? -1;
         const posLen = m.positions?.length ?? 0;
         const idxLen = m.indices?.length ?? 0;
-        parts.push(`${id}:${mi}:${posLen}:${idxLen}`);
+        parts.push(`${id}:${mi}:${posLen}:${idxLen}:${m.origin?.join(',') ?? ''}:${m.positions[0]},${m.positions[1]},${m.positions[2]}`);
     }
     return parts.join('|');
 }
@@ -100,6 +104,7 @@ export interface DeviationComputeResult {
  */
 export class DeviationComputer {
     private pipeline: DeviationPipeline | null = null;
+    private computedBuffers: WeakSet<GPUBuffer> | null = null;
     /**
      * Cache of which mesh-set the BVH was built from. We rebuild on
      * `computeDeviations` only when the cached "fingerprint" misses,
@@ -127,6 +132,35 @@ export class DeviationComputer {
         this.pipeline?.destroy();
         this.pipeline = new DeviationPipeline(device);
         this.bvhFingerprint = null;
+        this.computedBuffers = null;
+    }
+
+    /** On-demand GPU readback; each row belongs to one scan asset. */
+    async readAssetStats(ctx: DeviationComputeContext): Promise<DeviationAssetStats[]> {
+        return this.readComputed(ctx, readDeviationAssetStats);
+    }
+
+    /** Every computed point's signed distance, grouped by scan asset (#6872). */
+    async readDistances(ctx: DeviationComputeContext): Promise<DeviationDistances> {
+        return this.readComputed(ctx, readDeviationDistances);
+    }
+
+    private async readComputed<T>(
+        ctx: DeviationComputeContext,
+        read: (device: GPUDevice, nodes: Iterable<PointCloudNode>, wasComputed: (buffer: GPUBuffer) => boolean) => Promise<T>,
+    ): Promise<T> {
+        const computed = this.computedBuffers;
+        if (!computed || !ctx.pointCloudRenderer) {
+            throw new Error('No completed deviation run to read back.');
+        }
+        const result = await read(
+            ctx.device.getDevice(), ctx.pointCloudRenderer.getInternalNodes(),
+            (buffer) => computed.has(buffer),
+        );
+        if (this.computedBuffers !== computed) {
+            throw new Error('Deviation results changed during readback. Recompute and try again.');
+        }
+        return result;
     }
 
     /**
@@ -153,16 +187,25 @@ export class DeviationComputer {
         if (!this.pipeline || !ctx.pointCloudRenderer) {
             throw new Error('Renderer not initialised — call init() first.');
         }
+        this.computedBuffers = null;
         const meshes = collectAllSceneMeshes(ctx.scene);
+        const nodes = Array.from(ctx.pointCloudRenderer.getInternalNodes());
+        // One shared frame keeps both points and triangles small (#10094
+        // item 1). It is anchored on the meshes, so it moves only with them
+        // (and the BVH cache with it), not with cloud order or streaming: the
+        // first mesh's f64 origin; a mesh without one is absolute already.
+        const origin = meshes.find((mesh) => mesh.origin)?.origin;
+        const anchor: [number, number, number] = origin ? [origin[0], origin[1], origin[2]] : [0, 0, 0];
         // Fingerprint folds in per-mesh expressId / modelIndex /
         // positions length / triangle count, so two distinct meshes
         // that happen to share an aggregate position-length total
         // can't alias each other. A federation reload that swaps one
         // model for another with the same total triangle count would
         // otherwise reuse the previous BVH and report wrong distances.
+        // The anchor is a mesh origin, which the fingerprint already covers.
         const fingerprint = computeBvhFingerprint(meshes);
         if (opts.forceRebuild || fingerprint !== this.bvhFingerprint) {
-            const bvh = buildTriangleBVH(meshes);
+            const bvh = buildTriangleBVH(meshes, { anchor });
             this.pipeline.uploadBvh(bvh);
             this.bvhFingerprint = fingerprint;
         }
@@ -176,24 +219,25 @@ export class DeviationComputer {
         const encoder = ctx.device.getDevice().createCommandEncoder({ label: 'pointcloud-deviation' });
         let chunksProcessed = 0;
         let pointsProcessed = 0;
-        const nodes = ctx.pointCloudRenderer.getInternalNodes();
+        const computedBuffers = new WeakSet<GPUBuffer>();
         for (const node of nodes) {
+            const model = exactPlacement(node) ?? new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+            for (let axis = 0; axis < 3; axis++) model[12 + axis] -= anchor[axis];
+            const relativeModel = new Float32Array(model);
             for (const chunk of node.chunks) {
                 const ok = this.pipeline.dispatch(encoder, {
                     positionsBuffer: chunk.vertexBuffer,
                     deviationsBuffer: chunk.deviationBuffer,
                     pointCount: chunk.pointCount,
                     maxRange,
-                    // #1804: chunk positions are stored in the asset's
-                    // decode-shifted local frame when IfcMapConversion
-                    // alignment is active; the BVH triangles are world
-                    // space, so the compute pass must apply the same
-                    // per-asset matrix the splat shader renders with.
-                    model: node.model,
+                    // Preserve #1804 alignment, but in the BVH's shared local
+                    // frame: never narrow a map-grid translation first.
+                    model: relativeModel,
                 });
                 if (ok) {
                     chunksProcessed++;
                     pointsProcessed += chunk.pointCount;
+                    computedBuffers.add(chunk.deviationBuffer);
                 }
             }
         }
@@ -212,6 +256,7 @@ export class DeviationComputer {
             // them.
             this.pipeline.releaseTransientParams();
         }
+        this.computedBuffers = computedBuffers;
         ctx.requestRender();
 
         // Suggest a default half-range = max(0.01m, max-extent / 1000).
@@ -231,7 +276,11 @@ export class DeviationComputer {
             bvhNodes: stats.nodeCount,
             chunksProcessed,
             pointsProcessed,
-            bounds: stats.bounds,
+            // Metadata remains in world/render coordinates for callers.
+            bounds: bb && stats.triangleCount > 0 ? {
+                min: [bb.min[0] + anchor[0], bb.min[1] + anchor[1], bb.min[2] + anchor[2]],
+                max: [bb.max[0] + anchor[0], bb.max[1] + anchor[1], bb.max[2] + anchor[2]],
+            } : bb,
             suggestedHalfRange,
         };
     }
@@ -244,5 +293,6 @@ export class DeviationComputer {
         this.pipeline?.destroy();
         this.pipeline = null;
         this.bvhFingerprint = null;
+        this.computedBuffers = null;
     }
 }

@@ -8,7 +8,9 @@
 //! private helpers.
 
 use super::*;
-use nalgebra::Rotation3;
+use crate::GeometryRouter;
+use super::super::probe::ExtrudedSolidInfo as ExtrudedSolidLike;
+use nalgebra::{Point3, Rotation3};
 
 // Host: extruded +Z over [0, 4] in its own profile frame, placed in the world
 // by a translation and a rotation about Z.
@@ -283,4 +285,110 @@ fn footprint_interior_gates_boundary_breach() {
     ];
     assert!(footprint_interior(&interior, &profile));
     assert!(!footprint_interior(&breaching, &profile));
+}
+
+pub(super) fn mixed_overlap_fixture() -> (Mesh, VoidContext) {
+    let rect = |x0, y0, x1, y1| vec![
+        Point2::new(x0, y0), Point2::new(x1, y0),
+        Point2::new(x1, y1), Point2::new(x0, y1),
+    ];
+    let profile = Profile2D::new(rect(0.0, 0.0, 10.0, 10.0));
+    let residual_opening = super::super::CutterKind::Rectangular(
+        Point3::new(1.0, 1.0, -1.0), Point3::new(3.0, 3.0, 0.5),
+        Some(Vector3::z()),
+    );
+    let residual = VoidContext {
+        openings: vec![residual_opening.clone()],
+        merged_openings: vec![residual_opening.clone()],
+        param: None,
+        bool2d: None,
+    };
+    let cut = Bool2dCut {
+        host_profile: profile.clone(), depth: 1.0, dir_sign: 1.0,
+        wt: Matrix4::identity(),
+        footprints: vec![rect(2.0, 2.0, 4.0, 4.0), rect(2.0, 2.0, 4.0, 4.0), rect(6.0, 6.0, 8.0, 8.0)],
+        residual: Some(Box::new(residual)),
+    };
+    let host = extrude_profile_watertight(&profile, 1.0, None).unwrap();
+    let through_opening = |x0, y0, x1, y1| super::super::CutterKind::Rectangular(
+        Point3::new(x0, y0, -1.0), Point3::new(x1, y1, 2.0), Some(Vector3::z()),
+    );
+    let openings = vec![
+        through_opening(2.0, 2.0, 4.0, 4.0),
+        through_opening(2.0, 2.0, 4.0, 4.0),
+        through_opening(6.0, 6.0, 8.0, 8.0),
+        residual_opening,
+    ];
+    let context = VoidContext {
+        merged_openings: GeometryRouter::merge_rectangular_openings(&openings),
+        openings,
+        param: None,
+        bool2d: Some(cut),
+    };
+    (host, context)
+}
+
+/// #4617: duplicate footprints cancel in the staged precursor, so this case
+/// cannot pass by merely returning the precursor or by checking its closure.
+#[test]
+fn mixed_duplicate_footprints_apply_mandatory_union_correction_4617() {
+    let (host, context) = mixed_overlap_fixture();
+    let router = GeometryRouter::new();
+    // Exercise the existing production entry point, including the mandatory
+    // correction call. Reverting production still compiles this test and exposes
+    // the former parity result (94), rather than failing at a new private API.
+    let result = router.apply_void_context(host, &context, 4617);
+    // Two distinct four-unit footprints remove 8, and the half-depth residual
+    // removes 2 minus its 0.5 overlap with the corrected through-opening.
+    assert!((mesh_signed_volume(&result).abs() - 90.5).abs() < 1e-5);
+    assert!(crate::mesh_check::closed_or_hairline(&result));
+}
+
+/// #7955 C5b: the staged 2D route classifies its residual openings through the
+/// owned classifier in QUIET mode. A capture that is later rejected must not
+/// have leaked classification statistics or a host diagnostic into the parent,
+/// which classifies the full opening set exactly once.
+#[test]
+fn residual_classification_publishes_nothing_into_the_parent() {
+    let source = "#1=IFCCARTESIANPOINT((0.,0.,0.));
+#2=IFCAXIS2PLACEMENT3D(#1,$,$);
+#3=IFCDIRECTION((0.,0.,1.));
+#5=IFCCARTESIANPOINT((0.,0.));
+#6=IFCAXIS2PLACEMENT2D(#5,$);
+#4=IFCRECTANGLEPROFILEDEF(.AREA.,$,#6,10.,1.);
+#7=IFCEXTRUDEDAREASOLID(#4,#2,#3,3.);
+#8=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#7));
+#9=IFCPRODUCTDEFINITIONSHAPE($,$,(#8));
+#10=IFCWALL('host',$,$,$,$,$,#9,$);
+#11=IFCRECTANGLEPROFILEDEF(.AREA.,$,#6,1.,0.4);
+#12=IFCCARTESIANPOINT((0.,0.,-1.));
+#13=IFCAXIS2PLACEMENT3D(#12,$,$);
+#14=IFCEXTRUDEDAREASOLID(#11,#13,#3,5.);
+#15=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#14));
+#16=IFCPRODUCTDEFINITIONSHAPE($,$,(#15));
+#20=IFCOPENINGELEMENT('through',$,$,$,$,$,#16,$);
+#30=IFCCARTESIANPOINT((3.,-0.2,-1.));
+#31=IFCAXIS2PLACEMENT3D(#30,$,$);
+#32=IFCBLOCK(#31,1.,0.4,5.);
+#33=IFCSHAPEREPRESENTATION($,'Body','CSG',(#32));
+#34=IFCPRODUCTDEFINITIONSHAPE($,$,(#33));
+#21=IFCOPENINGELEMENT('block',$,$,$,$,$,#34,$);";
+    let router = GeometryRouter::new();
+    let mut decoder = ifc_lite_core::EntityDecoder::new(source);
+    let host = decoder.decode_by_id(10).unwrap();
+    let context = crate::program::openings::context(&host, &[20, 21], &router, &mut decoder).unwrap();
+    assert_eq!(context.openings.len(), 2, "the parent classifies the full set");
+    let cut = context.bool2d.expect("eligible through-cut");
+    assert_eq!(cut.footprints.len(), 1, "only the extruded through-cut is planar");
+    let residual = cut.residual.expect("the block opening is residual");
+    assert_eq!(residual.openings.len(), 1, "the residual is still classified");
+    let counts = router.take_classification_stats();
+    assert_eq!(
+        counts.rectangular + counts.diagonal + counts.non_rectangular,
+        2,
+        "only the parent's recording pass counts"
+    );
+    let diagnostics = router.take_host_opening_diagnostics();
+    let openings = &diagnostics[&10].openings;
+    assert_eq!(openings.iter().map(|o| o.opening_id).collect::<Vec<_>>(), [20, 21]);
 }

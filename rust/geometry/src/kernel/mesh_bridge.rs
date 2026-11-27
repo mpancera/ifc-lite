@@ -7,10 +7,18 @@
 //! `intersection` here are what the `ClippingProcessor` seam calls.
 
 use super::arrangement::{
-    boolean, difference_all, difference_all_lenient, union_all, BoolOp, Tri,
+    boolean, boolean_with_conformity, difference_all, difference_all_lenient,
+    difference_all_lenient_with_conformity, BoolOp,
+    Tri,
 };
 use super::signed_volume::signed_volume6;
 use crate::mesh::Mesh;
+#[path = "mesh_bridge/batch_oracle.rs"]
+mod batch_oracle;
+use batch_oracle::validate_lenient_batch;
+
+mod batch_subtract;
+pub use batch_subtract::BatchSubtract;
 
 /// f32-near-coplanar reconciliation snap grid, in the CALLER's unit — NOT
 /// metres (#2684): 15 µm on the METRE path (`router/voids`), 15 nm on the
@@ -33,12 +41,13 @@ fn snap(c: f64) -> f64 {
     (c / SNAP_GRID).round() * SNAP_GRID
 }
 
-// The near-coplanar perpendicular band lives in `super::near_band`: it keeps
-// the operand extent PER AXIS and projects it onto the plane normal actually
-// being tested. `tritri`, `classify` and this module all size their
-// near-coplanar/scatter bands with that ONE type rather than mirroring the
-// expression.
-use super::near_band::NearBand;
+// The cross-operand near-coincidence weld lives in `super::plane_weld`: it was
+// split out of this module when #3353 made it a boolean-wide concern rather
+// than a subtraction-only one, and this module was at its size budget.
+use super::plane_weld::{
+    promote_cutter_verts_onto_host_faces, promote_operands_mutually,
+    promote_subtract_cutter_onto_host_faces,
+};
 
 /// `Mesh` → the kernel's triangle list (f32 → f64, snapped to the reconcile
 /// grid). Panic-free: an out-of-range index OR a non-finite (NaN/Inf) coord drops
@@ -47,12 +56,10 @@ use super::near_band::NearBand;
 /// reachable panic sites).
 pub fn mesh_to_tris(m: &Mesh) -> Vec<Tri> {
     let vertex = |i: u32| -> Option<[f64; 3]> {
-        let b = (i as usize) * 3;
-        let c = [
-            *m.positions.get(b)? as f64,
-            *m.positions.get(b + 1)? as f64,
-            *m.positions.get(b + 2)? as f64,
-        ];
+        // Checked: a wasm32 index past 2^32/3 must drop, not wrap (#7688).
+        let b = (i as usize).checked_mul(3)?;
+        let p = m.positions.get(b..b.checked_add(3)?)?;
+        let c = [p[0] as f64, p[1] as f64, p[2] as f64];
         if !c.iter().all(|v| v.is_finite()) {
             return None;
         }
@@ -64,7 +71,10 @@ pub fn mesh_to_tris(m: &Mesh) -> Vec<Tri> {
         .collect()
 }
 
-fn face_normal(t: &Tri) -> [f32; 3] {
+/// The triangle's supporting plane in f64: unit normal + offset (`n . v0`),
+/// BEFORE any f32 cast. `(0,0,1,0)`-ish degenerate fallback for a
+/// zero-area triangle, matching `face_normal`'s old `[0,0,1]` default.
+fn face_plane(t: &Tri) -> ([f64; 3], f64) {
     let e1 = [t[1][0] - t[0][0], t[1][1] - t[0][1], t[1][2] - t[0][2]];
     let e2 = [t[2][0] - t[0][0], t[2][1] - t[0][1], t[2][2] - t[0][2]];
     let n = [
@@ -74,17 +84,37 @@ fn face_normal(t: &Tri) -> [f32; 3] {
     ];
     let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
     if len > 0.0 {
-        [(n[0] / len) as f32, (n[1] / len) as f32, (n[2] / len) as f32]
+        let n = [n[0] / len, n[1] / len, n[2] / len];
+        let d = n[0] * t[0][0] + n[1] * t[0][1] + n[2] * t[0][2];
+        (n, d)
     } else {
-        [0.0, 0.0, 1.0]
+        ([0.0, 0.0, 1.0], t[0][2])
     }
 }
 
 /// The kernel's triangle list → a `Mesh` (per-face flat normals, f64 → f32).
+///
+/// Also tags every output triangle with its f64 supporting plane
+/// ([`PlaneTag`], issue #3914) — the exact plane this function's own f64
+/// arithmetic derived, before the `positions`/`normals` f32 cast below loses
+/// precision. Union output carries the tags through this entry point;
+/// difference/intersection output uses [`tris_to_mesh_without_plane_tags`]
+/// because its consolidated result can become another boolean operand (#5012).
 pub fn tris_to_mesh(tris: &[Tri]) -> Mesh {
+    tris_to_mesh_impl(tris, true)
+}
+
+fn tris_to_mesh_without_plane_tags(tris: &[Tri]) -> Mesh {
+    tris_to_mesh_impl(tris, false)
+}
+
+fn tris_to_mesh_impl(tris: &[Tri], carry_plane_tags: bool) -> Mesh {
+    use crate::mesh::PlaneTag;
     let mut m = Mesh::with_capacity(tris.len() * 3, tris.len() * 3);
+    let mut tags = Vec::with_capacity(tris.len());
     for t in tris {
-        let n = face_normal(t);
+        let (n64, d64) = face_plane(t);
+        let n = [n64[0] as f32, n64[1] as f32, n64[2] as f32];
         let base = (m.positions.len() / 3) as u32;
         for p in t {
             m.positions
@@ -92,6 +122,10 @@ pub fn tris_to_mesh(tris: &[Tri]) -> Mesh {
             m.normals.extend_from_slice(&n);
         }
         m.indices.extend_from_slice(&[base, base + 1, base + 2]);
+        tags.push(PlaneTag { n: n64, d: d64 });
+    }
+    if carry_plane_tags {
+        m.plane_tags = Some(tags);
     }
     m
 }
@@ -119,333 +153,163 @@ pub(crate) fn orient_outward(mut tris: Vec<Tri>) -> Vec<Tri> {
     tris
 }
 
-/// Cross-operand near-coincidence promotion: weld every CUTTER vertex that
-/// sits within the snap-scatter band of a HOST face plane — and projects
-/// STRICTLY inside that face — onto the plane, then back onto the snap grid.
+/// `host − cutter` as a `Mesh`, retaining the general operand weld.
+/// Opening-specific welding is selected internally by the void router.
 ///
-/// WHY (found by the kernel-parity sweep on a long tunnel-wall fixture): when
-/// `extend_opening_mesh_through_host` pushes a flush opening cap along the
-/// host depth axis `d`, a cap corner that was bit-exactly a HOST corner can
-/// slide ALONG a host face plane that contains `d` (here: the wall END face).
-/// In exact arithmetic the slid corner stays on that plane, but the f32 round
-/// of `p + d·shift` lands it a few µm OFF — a TILTED gap below the per-axis
-/// `SNAP_GRID` reconcile (per-axis snapping cannot flatten a tilt). The host
-/// EDGE then GRAZES the cutter jamb FACE at ~5e-5 rad; the conforming
-/// arrangement splits the grazed face into degenerate sub-triangles whose
-/// keep/drop classification is undefined → open edges + inverted volume
-/// (the parity sweep's negative-volume family: 27 tris / vol −4.268 / 13 bad
-/// edges from two CLEAN watertight 12-tri boxes).
-///
-/// The gate is PLANE-level, deliberately NOT footprint-level: in the repro the
-/// cutter jamb face is PARALLEL to the host end face but 4× longer, so its
-/// verts perpendicular-project 0.18–0.4 m OUTSIDE the end face's footprint —
-/// a point-in-face containment test can never associate them, yet their plane
-/// IS the host plane up to f32 noise. A sub-band parallel-plane separation is
-/// never representable design intent (the band is three orders below the
-/// smallest real feature edge, ~0.2 m — same argument as
-/// `near_on_surface_normal`), so welding the vertex onto the plane only
-/// removes noise. The CUTTER-ONLY direction suffices and never perturbs the
-/// host. The band and its far-from-origin widening mirror
-/// `near_on_surface_normal`: [`NearBand`], sized PER HOST PLANE from the
-/// operands' per-axis extents projected onto that plane's own normal
-/// (8·SNAP_GRID until the projected extent passes ~512 CALLER units, not metres
-/// (#2684), so an offset along an axis this plane does not face never widens it).
-/// DETERMINISM: plain FMA-free f64 over
-/// already-snapped coords, fixed iteration order, nearest-plane ties broken
-/// by face index ⇒ byte-identical native==wasm. Every pinned box−box
-/// manifest is transversal (no cutter vertex within the band of a
-/// non-incident host plane), so the promotion never fires there.
-fn promote_cutter_verts_onto_host_faces(cutter: &mut [Tri], host: &[Tri]) {
-    if cutter.is_empty() || host.is_empty() {
-        return;
-    }
-    let mut band = NearBand::default();
-    band.observe_tris(cutter);
-    band.observe_tris(host);
-
-    struct Face {
-        t0: [f64; 3],
-        t1: [f64; 3],
-        t2: [f64; 3],
-        n: [f64; 3], // raw (unnormalised) plane normal
-        nn: f64,     // |n|²
-        /// Squared PERPENDICULAR band for THIS face's plane. `NearBand`
-        /// returns it scaled by `nn` (its comparisons are made against a raw
-        /// `d = dot(v − t0, n)`); the `/ nn` here puts it back into true
-        /// distance units, because the nearest-plane search below compares
-        /// `d²/nn` ACROSS faces with different `|n|`.
-        band2: f64,
-    }
-    let faces: Vec<Face> = host
-        .iter()
-        .filter_map(|t| {
-            let e1 = [t[1][0] - t[0][0], t[1][1] - t[0][1], t[1][2] - t[0][2]];
-            let e2 = [t[2][0] - t[0][0], t[2][1] - t[0][1], t[2][2] - t[0][2]];
-            let n = [
-                e1[1] * e2[2] - e1[2] * e2[1],
-                e1[2] * e2[0] - e1[0] * e2[2],
-                e1[0] * e2[1] - e1[1] * e2[0],
-            ];
-            let nn = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
-            if nn <= 0.0 || !nn.is_finite() {
-                return None; // degenerate host triangle
-            }
-            let band2 = band.scaled_band2(n, nn) / nn;
-            Some(Face { t0: t[0], t1: t[1], t2: t[2], n, nn, band2 })
-        })
-        .collect();
-
-    for t in cutter.iter_mut() {
-        for v in t.iter_mut() {
-            // Nearest host plane the vertex is within the band of but NOT
-            // exactly on (d == 0 planes are already reconciled — and must not
-            // shadow a second, still-noisy plane: in the repro the jamb verts
-            // sit EXACTLY on the host bottom plane while 18–25 µm off the end
-            // plane; the end plane is the one that needs the weld, and the
-            // perpendicular projection onto it slides ALONG the bottom plane).
-            // Ties → first in face order (deterministic).
-            let mut best: Option<(f64, &Face)> = None; // (perp-dist², face)
-            for f in &faces {
-                let d = (v[0] - f.t0[0]) * f.n[0]
-                    + (v[1] - f.t0[1]) * f.n[1]
-                    + (v[2] - f.t0[2]) * f.n[2];
-                if d == 0.0 {
-                    continue; // already exactly on this plane
-                }
-                let d2 = (d * d) / f.nn;
-                if d2 > f.band2 {
-                    continue; // outside the snap-scatter band
-                }
-                if let Some((bd2, _)) = best {
-                    if d2 >= bd2 {
-                        continue;
-                    }
-                }
-                best = Some((d2, f));
-            }
-            // EXACT-PLANE LIFT (the crack-family fix): re-express the foot of
-            // the perpendicular in the host triangle's EDGE BASIS and recombine
-            // it with EXACT f64 arithmetic, so the welded vertex lies EXACTLY on
-            // the host face's plane (orient3d == Zero) and the exact coplanar
-            // carve fires — A/B seam vertices then intern to identical Vids.
-            // The previous per-axis `snap()` of the foot re-scattered it 3–13 µm
-            // OFF a tilted plane (per-axis snapping cannot hold a tilt), so the
-            // tri-pair classified Segment/near-coplanar and the carve chords of
-            // the two operands diverged by mm in-plane ⇒ exact-coordinate
-            // boundary cracks on far-from-origin walls. On a weld failure
-            // (degenerate basis / out-of-range / inexact recombination) the
-            // vertex is left UNTOUCHED — never an inexact foot, which would be
-            // off every grid and force the BigRational tier on every predicate
-            // that sees it.
-            if let Some((_, f)) = best {
-                if let Some(w) = exact_on_plane_weld(*v, f.t0, f.t1, f.t2) {
-                    *v = w;
-                }
-            }
-        }
-    }
-}
-
-/// Weld `v` onto the plane of the (snap-grid) host triangle `(t0,t1,t2)` such
-/// that the result is EXACTLY on that plane and EXACTLY representable in f64.
-///
-/// The foot is solved in the triangle's edge basis (Gram system over `u=t1−t0`,
-/// `w=t2−t0`), then α,β are quantized to the 2⁻²⁰ grid and the point
-/// `t0 + α·u + β·w` is recombined in INTEGER arithmetic on the 2⁻³⁶ grid
-/// (operands are k/2¹⁶ ⇒ α·u terms are k/2³⁶ exactly). Any α,β on that grid
-/// yields a point mathematically ON the plane; the only requirement is that the
-/// f64 result is exact, which the i128 round-trip check enforces (and which
-/// bounds every magnitude case — huge georef coords simply fail the check and
-/// skip the weld). The in-plane quantization shift is ≤ edge·2⁻²⁰ (µm). The
-/// f64 Gram solve itself may round — harmless, it only picks WHICH on-grid
-/// (α,β) is used. |α|,|β| ≤ 8 bounds the integer products (the perpendicular
-/// foot of a band-near vertex is always within a few edge lengths; anything
-/// farther is a degenerate sliver basis we refuse to weld with).
-///
-/// DETERMINISM: FMA-free f64 + integer ops, fixed iteration order ⇒
-/// byte-identical native==wasm.
-fn exact_on_plane_weld(v: [f64; 3], t0: [f64; 3], t1: [f64; 3], t2: [f64; 3]) -> Option<[f64; 3]> {
-    const Q: f64 = 1_048_576.0; // 2^20 — α,β quantization
-    const S16: f64 = 65_536.0; // the operand snap grid (1/SNAP_GRID)
-    const S36: f64 = 68_719_476_736.0; // 2^36 = S16 · Q — the welded-vertex grid
-    let u = [t1[0] - t0[0], t1[1] - t0[1], t1[2] - t0[2]];
-    let w = [t2[0] - t0[0], t2[1] - t0[1], t2[2] - t0[2]];
-    let p = [v[0] - t0[0], v[1] - t0[1], v[2] - t0[2]];
-    let dot = |a: &[f64; 3], b: &[f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-    let (uu, ww, uw) = (dot(&u, &u), dot(&w, &w), dot(&u, &w));
-    let (pu, pw) = (dot(&p, &u), dot(&p, &w));
-    let det = uu * ww - uw * uw;
-    if det == 0.0 || !det.is_finite() {
-        return None; // degenerate (collinear) edge basis
-    }
-    let alpha = ((ww * pu - uw * pw) / det * Q).round();
-    let beta = ((uu * pw - uw * pu) / det * Q).round();
-    if !alpha.is_finite() || !beta.is_finite() || alpha.abs() > 8.0 * Q || beta.abs() > 8.0 * Q {
-        return None;
-    }
-    let (ai, bi) = (alpha as i128, beta as i128);
-    let mut out = [0.0f64; 3];
-    for k in 0..3 {
-        // scale the on-grid coords to integers (k/2^16 · 2^16); a coordinate
-        // off the snap grid (or too large to scale exactly) refuses the weld.
-        let (s0, s1, s2) = (t0[k] * S16, t1[k] * S16, t2[k] * S16);
-        for s in [s0, s1, s2] {
-            if s.fract() != 0.0 || s.abs() >= 9.0e18 {
-                return None;
-            }
-        }
-        let (i0, i1, i2) = (s0 as i128, s1 as i128, s2 as i128);
-        // the welded coordinate on the 2^-36 grid: t0·2^20 + α·u + β·w
-        let r36 = (i0 << 20) + ai * (i1 - i0) + bi * (i2 - i0);
-        let rf = r36 as f64;
-        if rf as i128 != r36 {
-            return None; // not exactly representable in f64 ⇒ skip the weld
-        }
-        out[k] = rf / S36; // power-of-two divide: exact
-    }
-    Some(out)
-}
-
-/// `host − cutter` as a `Mesh`.
+/// Owns its #1109 budget like [`union`] (#7688 KERNEL-17): a fresh count, so
+/// a stale one cannot truncate it, and EMPTY on a trip, never the partial
+/// arrangement. Inside a spent element it trips at once.
 pub fn subtract(host: &Mesh, cutter: &Mesh) -> Mesh {
+    super::budget::begin();
+    let (out, _, _) = subtract_with_change(host, cutter, false);
+    if super::budget::tripped() {
+        return Mesh::new();
+    }
+    out
+}
+
+/// Like [`subtract`], but also returns the classifier's `changed` bit (#4692).
+/// Caller-managed budget: the caller calls `budget::begin()` first and
+/// discards the result when `budget::tripped()` (`csg::subtract_mesh`).
+///
+/// `false` means no host sub-triangle was dropped and no cutter face was kept,
+/// so the triangles are the host re-tessellated, not a cut. [`subtract_many`]
+/// reads the same bit.
+///
+/// A one-component [`difference_all_lenient`] is the binary
+/// `boolean(.., Difference)`: the same arrangement over the same operands,
+/// classified through the same one-component `BComponents`, and neither gates
+/// on conformity. The third element says whether the arrangement conformed.
+///
+/// `opening` picks the weld: an opening cutter takes the guarded subtract weld
+/// (#6940), an `IfcBooleanResult` operand the plain one, as before #6940.
+pub(crate) fn subtract_with_change(host: &Mesh, cutter: &Mesh, opening: bool) -> (Mesh, bool, bool) {
     #[cfg(feature = "csg_capture")]
-    crate::csg_capture::record_single(host, cutter);
+    crate::csg_capture::record_single(host, cutter, opening);
+    if super::budget::tripped() { return (Mesh::new(), false, false); }
     let h = orient_outward(mesh_to_tris(host));
     let mut c = mesh_to_tris(cutter);
-    promote_cutter_verts_onto_host_faces(&mut c, &h);
+    let weld = if opening { promote_subtract_cutter_onto_host_faces } else { promote_cutter_verts_onto_host_faces };
+    weld(&mut c, &h);
+    if super::budget::tripped() { return (Mesh::new(), false, false); }
     let c = orient_outward(c);
-    tris_to_mesh(&boolean(&h, &c, BoolOp::Difference))
+    let (tris, changed, conforming) = difference_all_lenient_with_conformity(&h, &[&c]);
+    (tris_to_mesh_without_plane_tags(&tris), changed, conforming)
 }
 
 /// `host − (∪ cutters)` as a `Mesh` — the batched void-group subtract.
 ///
-/// The cutters MUST be pairwise disjoint (the router groups by snap-band-
-/// inflated AABBs) and each per-component watertight. Every component is
-/// promoted onto the host faces and oriented outward INDIVIDUALLY — the global
-/// signed-volume orientation of [`subtract`] cannot fix mixed per-component
-/// winding of a multi-component operand (the #2176 lesson) — then the whole
-/// group is subtracted in ONE arrangement (`difference_all_volume_safe`), so
-/// there is no per-cutter f64→f32→snap round-trip to re-jitter and re-crack the
-/// previous cut's seams. Component order is the caller's (deterministic).
-/// Returns `None` only when even the volume-safe non-conforming batch is
-/// untrustworthy; the caller then falls back to sequential per-cutter subtraction.
-pub fn subtract_many(host: &Mesh, cutters: &[&Mesh]) -> Option<Mesh> {
+/// The cutters are pairwise disjoint or abut within one snap-grid cell (the
+/// router groups by snap-band-inflated AABBs; the coaxial footprint union
+/// emits prisms that abut within f32 noise), and each is per-component
+/// watertight. Every component is promoted onto the host faces and oriented
+/// outward INDIVIDUALLY — the global signed-volume orientation of [`subtract`]
+/// cannot fix mixed per-component winding of a multi-component operand (the
+/// #2176 lesson). Components that abut are then merged into one closed solid,
+/// because this arrangement never intersects cutter with cutter; [`super::abutting`]
+/// owns that rule and its limits. Then the whole group is subtracted in ONE
+/// arrangement (`difference_all_volume_safe`), so there is no per-cutter
+/// f64→f32→snap round-trip to re-jitter and re-crack the previous cut's seams.
+/// Component order is the caller's (deterministic).
+/// See [`BatchSubtract`] for the three outcomes.
+///
+/// Owns its #1109 budget like [`subtract`]: a trip is `Nonconforming`, the
+/// outcome callers already fall back from, never a truncated `Cut` or a
+/// false `Unchanged` (#7688 KERNEL-17).
+pub fn subtract_many(host: &Mesh, cutters: &[&Mesh]) -> BatchSubtract {
+    super::budget::begin();
+    let (out, _, _) = subtract_many_with_conformity(host, cutters, false, false);
+    if super::budget::tripped() {
+        return BatchSubtract::Nonconforming;
+    }
+    out
+}
+
+/// Keep the provenance of an unchanged batch for the void router (#6516).
+/// A volume-checked nonconforming miss must retain the sequential fallback.
+/// Caller-managed budget, as [`subtract_with_change`] (`csg::group_cut`).
+pub(crate) fn subtract_many_with_conformity(
+    host: &Mesh, cutters: &[&Mesh], opening: bool, retain_conforming_miss: bool,
+) -> (BatchSubtract, bool, Option<Mesh>) {
     #[cfg(feature = "csg_capture")]
-    crate::csg_capture::record_many(host, cutters);
+    crate::csg_capture::record_many(host, cutters, opening, retain_conforming_miss);
+    if super::budget::tripped() { return (BatchSubtract::Nonconforming, false, None); }
     let h = orient_outward(mesh_to_tris(host));
-    let comp_tris: Vec<Vec<Tri>> = cutters
-        .iter()
-        .map(|m| {
-            let mut c = mesh_to_tris(m);
+    let mut comp_tris: Vec<Vec<Tri>> = Vec::with_capacity(cutters.len());
+    for m in cutters {
+        let mut c = mesh_to_tris(m);
+        if opening {
+            promote_subtract_cutter_onto_host_faces(&mut c, &h);
+        } else {
             promote_cutter_verts_onto_host_faces(&mut c, &h);
-            orient_outward(c)
-        })
-        .collect();
+        }
+        if super::budget::tripped() { return (BatchSubtract::Nonconforming, false, None); }
+        comp_tris.push(orient_outward(c));
+    }
+    // Budget-neutral by construction (`abutting` snapshots around its union),
+    // so no trip check is needed here: the loop above already made one.
+    let comp_tris = super::abutting::merge_abutting_components(comp_tris);
     let refs: Vec<&[Tri]> = comp_tris.iter().map(|c| c.as_slice()).collect();
     // Conforming batch: the fast, exact, byte-identical common path.
-    if let Some(r) = difference_all(&h, &refs) {
-        return Some(tris_to_mesh(&r));
+    if let Some((r, changed)) = difference_all(&h, &refs) {
+        #[cfg(feature = "opening-perf-trace")]
+        crate::opening_perf_trace::record(|c| {
+            c.batch_conforming_arrangements = c.batch_conforming_arrangements.saturating_add(1);
+            c.batch_conforming_misses = c.batch_conforming_misses.saturating_add(u64::from(!changed));
+        });
+        // Only the private void-group caller requests this: an unchanged
+        // arrangement still carries useful seams for topology consolidation.
+        let miss = (retain_conforming_miss && !changed)
+            .then(|| tris_to_mesh_without_plane_tags(&r));
+        return (BatchSubtract::classified(&r, changed), true, miss);
     }
+    #[cfg(feature = "opening-perf-trace")]
+    crate::opening_perf_trace::record(|c| c.batch_nonconforming_arrangements = c.batch_nonconforming_arrangements.saturating_add(1));
     // Non-conforming batch (an unrecovered constraint remains after the robust
     // traversal recovery). Its exact topology is CLEANER than sequential per-cutter
     // re-jitter on dense faceted-reveal walls (issue #098 V5C: 532→108 open edges),
     // but a straddling misclassification can over/under-cut VOLUME (#559171/#1167).
     // Trust the lenient batch ONLY when its removed volume matches the true removed
-    // volume; else None, so the caller runs its full sequential path.
-    let batch = difference_all_lenient(&h, &refs);
-    // ORACLE for the volume comparison (#1788): batched cutters are pairwise
-    // disjoint (this fn's contract), so the TRUE removed volume is
-    // Σ |host ∩ cutterᵢ| — each a small single boolean against the PRISTINE
-    // host, the well-conditioned regime. The previous oracle re-ran the
-    // sequential subtract chain, but that chain re-jitters its own seams
-    // cut-over-cut and UNDER-cuts on multi-void walls — on the ISSUE_098
-    // Poroton wall its "reference" removed 2% less volume than the (correct)
-    // batch, so a perfect batch was rejected in favour of the broken
-    // sequential fallback, leaving an opening uncut (T6 fail:opening-not-cut).
-    // Budget snapshot/restore: oracle work isn't charged to the caller's
-    // batch budget (codex P2 on #1660); a trip DURING an oracle intersection
-    // makes its volume untrustworthy ⇒ reject the group (as before).
-    let budget_snap = super::budget::snapshot_counters();
-    let mut inter_sum = 0.0f64;
-    let mut oracle_tripped = false;
-    for c in &comp_tris {
-        super::budget::begin();
-        let i = boolean(&h, c, BoolOp::Intersection);
-        if super::budget::tripped() {
-            oracle_tripped = true;
-            break;
-        }
-        inter_sum += signed_volume6(&i).abs();
-    }
-    super::budget::restore_counters(budget_snap);
-    if oracle_tripped {
-        return None;
-    }
-    let host_v = signed_volume6(&h).abs();
-    let batch_removed = host_v - signed_volume6(&batch).abs();
-    // 1% agreement — above f64/FMA noise (parity-stable branch), tight enough to
-    // reject the #1167 gross under-cut (3.7 m³ vs 13 m³).
-    let tol = inter_sum.abs().max(1.0e-9) * 0.01;
-    if (batch_removed - inter_sum).abs() <= tol {
-        Some(tris_to_mesh(&batch))
-    } else {
-        None
-    }
+    // volume; else Nonconforming, so the caller runs its full sequential path.
+    let (batch, changed) = difference_all_lenient(&h, &refs);
+    validate_lenient_batch(&h, &comp_tris, &batch, changed)
 }
 
 /// `a ∪ b` as a `Mesh`.
 pub fn union(a: &Mesh, b: &Mesh) -> Mesh {
-    // Enter the #1109 escalation budget exactly like `subtract` does: begin a
-    // fresh PER-BOOLEAN count (this is a distinct operation) while the per-ELEMENT
-    // accumulator is left intact — `begin()` resets only the per-op counter, so a
-    // union inside an over-budget element STILL trips (it is not an element-cap
-    // escape hatch; see `budget::begin` / the `per_element_budget_accumulates_
-    // across_booleans` test). Without this, a union scheduled on a worker thread
-    // after a subtract tripped starts already-tripped and `arrange` bails at its
-    // first pair, silently returning a partial/empty arrangement.
-    super::budget::begin();
-    let a = orient_outward(mesh_to_tris(a));
-    let b = orient_outward(mesh_to_tris(b));
-    let out = boolean(&a, &b, BoolOp::Union);
-    // On a budget trip `arrange` bailed mid-way and `out` is a PARTIAL arrangement.
-    // Discard it and return empty — the graceful-fallback signal the callers already
-    // handle (`csg::union_mesh` degrades to a plain merge; the #960 roof
-    // `build_cutter_union` defers to the sequential path) — never a poisoned mesh.
-    // Deterministic: the trip point is a pure function of the snapped operands, so
-    // native and wasm degrade the SAME union identically (parity).
-    if super::budget::tripped() {
-        return Mesh::new();
-    }
-    tris_to_mesh(&out)
+    union_with_conformity(a, b).0
 }
 
-/// `∪ meshes` as one watertight `Mesh` — the N-ary union, computed in a single
-/// conforming arrangement so coplanar seams shared by 3+ operands (the #960
-/// segmented-roof cutters) dissolve without the tearing that left-deep pairwise
-/// accumulation produces. Empty input ⇒ empty mesh.
-pub fn union_many(meshes: &[&Mesh]) -> Mesh {
-    // Participate in the #1109 budget like `subtract` / `union` — fresh per-boolean
-    // count, per-element accumulator preserved (see `union`).
+/// Like [`union`], but also reports arrangement conformity (`unrecovered == 0`).
+/// Diagnostics only (#3353); `union()` computes and discards this same signal.
+pub fn union_with_conformity(a: &Mesh, b: &Mesh) -> (Mesh, bool) {
+    // #1109 budget, as `subtract` does: fresh PER-BOOLEAN count, per-ELEMENT accumulator
+    // intact — `begin()` resets only the per-op counter, so a union inside an over-budget
+    // element STILL trips (see `budget::begin`). Without it a union after a tripped
+    // subtract starts tripped and `arrange` bails at its first pair.
     super::budget::begin();
-    let tri_lists: Vec<Vec<Tri>> =
-        meshes.iter().map(|m| orient_outward(mesh_to_tris(m))).collect();
-    let refs: Vec<&[Tri]> = tri_lists.iter().map(|t| t.as_slice()).collect();
-    let (out, conforming) = union_all(&refs);
-    // #1109 budget trip ⇒ `arrange_many` bailed and `out` is PARTIAL; return empty so
-    // `build_cutter_union` defers to the sequential per-cutter path instead of feeding
-    // a poisoned (non-watertight) cutter union into the subtract.
+    // Reconcile the two operands' near-coplanar faces onto shared planes BEFORE
+    // the arrangement (#3353). Mutual, not cutter-onto-host: union has no host,
+    // and the one-directional form left `union_mesh(b, a)` tearing on the same
+    // fixture `union_mesh(a, b)` handled. See `promote_operands_mutually`.
+    let mut operands = [mesh_to_tris(a), mesh_to_tris(b)];
+    promote_operands_mutually(&mut operands);
+    let [ta, tb] = operands;
+    let (a, b) = (orient_outward(ta), orient_outward(tb));
+    let (out, conforming) = boolean_with_conformity(&a, &b, BoolOp::Union);
+    // On a trip `out` is PARTIAL: discard it, return empty — the graceful fallback callers
+    // handle (`csg::union_mesh` merges plainly; #960 goes sequential), never a poisoned
+    // mesh. The trip point is a pure function of the snapped operands, so wasm agrees.
     if super::budget::tripped() {
-        return Mesh::new();
+        return (Mesh::new(), conforming);
     }
-    // `!conforming` ⇒ an unrecovered constraint left the arrangement non-conforming —
-    // `union_all` now SURFACES the condition `difference_all` hard-rejects (vs the old
-    // silent discard). We deliberately trust the union anyway: the sole caller (#960
-    // `build_cutter_union`) verifies the downstream subtract, and the exact batched
-    // union — even a torn one — beats the sequential fallback that reintroduces the
-    // seam sliver #960 removed (wall #4148: exact → 8984 mm; fallback → 9850 mm).
-    let _ = conforming;
-    tris_to_mesh(&out)
+    (tris_to_mesh(&out), conforming)
 }
+
+#[path = "nary_union.rs"]
+mod nary_union;
+pub use nary_union::union_many;
+pub(crate) use nary_union::union_many_preserving_coordinates;
 
 /// `a ∩ b` as the kernel's own exact f64 triangles, WITHOUT the `Mesh` round-trip.
 ///
@@ -476,9 +340,13 @@ pub fn intersection_tris(a: &Mesh, b: &Mesh) -> Vec<Tri> {
 
 /// `a ∩ b` as a `Mesh`.
 pub fn intersection(a: &Mesh, b: &Mesh) -> Mesh {
-    tris_to_mesh(&intersection_tris(a, b))
+    tris_to_mesh_without_plane_tags(&intersection_tris(a, b))
 }
 
 #[cfg(test)]
 #[path = "mesh_bridge_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "issue_3913_sweep_tests.rs"]
+mod issue_3913_sweep_tests;

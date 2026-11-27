@@ -7,14 +7,20 @@
  *
  * A registry-driven vertical icon rail on the viewport's right edge — the
  * evolution of the #1200 panel switcher. Icons follow the user's custom order
- * (`sidebarOrder`) and visible set (`sidebarHiddenIds`), cluster into groups
- * with dividers, highlight the active docked panel, and flag floating / popped
- * panels with a dot. The footer toggles customize mode, collapse, and a
- * layout menu. In customize mode every icon becomes drag-reorderable and
- * gains an eye toggle inline.
+ * (`sidebarOrder`) and visible set (`sidebarHiddenIds`), are grouped by task
+ * with hairline dividers (the group name is the divider's accessible text and
+ * tooltip), and exactly one icon, the panel shown in the right pane, carries
+ * the active state (`ActivityBarItem`). Icons that don't fit the rail's height
+ * go into an overflow menu rather than being clipped (#8802 R1). With no model
+ * loaded, model-dependent panels wait in that menu, marked as needing one, so
+ * the first screen's rail shows only what works without a model (#8802 R6).
+ * The footer toggles customize mode, collapse, and a layout menu. In customize
+ * mode every icon becomes drag-reorderable and gains an eye toggle inline (the
+ * rail scrolls then).
  */
 
-import { useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { lazyChunk } from '@/lib/lazy-chunk';
 import {
   SlidersHorizontal,
   PanelRightClose,
@@ -35,21 +41,54 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
 import { useViewerStore } from '@/store';
+import { resetLayout } from '@/store/layoutReset';
+import { useTranslation } from '@/i18n';
 import { usePanelControls } from '@/hooks/usePanelControls';
-import { WORKSPACE_PANELS, getPanelDef, type WorkspacePanelId } from '@/lib/panels/registry';
-import { isCollabEnabled } from '@/lib/collab/config';
+import { WORKSPACE_PANELS, getPanelDef, panelGroupDefinition, panelModelGateMode, type WorkspacePanelId } from '@/lib/panels/registry';
+import { useRailPanelIds } from '@/hooks/useRailPanelIds';
+import { useRenderedPanelIds } from '@/hooks/useRenderedPanelIds';
 import { pendingCompositionMutations } from '@/lib/layers/pending';
-import { activityAnchor, tourAnchor } from '@/lib/tours/anchors';
-import { CustomizeSidebar } from './CustomizeSidebar';
+import { isViewerEmpty } from '@/lib/tours/demo-kit';
+import { useTourStore } from '@/lib/tours/tour-store';
+import { getTour } from '@/lib/tours/registry';
+import { ActivityBarItem } from './ActivityBarItem';
+import { ActivityBarOverflow } from './ActivityBarOverflow';
+import { layoutRail } from './rail-overflow';
+import { useEmptyStartFoldsSidebarPane } from '../welcome/useEmptyStartFold';
+const CustomizeSidebar = lazyChunk(() => import('./CustomizeSidebar').then(module => ({ default: module.CustomizeSidebar })));
 
-/** Alt+N hint per panel, by registry index (frozen since #1200): 1-9, then 0.
- *  Only the first ten registry entries get a shortcut; later additions (e.g.
- *  Hierarchy, #1267) have none, so the map is limited to the first ten. */
-const ALT_LABEL = new Map<WorkspacePanelId, string>(
-  WORKSPACE_PANELS.slice(0, 10).map((p, i) => [p.id, i < 9 ? `Alt+${i + 1}` : 'Alt+0']),
+/** Alt+N shortcut KEY per panel, by registry index (frozen since #1200): 1-9,
+ *  then 0. Only the first ten registry entries get a shortcut; later
+ *  additions (e.g. Hierarchy, #1267) have none, so the map is limited to the
+ *  first ten. The label itself ('Alt+{key}') is composed at render time. */
+const ALT_KEY = new Map<WorkspacePanelId, string>(
+  WORKSPACE_PANELS.slice(0, 10).map((p, i) => [p.id, i < 9 ? String(i + 1) : '0']),
 );
 
+/** Panels that show nothing but a "start with a model" state on an empty
+ *  viewer: the registry's takeover gate, plus Properties and Hierarchy whose
+ *  own empty states the welcome tour anchors (`panelModelGateMode`). */
+function needsModel(id: WorkspacePanelId): boolean {
+  return panelModelGateMode(id) === 'takeover' || id === 'properties' || id === 'hierarchy' || id === 'measurements';
+}
+
+/** The icon list's height, tracked so overflowing icons can move to a menu. */
+function useElementHeight(ref: React.RefObject<HTMLElement | null>): number {
+  const [height, setHeight] = useState(0);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const update = () => setHeight(el.clientHeight);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref]);
+  return height;
+}
+
 export function ActivityBar() {
+  const { t } = useTranslation();
   const order = useViewerStore((s) => s.sidebarOrder);
   const hiddenIds = useViewerStore((s) => s.sidebarHiddenIds);
   const mode = useViewerStore((s) => s.sidebarMode);
@@ -58,9 +97,11 @@ export function ActivityBar() {
   const setSidebarCustomizing = useViewerStore((s) => s.setSidebarCustomizing);
   const setPanelShownInSidebar = useViewerStore((s) => s.setPanelShownInSidebar);
   const reorder = useViewerStore((s) => s.reorderSidebarPanel);
-  const resetLayout = useViewerStore((s) => s.resetSidebarLayout);
+  const viewerEmpty = useViewerStore(isViewerEmpty);
 
-  const { isOpen, panelLocation, toggle, openInHome, floatPanel, popOutPanel, activePanel } = usePanelControls();
+  const { isOpen, panelLocation, toggle, openInHome, floatPanel, popOutPanel, activePanel, floatingIds, poppedIds } = usePanelControls();
+  // The start screen folds a Properties-only pane (`SidebarDock`).
+  const paneFolded = useEmptyStartFoldsSidebarPane();
 
   // Draft-awareness badge on the Layers icon (#1717 exposure): unpublished
   // composition edits are the moment the feature becomes relevant — surface
@@ -72,18 +113,52 @@ export function ActivityBar() {
     return hasStack ? pendingCompositionMutations().length : 0;
   }, [mutationVersion, hasStack]);
 
-  const hidden = new Set(hiddenIds);
   const [dragId, setDragId] = useState<WorkspacePanelId | null>(null);
   const [overId, setOverId] = useState<WorkspacePanelId | null>(null);
 
-  // Hidden panels are removed from the rail in every mode (#1263), including
-  // customize. Restoring a hidden panel happens in the Customize popover's
-  // dedicated Hidden section, not by an inline greyed icon here. The collab
-  // Room panel only surfaces while the collab feature flag is on.
-  const visibleIds = order.filter(
-    (id) =>
-      (!hidden.has(id) || id === 'properties') &&
-      (id !== 'collab' || isCollabEnabled()),
+  // One rail list for the activity bar and the mobile Panels sheet (#5853).
+  const visibleIds = useRailPanelIds();
+
+  // The single active item: the panel the right pane actually shows, derived
+  // exactly as `SidebarPanelHost` derives it (the active panel, or Information
+  // when that one is detached), and only while the pane is expanded and not
+  // folded for the start screen. Panels docked elsewhere read as "open".
+  const detached = (id: WorkspacePanelId) => floatingIds.has(id) || poppedIds.has(id);
+  const paneShown: WorkspacePanelId | null = !detached(activePanel)
+    ? activePanel
+    : detached('properties') ? null : 'properties';
+  const primaryId = mode === 'expanded' && !paneFolded ? paneShown : null;
+
+  // Prefer the current tour anchor on the rail. If a short window forces it
+  // into More, the menu opens so the resolver still finds its live anchor.
+  const tourRailAnchor = useTourStore((s) => {
+    if (!s.tourId || s.status === 'idle') return null;
+    const anchor = getTour(s.tourId)?.steps[s.stepIndex]?.anchor;
+    return anchor?.startsWith('activity-') ? (anchor.slice('activity-'.length) as WorkspacePanelId) : null;
+  });
+
+  const listRef = useRef<HTMLDivElement>(null);
+  const listHeight = useElementHeight(listRef);
+  const entries = useMemo(
+    () => visibleIds.flatMap((id) => {
+      const def = getPanelDef(id);
+      return def ? [{ id, group: def.group }] : [];
+    }),
+    [visibleIds],
+  );
+  // Every panel drawn on screen stays on the rail (`useRenderedPanelIds`, the
+  // rule the dock, pane and strip draw by); on the empty start screen the
+  // panels that need a model wait in More (`layoutRail`).
+  const rendered = useRenderedPanelIds();
+  const fit = useMemo(
+    () => (customizing
+      ? { visible: entries.map((e) => e.id), overflow: [], waiting: [] }
+      : layoutRail(entries, listHeight, {
+        anchors: [tourRailAnchor, primaryId && rendered.has(primaryId) ? primaryId : null],
+        rendered,
+        waits: viewerEmpty ? needsModel : null,
+      })),
+    [customizing, entries, listHeight, primaryId, rendered, tourRailAnchor, viewerEmpty],
   );
 
   const onIconClick = (id: WorkspacePanelId) => {
@@ -112,112 +187,80 @@ export function ActivityBar() {
   let prevGroup: string | null = null;
 
   return (
-    <div data-activity-bar className="relative flex flex-col items-center w-12 shrink-0 h-full border-l border-border bg-background">
+    <div data-activity-bar className="relative flex flex-col items-center w-12 shrink-0 h-full border-l border-divider bg-panel">
       {/* Panels */}
-      <div className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden py-1.5 flex flex-col items-center gap-0.5">
-        {visibleIds.map((id) => {
+      <div
+        ref={listRef}
+        className={cn(
+          'flex-1 min-h-0 w-full overflow-x-hidden py-1.5 flex flex-col items-center gap-0.5',
+          customizing ? 'overflow-y-auto' : 'overflow-y-hidden',
+        )}
+      >
+        {fit.visible.map((id, index) => {
           const def = getPanelDef(id);
           if (!def) return null;
-          const Icon = def.Icon;
           const loc = panelLocation(id);
-          const active = loc === 'docked';
-          const open = isOpen(id);
-          const showDivider = prevGroup !== null && def.group !== prevGroup;
+          const startsGroup = def.group !== prevGroup;
           prevGroup = def.group;
-
-          // Accessible name: the Radix tooltip is NOT the button's name, and
-          // tooltips don't fire on touch / for many SR users, so set it
-          // explicitly. In customize mode the action is "hide" (only shown
-          // panels render here now, #1263).
-          const ariaLabel = customizing
-            ? `${def.title}, activate to hide from the sidebar`
-            : `${def.title}${loc === 'floating' ? ' (floating)' : loc === 'popped' ? ' (popped out)' : ''}`;
-
+          const group = panelGroupDefinition(def.group);
           return (
             <div key={id} className="contents">
-              {showDivider && <div className="my-1 h-px w-6 bg-border/70" aria-hidden />}
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    {...tourAnchor(activityAnchor(id))}
-                    aria-label={ariaLabel}
-                    aria-pressed={active}
-                    draggable={customizing && id !== 'properties'}
-                    onDragStart={() => customizing && setDragId(id)}
-                    onDragEnd={() => {
-                      setDragId(null);
-                      setOverId(null);
-                    }}
-                    onDragOver={(e) => {
-                      if (!customizing) return;
-                      e.preventDefault();
-                      if (overId !== id) setOverId(id);
-                    }}
-                    onDrop={() => {
-                      if (customizing && dragId && dragId !== id) reorder(dragId, order.indexOf(id));
-                      setDragId(null);
-                      setOverId(null);
-                    }}
-                    onClick={() => (customizing ? setPanelShownInSidebar(id, false) : onIconClick(id))}
-                    className={cn(
-                      'relative h-9 w-9 inline-flex items-center justify-center rounded-md transition-colors',
-                      active
-                        ? 'bg-primary/15 text-primary'
-                        : 'text-muted-foreground hover:bg-muted hover:text-foreground',
-                      customizing && 'cursor-grab active:cursor-grabbing',
-                      dragId === id && 'opacity-40',
-                      overId === id && dragId && dragId !== id && 'ring-1 ring-primary/60',
-                    )}
-                  >
-                    {/* Active accent bar (VS Code idiom) */}
-                    {active && !customizing && (
-                      <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-r bg-primary" aria-hidden />
-                    )}
-                    <Icon className="h-4 w-4" />
-                    {/* Unpublished-edits badge on the Layers icon. */}
-                    {!customizing && id === 'layers' && pendingLayerEdits > 0 && (
-                      <span
-                        className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-500 px-1 text-[9px] font-medium text-white ring-1 ring-background"
-                        aria-hidden
-                      >
-                        {pendingLayerEdits > 99 ? '99+' : pendingLayerEdits}
-                      </span>
-                    )}
-                    {/* Detached indicator dot — floating (primary) vs popped out (emerald). */}
-                    {!customizing && open && loc !== 'docked' && (
-                      <span
-                        className={cn(
-                          'absolute -right-0 -top-0 h-1.5 w-1.5 rounded-full ring-1 ring-background',
-                          loc === 'popped' ? 'bg-emerald-500' : 'bg-primary',
-                        )}
-                        aria-hidden
-                      />
-                    )}
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="left">
-                  {def.title}
-                  <span className="text-muted-foreground">
-                    {customizing
-                      ? ' · click to hide'
-                      : `${ALT_LABEL.get(id) ? ` · ${ALT_LABEL.get(id)}` : ''}${loc === 'floating' ? ' · floating' : loc === 'popped' ? ' · popped out' : ''}`}
-                  </span>
-                </TooltipContent>
-              </Tooltip>
+              {startsGroup && (
+                // The group name is the divider's accessible text and tooltip:
+                // a visible caption never fit the 48px rail (#8802 R1).
+                <h3
+                  data-panel-group={def.group}
+                  title={`${t(group.labelKey)} · ${t(group.descriptionKey)}`}
+                  className={cn('w-6 shrink-0', index > 0 ? 'my-1 h-px bg-divider' : 'h-0 overflow-hidden')}
+                >
+                  <span className="sr-only">{t(group.labelKey)}</span>
+                </h3>
+              )}
+              <ActivityBarItem
+                id={id}
+                location={loc}
+                open={isOpen(id)}
+                active={id === primaryId}
+                quiet={viewerEmpty && needsModel(id) && loc !== 'docked'}
+                customizing={customizing}
+                altKey={ALT_KEY.get(id)}
+                badge={id === 'layers' ? pendingLayerEdits : undefined}
+                dragging={dragId === id}
+                dropTarget={overId === id && dragId !== null && dragId !== id}
+                onActivate={() => (customizing ? setPanelShownInSidebar(id, false) : onIconClick(id))}
+                onDragStart={() => customizing && setDragId(id)}
+                onDragEnd={() => {
+                  setDragId(null);
+                  setOverId(null);
+                }}
+                onDragOver={(e) => {
+                  // Only an icon reorder claims the drag; a file is the window's (#5845).
+                  if (!customizing || !dragId) return;
+                  e.preventDefault();
+                  if (overId !== id) setOverId(id);
+                }}
+                onDrop={() => {
+                  if (customizing && dragId && dragId !== id) reorder(dragId, order.indexOf(id));
+                  setDragId(null);
+                  setOverId(null);
+                }}
+              />
             </div>
           );
         })}
+        {fit.overflow.length > 0 && (
+          <ActivityBarOverflow ids={fit.overflow} locationOf={panelLocation} onSelect={onIconClick} waiting={fit.waiting} />
+        )}
       </div>
 
       {/* Footer controls */}
-      <div className="w-full shrink-0 border-t border-border py-1.5 flex flex-col items-center gap-0.5">
+      <div className="w-full shrink-0 border-t border-divider py-1.5 flex flex-col items-center gap-0.5">
         <Tooltip>
           <TooltipTrigger asChild>
             <button
               type="button"
               data-sidebar-customize-toggle
-              aria-label={customizing ? 'Done customizing' : 'Customize sidebar'}
+              aria-label={t(customizing ? 'shellChrome.shared.doneCustomizing' : 'shellChrome.shared.customizeSidebar')}
               aria-pressed={customizing}
               onClick={() => setSidebarCustomizing(!customizing)}
               className={cn(
@@ -228,11 +271,13 @@ export function ActivityBar() {
               <SlidersHorizontal className="h-4 w-4" />
             </button>
           </TooltipTrigger>
-          <TooltipContent side="left">{customizing ? 'Done customizing' : 'Customize sidebar'}</TooltipContent>
+          <TooltipContent side="left">
+            {t(customizing ? 'shellChrome.shared.doneCustomizing' : 'shellChrome.shared.customizeSidebar')}
+          </TooltipContent>
         </Tooltip>
 
         <FooterButton
-          label={mode === 'collapsed' ? 'Expand sidebar' : 'Collapse to icons'}
+          label={t(mode === 'collapsed' ? 'shellChrome.activityBar.expandSidebar' : 'shellChrome.shared.collapseToIcons')}
           onClick={() => setSidebarMode(mode === 'collapsed' ? 'expanded' : 'collapsed')}
         >
           {mode === 'collapsed' ? <PanelRightOpen className="h-4 w-4" /> : <PanelRightClose className="h-4 w-4" />}
@@ -244,19 +289,19 @@ export function ActivityBar() {
               <DropdownMenuTrigger asChild>
                 <button
                   type="button"
-                  aria-label="Sidebar options"
+                  aria-label={t('shellChrome.activityBar.sidebarOptions')}
                   className="h-9 w-9 inline-flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
                 >
                   <EllipsisVertical className="h-4 w-4" />
                 </button>
               </DropdownMenuTrigger>
             </TooltipTrigger>
-            <TooltipContent side="left">Sidebar options</TooltipContent>
+            <TooltipContent side="left">{t('shellChrome.activityBar.sidebarOptions')}</TooltipContent>
           </Tooltip>
           <DropdownMenuContent side="left" align="end" className="w-52">
             <DropdownMenuItem onSelect={() => setSidebarCustomizing(true)} className="gap-2">
               <SlidersHorizontal className="h-4 w-4 text-muted-foreground" />
-              Customize panels…
+              {t('shellChrome.activityBar.customizePanelsMenuItem')}
             </DropdownMenuItem>
             {hiddenIds.length > 0 && (
               <DropdownMenuItem
@@ -264,28 +309,28 @@ export function ActivityBar() {
                 className="gap-2"
               >
                 <Eye className="h-4 w-4 text-muted-foreground" />
-                Show all panels ({hiddenIds.length} hidden)
+                {t('shellChrome.activityBar.showAllPanels', { count: hiddenIds.length })}
               </DropdownMenuItem>
             )}
             <DropdownMenuItem onSelect={() => resetLayout()} className="gap-2">
               <RotateCcw className="h-4 w-4 text-muted-foreground" />
-              Reset layout
+              {t('shellChrome.activityBar.resetLayoutMenuItem')}
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             {/* Keyboard-accessible detach (the grip drag is mouse-only). */}
             <DropdownMenuItem onSelect={() => floatPanel(activePanel)} className="gap-2">
               <SquareArrowOutUpRight className="h-4 w-4 text-muted-foreground" />
-              Float current panel
+              {t('shellChrome.activityBar.floatCurrentPanel')}
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => popOutPanel(activePanel)} className="gap-2">
               <MonitorUp className="h-4 w-4 text-muted-foreground" />
-              Pop out to another screen
+              {t('shellChrome.activityBar.popOutToAnotherScreen')}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
 
-      {customizing && <CustomizeSidebar onClose={() => setSidebarCustomizing(false)} />}
+      {customizing && <Suspense fallback={null}><CustomizeSidebar onClose={() => setSidebarCustomizing(false)} /></Suspense>}
     </div>
   );
 }

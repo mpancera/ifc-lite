@@ -21,68 +21,9 @@
 
 use ifc_lite_geometry::{intersection_solid, DegenerateReason, IntersectionSolid, Mesh};
 
-/// Axis-aligned box as a `Mesh`, each face subdivided `n`×`n`.
-///
-/// Triangle count is `12·n²`: `n = 1 → 12`, `n = 2 → 48`, `n = 4 → 192`. The
-/// surface is identical for every `n` — only the tessellation changes — so any
-/// quantity that varies across `n` is measuring the mesh, not the solid.
-fn box_mesh(lo: [f64; 3], hi: [f64; 3], n: usize) -> Mesh {
-    assert!(n >= 1);
-    let mut m = Mesh::new();
-    let mut push = |p: [f64; 3]| -> u32 {
-        let idx = (m.positions.len() / 3) as u32;
-        m.positions.push(p[0] as f32);
-        m.positions.push(p[1] as f32);
-        m.positions.push(p[2] as f32);
-        m.normals.extend_from_slice(&[0.0, 0.0, 0.0]);
-        idx
-    };
-    for axis in 0..3usize {
-        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
-        for (side, &w) in [lo[axis], hi[axis]].iter().enumerate() {
-            for i in 0..n {
-                for j in 0..n {
-                    let fu = |k: usize| lo[u] + (hi[u] - lo[u]) * (k as f64) / (n as f64);
-                    let fv = |k: usize| lo[v] + (hi[v] - lo[v]) * (k as f64) / (n as f64);
-                    let corner = |cu: f64, cv: f64| {
-                        let mut p = [0.0f64; 3];
-                        p[axis] = w;
-                        p[u] = cu;
-                        p[v] = cv;
-                        p
-                    };
-                    let a = push(corner(fu(i), fv(j)));
-                    let b = push(corner(fu(i + 1), fv(j)));
-                    let c = push(corner(fu(i + 1), fv(j + 1)));
-                    let d = push(corner(fu(i), fv(j + 1)));
-                    // Wind the low and high faces oppositely so the box is
-                    // consistently outward-oriented.
-                    if side == 0 {
-                        m.indices.extend_from_slice(&[a, c, b, a, d, c]);
-                    } else {
-                        m.indices.extend_from_slice(&[a, b, c, a, c, d]);
-                    }
-                }
-            }
-        }
-    }
-    m
-}
-
-/// `box_mesh`, then every vertex mapped by the rotation `r` (row-major 3×3).
-fn rotated_box_mesh(lo: [f64; 3], hi: [f64; 3], n: usize, r: [[f64; 3]; 3]) -> Mesh {
-    let mut m = box_mesh(lo, hi, n);
-    for p in m.positions.chunks_exact_mut(3) {
-        let v = [p[0] as f64, p[1] as f64, p[2] as f64];
-        for k in 0..3 {
-            p[k] = (r[k][0] * v[0] + r[k][1] * v[1] + r[k][2] * v[2]) as f32;
-        }
-    }
-    m
-}
-
-/// The three tessellation levels every oracle sweeps: 12, 48 and 192 triangles.
-const TESSELLATIONS: [usize; 3] = [1, 2, 4];
+#[path = "support/clash_box_fixtures.rs"]
+mod clash_box_fixtures;
+use clash_box_fixtures::{box_mesh, rotated_box_mesh, ROT_Z_3_4_5, TESSELLATIONS};
 
 /// Analytic agreement bound. The API returns f64 positions taken straight from
 /// the exact kernel, so the observed error on every case below is ≤ 2e-15;
@@ -227,15 +168,6 @@ fn containment_returns_the_contained_solid_not_a_shell() {
 // ---------------------------------------------------------------------------
 // Analytic volume — rotated, with a hand derivation.
 // ---------------------------------------------------------------------------
-
-/// Rotation by the exact Pythagorean angle `cos θ = 3/5, sin θ = 4/5` about Z.
-///
-/// Chosen over 45° deliberately: every entry is an exact binary fraction, so the
-/// rotated operand's vertices land exactly on the kernel's `2^-16` snap grid and
-/// the analytic answer stays reachable to f64. A `√2/2` rotation would smear
-/// corners by up to half a snap cell and force a tolerance loose enough to hide
-/// a real error.
-const ROT_Z_3_4_5: [[f64; 3]; 3] = [[0.6, -0.8, 0.0], [0.8, 0.6, 0.0], [0.0, 0.0, 1.0]];
 
 /// The rotated operand: a 5 × 2.5 box in XY (cross-section 12.5 m², preserved by
 /// rotation) spanning z ∈ [0.25, 5], turned by `ROT_Z_3_4_5`.
@@ -451,15 +383,15 @@ fn rotated_near_band_overlap_is_withheld_exactly_as_the_axis_aligned_one_is() {
                     thickness_m,
                     required_m,
                 } => {
-                    // The measured thickness must be the TRUE contact depth,
-                    // not some world-frame projection of it. The tolerance is
-                    // one snap cell: the rotated operands' vertices no longer
-                    // land on the kernel's `2^-16` grid, so the arranged
-                    // geometry is the snapped one, and f32 `Mesh` positions add
-                    // ~6e-8 m on top. Both are far below the 488 µm gate.
+                    // #7292: unresolved intersections can have disconnected tiny
+                    // components. The diagnostic reports their actual thinnest
+                    // violating extent, not the ideal pair's penetration depth.
+                    // The private component-report test independently checks the
+                    // exact report for these same 15 fixtures.
                     assert!(
-                        (thickness_m - depth).abs() < 1.0 / 65536.0,
-                        "{ctx}: reported thickness {thickness_m}, true depth {depth}"
+                        thickness_m.is_finite() && thickness_m >= 0.0
+                            && required_m.is_finite() && thickness_m < required_m,
+                        "{ctx}: invalid component diagnostic {thickness_m} / {required_m}"
                     );
                     assert!(
                         required_m >= 4.0 * NEAR_BAND_FLOOR - 1e-12,
@@ -848,6 +780,171 @@ fn two_disjoint_below_band_slivers_are_withheld_not_pooled_into_one_bounding_box
                 "n={n}: two below-band disjoint slivers must be withheld, got {other:?} \
                  (a pooled bounding box across both components would wrongly pass the gate)"
             ),
+        }
+    }
+}
+
+/// Divergence-theorem volume of a possibly-OPEN triangle soup, about the world
+/// origin: the raw reading the trust gate exists to withhold.
+fn raw_divergence_volume(tris: &[[[f64; 3]; 3]]) -> f64 {
+    tris.iter()
+        .map(|t| {
+            let (a, b, c) = (t[0], t[1], t[2]);
+            let cr = [
+                b[1] * c[2] - b[2] * c[1],
+                b[2] * c[0] - b[0] * c[2],
+                b[0] * c[1] - b[1] * c[0],
+            ];
+            a[0] * cr[0] + a[1] * cr[1] + a[2] * cr[2]
+        })
+        .sum::<f64>()
+        .abs()
+        / 6.0
+}
+
+/// The `2/3` in this file's header is asserted in prose and never measured.
+/// This measures it, and pins the property that makes it exact: the shortfall
+/// is a whole missing face PAIR, not a shape-dependent wedge.
+///
+/// `intersection_solid` withholds inside the band, so the volume is read through
+/// `intersection_tris` — the same triangles the gate sums before refusing them.
+///
+/// WHY exactly 2/3, and why it does not depend on the cross-section: for each
+/// opposite face pair of a box, the two faces' triple-product contributions
+/// sum to `2V`, with the reference-point terms cancelling *within* the pair.
+/// Three pairs give `6V`, which is what `raw_divergence_volume`'s `/6.0`
+/// turns back into `V`. Classification drops both x end caps here — A's cap is
+/// anti-parallel to B's, so `co_oriented` is false and the `Intersection` keep
+/// rule drops it, while the B side drops its copy unconditionally — leaving
+/// the four side walls at `4V`, hence `4V/6 = 2V/3`. That is `2/3` for EVERY
+/// `Ly`/`Lz`: losing a whole pair always costs exactly a third.
+///
+/// The reference-point invariance is narrower than it looks and the distinction
+/// matters if this test is ever extended: it holds because the REMOVED faces are
+/// themselves a complete opposite pair, so their position-dependent terms cancel
+/// against each other. Drop a single face instead and the value does depend on
+/// where the box sits.
+#[test]
+fn the_near_band_shortfall_is_a_missing_face_pair_not_a_shape_dependent_wedge() {
+    for (ly, lz) in [(1.0, 1.0), (1.0, 2.0), (2.0, 2.0), (1.0, 4.0)] {
+        for cells in [1u32, 2, 4, 6, 8] {
+            let depth = f64::from(cells) / 65536.0;
+            for &n in &TESSELLATIONS {
+                let a = box_mesh([0.0, 0.0, 0.0], [1.0, ly, lz], n);
+                let b = box_mesh([1.0 - depth, 0.0, 0.0], [2.0, ly, lz], n);
+                let tris = ifc_lite_geometry::kernel::mesh_bridge::intersection_tris(&a, &b);
+                assert!(
+                    !tris.is_empty(),
+                    "ly={ly} lz={lz} cells={cells} n={n}: no intersection triangles"
+                );
+                let ratio = raw_divergence_volume(&tris) / (depth * ly * lz);
+                // At 1-2 cells the overlap is 1-2 snap cells deep, so a single
+                // grid-scale perturbation is a large fraction of `depth` itself
+                // and a tight bound is not defensible. Above that the ratio is
+                // an exact identity on grid-aligned corners. Both bounds still
+                // reject a shape-dependent wedge, which would move with ly/lz.
+                let tol = if cells >= 4 { 1.0e-9 } else { 1.0e-3 };
+                assert!(
+                    (ratio - 2.0 / 3.0).abs() < tol,
+                    "ly={ly} lz={lz} cells={cells} n={n}: ratio {ratio}, expected 2/3 \
+                     (a cross-section-dependent ratio would mean the shortfall is a \
+                     wedge, not a missing face pair)"
+                );
+            }
+        }
+    }
+}
+
+/// Reproduces the CAUSE behind the `2/3` ratio measured above, not just its
+/// consequence. `classify.rs` drops A's x end cap for failing `co_oriented`
+/// under `Intersection`, and drops B's copy unconditionally in
+/// `c_on_or_near_a`. If both x caps are really gone, every triangle
+/// `intersection_tris` returns belongs to one of the four side walls, whose
+/// outward normals are +/-y or +/-z -- none should be x-facing.
+///
+/// Kept separate from the ratio sweep rather than folded into its loop, so a
+/// normal-classification failure cannot be mistaken for a failure of the
+/// volume identity.
+#[test]
+fn no_surviving_near_band_triangle_has_an_x_facing_normal() {
+    // Below this cross-product magnitude a triangle has no well-defined
+    // normal, so classify it as neither rather than guessing. Positions are
+    // O(1-4), so cross-product round-off floors out near 1e-14. The smallest
+    // triangle this sweep genuinely produces has one edge of order `depth`
+    // (>= 1/65536, itself grid-aligned) and another of order a box_mesh cell
+    // (>= min(ly, lz)/n >= 1/4), i.e. magnitude >~ 3.8e-6. Anything thinner
+    // is EXCLUDED from the area sum rather than classified, which can only
+    // weaken the guard below, never hide an x-facing survivor.
+    const DEGENERATE_NORM: f64 = 1.0e-10;
+    // |n.x| after normalising. A side wall's normal is (0, +/-1, 0) or
+    // (0, 0, +/-1) up to round-off; an end cap's is (+/-1, 0, 0). For a
+    // triangle that only just clears the floor above, worst-case relative
+    // noise on |n.x| is ~1e-4, so this sits ~100x above the noise and ~100x
+    // below a real cap.
+    const X_FACING_TOL: f64 = 1.0e-2;
+
+    for (ly, lz) in [(1.0, 1.0), (1.0, 2.0), (2.0, 2.0), (1.0, 4.0)] {
+        for cells in [1u32, 2, 4, 6, 8] {
+            let depth = f64::from(cells) / 65536.0;
+            for &n in &TESSELLATIONS {
+                let a = box_mesh([0.0, 0.0, 0.0], [1.0, ly, lz], n);
+                let b = box_mesh([1.0 - depth, 0.0, 0.0], [2.0, ly, lz], n);
+                let tris = ifc_lite_geometry::kernel::mesh_bridge::intersection_tris(&a, &b);
+                assert!(
+                    !tris.is_empty(),
+                    "ly={ly} lz={lz} cells={cells} n={n}: no intersection triangles"
+                );
+
+                // Non-vacuity guard, by AREA rather than triangle count:
+                // `intersection_tris` retriangulates the clipped region, so
+                // its output count is not a closed form of box_mesh's n, but
+                // area is invariant under retriangulation. The overlap is a
+                // box depth x ly x lz whose four side faces total
+                // 2*depth*(ly + lz). Without this, "no x-facing normal"
+                // would pass trivially if almost nothing survived.
+                let expected_side_area = 2.0 * depth * (ly + lz);
+                let mut side_area = 0.0;
+                let mut degenerate = 0usize;
+                let mut x_facing = 0usize;
+
+                for t in &tris {
+                    let e1 = [t[1][0] - t[0][0], t[1][1] - t[0][1], t[1][2] - t[0][2]];
+                    let e2 = [t[2][0] - t[0][0], t[2][1] - t[0][1], t[2][2] - t[0][2]];
+                    let nrm = [
+                        e1[1] * e2[2] - e1[2] * e2[1],
+                        e1[2] * e2[0] - e1[0] * e2[2],
+                        e1[0] * e2[1] - e1[1] * e2[0],
+                    ];
+                    let norm = (nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]).sqrt();
+                    if norm < DEGENERATE_NORM {
+                        degenerate += 1;
+                        continue;
+                    }
+                    if (nrm[0] / norm).abs() > X_FACING_TOL {
+                        x_facing += 1;
+                    } else {
+                        side_area += 0.5 * norm;
+                    }
+                }
+
+                assert_eq!(
+                    x_facing,
+                    0,
+                    "ly={ly} lz={lz} cells={cells} n={n}: {x_facing} of {} triangles \
+                     ({degenerate} degenerate) face x -- an x cap survived, so the \
+                     'both caps dropped' account is incomplete",
+                    tris.len()
+                );
+
+                let tol = if cells >= 4 { 1.0e-9 } else { 1.0e-3 };
+                let ratio = side_area / expected_side_area;
+                assert!(
+                    (ratio - 1.0).abs() < tol,
+                    "ly={ly} lz={lz} cells={cells} n={n}: side-wall area {side_area}, \
+                     expected {expected_side_area} (ratio {ratio}) -- too little side-wall \
+                     geometry survived for the x-facing check to mean anything"
+                );
+            }
         }
     }
 }

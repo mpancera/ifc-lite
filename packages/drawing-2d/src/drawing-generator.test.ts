@@ -15,7 +15,7 @@
 
 import { describe, it, expect } from 'vitest';
 import type { MeshData } from '@ifc-lite/geometry';
-import { Drawing2DGenerator } from './drawing-generator.js';
+import { Drawing2DGenerator, generateFloorPlan } from './drawing-generator.js';
 import { projectTo2D } from './math.js';
 import type {
   DrawingLine,
@@ -463,5 +463,48 @@ describe('generate() line work on non-outward-wound meshes (issue #2682)', () =>
     expect(outward.lines.length).toBeGreaterThan(0);
     expect(inward.lines.map(lineIdentity).sort()).toEqual(outward.lines.map(lineIdentity).sort());
     expect(inward.bounds).toEqual(outward.bounds);
+  });
+});
+
+describe('generate() cut rings carry only real corners', () => {
+  // Plan cut through a 6 m long, 0.2 m thick, 3 m high wall. Each side face is
+  // two triangles whose diagonal crosses the cut plane, so the cutter returns
+  // each 6 m face as two collinear segments. The ring used to keep the split
+  // point as a vertex (building-architecture.ifc "house left": 4.26 m + 1.74 m),
+  // which the 2D measure tool snapped to.
+  it('drops tessellation split points on straight faces', async () => {
+    const wall = boxMesh(1, [0, 0, 0], [0.2, 3, 6]);
+    const drawing = await drawingFor([wall], bandedPlanConfig(0.8));
+    const rings = drawing.cutPolygons.filter((p) => p.entityId === 1);
+    expect(rings).toHaveLength(1);
+    const outer = rings[0].polygon.outer;
+    expect(outer).toHaveLength(4);
+    const edges = outer.map((a, i) => {
+      const b = outer[(i + 1) % outer.length];
+      return Math.hypot(b.x - a.x, b.y - a.y);
+    }).sort((a, b) => a - b);
+    expect(edges[0]).toBeCloseTo(0.2, 6);
+    expect(edges[1]).toBeCloseTo(0.2, 6);
+    expect(edges[2]).toBeCloseTo(6, 6);
+    expect(edges[3]).toBeCloseTo(6, 6);
+  });
+});
+
+describe('generateFloorPlan() storey-relative cut (#10931)', () => {
+  it('cuts a storey of a building placed above its site 1.2 m above that storey floor', async () => {
+    // Site Z 14.23, building Z 3, storey Elevation 0.5, RTC offset Z 14.73: the storey floor is at render Y 3.
+    const frame = { siteOrigin: { x: 0, y: 0, z: 14.23 }, buildingOrigin: { z: 3 }, wasmRtcOffset: { x: 0, y: 0, z: 14.73 } };
+    const parapet = boxMesh(1, [0, 3, 0], [4, 4.5, 0.2]);
+    const wallBelow = boxMesh(2, [0, -0.5, 1], [4, 2.9, 1.2]);
+    const drawing = await generateFloorPlan([parapet, wallBelow], { storeyElevation: 0.5, cutHeight: 1.2, frame }, {
+      useGPU: false, includeHiddenLines: false,
+    });
+    expect(drawing.cutPolygons.map((p) => p.entityId)).toEqual([1]);
+    expect(drawing.config.plane.position).toBeCloseTo(4.2, 9);
+  });
+
+  it('still takes a render-frame Y as a number', async () => {
+    const drawing = await generateFloorPlan([boxMesh(1, [0, 0, 0], [4, 1.5, 0.2])], 1.2, { useGPU: false, includeHiddenLines: false });
+    expect(drawing.cutPolygons.map((p) => p.entityId)).toEqual([1]);
   });
 });

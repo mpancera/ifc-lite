@@ -93,6 +93,23 @@ fn test_attribute_value_conversion() {
 }
 
 #[test]
+fn typed_value_name_decodes_to_the_express_spelling_4707() {
+    // A typed-value name is a STEP keyword, so its case is not significant.
+    // Every consumer matches the uppercase spelling, so decode folds it once.
+    for spelling in [&b"IFCPARAMETERVALUE"[..], b"ifcparametervalue", b"IfcParameterValue"] {
+        let token = Token::TypedValue(spelling, vec![Token::Float(0.5)]);
+        let attr = AttributeValue::from_token(&token);
+        let (name, value) = attr.as_typed().expect("typed value decodes to a typed value");
+        assert_eq!(name, "IFCPARAMETERVALUE", "{}", String::from_utf8_lossy(spelling));
+        assert_eq!(value.as_float(), Some(0.5));
+    }
+    // The payload is not a keyword: a typed string keeps its case.
+    let token = Token::TypedValue(b"ifclabel", vec![Token::String(b"Mixed Case")]);
+    let attr = AttributeValue::from_token(&token);
+    assert_eq!(attr.as_typed().unwrap().1.as_string(), Some("Mixed Case"));
+}
+
+#[test]
 fn test_decoded_entity() {
     let entity = DecodedEntity::new(
         1,
@@ -110,6 +127,58 @@ fn test_decoded_entity() {
 }
 
 #[test]
+fn decoded_entity_get_refs_accepts_a_list_or_bare_reference() {
+    let entity = DecodedEntity::new(
+        1,
+        IfcType::IfcWall,
+        vec![
+            AttributeValue::List(vec![
+                AttributeValue::EntityRef(2),
+                AttributeValue::Null,
+                AttributeValue::EntityRef(3),
+            ]),
+            AttributeValue::EntityRef(4),
+            AttributeValue::List(Vec::new()),
+            AttributeValue::Null,
+        ],
+    );
+    assert_eq!(entity.get_refs(0), Some(vec![2, 3]));
+    assert_eq!(entity.get_refs(1), Some(vec![4]));
+    assert_eq!(entity.get_refs(2), None);
+    assert_eq!(entity.get_refs(3), None);
+    assert_eq!(entity.get_refs(4), None);
+}
+
+/// EXPORT-DATA-1 (#7681): `IfcRelDefinesByProperties.RelatingPropertyDefinition`
+/// is an `IfcPropertySetDefinitionSelect`. Its `IfcPropertySetDefinitionSet`
+/// alternative is a defined type, so ISO 10303-21 writes it as a typed
+/// parameter, `IFCPROPERTYSETDEFINITIONSET((#20,#22))`, which decodes to
+/// `[String(name), List(refs)]`. `get_refs` read that as a list with no
+/// reference members and returned `None`, so every reader dropped the whole
+/// relationship. Decoded from real STEP so the shape is the tokenizer's.
+#[test]
+fn decoded_entity_get_refs_unwraps_a_property_set_definition_set() {
+    let content = b"ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n\
+        #1=IFCRELDEFINESBYPROPERTIES('a',$,$,$,(#50),#20);\n\
+        #2=IFCRELDEFINESBYPROPERTIES('b',$,$,$,(#50),(#20,#22));\n\
+        #3=IFCRELDEFINESBYPROPERTIES('c',$,$,$,(#50),IFCPROPERTYSETDEFINITIONSET((#20,#22)));\n\
+        #4=IFCRELDEFINESBYPROPERTIES('d',$,$,$,(#50),ifcPropertySetDefinitionSet((#21)));\n\
+        #5=IFCRELDEFINESBYPROPERTIES('e',$,$,$,(#50),IFCLABEL('x'));\n\
+        #6=IFCRELDEFINESBYPROPERTIES('f',$,$,$,(#50),IFCOTHERSET((#20)));\n\
+        #7=IFCRELDEFINESBYPROPERTIES('g',$,$,$,(#50),IFCPROPERTYSETDEFINITIONSET((#20),(#22)));\n\
+        ENDSEC;\nEND-ISO-10303-21;\n";
+    let mut decoder = crate::EntityDecoder::with_index(content, crate::build_entity_index(content));
+    let mut refs = |id| decoder.decode_by_id(id).expect("decodes").get_refs(5);
+    assert_eq!(refs(1), Some(vec![20]), "single reference");
+    assert_eq!(refs(2), Some(vec![20, 22]), "bare list");
+    assert_eq!(refs(3), Some(vec![20, 22]), "typed IfcPropertySetDefinitionSet");
+    assert_eq!(refs(4), Some(vec![21]), "the keyword is case-insensitive");
+    assert_eq!(refs(5), None, "a typed non-aggregate holds no references");
+    assert_eq!(refs(6), None, "only the one schema type that wraps references is unwrapped");
+    assert_eq!(refs(7), None, "a wrapper must carry exactly one SET argument");
+}
+
+#[test]
 fn test_as_float_with_typed_value() {
     // Test plain float
     let plain_float = AttributeValue::Float(0.5);
@@ -120,19 +189,25 @@ fn test_as_float_with_typed_value() {
     assert_eq!(integer.as_float(), Some(42.0));
 
     // Test TypedValue wrapper like IFCNORMALISEDRATIOMEASURE(0.5)
-    // This is stored as List([String("IFCNORMALISEDRATIOMEASURE"), Float(0.5)])
-    let typed_value = AttributeValue::List(vec![
-        AttributeValue::String("IFCNORMALISEDRATIOMEASURE".to_string()),
-        AttributeValue::Float(0.5),
-    ]);
+    let typed_value = AttributeValue::Typed {
+        name: "IFCNORMALISEDRATIOMEASURE".into(),
+        value: Box::new(AttributeValue::Float(0.5)),
+    };
     assert_eq!(typed_value.as_float(), Some(0.5));
 
     // Test TypedValue with integer
-    let typed_int = AttributeValue::List(vec![
-        AttributeValue::String("IFCINTEGER".to_string()),
-        AttributeValue::Integer(100),
-    ]);
+    let typed_int = AttributeValue::Typed {
+        name: "IFCINTEGER".into(),
+        value: Box::new(AttributeValue::Integer(100)),
+    };
     assert_eq!(typed_int.as_float(), Some(100.0));
+
+    // A list shaped like the old encoding is a list, not a typed value (CORE-4).
+    let lookalike = AttributeValue::List(vec![
+        AttributeValue::String("IFCNORMALISEDRATIOMEASURE".to_string()),
+        AttributeValue::Float(0.5),
+    ]);
+    assert_eq!(lookalike.as_float(), None);
 
     // Test that non-typed lists return None
     let regular_list =
@@ -142,6 +217,24 @@ fn test_as_float_with_typed_value() {
     // Test that empty list returns None
     let empty_list = AttributeValue::List(vec![]);
     assert_eq!(empty_list.as_float(), None);
+}
+
+#[test]
+fn ifc4x1_alignment_curve_preserves_its_exact_supported_name_4203() {
+    let alignment_curve = IfcType::from_str("IFCALIGNMENTCURVE");
+
+    assert!(!matches!(alignment_curve, IfcType::Unknown(_)));
+    assert_eq!(alignment_curve.as_str(), "IFCALIGNMENTCURVE");
+    assert_eq!(alignment_curve.name(), "IfcAlignmentCurve");
+    assert!(alignment_curve.attribute_names().is_empty());
+
+    for non_entity in [
+        "IFCLENGTHMEASURE",
+        "IFCBINARY",
+        "IFCPROPERTYSETDEFINITIONSET",
+    ] {
+        assert!(matches!(IfcType::from_str(non_entity), IfcType::Unknown(_)));
+    }
 }
 
 /// `IFC_TYPES` is the catalog the enum itself cannot give you: `Unknown(u32)`
@@ -158,14 +251,14 @@ mod ifc_types_catalog {
     /// back would produce a catalog that silently omits those classes.
     #[test]
     fn every_entry_round_trips_through_its_name() {
-        for &t in IFC_TYPES {
+        for t in IFC_TYPES {
             let name = t.name();
             assert_eq!(
                 IfcType::from_str(&name.to_uppercase()),
-                t,
+                t.clone(),
                 "{name} did not round-trip"
             );
-            assert_eq!(IfcType::from_id(t.id()), t, "{name} did not round-trip by id");
+            assert_eq!(IfcType::from_id(t.id()), Some(t.clone()), "{name} did not round-trip by id");
         }
     }
 
@@ -173,8 +266,8 @@ mod ifc_types_catalog {
     #[test]
     fn the_catalog_is_a_set_of_real_entities() {
         let mut seen = std::collections::HashSet::new();
-        for &t in IFC_TYPES {
-            assert!(seen.insert(t.name()), "{} appears twice", t.name());
+        for t in IFC_TYPES {
+            assert!(seen.insert(t.known_as_str()), "{} appears twice", t.name());
             assert!(
                 !matches!(t, IfcType::Unknown(_)),
                 "Unknown is the absence of a type, not one of them"
@@ -189,12 +282,12 @@ mod ifc_types_catalog {
     /// rather than a guess about names.
     #[test]
     fn every_parent_is_itself_in_the_catalog() {
-        let known: std::collections::HashSet<&str> = IFC_TYPES.iter().map(|t| t.name()).collect();
-        for &t in IFC_TYPES {
+        let known: std::collections::HashSet<&str> = IFC_TYPES.iter().filter_map(IfcType::known_as_str).collect();
+        for t in IFC_TYPES {
             let mut cur = t.parent();
             while let Some(p) = cur {
                 assert!(
-                    known.contains(p.name()),
+                    known.contains(p.known_as_str().expect("catalog parent is known")),
                     "{} has an ancestor {} outside the catalog",
                     t.name(),
                     p.name()
@@ -217,17 +310,17 @@ mod ifc_types_catalog {
             876,
             "the IFC4X3 catalog has an unexpected entity count"
         );
-        let by_name: std::collections::HashMap<&str, IfcType> =
-            IFC_TYPES.iter().map(|t| (t.name(), *t)).collect();
+        let by_name: std::collections::HashMap<String, IfcType> =
+            IFC_TYPES.iter().map(|t| (t.name().to_string(), t.clone())).collect();
         for name in ["IfcWall", "IfcSlab", "IfcDoor", "IfcWindow", "IfcBuildingStorey"] {
-            let t = by_name[name];
+            let t = by_name[name].clone();
             assert!(!t.is_abstract(), "{name} is instantiable");
-            assert!(t.is_subtype_of(by_name["IfcProduct"]), "{name} is a product");
+            assert!(t.is_subtype_of(by_name["IfcProduct"].clone()), "{name} is a product");
         }
         assert!(by_name["IfcProduct"].is_abstract());
         assert_eq!(
             by_name["IfcWallStandardCase"].parent(),
-            Some(by_name["IfcWall"]),
+            Some(by_name["IfcWall"].clone()),
             "the supertype chain is what makes ancestor mapping a fact"
         );
     }
@@ -238,7 +331,7 @@ mod ifc_types_catalog {
 /// written today and how one of them will eventually be wrong.
 #[cfg(test)]
 mod attribute_names {
-    use crate::{IfcType, IFC_TYPES};
+    use crate::{IfcType, SchemaVersion, IFC_TYPES};
 
     /// The property the whole thing rests on: supertype attributes come FIRST,
     /// so the position here is the position `DecodedEntity::get` indexes. A
@@ -264,7 +357,6 @@ mod attribute_names {
     /// two is wrong and it is no longer a matter of opinion which.
     #[test]
     fn it_agrees_with_the_positions_the_workspace_already_reads() {
-        let wall = IfcType::from_str("IFCWALL");
         for (name, want) in [
             ("GlobalId", 0),
             ("Name", 2),
@@ -274,7 +366,7 @@ mod attribute_names {
             ("Representation", 6),
         ] {
             assert_eq!(
-                wall.attribute_index(name),
+                SchemaVersion::Ifc4x3.attribute("IFCWALL", name).map(|a| a.index),
                 Some(want),
                 "IfcProduct attribute {name} is read at index {want} in this workspace"
             );
@@ -286,40 +378,47 @@ mod attribute_names {
     #[test]
     fn a_storeys_elevation_is_reachable_by_name() {
         let storey = IfcType::from_str("IFCBUILDINGSTOREY");
-        assert_eq!(storey.attribute_index("Elevation"), Some(9));
+        assert_eq!(
+            SchemaVersion::Ifc4x3
+                .attribute("IFCBUILDINGSTOREY", "Elevation")
+                .map(|a| a.index),
+            Some(9)
+        );
         assert_eq!(storey.attribute_names().len(), 10);
     }
 
     #[test]
-    fn an_unknown_name_is_none_and_the_lookup_is_case_sensitive() {
-        let wall = IfcType::from_str("IFCWALL");
-        assert_eq!(wall.attribute_index("NotAnAttribute"), None);
+    fn an_unknown_name_is_none_and_the_lookup_is_ascii_case_insensitive() {
+        let attr = |name| SchemaVersion::Ifc4x3.attribute("IFCWALL", name);
+        assert_eq!(attr("NotAnAttribute"), None);
         assert_eq!(
-            wall.attribute_index("globalid"),
-            None,
-            "EXPRESS names are PascalCase; a case-insensitive match would let a \
-             typo resolve to the wrong attribute on some other entity"
+            attr("globalid").map(|a| a.index),
+            Some(0),
+            "attribute names fold ASCII case, as the decoder's header-driven lookup always did"
         );
     }
 
     /// Every catalog entry answers, and no entry repeats a name — a duplicate
-    /// would make `attribute_index` return the first of two real positions.
+    /// would make the by-name lookup return the first of two real positions.
     #[test]
     fn every_type_has_a_consistent_attribute_list() {
-        for &t in IFC_TYPES {
+        for t in IFC_TYPES {
             let names = t.attribute_names();
             let mut seen = std::collections::HashSet::new();
             for n in names {
                 assert!(
                     seen.insert(*n),
-                    "{} lists {n} twice; attribute_index would answer with the \
+                    "{} lists {n} twice; the by-name lookup would answer with the \
                      first of two real positions",
                     t.name()
                 );
             }
-            for (i, n) in names.iter().enumerate() {
-                assert_eq!(t.attribute_index(n), Some(i));
-            }
+            assert_eq!(
+                t.attribute_flags().len(),
+                names.len(),
+                "{}: one flag byte per attribute name",
+                t.name()
+            );
         }
     }
 
@@ -330,6 +429,68 @@ mod attribute_names {
         let u = IfcType::from_str("NOT_AN_IFC_TYPE_AT_ALL");
         assert!(matches!(u, IfcType::Unknown(_)));
         assert!(u.attribute_names().is_empty());
-        assert_eq!(u.attribute_index("GlobalId"), None);
+        assert!(u.attribute_flags().is_empty());
+        assert_eq!(SchemaVersion::Ifc4x3.attribute(u.as_str(), "GlobalId"), None);
+    }
+}
+
+// #3987: borrowing canonical names must retain case-insensitive schema identity
+// and the public Unicode-normalized CRC for unknown names.
+#[test]
+fn type_name_normalization_preserves_catalog_and_unknown_unicode_3987() {
+    for ty in crate::IFC_TYPES {
+        for spelling in [ty.name().to_string(), ty.name().to_uppercase(), ty.name().to_lowercase()] {
+            assert_eq!(IfcType::from_str(&spelling), ty.clone(), "{spelling}");
+        }
+    }
+    // Independent bitwise IEEE CRC32 oracle, avoiding the generated table.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
+            }
+        }
+        !crc
+    }
+    // Unicode normalization may produce a KNOWN canonical keyword.
+    assert_eq!(IfcType::from_str("IFCſPACE"), IfcType::IfcSpace);
+    // Supported legacy schema spellings now preserve their exact variant;
+    // synthetic extension spellings remain Unknown and are handled by the
+    // legacy-aware classification wrapper.
+    for &name in crate::EXPORTER_STRATUM_ALIASES {
+        let upper = name.to_uppercase();
+        let expected = IfcType::from_str(name);
+        if matches!(
+            name,
+            "IFCSOLIDSTRATUM" | "IFCVOIDSTRATUM" | "IFCWATERSTRATUM"
+        ) {
+            assert!(matches!(expected, IfcType::Unknown(_)), "{name}");
+        } else {
+            assert_eq!(expected.as_str(), upper, "{name}");
+        }
+        for spelling in [name.to_owned(), name.to_lowercase()] {
+            assert_eq!(IfcType::from_str(&spelling), expected, "{spelling}");
+        }
+    }
+    for (input, uppercase) in [
+        ("", ""),
+        ("IFCÉ", "IFCÉ"),
+        ("IFCWALL ", "IFCWALL "),
+        ("IFC\0WALL", "IFC\0WALL"),
+        ("IFC_VENDOR_123", "IFC_VENDOR_123"),
+        ("Ifc_Vendor_123", "IFC_VENDOR_123"),
+        ("ifcstraße", "IFCSTRASSE"),
+        ("ifcﬃ", "IFCFFI"),
+        ("ifcé", "IFCÉ"),
+        ("ifcı", "IFCI"),
+    ] {
+        let parsed = IfcType::from_str(input);
+        let IfcType::Unknown(unknown) = parsed else {
+            panic!("{input} unexpectedly resolved to a schema type");
+        };
+        assert_eq!(unknown.as_str(), uppercase, "{input}");
+        assert_eq!(unknown.id(), crc32(uppercase.as_bytes()), "{input}");
     }
 }

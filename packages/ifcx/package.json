@@ -1,8 +1,9 @@
 {
   "name": "@ifc-lite/ifcx",
-  "version": "2.3.6",
+  "version": "4.7.1",
   "description": "IFC5 (IFCX) parser for IFC-Lite",
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -13,7 +14,7 @@
     }
   },
   "scripts": {
-    "build": "pnpm exec tsc && node ./scripts/verify-dist-hello-wall.mjs",
+    "build": "node ../../scripts/build-imported-geometry.mjs --verify && pnpm exec tsc && node ../../scripts/build-imported-geometry.mjs --copy && node ./scripts/verify-dist-hello-wall.mjs",
     "typecheck": "node ../../scripts/typecheck-tests.mjs",
     "dev": "pnpm exec tsc --watch",
     "test": "tsx --test src/*.test.ts"
@@ -22,10 +23,11 @@
     "@ifc-lite/data": "workspace:^",
     "@ifc-lite/mutations": "workspace:^",
     "@ifc-lite/pointcloud": "workspace:^",
-    "@noble/hashes": "^2.3.0"
+    "@noble/hashes": "^2.4.0"
   },
   "devDependencies": {
-    "tsx": "^4.23.12",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
     "typescript": "^6.0.3"
   },
   "license": "MPL-2.0",

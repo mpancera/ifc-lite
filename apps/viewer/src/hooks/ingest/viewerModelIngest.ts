@@ -2,11 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import { parseIfcx, createSyntheticDataStore, attachDataStoreAccessors, contiguousSourceBytes, type IfcDataStore, type IfcSourceBytes, type IfcStoreData, type PointCloudExtraction } from '@ifc-lite/parser';
+import { sourceWatermark } from '../../utils/source-watermark.js';
+import type { parseIfcx as ParseIfcx } from '@ifc-lite/ifcx';
+import { IFCX_LENGTH_UNIT_SCALE, createSyntheticDataStore, type IfcDataStore, type PointCloudExtraction } from '@ifc-lite/parser';
 import { type GeometryResult, type MeshData, type PointCloudAsset } from '@ifc-lite/geometry';
-import { loadGLBToMeshData } from '@ifc-lite/cache';
+import { parseGLB, parseGLBToMeshData, parseGLBImageResources } from '@ifc-lite/cache';
 import type { SchemaVersion } from '../../store/types.js';
-import { calculateMeshBounds, createCoordinateInfo, normalizeColor } from '../../utils/localParsingUtils.js';
+import type { ContainerVisibilityPlan } from '../../lib/container-visibility.js';
+import { calculateMeshBounds, createCoordinateInfo, expandBoundsForPointClouds, normalizeColor } from '../../utils/localParsingUtils.js';
+import { buildTabularDataStore } from './tabularDataStore.js';
 
 interface RawIfcxMesh {
   expressId?: number;
@@ -18,15 +22,30 @@ interface RawIfcxMesh {
   color?: [number, number, number, number] | [number, number, number];
   ifcType?: string;
   ifc_type?: string;
+  uvs?: Float32Array;
+  texture?: MeshData['texture'];
 }
 
 export interface ViewerModelPayload {
   dataStore: IfcDataStore;
   geometryResult: GeometryResult;
   schemaVersion: SchemaVersion;
+  /** Encoded GLB base-colour images, retained through the canonical load owner. */
+  originalResources?: Map<string, Uint8Array>;
   /** IFCX path ↔ expressId maps (only present for IFCX-parsed models). */
   pathToId?: Map<string, number>;
   idToPath?: Map<number, string>;
+  /**
+   * Model-local express ids the source file states are hidden. Nothing here
+   * applies them: the format's own `loadFile` branch does, through
+   * `applyInitialHiddenState`, once `finalizeModel` has registered the model
+   * and its express id range. A format whose file says nothing about
+   * visibility leaves this out. Only the `.3dm` branch sets it today; a second
+   * format setting it would have to call the same helper.
+   */
+  hiddenExpressIds?: number[];
+  /** How the source's container rows hide and show their subtree; the `.3dm` branch puts it on the model after `finalizeModel`. */
+  containerVisibility?: ContainerVisibilityPlan;
 }
 
 export interface ParseIfcxOptions {
@@ -36,6 +55,14 @@ export interface ParseIfcxOptions {
    * Without this, geometry-less IFCX throws `overlay-only-ifcx`.
    */
   allowEmptyGeometry?: boolean;
+}
+
+export function getViewerSchemaVersion(dataStore: IfcDataStore | null): SchemaVersion {
+  if (!dataStore) return 'IFC4';
+  if (dataStore.schemaVersion === 'IFC4X3') return 'IFC4X3';
+  if (dataStore.schemaVersion === 'IFC4') return 'IFC4';
+  if (dataStore.schemaVersion === 'IFC5') return 'IFC5';
+  return 'IFC2X3';
 }
 
 export function convertIfcxMeshes(rawMeshes: RawIfcxMesh[]): MeshData[] {
@@ -49,6 +76,8 @@ export function convertIfcxMeshes(rawMeshes: RawIfcxMesh[]): MeshData[] {
       positions,
       indices,
       normals,
+      uvs: mesh.uvs,
+      texture: mesh.texture,
       color: normalizeColor(mesh.color),
       ifcType: mesh.ifcType ?? mesh.ifc_type ?? 'IfcProduct',
     };
@@ -67,17 +96,16 @@ export function createMinimalGlbDataStore(buffer: ArrayBuffer, meshCount: number
   });
 }
 
-export function getMaxExpressId(dataStore: IfcDataStore, meshes: MeshData[]): number {
+export function getMaxExpressId(
+  dataStore: IfcDataStore | null,
+  meshes: MeshData[],
+  pointClouds: readonly Pick<PointCloudAsset, 'expressId'>[] = [],
+): number {
   const maxExpressIdFromMeshes = meshes.reduce((max, mesh) => Math.max(max, mesh.expressId), 0);
-  let maxExpressIdFromEntities = 0;
-  if (dataStore.entityIndex?.byId) {
-    for (const key of dataStore.entityIndex.byId.keys()) {
-      if (key > maxExpressIdFromEntities) {
-        maxExpressIdFromEntities = key;
-      }
-    }
-  }
-  return Math.max(maxExpressIdFromMeshes, maxExpressIdFromEntities);
+  // Same rule as the allocator floor, so the ownership bound and the floor cannot diverge.
+  const maxExpressIdFromEntities = sourceWatermark(dataStore);
+  const maxExpressIdFromPoints = pointClouds.reduce((max, asset) => Math.max(max, asset.expressId), 0);
+  return Math.max(maxExpressIdFromMeshes, maxExpressIdFromEntities, maxExpressIdFromPoints);
 }
 
 /**
@@ -85,75 +113,42 @@ export function getMaxExpressId(dataStore: IfcDataStore, meshes: MeshData[]): nu
  * is only carried into the store (never read here), so it is optional — which keeps
  * the regression test from having to fabricate a full hierarchy.
  */
-type IfcxParse = Awaited<ReturnType<typeof parseIfcx>>;
+type IfcxParse = Awaited<ReturnType<typeof ParseIfcx>>;
 type IfcxStoreInput = Pick<
   IfcxParse,
-  'fileSize' | 'entityCount' | 'parseTime' | 'strings' | 'entities' | 'properties' | 'quantities' | 'relationships'
-> & { spatialHierarchy?: IfcxParse['spatialHierarchy'] };
+  'fileSize' | 'parseTime' | 'strings' | 'entities' | 'properties' | 'quantities' | 'relationships' | 'georeferencing'
+> & { spatialHierarchy?: IfcxParse['spatialHierarchy']; derivedEntities?: IfcxParse['derivedEntities'] };
 
 /**
  * Build the `IfcDataStore` for an IFCX import. Exported for regression coverage of
  * the selection-time accessor path (see viewerModelIngest.test.ts).
  *
- * IFCX carries real data tables, so unlike the GLB path we can't route through
- * `createSyntheticDataStore` (it builds empty tables) — we attach the accessors to
- * the populated store instead. Without this, selecting an entity in an IFCX-imported
- * model threw "this.store.getQuantities is not a function".
- *
- * `attachDataStoreAccessors` then wires `getEntity`/`getEntitiesByType` through the
- * STEP `BufferEntitySource`, which cannot read an IFCX store (the source is IFCX JSON
- * and the byte index is empty) and would return null/[] for every entity. We override
- * both to serve the `IfcEntity` contract from the populated IFCX entity table. (Raw
- * STEP attribute lists don't exist for IFCX, so `attributes` is empty — identity rides
- * `type`, and name/GlobalId come from the entity table via the store's other accessors.)
+ * The store itself is `buildTabularDataStore`'s; this names what IFCX states
+ * about its file.
  */
 export function buildIfcxDataStore(ifcxResult: IfcxStoreInput, buffer: ArrayBuffer): IfcDataStore {
-  // Annotated deliberately. The object literal below ends in `as unknown as
-  // IfcStoreData` (the IFCX tables do not have the STEP shape), and that cast
-  // silences every field inside it -- including this one. When `source` became
-  // an accessor (#2183) this producer kept handing over a bare Uint8Array and
-  // the whole-monorepo typecheck stayed green, so every IFCX model reached
-  // consumers calling `.materialize()` on a plain array. The annotation puts a
-  // compiler gate back on the one field the cast must not be allowed to cover.
-  const source: IfcSourceBytes = contiguousSourceBytes(new Uint8Array(buffer));
-  const dataStore = attachDataStoreAccessors({
+  const georef = ifcxResult.georeferencing;
+  return buildTabularDataStore(ifcxResult, {
+    schemaVersion: 'IFC5',
+    source: buffer,
     fileSize: ifcxResult.fileSize,
-    schemaVersion: 'IFC5' as const,
-    entityCount: ifcxResult.entityCount,
     parseTime: ifcxResult.parseTime,
-    source,
-    entityIndex: { byId: new Map(), byType: new Map() },
-    strings: ifcxResult.strings,
-    entities: ifcxResult.entities,
-    properties: ifcxResult.properties,
-    quantities: ifcxResult.quantities,
-    relationships: ifcxResult.relationships,
-    spatialHierarchy: ifcxResult.spatialHierarchy,
-  } as unknown as IfcStoreData);
-
-  const entityTable = ifcxResult.entities;
-  const idsByType = new Map<string, number[]>();
-  const knownIds = new Set<number>();
-  for (const id of entityTable.expressId) {
-    if (!id) continue;
-    knownIds.add(id);
-    const key = entityTable.getTypeName(id).toUpperCase();
-    const bucket = idsByType.get(key);
-    if (bucket) bucket.push(id);
-    else idsByType.set(key, [id]);
-  }
-  dataStore.getEntity = (expressId) =>
-    knownIds.has(expressId)
-      ? { expressId, type: entityTable.getTypeName(expressId), attributes: [] }
-      : null;
-  dataStore.getEntitiesByType = (typeName) =>
-    (idsByType.get(typeName.toUpperCase()) ?? []).map((expressId) => ({
-      expressId,
-      type: entityTable.getTypeName(expressId),
-      attributes: [],
-    }));
-
-  return dataStore;
+    // IFCX has no IfcUnitAssignment to read: the format's unit, assumed (nothing in the file declares it).
+    lengthUnitScale: IFCX_LENGTH_UNIT_SCALE,
+    lengthUnitSource: 'default',
+    georeferencing: georef ? {
+      hasGeoreference: true, source: 'mapConversion',
+      projectedCRS: { id: 0, name: georef.IfcProjectedCRS.Name, mapUnit: 'METRE', mapUnitScale: 1 },
+      mapConversion: { id: 0, sourceCRS: 0, targetCRS: 0,
+        eastings: georef.IfcMapConversion.Eastings,
+        northings: georef.IfcMapConversion.Northings,
+        orthogonalHeight: georef.IfcMapConversion.OrthogonalHeight,
+        xAxisAbscissa: georef.IfcMapConversion.XAxisAbscissa,
+        xAxisOrdinate: georef.IfcMapConversion.XAxisOrdinate,
+        scale: georef.IfcMapConversion.Scale,
+      },
+    } : undefined,
+  });
 }
 
 export async function parseIfcxViewerModel(
@@ -161,6 +156,9 @@ export async function parseIfcxViewerModel(
   onProgress?: (progress: { phase: string; percent: number }) => void,
   opts?: ParseIfcxOptions,
 ): Promise<ViewerModelPayload> {
+  // Dynamic: the IFCX parser carries the generated imported-geometry kernel
+  // (~600 KB). Importing it on demand keeps it out of the eager startup chunks.
+  const { parseIfcx } = await import('@ifc-lite/ifcx');
   const ifcxResult = await parseIfcx(buffer, {
     onProgress: (progress) => {
       onProgress?.({
@@ -193,17 +191,7 @@ export async function parseIfcxViewerModel(
     bounds.min = { x: 0, y: 0, z: 0 };
     bounds.max = { x: 0, y: 0, z: 0 };
   }
-  // Expand bounds to include point cloud asset extents so fit-to-view, the
-  // section-plane slider, and camera near/far all see the points too.
-  for (const pc of pointClouds) {
-    const { min, max } = pc.chunk.bbox;
-    bounds.min.x = Math.min(bounds.min.x, min[0]);
-    bounds.min.y = Math.min(bounds.min.y, min[1]);
-    bounds.min.z = Math.min(bounds.min.z, min[2]);
-    bounds.max.x = Math.max(bounds.max.x, max[0]);
-    bounds.max.y = Math.max(bounds.max.y, max[1]);
-    bounds.max.z = Math.max(bounds.max.z, max[2]);
-  }
+  expandBoundsForPointClouds(bounds, pointClouds);
   return {
     dataStore: buildIfcxDataStore(ifcxResult, buffer),
     geometryResult: {
@@ -233,13 +221,17 @@ export function convertIfcxPointClouds(extractions: PointCloudExtraction[]): Poi
 }
 
 export async function parseGlbViewerModel(buffer: ArrayBuffer): Promise<ViewerModelPayload> {
-  const meshes = loadGLBToMeshData(new Uint8Array(buffer));
+  const { json, bin } = parseGLB(new Uint8Array(buffer));
+  if (!bin) throw new Error('GLB has no binary buffer');
+  const meshes = parseGLBToMeshData(json, bin);
+  const originalResources = parseGLBImageResources(json, bin);
   if (meshes.length === 0) {
     throw new Error('glb-empty');
   }
 
   const { bounds, stats } = calculateMeshBounds(meshes);
   return {
+    originalResources,
     dataStore: createMinimalGlbDataStore(buffer, meshes.length),
     geometryResult: {
       meshes,

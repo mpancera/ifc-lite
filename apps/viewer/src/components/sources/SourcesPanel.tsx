@@ -2,43 +2,122 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import type { ConnectionTestResult, SourceFile as PluginSourceFile } from '@ifc-lite/plugin-api';
+import { Suspense, useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { lazyChunk } from '@/lib/lazy-chunk';
+import type { ConnectionTestResult } from '@ifc-lite/plugin-api';
 import { useSourceHost } from '@/services/sources/SourceHostProvider';
-import { dispatchSourceDownload } from '@/services/sources/source-host';
 import { SourceSettingsDialog } from './SourceSettingsDialog';
 import { SourceBrowser } from './SourceBrowser';
 import { SourceProviderRow } from './SourceProviderRow';
 import { SourceFavouritesList } from './SourceFavouritesList';
+import { LocalAgentSourceRow } from './LocalAgentSourceRow';
+import { useSourceDownloadBatch } from './useSourceDownloadBatch';
 import type { SourceFavourite } from '@/lib/sources/favourites';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast';
 import { AlertCircle, Cloud, X } from 'lucide-react';
+import { useTranslation } from '@/i18n';
+import { formatLocaleNumber } from '@/i18n/intlFormat';
+import type { TranslationKey } from '@/i18n';
+import { getLocale, hasActiveTranslation, resolveEnglish, selectPluralCategory } from '@/i18n/registry';
 import { useViewerStore } from '@/store';
 import { loadResolvedSourcePrefs, saveSourcePrefs } from '@/lib/sources/preferences';
-import { sanitizeFilename } from '@/lib/export/download';
+import { useSourceProviderPins } from './useSourceProviderPins';
 import { clearAllSourceData } from '@/lib/sources/persistence';
-import { claimRevisionWatchSlot, watchSourceRevisions } from '@/lib/sources/revisionWatch';
+import {
+  claimRevisionWatchSlot,
+  watchSourceRevisions,
+  type SourceRevisionUpdate,
+} from '@/lib/sources/revisionWatch';
+
+const RegistrySource = lazyChunk(() => import('./RegistrySource').then(module => ({ default: module.RegistrySource })));
 
 interface SourcesPanelProps {
   onClose: () => void;
+  registryEnabled?: boolean;
 }
 
-interface SourceDownloadSelection {
-  readonly projectId: string;
-  readonly files: readonly PluginSourceFile[];
+type Translate = ReturnType<typeof useTranslation>['t'];
+
+/** Build one complete, locale-orderable source revision notice. */
+const REVISION_BOTH_KEYS: Record<Intl.LDMLPluralRule, TranslationKey> = {
+  zero: 'sources.sourcesPanel.revisionChangedZeroDeleted',
+  one: 'sources.sourcesPanel.revisionChangedOneDeleted',
+  two: 'sources.sourcesPanel.revisionChangedTwoDeleted',
+  few: 'sources.sourcesPanel.revisionChangedFewDeleted',
+  many: 'sources.sourcesPanel.revisionChangedManyDeleted',
+  other: 'sources.sourcesPanel.revisionChangedOtherDeleted',
+};
+
+export function revisionSyncMessage(t: Translate, locale: string, changed: number, deleted: number): string {
+  if (changed > 0 && deleted > 0) {
+    const localeKey = REVISION_BOTH_KEYS[selectPluralCategory(locale, changed)];
+    const params = {
+      count: deleted,
+      changed: formatLocaleNumber(locale, changed),
+      deleted: formatLocaleNumber(locale, deleted),
+    };
+    // Locale catalogues are partial (#4785): falling back to English text
+    // under the *active locale's* plural category (e.g. Russian "one" for
+    // 21) can pick an English form that count doesn't have (English's
+    // "one" is only for exactly 1) — reselect with English plural rules
+    // first so the fallback text and its count agree grammatically.
+    return hasActiveTranslation(localeKey)
+      ? t(localeKey, params)
+      : resolveEnglish(REVISION_BOTH_KEYS[selectPluralCategory('en', changed)], params);
+  }
+  if (changed > 0) {
+    return t('sources.sourcesPanel.revisionChangedOnly', { count: changed });
+  }
+  if (deleted > 0) {
+    return t('sources.sourcesPanel.revisionDeletedOnly', { count: deleted });
+  }
+  return '';
 }
 
-export function SourcesPanel({ onClose }: SourcesPanelProps) {
+/**
+ * Builds and shows the background revision-sync toast. Reads the active
+ * locale live via `getLocale()` rather than accepting it as a parameter:
+ * the one-shot, slot-gated effect below can still be pending when the
+ * app's async startup locale activates, so a closed-over value could be
+ * stale by the time this resolves (#5000 review).
+ */
+export function notifyRevisionSync(t: Translate, updates: readonly SourceRevisionUpdate[]): void {
+  const deleted = updates.filter((u) => u.event.deleted).length;
+  const changed = updates.length - deleted;
+  toast.info(revisionSyncMessage(t, getLocale(), changed, deleted));
+}
+
+export function RegistrationFailureMessage({ provider, reason }: { provider: string; reason: string }) {
+  const { t } = useTranslation();
+  let marker = '\uE000provider\uE001';
+  while (reason.includes(marker)) marker += '\uE002';
+  const message = t('sources.sourcesPanel.failedToRegister', { provider: marker, reason });
+  const segments = message.split(marker);
+  if (segments.length === 1) return message;
+  return segments.flatMap((segment, index) => index === segments.length - 1
+    ? [segment]
+    : [segment, <span key={index} className="font-medium">{provider}</span>]);
+}
+
+export function SourcesPanel({ onClose, registryEnabled = import.meta.env?.VITE_REGISTRY_ENABLED === 'true' }: SourcesPanelProps) {
+  const { t } = useTranslation();
   const sourceHost = useSourceHost();
   const providers = useMemo(() => sourceHost.list(), [sourceHost]);
   const registrationFailures = useMemo(
     () => sourceHost.getRegistrationFailures(),
     [sourceHost],
   );
+  const pins = useSourceProviderPins();
+  const pinnedIds = useRef(pins.ids);
+  pinnedIds.current = pins.ids;
+  const didAutoOpen = useRef(false);
+  const [readyProviders, setReadyProviders] = useState<ReadonlySet<string>>(() => new Set());
+  const [downloadContext, setDownloadContext] = useState<{ providerId: string; projectId: string } | null>(null);
+  const downloadOwner = downloadContext?.providerId ?? null;
   const [browsing, setBrowsing] = useState<string | null>(null);
+  const [registryBusy, setRegistryBusy] = useState(false);
   const [settingsFor, setSettingsFor] = useState<string | null>(null);
-  const [downloading, setDownloading] = useState(false);
   // Bumped when saved prefs change so rows/contexts re-derive configured state.
   const [prefsVersion, setPrefsVersion] = useState(0);
   // Same counter pattern for the favourites the list reads from storage. Its
@@ -62,19 +141,30 @@ export function SourcesPanel({ onClose }: SourcesPanelProps) {
     });
   }, []);
 
-  const openFavourite = useCallback((favourite: SourceFavourite) => {
-    setBrowseTarget(favourite);
-    setBrowsing(favourite.providerId);
+  const recordReady = useCallback((providerId: string, ready: boolean) => {
+    setReadyProviders((previous) => {
+      if (previous.has(providerId) === ready) return previous;
+      const next = new Set(previous);
+      if (ready) next.add(providerId); else next.delete(providerId);
+      return next;
+    });
   }, []);
+  useEffect(() => {
+    if (didAutoOpen.current || browsing) return;
+    const pinned = pins.ids.find((id) => readyProviders.has(id));
+    if (pinned) { didAutoOpen.current = true; setBrowsing(pinned); }
+  }, [pins.ids, readyProviders, browsing]);
 
   const closeBrowser = useCallback(() => {
     setBrowsing(null);
     setBrowseTarget(null);
   }, []);
 
-  // Cancels in-flight downloads when the panel unmounts (close / navigate away).
-  const downloadAbortRef = useRef<AbortController | null>(null);
-  useEffect(() => () => downloadAbortRef.current?.abort(), []);
+  useEffect(() => {
+    if (browsing && liveIdentities.has(browsing) && !readyProviders.has(browsing)) {
+      setBrowsing(null); setBrowseTarget(null);
+    }
+  }, [browsing, liveIdentities, readyProviders]);
 
   const activeProvider = browsing ? sourceHost.get(browsing) : undefined;
   const settingsProvider = settingsFor ? sourceHost.get(settingsFor) : undefined;
@@ -89,19 +179,21 @@ export function SourcesPanel({ onClose }: SourcesPanelProps) {
     void watchSourceRevisions(sourceHost, tags, controller.signal)
       .then((updates) => {
         if (controller.signal.aborted || updates.length === 0) return;
-        const deleted = updates.filter((u) => u.event.deleted).length;
-        const changed = updates.length - deleted;
-        const parts: string[] = [];
-        if (changed > 0) parts.push(`${changed} loaded model${changed === 1 ? ' has' : 's have'} a newer revision`);
-        if (deleted > 0) parts.push(`${deleted} source file${deleted === 1 ? ' is' : 's are'} gone upstream`);
-        toast.info(`${parts.join('; ')} — use Sync to update.`);
+        // `notifyRevisionSync` reads the locale live (`getLocale()`) rather
+        // than a value closed over here: this is a one-shot, slot-gated
+        // check that can still be pending when the startup locale finishes
+        // loading and activates, so a render-time snapshot could be stale
+        // by the time this resolves (#5000 review). `locale` is
+        // deliberately not a dependency of this effect — adding it would
+        // abort and restart the one-shot check on every switch.
+        notifyRevisionSync(t, updates);
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
         console.warn('[sources] Background revision check failed', err);
       });
     return () => controller.abort();
-  }, [sourceHost]);
+  }, [sourceHost, t]);
 
   const handleSavePrefs = useCallback(
     (values: Record<string, string>) => {
@@ -129,78 +221,47 @@ export function SourcesPanel({ onClose }: SourcesPanelProps) {
 
   const handleTestConnection = useCallback(
     async (values: Record<string, string>): Promise<ConnectionTestResult> => {
-      if (!settingsProvider) return { ok: false, message: 'No provider' };
+      if (!settingsProvider) {
+        return { ok: false, message: t('sources.sourcesPanel.noProviderMessage') };
+      }
       const ctx = sourceHost.createContext(settingsProvider.manifest, values);
       if (settingsProvider.testConnection) {
         return settingsProvider.testConnection(ctx);
       }
-      return { ok: false, message: 'Provider does not support connection testing' };
+      return { ok: false, message: t('sources.sourcesPanel.connectionTestUnsupported') };
     },
-    [settingsProvider, sourceHost],
+    [settingsProvider, sourceHost, t],
   );
 
-  // Downloads run one file at a time and each finished file is dispatched
-  // (and its buffer reference dropped) before the next download starts, so
-  // whole batches of large IFCs are never held in memory simultaneously.
-  // The viewport listener serializes the resulting loads.
-  const handleDownload = useCallback(
-    async ({ projectId, files }: SourceDownloadSelection) => {
-      if (!activeProvider || !browsing) return;
-      const prefs = loadResolvedSourcePrefs(activeProvider.manifest);
-      const ctx = sourceHost.createContext(activeProvider.manifest, prefs);
-      const providerId = browsing;
-      const providerTitle = activeProvider.manifest.title;
+  // Downloads are aborted when the panel unmounts (close / navigate away).
+  const { downloading, downloadStates, handleDownload, cancelDownload, clearFinishedDownloadStates } = useSourceDownloadBatch({
+    provider: activeProvider,
+    providerId: browsing,
+    sourceHost,
+    onBatchSucceeded: () => { if (!pinnedIds.current.includes(browsing ?? '')) closeBrowser(); },
+  });
 
-      downloadAbortRef.current?.abort();
-      const controller = new AbortController();
-      downloadAbortRef.current = controller;
+  // Every exit from the download owner's browser forgets finished failures.
+  useEffect(() => {
+    if (browsing !== downloadOwner && !downloading) clearFinishedDownloadStates();
+  }, [browsing, downloadOwner, downloading, clearFinishedDownloadStates]);
 
-      setDownloading(true);
-      try {
-        let queued = 0;
-        for (const f of files) {
-          if (controller.signal.aborted) break;
-          try {
-            const buffer = await activeProvider.download(
-              ctx,
-              { projectId, containerId: f.containerId, fileId: f.id },
-              { signal: controller.signal },
-            );
-            dispatchSourceDownload([
-              {
-                // `f.name` is provider-supplied and reaches `new File(...)` and
-                // `addModel`, so it is untrusted input to a filename position.
-                // Sanitize at the boundary rather than trusting every provider
-                // to have done it — the same contract the export paths use.
-                name: sanitizeFilename(f.name, { fallback: 'model.ifc' }),
-                buffer,
-                sourceFile: f,
-                tag: sourceHost.createSourceTag(
-                  providerId,
-                  projectId,
-                  f.containerId,
-                  f.id,
-                  f.currentRevisionId,
-                ),
-              },
-            ]);
-            queued += 1;
-          } catch (err) {
-            if (controller.signal.aborted) break;
-            toast.error(
-              err instanceof Error
-                ? `${f.name}: ${err.message}`
-                : `Failed to download ${f.name} from ${providerTitle}`,
-            );
-          }
-        }
-        if (queued > 0) closeBrowser();
-      } finally {
-        setDownloading(false);
-      }
-    },
-    [activeProvider, browsing, closeBrowser, sourceHost],
-  );
+  // A sign-in started before a download may resolve afterward. Async browse
+  // callbacks must consult the current lock rather than their captured render.
+  const navigationLock = useRef<{ busy: boolean; providerId: string | null }>({ busy: false, providerId: null });
+  navigationLock.current = { busy: downloading || registryBusy, providerId: registryBusy ? 'oci-registry' : downloadOwner };
+
+  const openFavourite = useCallback((favourite: SourceFavourite) => {
+    if (navigationLock.current.busy) return;
+    didAutoOpen.current = true;
+    setBrowseTarget(favourite);
+    setBrowsing(favourite.providerId);
+  }, []);
+
+  useEffect(() => {
+    if (downloading && downloadOwner && sourceHost.get(downloadOwner)?.manifest.auth === 'interactive'
+      && liveIdentities.has(downloadOwner) && liveIdentities.get(downloadOwner) === null) cancelDownload();
+  }, [downloading, downloadOwner, liveIdentities, sourceHost, cancelDownload]);
 
   const browsingCtx = useMemo(() => {
     if (!activeProvider || !browsing) return null;
@@ -220,80 +281,99 @@ export function SourcesPanel({ onClose }: SourcesPanelProps) {
     return loadResolvedSourcePrefs(settingsProvider.manifest);
   }, [settingsProvider, prefsVersion]);
 
-  if (activeProvider && browsingCtx) {
-    return (
-      <SourceBrowser
-        provider={activeProvider}
-        ctx={browsingCtx}
-        onDownload={(selection) => void handleDownload(selection)}
-        onBack={closeBrowser}
-        busy={downloading}
-        openTarget={browseTarget}
-        onFavouritesChanged={bumpFavourites}
-      />
-    );
-  }
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center justify-between border-b px-3 py-2">
-        <span className="text-sm font-medium">Cloud Sources</span>
+        <span className="text-sm font-medium">{t('sources.sourcesPanel.title')}</span>
         <Button
           variant="ghost"
           size="sm"
           className="h-7 w-7 p-0 rounded-sm"
-          aria-label="Close"
+          aria-label={t('sources.sourcesPanel.closeAria')}
           onClick={onClose}
         >
           <X className="h-4 w-4" aria-hidden />
         </Button>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="min-h-0 flex-1 overflow-y-auto p-2">
+        <p className="px-1 pb-3 text-xs text-muted-foreground">{t('sources.workspace.intro')}</p>
         {providers.length === 0 && registrationFailures.length === 0 && (
           <div className="flex flex-col items-center gap-2 px-4 py-8 text-center text-sm text-muted-foreground">
             <Cloud className="h-8 w-8" aria-hidden />
-            <span>No source providers configured</span>
+            <span>{t('sources.sourcesPanel.noProviders')}</span>
           </div>
         )}
 
+        {pins.restoreFailed && <div role="alert" className="mb-2 rounded border p-2 text-xs text-muted-foreground">
+          <p>{t('sources.workspace.pinRestoreFailed')}</p>
+          <Button className="mt-2" size="sm" variant="outline" onClick={pins.reset}>{t('sources.workspace.resetPins')}</Button>
+        </div>}
+        {downloading && <div className="mb-2 flex items-center gap-2 rounded border p-2">
+          <output className="min-w-0 flex-1 text-xs">{t('sources.workspace.downloading', { title: sourceHost.get(downloadOwner ?? '')?.manifest.title ?? '' })}</output>
+          <Button size="sm" variant="outline" onClick={cancelDownload}>{t('sources.sourceBrowserHeader.cancelDownload')}</Button>
+        </div>}
         <SourceFavouritesList
           sourceHost={sourceHost}
           favouritesVersion={favouritesVersion}
           liveIdentities={liveIdentities}
           onOpen={openFavourite}
+          navigationDisabled={downloading || registryBusy}
           onChanged={bumpFavourites}
         />
 
-        <ul className="divide-y">
-          {providers.map((p) => (
+        <ul className="space-y-2">
+          {registryEnabled && <Suspense fallback={null}>
+            <RegistrySource expanded={browsing === 'oci-registry'} navigationDisabled={downloading} onBusyChange={setRegistryBusy}
+              onToggle={() => { if (navigationLock.current.busy) return; didAutoOpen.current = true; setBrowseTarget(null); setBrowsing(previous => previous === 'oci-registry' ? null : 'oci-registry'); }} />
+          </Suspense>}
+          {[...providers].sort((a, b) => Number(pins.ids.includes(b.manifest.name)) - Number(pins.ids.includes(a.manifest.name))).map((p) => (
             <SourceProviderRow
               key={p.manifest.name}
               provider={p}
               sourceHost={sourceHost}
               prefsVersion={prefsVersion}
               onOpenSettings={() => setSettingsFor(p.manifest.name)}
-              onBrowse={() => setBrowsing(p.manifest.name)}
+              onBrowse={() => {
+                if (navigationLock.current.busy && navigationLock.current.providerId !== p.manifest.name) return;
+                didAutoOpen.current = true;
+                setBrowseTarget(null);
+                setBrowsing((previous) => previous === p.manifest.name ? null : p.manifest.name);
+              }}
+              browseDisabled={registryBusy || (downloading && downloadOwner !== p.manifest.name)}
+              expanded={browsing === p.manifest.name}
+              pinned={pins.ids.includes(p.manifest.name)}
+              onTogglePin={() => pins.toggle(p.manifest.name)}
+              onReady={recordReady}
               onIdentityChange={recordIdentity}
-            />
+            >
+              {browsing === p.manifest.name && activeProvider && browsingCtx && (
+                <div className="flex h-[min(65vh,600px)] min-h-64 flex-col">
+                  <SourceBrowser key={JSON.stringify([browsing, prefsVersion, browseTarget?.projectId, browseTarget?.fileAreaId, browseTarget?.containerId, browseTarget?.fileId])} provider={activeProvider} ctx={browsingCtx}
+                    onDownload={(selection) => { navigationLock.current = { busy: true, providerId: p.manifest.name }; setDownloadContext({ providerId: p.manifest.name, projectId: selection.projectId }); void handleDownload(selection); }}
+                    onBack={() => { didAutoOpen.current = true; closeBrowser(); }}
+                    busy={downloading} onCancelDownload={cancelDownload} downloadStates={downloadOwner === browsing ? downloadStates : new Map()}
+                    downloadProjectId={downloadContext?.projectId ?? null}
+                    openTarget={browseTarget} onFavouritesChanged={bumpFavourites} favouritesVersion={favouritesVersion} />
+                </div>
+              )}
+            </SourceProviderRow>
           ))}
         </ul>
+        <LocalAgentSourceRow />
 
         {registrationFailures.length > 0 && (
           <div className="border-t px-3 py-2">
-            <div className="mb-1 text-[11px] uppercase tracking-wide text-muted-foreground">
-              Unavailable providers
+            <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">
+              {t('sources.sourcesPanel.unavailableProviders')}
             </div>
             <ul className="flex flex-col gap-1.5">
               {registrationFailures.map((failure) => (
-                <li
-                  key={failure.provider}
-                  className="flex items-start gap-2 text-xs text-red-600 dark:text-red-400"
-                >
+                <li key={failure.provider} className="flex items-start gap-2 text-xs text-danger">
                   <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
                   <span>
-                    <span className="font-medium">{failure.provider}</span> failed to register:{' '}
-                    {failure.reason}
+                    <RegistrationFailureMessage provider={failure.provider} reason={failure.reason} />
                   </span>
                 </li>
               ))}

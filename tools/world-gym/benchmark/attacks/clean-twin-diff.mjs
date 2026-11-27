@@ -40,7 +40,7 @@
  * `--salt-file`; a salt is never accepted in argv - see lib/salt.mjs), used
  * only by the B4.3 control run to demonstrate that handing the attack the
  * secret restores it to 1.000, i.e. that the collapse is the salt's doing and
- * not a broken harness. Measured numbers: scripts/moonshot/b43-benchmark-salt/.
+ * not a broken harness. The historical result is summarized in BENCHMARK.md.
  *
  * It also keeps working, at full strength, on dev - which is deliberate. Dev is
  * open by design and carries no integrity claim.
@@ -86,7 +86,6 @@
  */
 
 import { writeFile, mkdir } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 import { generateModel } from '../../generator.mjs';
 import {
@@ -94,6 +93,7 @@ import {
   DEFECT_TYPES, QUANTITY_KEYS, seedsForSplit,
 } from '../splits.mjs';
 import { resolveSaltFromArgs, describeSalt, redactSalt } from '../../lib/salt.mjs';
+import { isMainEntry } from '../../../../scripts/lib/is-main-entry.mjs';
 
 // ============================================================================
 // Byte-only structural summary (reads a raw STEP string; no labels involved)
@@ -400,7 +400,7 @@ async function main() {
   process.stderr.write(`  node tools/world-gym/benchmark/score.mjs --submission ${outPath} --split ${split}\n`);
 }
 
-const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+const isMain = isMainEntry(import.meta.url);
 if (isMain) {
   main().catch((err) => {
     // A SaltFormatError is an operator message, not a bug: print it without a

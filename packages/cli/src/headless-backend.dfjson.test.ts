@@ -7,7 +7,7 @@
  *
  * DFJSON shipped reading `store.source` directly, so it carried the whole of
  * issue #1908 unfixed: anything authored through the in-store edit APIs (the
- * CLI equivalent of the viewer's Space Sketch tool) was invisible to the
+ * CLI equivalent of the viewer's Room tool) was invisible to the
  * Dragonfly exporter by construction, exactly as HBJSON was before #1956.
  * Both formats now share the gate in `energy-export.ts`, and this file pins
  * the DFJSON half of that contract independently — a shared helper means a
@@ -128,17 +128,15 @@ describe('HeadlessBackend dfjson export (#1908 for the Dragonfly path)', () => {
     // a filename and gets a real IFC extension stripped. A blanket
     // `.replace(/\.[^.]+$/, '')` would silently ship this model as `Tower`.
     //
-    // The dot itself does NOT survive, and must not: Dragonfly/Honeybee
-    // identifiers may not contain special characters, so `sanitize_identifier`
-    // (rust/export/src/lib.rs) maps anything outside [alnum _ -] to `_`. The
-    // contract is therefore `Tower.v2` -> `Tower_v2`, asserted exactly — this
-    // test previously claimed "verbatim" and asserted only
-    // `toContain('Tower')` + `not.toBe('Tower')`, which passed while the stated
-    // invariant was false.
+    // The dot survives in the identifier too: dragonfly-schema and
+    // honeybee-schema identifiers are `^[.A-Za-z0-9_-]+$` (at most 100
+    // characters), and `ladybug_identifier` (rust/export/src/ident.rs) maps
+    // only characters outside that set to `_` (#7692). The display name keeps
+    // the caller's text unchanged. Both are asserted exactly.
     const { bim } = await createHeadlessContext(SAMPLE_IFC);
-    const dfjson = await bim.export.dfjson({ name: 'Tower.v2' });
-    const parsed = JSON.parse(dfjson) as { identifier?: string; name?: string };
-    const emitted = parsed.identifier ?? parsed.name ?? '';
-    expect(emitted).toBe('Tower_v2');
+    const dfjson = await bim.export.dfjson({ name: 'Tower.v2 Süd' });
+    const parsed = JSON.parse(dfjson) as { identifier?: string; display_name?: string };
+    expect(parsed.identifier).toBe('Tower.v2_S_d');
+    expect(parsed.display_name).toBe('Tower.v2 Süd');
   }, 30_000);
 });

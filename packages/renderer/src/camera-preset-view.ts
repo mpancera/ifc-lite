@@ -11,8 +11,8 @@
  * current direction"). Presets are the opposite subject: the direction is
  * dictated by the named face and the caller's rotation cycle, and the box is
  * whatever the caller supplied or whatever the current pose implies. The two
- * share only box arithmetic, which is why this module imports `centerOf` /
- * `maxExtentOf` rather than owning a second copy.
+ * share the box arithmetic and the corner fit, which is why this module
+ * imports `centerOf` / `fitDistanceFor` rather than owning a second copy.
  *
  * Pure by construction, exactly as `camera-framing.ts` is: everything here
  * reads `CameraInternalState` and returns a target, nothing writes to it or
@@ -29,7 +29,9 @@
 import type { Vec3 } from './types.js';
 import type { CameraInternalState } from './camera-state.js';
 import { isUsableBounds } from './camera-guards.js';
-import { centerOf, fitDistanceFor, maxExtentOf, type FramingBounds } from './camera-framing.js';
+import { centerOf, fitDistanceFor, type FramingBounds } from './camera-framing.js';
+import { viewBasis } from './math.js';
+import { CAMERA_CONSTANTS } from './constants.js';
 
 /**
  * Get current bounds estimate (simplified - in production would use scene bounds).
@@ -102,15 +104,12 @@ export function presetViewTarget(
   buildingRotation?: number,
 ): { position: Vec3; target: Vec3; up: Vec3 } {
   const center = centerOf(bounds.min, bounds.max);
-  const maxSize = maxExtentOf(bounds.min, bounds.max);
 
-  // Calculate distance based on FOV for proper fit. Aspect-aware: on a
-  // portrait viewport the horizontal field is the narrower one, and a preset
-  // fitted to the vertical field alone overflows it. See `fitDistanceFor`.
-  const distance = fitDistanceFor(state, maxSize, 1.5); // 1.5x for padding
-
-  let endPos: Vec3;
-  const endTarget = center;
+  // Unit offset from the centre to the camera, per named face. The fit
+  // distance depends on it — the box's projected extent is a property of the
+  // direction it is seen from — so the switch below picks the direction and
+  // the standoff is applied once, afterwards.
+  let offsetDir: Vec3;
 
   // WebGL uses Y-up coordinate system internally
   // We set both position AND up vector for proper orthogonal views
@@ -121,7 +120,7 @@ export function presetViewTarget(
   // Normalized rather than trusted: this is the IfcSite placement angle,
   // derived from the file and threaded through `Camera.setPresetView` — the
   // published entry point — without ever meeting a guard. `Math.cos(NaN)` is
-  // NaN, and the four horizontal presets multiply it straight into `endPos`,
+  // NaN, and the four horizontal presets multiply it straight into the offset,
   // so a malformed placement would send the ViewCube to a non-finite pose. A
   // zero rotation is the same answer as "no rotation supplied", which is what
   // the undefined case already resolves to.
@@ -131,49 +130,39 @@ export function presetViewTarget(
 
   switch (view) {
     case 'top': {
-      // Top view: position camera *just barely* off the +Y pole so the
-      // subsequent orbit math has a well-defined polar tangent (no pole
-      // singularity). camera.up stays world Y throughout — screen-up is
-      // then determined by lookAt projecting (0,1,0) onto perp(look),
-      // which falls along the horizontal component of `-look`.
+      // Top view: straight down the +Y pole, exactly (#9501). It used to
+      // stop 0.01 rad (~0.6 degrees) off the pole so the orbit math had a
+      // polar tangent, and in orthographic projection that tilt drew the
+      // walls of every vertical member as a band beside its section: 13 mm
+      // of a 1.3 m column, inside a hollow section and on the far face.
+      // Screen-up is carried by `camera.up` instead, which is horizontal
+      // here, and `CameraControls.orbit` steps back off the pole along it
+      // before the first drag (`leavePole`).
       //
-      // The 4 rotation cycles select which compass direction appears at
-      // the top of the screen by varying the small horizontal offset
-      // (theta in the spherical math).
-      //   rotation 0 → camera slightly to +Z of center → screen-up = +Z
-      //   rotation 1 → camera slightly to +X → screen-up = +X
-      //   rotation 2 → camera slightly to -Z → screen-up = -Z
-      //   rotation 3 → camera slightly to -X → screen-up = -X
-      // Building rotation is applied as the same Y-axis rotation that
-      // setPresetView would have used to remap the legacy up vector.
-      const poleOffset = Math.sin(0.01) * distance; // ~0.6° tilt
-      const verticalOffset = Math.cos(0.01) * distance;
+      // The 4 rotation cycles pick which compass direction is at the top of
+      // the screen, the same ones the tilted pose produced:
+      //   rotation 0 → screen-up = -Z
+      //   rotation 1 → screen-up = -X
+      //   rotation 2 → screen-up = +Z
+      //   rotation 3 → screen-up = +X
+      // Building rotation is applied as the same Y-axis rotation.
+      //
       // `?? 0`: `rotation` is the animator's 0-3 cycle counter today, but it
       // is a plain `number` on the signature, and an out-of-range, fractional
       // or non-finite one indexes past the table and makes `thetaWorld` — and
       // with it the whole preset pose — NaN.
       const thetaPerRotation = [0, Math.PI / 2, Math.PI, -Math.PI / 2];
       const thetaWorld = (thetaPerRotation[rotation] ?? 0) + rotationRadians;
-      endPos = {
-        x: center.x + poleOffset * Math.sin(thetaWorld),
-        y: center.y + verticalOffset,
-        z: center.z + poleOffset * Math.cos(thetaWorld),
-      };
-      upVector = { x: 0, y: 1, z: 0 };
+      offsetDir = { x: 0, y: 1, z: 0 };
+      upVector = { x: -Math.sin(thetaWorld), y: 0, z: -Math.cos(thetaWorld) };
       break;
     }
     case 'bottom': {
-      // Bottom view: mirror of top — phi = π − MIN_PHI.
-      const poleOffset = Math.sin(0.01) * distance;
-      const verticalOffset = Math.cos(0.01) * distance;
+      // Bottom view: mirror of top, exactly on the -Y pole.
       const thetaPerRotation = [Math.PI, Math.PI / 2, 0, -Math.PI / 2];
       const thetaWorld = (thetaPerRotation[rotation] ?? 0) + rotationRadians;
-      endPos = {
-        x: center.x + poleOffset * Math.sin(thetaWorld),
-        y: center.y - verticalOffset,
-        z: center.z + poleOffset * Math.cos(thetaWorld),
-      };
-      upVector = { x: 0, y: 1, z: 0 };
+      offsetDir = { x: 0, y: -1, z: 0 };
+      upVector = { x: Math.sin(thetaWorld), y: 0, z: Math.cos(thetaWorld) };
       break;
     }
     case 'front':
@@ -182,44 +171,98 @@ export function presetViewTarget(
       // Standard rotation: x' = x*cos - z*sin, z' = x*sin + z*cos
       // For +Z direction (0,0,1): x' = -sin, z' = cos
       // But we need to look at building's front, so use negative rotation
-      endPos = {
-        x: center.x + sinR * distance,
-        y: center.y,
-        z: center.z + cosR * distance,
-      };
+      offsetDir = { x: sinR, y: 0, z: cosR };
       upVector = { x: 0, y: 1, z: 0 }; // Y-up
       break;
     case 'back':
       // Back view: from -Z looking at model
       // For -Z direction (0,0,-1) rotated: x' = sin, z' = -cos
-      endPos = {
-        x: center.x - sinR * distance,
-        y: center.y,
-        z: center.z - cosR * distance,
-      };
+      offsetDir = { x: -sinR, y: 0, z: -cosR };
       upVector = { x: 0, y: 1, z: 0 }; // Y-up
       break;
     case 'left':
       // Left view: from -X looking at model
       // For -X direction (-1,0,0) rotated: x' = -cos, z' = sin
-      endPos = {
-        x: center.x - cosR * distance,
-        y: center.y,
-        z: center.z + sinR * distance,
-      };
+      offsetDir = { x: -cosR, y: 0, z: sinR };
       upVector = { x: 0, y: 1, z: 0 }; // Y-up
       break;
     case 'right':
       // Right view: from +X looking at model
       // For +X direction (1,0,0) rotated: x' = cos, z' = -sin
-      endPos = {
-        x: center.x + cosR * distance,
-        y: center.y,
-        z: center.z - sinR * distance,
-      };
+      offsetDir = { x: cosR, y: 0, z: -sinR };
       upVector = { x: 0, y: 1, z: 0 }; // Y-up
       break;
   }
 
-  return { position: endPos, target: endTarget, up: upVector };
+  // The standoff that keeps every corner of the box on screen from this
+  // direction, with 1.5x padding. `viewBasis` is the same function
+  // `MathUtils.lookAt` will build the real view matrix with, so the axes here
+  // are the ones the frame is drawn in — including the horizontal up the
+  // top/bottom presets carry. It is given `offsetDir` about the
+  // origin rather than the real pose because it only ever uses `eye - target`,
+  // and the difference at the real centre is the same direction with the low
+  // bits of a georeferenced coordinate rounded off it.
+  const basis = viewBasis(offsetDir, { x: 0, y: 0, z: 0 }, upVector);
+  const distance = fitDistanceFor(state, bounds, basis, CAMERA_CONSTANTS.ZOOM_EXTENT_PADDING);
+
+  return {
+    // Off the basis rather than off `offsetDir`, so the standoff is the
+    // distance whatever length the switch above happened to build.
+    position: {
+      x: center.x - basis.forward.x * distance,
+      y: center.y - basis.forward.y * distance,
+      z: center.z - basis.forward.z * distance,
+    },
+    target: center,
+    up: upVector,
+  };
+}
+
+/**
+ * Pose for a diagonal preset: the camera sits along `direction`, expressed in
+ * the same face frame the named presets use (+X right, +Y top, +Z front), so
+ * an edge is the sum of its two faces and a corner the sum of its three.
+ *
+ * The building rotation turns the horizontal part exactly as the named
+ * horizontal presets do. Unlike `top`/`bottom` there is no pole to dodge: a
+ * diagonal always keeps a horizontal component, so `up` stays world Y and the
+ * view basis is well defined. Returns `null` for a zero or non-finite
+ * direction, which has no heading to look from.
+ *
+ * @param bounds Must already have passed {@link resolvePresetBounds}.
+ */
+export function presetDirectionTarget(
+  state: CameraInternalState,
+  direction: Vec3,
+  bounds: FramingBounds,
+  buildingRotation?: number,
+): { position: Vec3; target: Vec3; up: Vec3 } | null {
+  const length = Math.hypot(direction.x, direction.y, direction.z);
+  if (!Number.isFinite(length) || length < 1e-9) return null;
+  // Written as a negated `>=` so a NaN component can never pass either bound.
+  if (!(Math.hypot(direction.x, direction.z) >= 1e-9)) return null;
+
+  const rotationRadians = Number.isFinite(buildingRotation) ? (buildingRotation as number) : 0;
+  const cosR = Math.cos(rotationRadians);
+  const sinR = Math.sin(rotationRadians);
+  const offsetDir: Vec3 = {
+    x: (direction.x * cosR + direction.z * sinR) / length,
+    y: direction.y / length,
+    z: (-direction.x * sinR + direction.z * cosR) / length,
+  };
+  const upVector: Vec3 = { x: 0, y: 1, z: 0 };
+
+  const center = centerOf(bounds.min, bounds.max);
+  const basis = viewBasis(offsetDir, { x: 0, y: 0, z: 0 }, upVector);
+  const distance = fitDistanceFor(state, bounds, basis, CAMERA_CONSTANTS.ZOOM_EXTENT_PADDING);
+
+  return {
+    position: {
+      x: center.x - basis.forward.x * distance,
+      y: center.y - basis.forward.y * distance,
+      z: center.z - basis.forward.z * distance,
+    },
+    target: center,
+    up: upVector,
+  };
 }

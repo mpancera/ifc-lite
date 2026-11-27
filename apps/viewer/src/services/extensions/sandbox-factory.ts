@@ -26,6 +26,7 @@
 
 import {
   assertMethodCall,
+  checkMethodCall,
   CapabilityDeniedError,
   type Capability,
   type RuntimeRunOptions,
@@ -36,6 +37,7 @@ import {
 } from '@ifc-lite/extensions';
 import { createSandbox, type Sandbox } from '@ifc-lite/sandbox';
 import type { BimContext } from '@ifc-lite/sdk';
+import { prepareSandboxStepExport } from '@/sdk/sdk-step-writer';
 import { describeSandboxAbort, SANDBOX_MODULE_RETIRED_MESSAGE } from '../../lib/sandboxAbort.js';
 
 export interface SandboxFactoryOptions {
@@ -53,6 +55,11 @@ export function createBimSandboxFactory(opts: SandboxFactoryOptions): RuntimeSan
       const gatedSdk = createOpts.grants
         ? wrapWithCapabilityGate(opts.sdk, createOpts.grants, createOpts.extensionId)
         : opts.sdk;
+      // Extension scripts call export.ifc synchronously inside QuickJS.
+      const canExportIfc = createOpts.permissions?.export !== false && (
+        !createOpts.grants || checkMethodCall('export', 'ifc', createOpts.grants).ok
+      );
+      if (canExportIfc) await prepareSandboxStepExport();
       const sandbox = await createSandbox(gatedSdk, {
         permissions: createOpts.permissions,
         limits: createOpts.limits,
@@ -74,8 +81,8 @@ export function createBimSandboxFactory(opts: SandboxFactoryOptions): RuntimeSan
  * with "<x> is not a function". The root Proxy resolves members via
  * the prototype chain, so nothing is dropped.
  *
- * Top-level functions (e.g. `sdk.query()`, `sdk.entity()`) pass
- * through ungated — the coarse permission ring already gates whole
+ * Top-level functions (e.g. `sdk.query()`, `sdk.entity()`)
+ * retain their native receiver — the coarse permission ring already gates whole
  * namespaces; this inner ring only wraps object-namespace methods
  * (`sdk.viewer.colorize`, etc.).
  */
@@ -89,8 +96,13 @@ function wrapWithCapabilityGate(
     get(target, prop) {
       const value = (target as Record<string | symbol, unknown>)[prop];
       if (typeof prop !== 'string') return value;
-      // Functions / primitives pass through; only object namespaces
-      // get the per-method capability gate.
+      // #7172 SDK factories must not read private namespaces through this proxy.
+      // Cache bound methods, preserving identity and the SDK's native receiver.
+      if (typeof value === 'function') {
+        if (!nsCache.has(prop)) nsCache.set(prop, value.bind(target));
+        return nsCache.get(prop);
+      }
+      // Only public object namespaces get the per-method capability gate.
       if (value === null || typeof value !== 'object') return value;
       let wrapped = nsCache.get(prop);
       if (!wrapped) {
@@ -129,7 +141,7 @@ export class BimSandboxHandle implements RuntimeSandboxHandle {
   private globals = new Map<string, string>();
   private disposed = false;
 
-  constructor(private sandbox: Sandbox) {}
+  constructor(private sandbox: Pick<Sandbox, 'eval' | 'dispose' | 'moduleRetired'>) {}
 
   setGlobal(name: string, value: unknown): void {
     if (this.disposed) throw new Error('Sandbox disposed.');
@@ -143,7 +155,9 @@ export class BimSandboxHandle implements RuntimeSandboxHandle {
     // serialisation crashes. The bridge has already installed `bim`
     // inside the QuickJS realm — synthesize ctx from that instead.
     if (name === '__ifclite_ctx__') {
-      this.globals.set(name, `globalThis.__ifclite_ctx__ = { bim: globalThis.bim };`);
+      // Invocation arguments are captured in the command's own source wrapper,
+      // never staged on this shared activation across awaits (#8947).
+      this.globals.set(name, 'globalThis.__ifclite_ctx__ = { bim: globalThis.bim };');
       return;
     }
     // Other globals (test args, synthetic-spec data) are JSON-safe;
@@ -204,7 +218,7 @@ export class BimSandboxHandle implements RuntimeSandboxHandle {
       const msg = err instanceof Error ? err.message : String(err);
       if (/Lifetime not alive|QuickJSUseAfterFree/i.test(msg)) {
         this.disposed = true;
-        try { this.sandbox.dispose(); } catch { /* already torn down */ }
+        try { this.sandbox.dispose(); } catch (disposeError) { console.warn('[sandbox-factory] dead sandbox teardown failed', disposeError); }
         throw new Error(
           'Sandbox was torn down between activate and run. Click Run again — the runtime will reactivate.',
         );

@@ -19,7 +19,7 @@ fn one_quad() -> MeshArrays {
 #[test]
 fn emits_valid_collada_skeleton() {
     let (p, n, i, vc, ic, col, og) = one_quad();
-    let dae = export_collada_from_meshes(&p, &n, &i, &vc, &ic, &col, &og);
+    let dae = try_export_collada_from_meshes(&p, &n, &i, &vc, &ic, &col, &og).expect("has geometry");
     let xml = String::from_utf8(dae).unwrap();
     assert!(xml.contains(r#"version="1.4.1""#));
     assert!(xml.contains("<up_axis>Z_UP</up_axis>"));
@@ -33,7 +33,7 @@ fn emits_valid_collada_skeleton() {
 #[test]
 fn emission_carries_colour_and_double_sided() {
     let (p, n, i, vc, ic, col, og) = one_quad();
-    let xml = String::from_utf8(export_collada_from_meshes(&p, &n, &i, &vc, &ic, &col, &og)).unwrap();
+    let xml = String::from_utf8(try_export_collada_from_meshes(&p, &n, &i, &vc, &ic, &col, &og).expect("has geometry")).unwrap();
     // Red emission = brightness lever for Google Earth.
     assert!(xml.contains("<emission><color>1 0 0 1</color></emission>"));
     assert!(xml.contains("<double_sided>1</double_sided>"));
@@ -88,9 +88,9 @@ fn converts_yup_to_zup_and_centers() {
     // geometry is centred on its horizontal AABB so the .dae origin == geometry centre.
     let positions = vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
     let normals: Vec<f32> = std::iter::repeat_n([0.0f32, 0.0, 1.0], 3).flatten().collect();
-    let xml = String::from_utf8(export_collada_from_meshes(
+    let xml = String::from_utf8(try_export_collada_from_meshes(
         &positions, &normals, &[0, 1, 2], &[3], &[3], &[0.5, 0.5, 0.5, 1.0], &[0.0, 0.0, 0.0],
-    ))
+    ).expect("has geometry"))
     .unwrap();
     let verts = parse_positions(&xml);
     assert!(verts.iter().any(|v| (v[2] - 1.0).abs() < 1e-4), "Y-up (0,1,0) -> Z-up Z=1");
@@ -107,9 +107,9 @@ fn centers_geometry_far_from_origin() {
         100.0, 0.0, 200.0, 110.0, 0.0, 200.0, 110.0, 0.0, 220.0, 100.0, 0.0, 220.0,
     ];
     let normals: Vec<f32> = std::iter::repeat_n([0.0f32, 1.0, 0.0], 4).flatten().collect();
-    let xml = String::from_utf8(export_collada_from_meshes(
+    let xml = String::from_utf8(try_export_collada_from_meshes(
         &positions, &normals, &[0, 1, 2, 0, 2, 3], &[4], &[6], &[0.6, 0.6, 0.6, 1.0], &[0.0, 0.0, 0.0],
-    ))
+    ).expect("has geometry"))
     .unwrap();
     let (cx, cy) = hbounds(&parse_positions(&xml));
     assert!(cx.abs() < 1e-3, "X re-centred to ~0 (geometry was ~105 from origin): {cx}");
@@ -129,11 +129,54 @@ fn deduplicates_shared_vertices() {
     }
     let normals: Vec<f32> = std::iter::repeat_n([0.0f32, 1.0, 0.0], 6).flatten().collect();
     let indices: Vec<u32> = (0..6).collect();
-    let xml = String::from_utf8(export_collada_from_meshes(
+    let xml = String::from_utf8(try_export_collada_from_meshes(
         &positions, &normals, &indices, &[6], &[6], &[0.5, 0.5, 0.5, 1.0], &[0.0, 0.0, 0.0],
-    ))
+    ).expect("has geometry"))
     .unwrap();
     assert_eq!(parse_positions(&xml).len(), 4, "6 input verts dedupe to 4 unique");
+}
+
+#[test]
+fn to_zup_preserves_negation_and_swap_with_nonzero_z() {
+    // Every OTHER fixture in this file feeds z == 0 into `to_zup`, so `[x, -z,
+    // y]` could drop its negation (or swap y and z) with the whole suite still
+    // green (issue #2802). Every vertex here has z != 0 AND y != z, so both
+    // the negation and the axis swap are independently observable.
+    //
+    // Positions are chosen so the (min+max)/2 midpoint of X, and of -Z (== the
+    // Z-up Y, the OTHER horizontal axis), are each exactly zero across the 3
+    // vertices: the exporter re-centers on the horizontal (X, Y) AABB MIDPOINT
+    // after conversion, and a zero-midpoint choice keeps the expected output
+    // values exact instead of also having to model that
+    // (irrelevant-to-this-gap) centering offset.
+    //
+    // Every vertex ALSO gets its own distinct X, not just distinct Z: with a
+    // repeated X (e.g. two vertices sharing X = -10, one at z = 4 and the
+    // other at z = -4), dropping the negation just swaps which of those two
+    // vertices carries Y = -4 vs Y = 4 -- the *set* of emitted (x, y, z)
+    // triples is unchanged, so a set-membership assertion can't see the bug.
+    let positions = vec![
+        -10.0, 5.0, 4.0, // Y-up (x, y, z)
+        0.0, 5.0, -4.0, //
+        10.0, 5.0, 0.0, //
+    ];
+    let normals: Vec<f32> = std::iter::repeat_n([0.0f32, 1.0, 0.0], 3).flatten().collect();
+    let xml = String::from_utf8(try_export_collada_from_meshes(
+        &positions, &normals, &[0, 1, 2], &[3], &[3], &[1.0, 0.0, 0.0, 1.0], &[0.0, 0.0, 0.0],
+    ).expect("has geometry"))
+    .unwrap();
+    let verts = parse_positions(&xml);
+    assert_eq!(verts.len(), 3, "no accidental dedup across 3 distinct vertices");
+    // Expected Z-up `[x, -z, y]` for each Y-up input above.
+    let want = [[-10.0f32, -4.0, 5.0], [0.0, 4.0, 5.0], [10.0, 0.0, 5.0]];
+    for w in want {
+        assert!(
+            verts.iter().any(|v| {
+                (v[0] - w[0]).abs() < 1e-3 && (v[1] - w[1]).abs() < 1e-3 && (v[2] - w[2]).abs() < 1e-3
+            }),
+            "expected z-up vertex {w:?} not found in {verts:?}"
+        );
+    }
 }
 
 #[test]
@@ -153,10 +196,10 @@ fn large_model_is_chunked_into_small_text_nodes() {
         normals.extend_from_slice(&[0.0, 1.0, 0.0]);
         indices.push(i as u32);
     }
-    let xml = String::from_utf8(export_collada_from_meshes(
+    let xml = String::from_utf8(try_export_collada_from_meshes(
         &positions, &normals, &indices, &[vcount as u32], &[vcount as u32],
         &[0.5, 0.5, 0.5, 1.0], &[0.0, 0.0, 0.0],
-    ))
+    ).expect("has geometry"))
     .unwrap();
     assert!(xml.matches("<geometry ").count() >= 2, "geometry split into ≥2 chunks");
     // All vertices survive the split (75k in, 75k out across chunks).
@@ -180,38 +223,36 @@ fn large_model_is_chunked_into_small_text_nodes() {
 }
 
 #[test]
-fn triangles_count_matches_index_list_on_ragged_input() {
-    // A malformed index count (not a multiple of 3) must not desync the emitted
-    // <triangles count> from the <p> list — keep only whole triangles.
-    let positions = vec![0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.5, 0.0, 0.5];
-    let normals: Vec<f32> = std::iter::repeat_n([0.0f32, 1.0, 0.0], 4).flatten().collect();
-    let indices = vec![0u32, 1, 2, 0, 2]; // 5 indices = one whole triangle + a stray pair
-    let xml = String::from_utf8(export_collada_from_meshes(
-        &positions, &normals, &indices, &[4], &[5], &[0.3, 0.3, 0.3, 1.0], &[0.0, 0.0, 0.0],
-    ))
-    .unwrap();
-    // Exactly one triangle survives; its <p> holds 3 vertex+normal index pairs (6 ints).
-    assert!(xml.contains("<triangles material=\"sym0\" count=\"1\">"));
-    let p_start = xml.find("<p>").unwrap() + 3;
-    let p = &xml[p_start..xml[p_start..].find("</p>").unwrap() + p_start];
-    assert_eq!(p.split_whitespace().count(), 6, "one triangle = 3 pairs = 6 indices: {p}");
-}
-
-#[test]
 fn translucent_material_emits_transparency() {
     let positions = vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0];
     let normals: Vec<f32> = std::iter::repeat_n([0.0f32, 1.0, 0.0], 3).flatten().collect();
-    let xml = String::from_utf8(export_collada_from_meshes(
+    let xml = String::from_utf8(try_export_collada_from_meshes(
         &positions, &normals, &[0, 1, 2], &[3], &[3], &[0.0, 1.0, 0.0, 0.5], &[0.0, 0.0, 0.0],
-    ))
+    ).expect("has geometry"))
     .unwrap();
     assert!(xml.contains("<transparency>"));
     assert!(xml.contains("opaque=\"A_ONE\""));
 }
 
+/// #7777: one colour-key rule across glTF/COLLADA/USD. 1.5 and 1.0 red clamp to
+/// the same bucket, so the two meshes share one material, and a non-finite
+/// channel buckets as 0 instead of splitting on `NaN != NaN`-style saturation.
+#[test]
+fn out_of_gamut_and_non_finite_colours_share_the_clamped_material_bucket() {
+    let positions = vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0];
+    let normals: Vec<f32> = std::iter::repeat_n([0.0f32, 1.0, 0.0], 6).flatten().collect();
+    let xml = String::from_utf8(try_export_collada_from_meshes(
+        &positions, &normals, &[0, 1, 2, 0, 1, 2], &[3, 3], &[3, 3],
+        &[1.5, 0.5, 0.5, 1.0, 1.0, 0.5, 0.5, 1.0], &[0.0, 0.0, 0.0],
+    ).expect("has geometry"))
+    .unwrap();
+    assert!(xml.contains("#mat0"));
+    assert!(!xml.contains("#mat1"), "1.5 and 1.0 share a bucket:\n{xml}");
+}
+
 // ── Composed KMZ orientation invariant (#2554 / PR #2628) ──────────────────────
 //
-// `kmz.rs::heading_matches_ifc_convention` and this file's own
+// `kmz_tests.rs::heading_matches_ifc_convention` and this file's own
 // `converts_yup_to_zup_and_centers` each pin ONE half of the KMZ rotation
 // pipeline in isolation: the IFC-grid-north → KML `<heading>` conversion, and
 // the COLLADA Z-up<->Y-up up-axis swap. Both can be individually correct while
@@ -254,7 +295,7 @@ fn composed_orientation_reproduces_ifc_bearing() {
         // Half 2 (collada.rs, real code path): the mesh's local +X ("east" at
         // heading = 0, per kmz.rs's doc comment) converted from the Y-up mesh
         // frame the exporter receives into the Z-up frame the .dae declares.
-        let zup = to_zup(1.0, 0.0, 0.0);
+        let zup = ifc_lite_geometry::math::frame::yup_to_zup([1.0, 0.0, 0.0]);
 
         // Compose: apply the KML heading as Google Earth does — a clockwise
         // rotation, about the vertical axis, of the Z-up model whose (X, Y)
@@ -272,3 +313,64 @@ fn composed_orientation_reproduces_ifc_bearing() {
         );
     }
 }
+
+/// Pins the DEGENERATE-mesh trigger of the fail-closed gate (see
+/// `try_export_collada_from_meshes` for why an empty document is
+/// schema-invalid): the two coincident vertices below collapse in the dedup
+/// and the triangle is dropped AFTER its material was registered, so a
+/// "did we export anything" check on the material count cannot see it.
+#[test]
+fn a_degenerate_only_mesh_fails_closed_instead_of_shipping_an_invalid_dae() {
+    // Three vertices, two of them coincident with the same normal.
+    let positions = vec![0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let normals: Vec<f32> = std::iter::repeat_n([0.0f32, 1.0, 0.0], 3).flatten().collect();
+    let (indices, vc, ic) = (vec![0u32, 1, 2], vec![3u32], vec![3u32]);
+    let (col, og) = (vec![1.0f32, 0.0, 0.0, 1.0], vec![0.0f64, 0.0, 0.0]);
+
+    let err = try_export_collada_from_meshes(&positions, &normals, &indices, &vc, &ic, &col, &og)
+        .expect_err("a document with no geometry must be NoRenderGeometry");
+    assert!(matches!(err, crate::ExportError::NoRenderGeometry), "got {err:?}");
+    assert_eq!(err.code(), "NO_RENDER_GEOMETRY");
+}
+
+/// The other trigger, and the plainer one: nothing to export at all.
+#[test]
+fn an_empty_mesh_set_fails_closed() {
+    let err = try_export_collada_from_meshes(&[], &[], &[], &[], &[], &[], &[])
+        .expect_err("zero meshes must be NoRenderGeometry");
+    assert!(matches!(err, crate::ExportError::NoRenderGeometry), "got {err:?}");
+}
+
+/// A declared count running past its buffer used to `break` out of the mesh
+/// loop, and a missing `index_counts` slot read as zero indices, so inputs
+/// the GLB twin refuses came back `Ok` here with meshes missing: two
+/// declared, one triangle emitted. Now both are `MalformedMeshInput`, as in
+/// `gltf::from_meshes`.
+#[test]
+fn a_count_running_past_its_buffer_is_refused_not_truncated() {
+    // Two meshes declared, but only one mesh's worth of positions/indices.
+    let positions = vec![0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0];
+    let normals: Vec<f32> = std::iter::repeat_n([0.0f32, 0.0, 1.0], 3).flatten().collect();
+    let indices = vec![0u32, 1, 2];
+    let (vc, ic) = (vec![3u32, 3], vec![3u32, 3]);
+    let col = vec![1.0f32, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
+    let og = vec![0.0f64; 6];
+
+    let err = try_export_collada_from_meshes(&positions, &normals, &indices, &vc, &ic, &col, &og)
+        .expect_err("a count overrun must be MalformedMeshInput");
+    assert!(matches!(err, crate::ExportError::MalformedMeshInput { .. }), "got {err:?}");
+    assert!(err.to_string().contains("mesh 1"), "names the offending mesh: {err}");
+
+    // A mesh with no `index_counts` slot used to be read as zero indices and
+    // skipped, the same silent loss one entry further along the contract.
+    let err = try_export_collada_from_meshes(&positions, &normals, &indices, &vc, &[3], &col, &og)
+        .expect_err("a missing index_counts slot must be MalformedMeshInput");
+    assert!(matches!(err, crate::ExportError::MalformedMeshInput { .. }), "got {err:?}");
+
+    // Consistent counts for the same single mesh still export.
+    try_export_collada_from_meshes(&positions, &normals, &indices, &[3], &[3], &col[..4], &og[..3])
+        .expect("a consistent single mesh is render geometry");
+}
+
+#[path = "collada_conformance_tests.rs"]
+mod conformance;

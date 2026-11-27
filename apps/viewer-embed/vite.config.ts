@@ -1,3 +1,7 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import wasm from 'vite-plugin-wasm';
@@ -48,7 +52,8 @@ export default defineConfig({
       '@ifc-lite/lens': path.resolve(__dirname, '../../packages/lens/src'),
       '@ifc-lite/lists': path.resolve(__dirname, '../../packages/lists/src'),
       '@ifc-lite/create': path.resolve(__dirname, '../../packages/create/src'),
-      '@ifc-lite/wasm': path.resolve(__dirname, '../../packages/wasm/pkg/ifc-lite.js'),
+      // The embed never carries the retained kernel (#7955 M2).
+      '@ifc-lite/viewer-retained': path.resolve(__dirname, '../viewer/src/lib/retained/off.ts'),
     },
   },
   server: {

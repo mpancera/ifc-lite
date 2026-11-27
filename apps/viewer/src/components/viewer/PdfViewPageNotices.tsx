@@ -18,6 +18,7 @@
 import { AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { useTranslation } from '@/i18n';
 import { MAX_PDF_PAGE_DIMENSION_MM } from '@/lib/export/view-pdf/view-pdf-scale';
 
 export interface PdfViewPageNoticesProps {
@@ -27,6 +28,8 @@ export interface PdfViewPageNoticesProps {
   /** `null` when no camera has been read yet. */
   projectionMode: 'orthographic' | 'perspective' | null;
   onSwitchToOrthographic: () => void;
+  /** Released geometry being read back, or not readable yet (#10264); export stays off meanwhile. */
+  sourceStatus?: 'none' | 'ready' | 'loading' | 'unavailable';
   /** Millimetre formatter, shared with the dialog so both round identically. */
   formatMm: (value: number) => string;
 }
@@ -37,7 +40,9 @@ export function PdfViewPageNotices({
   projectionMode,
   onSwitchToOrthographic,
   formatMm,
+  sourceStatus = 'none',
 }: PdfViewPageNoticesProps) {
+  const { t } = useTranslation();
   return (
     <>
       {/* The sheet size changes as the scale changes, with focus staying in
@@ -50,20 +55,33 @@ export function PdfViewPageNotices({
         aria-live="polite"
       >
         {preview
-          ? `Estimated page: ${formatMm(preview.page.widthMm)} x ${formatMm(preview.page.heightMm)} mm` +
-            (preview.paper ? ` (fits ${preview.paper.name})` : ' (larger than any ISO sheet)') +
-            '. The exported page is sized to the drawing itself and will never be larger.'
-          : 'Page size is not available yet. Load a model and choose a valid scale.'}
+          ? t(preview.paper ? 'sheetsPdf.pdfView.pageReadoutFits' : 'sheetsPdf.pdfView.pageReadoutOversizeIso', {
+              width: formatMm(preview.page.widthMm),
+              height: formatMm(preview.page.heightMm),
+              paperName: preview.paper?.name ?? '',
+            })
+          : t('sheetsPdf.pdfView.pageReadoutUnavailable')}
       </p>
+
+      {(sourceStatus === 'loading' || sourceStatus === 'unavailable') && (
+        <Alert data-testid="pdf-view-source-status" variant={sourceStatus === 'unavailable' ? 'destructive' : 'default'} aria-live="polite">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            {t(sourceStatus === 'loading' ? 'sheetsPdf.pdfView.releasedLoading' : 'sheetsPdf.pdfView.releasedUnavailable')}
+          </AlertDescription>
+        </Alert>
+      )}
 
       {oversize && preview && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Page too large to print</AlertTitle>
+          <AlertTitle>{t('sheetsPdf.pdfView.oversizeTitle')}</AlertTitle>
           <AlertDescription>
-            {`This scale needs a page of ${formatMm(preview.page.widthMm)} x ` +
-              `${formatMm(preview.page.heightMm)} mm. A PDF page cannot exceed ` +
-              `${MAX_PDF_PAGE_DIMENSION_MM} mm on a side. Choose a smaller scale.`}
+            {t('sheetsPdf.pdfView.oversizeDescription', {
+              width: formatMm(preview.page.widthMm),
+              height: formatMm(preview.page.heightMm),
+              maxDimension: MAX_PDF_PAGE_DIMENSION_MM,
+            })}
           </AlertDescription>
         </Alert>
       )}
@@ -78,25 +96,16 @@ export function PdfViewPageNotices({
       ) : projectionMode === 'perspective' ? (
         <Alert>
           <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Perspective camera</AlertTitle>
+          <AlertTitle>{t('sheetsPdf.pdfView.perspectiveTitle')}</AlertTitle>
           <AlertDescription>
-            <span>
-              The PDF is an orthographic (parallel) projection along your current view
-              direction, so near and far objects print at the same scale. That is the only
-              way a printed drawing can carry a single scale. Switch to orthographic to
-              see the same parallel projection on screen.
-            </span>
+            <span>{t('sheetsPdf.pdfView.perspectiveDescription')}</span>
             <Button variant="outline" size="sm" className="mt-2" onClick={onSwitchToOrthographic}>
-              Switch camera to orthographic
+              {t('sheetsPdf.pdfView.switchToOrthographicButton')}
             </Button>
           </AlertDescription>
         </Alert>
       ) : (
-        <p className="text-xs text-muted-foreground">
-          Orthographic camera, so the printed scale is exact. The sheet covers
-          everything currently visible, not only the part framed on screen:
-          panning and zooming change what you look at, not what is printed.
-        </p>
+        <p className="text-xs text-muted-foreground">{t('sheetsPdf.pdfView.orthographicNote')}</p>
       )}
     </>
   );

@@ -5,7 +5,6 @@
 /**
  * Shared types for the viewer store
  */
-
 // ============================================================================
 // Measurement Types
 // ============================================================================
@@ -40,11 +39,24 @@ export interface ActiveMeasurement {
  * Which gesture the Measure tool is currently listening for. `'drag'` is the
  * original mousedown→mouseup distance measurement (unchanged by this mode).
  * `'polyline'` accumulates points via successive clicks instead; `'angle'`
- * (#2735) accumulates a FIXED number of clicks and finishes itself. All three
- * are mutually exclusive so a sequence started in one can never leak state
- * into another (see `setMeasureMode` in measurementSlice.ts).
+ * (#2735) accumulates a FIXED number of clicks and finishes itself. `'radius'`
+ * (#2737 item 2) accumulates an UNBOUNDED number of clicks (three minimum)
+ * and finishes on the same gesture polyline uses — double-click or Enter —
+ * because there is no natural "last pick" the way angle has one. `'point'`
+ * (#8770) takes ONE click and reads that point's coordinates; it records no
+ * measurement. All five are mutually exclusive so a sequence started in one
+ * can never leak state into another (see `setMeasureMode` in
+ * measurementSlice.ts).
  */
-export type MeasureMode = 'drag' | 'polyline' | 'angle';
+export type MeasureMode = 'drag' | 'polyline' | 'angle' | 'radius' | 'point';
+
+/**
+ * The input the viewport saw last (#8879): `'touch'` for a finger or a pen,
+ * `'mouse'` for a mouse. The Measure hint words itself for it, so a hybrid
+ * device (a touch laptop with a mouse) shows the wording for whichever was
+ * used last.
+ */
+export type PointerInput = 'mouse' | 'touch';
 
 /** A multi-click sequence in progress, not yet finished or cancelled. */
 export interface ActivePolyline {
@@ -79,7 +91,13 @@ export type AngleKind = 'points' | 'edges' | 'faces';
 /** How many picks each kind needs before the measurement finishes itself. */
 export const ANGLE_REQUIRED_PICKS: Record<AngleKind, number> = {
   points: 3,
-  edges: 2,
+  // FOUR, not two. `SnapTarget.metadata.vertices` yields tessellation
+  // segments rather than topological edges - one straight 2.000 m slab edge
+  // reported as four collinear pieces on #2199 - so two picks cannot identify
+  // two edges. #2735 sanctions the alternative directly: "scope itself to
+  // explicitly-picked point pairs". Each edge is two picks the user places,
+  // so the direction measured is the one they chose.
+  edges: 4,
   faces: 2,
 };
 
@@ -87,6 +105,14 @@ export const ANGLE_REQUIRED_PICKS: Record<AngleKind, number> = {
 export interface AnglePick {
   kind: AngleKind;
   point: MeasurePoint;
+  /**
+   * Surface normal at the pick, for `'faces'` only.
+   *
+   * Carried on the pick rather than derived later because it is only knowable
+   * at pick time: it comes from the raycast hit, and the stored point alone
+   * cannot recover which face was under the cursor.
+   */
+  normal?: { x: number; y: number; z: number };
 }
 
 /** A fixed-length sequence in progress, not yet complete or cancelled. */
@@ -109,6 +135,35 @@ export interface AngleMeasurement {
   id: string;
   kind: AngleKind;
   picks: AnglePick[];
+}
+
+// ============================================================================
+// Radius Measurement Types (issue #2737 item 2, split from #2199 §3)
+// ============================================================================
+
+/**
+ * A radius/diameter click sequence in progress, not yet finished or
+ * cancelled. Unbounded, like {@link ActivePolyline} rather than
+ * {@link ActiveAngle}: `fitRadius` (measure-modes/radius.ts) takes three or
+ * more picks and there is no fixed count at which the measurement finishes
+ * itself, so the same explicit finish gesture polyline uses (double-click or
+ * Enter) applies here too.
+ */
+export interface ActiveRadius {
+  points: MeasurePoint[];
+}
+
+/**
+ * A finished radius measurement. Only the PICKS are stored, never the fitted
+ * radius/diameter — mirrors {@link AngleMeasurement}: the fit (including
+ * which refusal reason, if any) is derived on render by `fitRadius`, so a
+ * correction to the maths retroactively fixes every measurement already
+ * listed rather than leaving a second, independently-stale copy of the
+ * answer.
+ */
+export interface RadiusMeasurement {
+  id: string;
+  points: MeasurePoint[];
 }
 
 /** Orthogonal constraint axis type */
@@ -161,69 +216,21 @@ export interface EdgeLockState {
 // ============================================================================
 // Section Plane Types
 // ============================================================================
-
 /** Semantic axis names: down (Y), front (Z), side (X) for intuitive user experience */
 export type SectionPlaneAxis = 'down' | 'front' | 'side';
-
 // Re-export the renderer's canonical cap-styling types so the viewer store and
 // the WebGPU renderer share a single source of truth. Adding a new hatch
 // pattern only requires editing `packages/renderer/src/section-cap-style.ts`.
 export type { HatchPatternId as SectionCapHatchId, SectionCapStyle } from '@ifc-lite/renderer';
-import type { SectionCapStyle } from '@ifc-lite/renderer';
-
-/**
- * Custom (face-picked) plane override. When present, the renderer uses
- * `normal` + `distance` directly and ignores `axis` / `position`. The
- * cardinal `axis` / `position` / `flipped` fields are still kept in sync
- * (nearest-cardinal for axis, percentage along it for position) so any
- * downstream reader that pre-dates custom planes (drawings export, BCF
- * snapshots, view controls) still gets a sensible projection rather than
- * crashing or emitting empty data.
- *
- * Tangent + bitangent are derived once at pick time from `normal` via the
- * deterministic `planeBasis` helper so the cap shader and cutter share
- * exactly one orientation — without this the cap-hatch can rotate when
- * the renderer re-derives the basis on every frame.
- */
-export interface CustomSectionPlane {
-  /** Unit world-space normal. */
-  normal: [number, number, number];
-  /** Signed plane offset in world units: `dot(pointOnPlane, normal)`. */
-  distance: number;
-  /** World-space hit point at pick time (anchors the slider re-mapping). */
-  pickedAt: [number, number, number];
-  /** First in-plane axis, deterministic from `normal`. */
-  tangent: [number, number, number];
-  /** Second in-plane axis, deterministic from `normal`. */
-  bitangent: [number, number, number];
-}
-
-export interface SectionPlane {
-  axis: SectionPlaneAxis;
-  /** 0-100 percentage of model bounds */
-  position: number;
-  enabled: boolean;
-  /** If true, show the opposite side of the cut */
-  flipped: boolean;
-  /** Whether to render the filled, hatched cap surface at the plane. Defaults to true. */
-  showCap: boolean;
-  /**
-   * Whether to draw polygon outlines on top of the cut (the crisp black
-   * line the architect expects around each sliced element). Independent
-   * from `showCap` so users can have a hatched fill without outlines,
-   * or vice versa. Defaults to true.
-   */
-  showOutlines: boolean;
-  /** User-defined colour + hatch for the cut surface. */
-  capStyle: SectionCapStyle;
-  /**
-   * Optional arbitrary-normal override populated by face-pick. When set,
-   * the renderer cuts on this plane verbatim; cardinal `axis` / `position`
-   * are kept in sync as the closest cardinal projection (see
-   * `CustomSectionPlane`).
-   */
-  custom?: CustomSectionPlane;
-}
+// Same reasoning: the embed `controls` param (#2934) restricts orbit/pan/zoom
+// at the renderer's `Camera`, so the store shares the renderer's own type.
+export type { InteractionMode as ControlsMode } from '@ifc-lite/renderer';
+import type { InteractionMode as ControlsMode } from '@ifc-lite/renderer';
+import type { LandXmlSchema, LandXmlTinDocument } from '../hooks/ingest/landXmlSemantics.js';
+import type { LandXmlGeorefAssumption } from '../hooks/ingest/landXmlGeorefAssumptions.js';
+import type { GaussianSplatModel } from '../hooks/ingest/gaussianIngest.js';
+import type { ModelSpatialPlacement } from '../hooks/ingest/federationAlign.js';
+export type { CustomSectionPlane, SectionPlane, SectionBox, SectionBoxFace } from './section-types';
 
 // ============================================================================
 // Hover & Context Menu Types
@@ -234,13 +241,13 @@ export interface HoverState {
   screenX: number;
   screenY: number;
   /**
-   * World-space hit position from the GPU pick (depth readback +
-   * inverse view-projection). Unset when the picker couldn't recover
-   * one (e.g. `pointCount === 0` clear, or the pick fell on the
-   * background). Useful for point-cloud hover tooltips where the
-   * synthetic entity has no surface property to display.
+   * World-space hit position from the GPU pick (depth readback + inverse view-projection).
+   * Unset when the picker couldn't recover one (e.g. `pointCount === 0` clear, or the pick
+   * fell on the background). Useful for point-cloud hover tooltips where the synthetic
+   * entity has no surface property to display.
    */
   worldXYZ?: { x: number; y: number; z: number };
+  modelIndex?: number; // model of the picked entity (federation), for the hover outline (#5390)
 }
 
 export interface ContextMenuState {
@@ -312,7 +319,15 @@ export interface TypeVisibility {
    * grid lines only show for storeys near the cut.
    */
   ifcGrid: boolean;
+  /**
+   * Support and load glyphs of a structural analysis model (#9668). On by
+   * default; draws nothing for a model with no supports or loads. Like
+   * `ifcGrid`, a scene overlay rather than an IFC class, so it gates no mesh.
+   */
+  structuralGlyphs: boolean;
 }
+
+export type StructuralViewMode = 'both' | 'physical' | 'analytical';
 
 // ============================================================================
 // Camera Types
@@ -336,6 +351,8 @@ export interface CameraViewpoint {
 
 export interface CameraCallbacks {
   setPresetView?: (view: 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right') => void;
+  /** ViewCube edge/corner: camera offset in the face frame (+X right, +Y top, +Z front). */
+  setPresetDirection?: (direction: { x: number; y: number; z: number }) => void;
   fitAll?: () => void;
   home?: () => void;
   zoomIn?: () => void;
@@ -344,7 +361,14 @@ export interface CameraCallbacks {
   rotateLeft?: () => void;
   /** Rotate the camera exactly 90° around the vertical axis. */
   rotateRight?: () => void;
-  frameSelection?: () => void;
+  frameSelection?: (durationMs?: number) => void;
+  /**
+   * Frame an explicit world box keeping the current view direction and projection. `padding` is a
+   * multiple of the box (1 = edge to edge, default 1.2); resolves false when the box is unusable.
+   */
+  frameBounds?: (min: { x: number; y: number; z: number }, max: { x: number; y: number; z: number }, options?: { padding?: number; durationMs?: number }) => Promise<boolean>;
+  /** The world AABB `frameSelection` would frame (same id resolution), or `null` with nothing framable. */
+  selectionBounds?: () => { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } } | null;
   /**
    * Resolve ids to what the 3D renderer can actually highlight, expanding a
    * geometry-less `IfcRelAggregates` assembly (own id has no mesh) to its
@@ -359,26 +383,23 @@ export interface CameraCallbacks {
   /**
    * Frame the camera on the bounds of an explicit id set, keeping the current
    * view direction. Ids are federated GLOBAL ids — the id space the scene
-   * meshes carry (single model: global === express). Used by the Space Sketch
-   * tool to zoom to the existing IfcSpace extent on open.
+   * meshes carry (single model: global === express).
    */
   frameEntities?: (ids: number[]) => void;
   /**
    * Frame the camera on the building shell - the bounds of all rendered
-   * geometry EXCLUDING IfcSite/terrain and IfcSpace. Used by the Space Sketch
-   * tool when a model has no spaces yet, so it frames the building rather than
-   * the much larger georeferenced site extent.
+   * geometry EXCLUDING IfcSite/terrain and IfcSpace, so a georeferenced model
+   * frames the building rather than the much larger site extent.
    */
   frameBuildingExtent?: () => void;
   /**
-   * Replace the Space Sketch draft "ghost" overlay meshes in the 3D scene. These
-   * go straight to the renderer scene (NOT through geometryResult), so frequent
-   * per-edit updates can't trip the streaming reclassifier (which would reset the
-   * camera / un-pick newly created spaces). Pass [] (or use clear) to remove all.
+   * Replace one authoring channel's ghost meshes (a command
+   * preview; `useAuthoringOverlay.ts`). They bypass geometryResult so per-edit
+   * updates can't trip the streaming reclassifier. [] (or clear) removes them.
    */
-  setSpaceOverlayMeshes?: (meshes: MeshData[]) => void;
-  /** Remove all Space Sketch overlay ghost meshes from the scene. */
-  clearSpaceOverlayMeshes?: () => void;
+  setAuthoringOverlayMeshes?: (channel: AuthoringOverlayChannel, meshes: MeshData[]) => void;
+  /** Remove one authoring channel's overlay ghost meshes from the scene. */
+  clearAuthoringOverlayMeshes?: (channel: AuthoringOverlayChannel) => void;
   /**
    * Frame an explicit world-space box (min/max corners) from the canonical
    * isometric view, animating there. Used to frame a focused clash's contact
@@ -388,6 +409,21 @@ export interface CameraCallbacks {
    */
   frameClashRegion?: (min: { x: number; y: number; z: number }, max: { x: number; y: number; z: number }) => void;
   orbit?: (deltaX: number, deltaY: number) => void;
+  /**
+   * Place the camera at an ABSOLUTE orientation (degrees, same convention as
+   * `cameraRotation` and the renderer's `Camera.getRotation`), keeping the
+   * current target and orbit distance.
+   *
+   * Every other orientation callback here is relative (`orbit`, `rotateLeft`,
+   * `rotateRight`) or names a direction (`setPresetView`), so a caller holding
+   * an angle pair — the embed API's `SET_CAMERA` — had nothing to call and the
+   * store write went nowhere (#2934). Driven from `setCameraRotation` in
+   * cameraSlice, mirroring how `setProjectionMode` drives its own callback.
+   */
+  setCameraRotation?: (rotation: CameraRotation) => void;
+  /** Restrict interactive orbit/pan/zoom (embed `?controls=`, #2934). Does
+   *  not gate programmatic moves — `setCameraRotation`/`setPresetView`/etc. */
+  setInteractionMode?: (mode: ControlsMode) => void;
   projectToScreen?: (worldPos: { x: number; y: number; z: number }) => { x: number; y: number } | null;
   /**
    * Unproject a screen pixel onto the horizontal plane at the
@@ -401,6 +437,13 @@ export interface CameraCallbacks {
   toggleProjectionMode?: () => void;
   getProjectionMode?: () => ProjectionMode;
   getViewpoint?: () => CameraViewpoint | null;
+  /**
+   * True while a timed camera tween (preset view, frame, home) has started and
+   * its final pose has not been applied yet. Unlike comparing two
+   * `getViewpoint()` reads, it cannot mistake an intermediate pose for the
+   * final one when the render loop is stalled (#5841).
+   */
+  isCameraTweening?: () => boolean;
   applyViewpoint?: (viewpoint: CameraViewpoint, animate?: boolean, durationMs?: number) => void;
 }
 
@@ -409,8 +452,9 @@ export interface CameraCallbacks {
 // ============================================================================
 
 import type { IfcDataStore } from '@ifc-lite/parser';
-import type { CoordinateInfo, EntityWorldAabb, GeometryResult, MeshData } from '@ifc-lite/geometry';
-
+import type { CoordinateInfo, EntityWorldAabb, GeometryResult, MeshData, ModelSpatialReference, PointCloudAsset } from '@ifc-lite/geometry';
+import type { ModelLoadReportFields } from '../lib/loadReport'; // #3927 load report
+export type AuthoringOverlayChannel = 'command' | 'grids' | 'proposal' | 'scan'; // authoring ghost-mesh channels (#6232); 'proposal': reviewed AI authoring (P15A); 'scan': scan-to-BIM detections (#6894)
 /**
  * Compound identifier for entities across multiple models.
  *
@@ -449,15 +493,14 @@ export type MetadataLoadState =
   | 'error';
 
 export type ModelSourceFile = File;
-
 /** Complete model container for federation */
 /**
  * A federated model's geometry as it stood before alignment re-baked it.
- *
  * The whole set of channels `federationAlign.ts` overwrites — anything it
- * writes has to be in here or the restore is incomplete. Captured and restored
- * by the one pair of functions in `hooks/ingest/federationRealign.ts`.
- */
+ * writes has to be in here or the restore is incomplete. Captured/restored
+ * by the pair in `hooks/ingest/federationRealign.ts`. Invariant (#4970):
+ * every array below is INDEX-ALIGNED with `geometryResult.meshes`; only
+ * `growPreAlignment`/`prunePreAlignment` may change its length. */
 export interface PreAlignmentSnapshot {
   /** One Float32Array per mesh, in `geometryResult.meshes` order. */
   positions: Float32Array[];
@@ -478,6 +521,11 @@ export interface PreAlignmentSnapshot {
    * path carries origins.
    */
   origins: ([number, number, number] | undefined)[];
+  /** Per inline point cloud, in `geometryResult.pointClouds` order: its origin
+   *  and chunk (by reference; alignment replaces chunks, never mutates them).
+   *  The RTC re-base and georeference alignment move clouds with the meshes
+   *  (#10029), so a restore that put back only the meshes would split the model. */
+  clouds?: { origin?: [number, number, number]; chunk: PointCloudAsset['chunk'] }[];
   /** The RTC/shift frame the positions are relative to, recovered before the
    *  new alignment is applied. */
   coordinateInfo: CoordinateInfo;
@@ -500,26 +548,40 @@ export interface PreAlignmentSnapshot {
    */
   instancedGeometryAabbs: Map<number, EntityWorldAabb> | undefined;
 }
-
-export interface FederatedModel {
-  /** Unique identifier (UUID generated on load) */
-  id: string;
-  /** Display name (filename by default, user can rename) */
-  name: string;
+export interface FederatedModel extends ModelLoadReportFields {
+  hasOverlayCapacity?: boolean; // false when the overlay range is exhausted; unset counts as capacity.
+  id: string; // UUID generated on load.
+  name: string; // Display name (filename by default, user can rename)
+  sourceFingerprint?: string; // Durable identity for persisted model filters.
+  sourceContentHash?: string; // Full-content identity for workspace placements.
+  sourceReadRefused?: boolean; // Explicit pre-acquisition refusal, distinct from a published load error (#10264).
   /** Parsed IFC data model */
   ifcDataStore: IfcDataStore | null;
+  /** Non-IFC source semantics, kept outside the IFC data store by design; `terrainImagery` is imagery draped on it (#5942), provenance only. */
+  landXmlDocument?: LandXmlTinDocument; terrainImagery?: import('../lib/terrain-imagery/drape-state.js').TerrainImageryDrape;
+  /** How container rows hide/show their subtree (a Rhino layer, #10214); absent: rows act on direct members. */ containerVisibility?: import('../lib/container-visibility').ContainerVisibilityPlan;
+  /** Truthful source schema; `schemaVersion` remains the compatibility store schema. */
+  sourceSchema?: LandXmlSchema;
   /** Pre-tessellated geometry (with globalIds, not original expressIds) */
   geometryResult: GeometryResult | null;
+  /** Format-neutral declared source frame for non-IFC geometry (LandXML/scans). */
+  spatialReference?: ModelSpatialReference;
+  /**
+   * The LandXML georeferencing assumptions this model was ACTUALLY placed
+   * under: each one was needed to align it and was chosen by the user (the
+   * refusal's retry or the viewer settings). Absent when the placement rests
+   * on declared CRSs alone, even if assumptions were enabled.
+   */
+  landXmlAssumptionsApplied?: readonly LandXmlGeorefAssumption[];
+  /** IFC shared-height choice: true for omitted datums, unresolved for an unrecognized authored declaration. */
+  ifcSharedVerticalDatumAssumed?: true | 'unresolved';
   /** Model-level visibility toggle */
   visible: boolean;
   /** UI collapse state in hierarchy panel */
   collapsed: boolean;
-  /** IFC schema version */
-  schemaVersion: SchemaVersion;
-  /** Load timestamp */
-  loadedAt: number;
-  /** Original file size in bytes */
-  fileSize: number;
+  schemaVersion: SchemaVersion; // IFC schema version
+  loadedAt: number; // Load timestamp
+  fileSize: number; // Original file size in bytes
   /** Original source handle used for explicit reload/reposition operations. */
   sourceFile?: ModelSourceFile;
   /**
@@ -534,22 +596,27 @@ export interface FederatedModel {
    * layers. Held in memory only; never serialized to cache.
    */
   sourceHandle?: FileSystemFileHandle;
-  /**
-   * ID offset for this model (from FederationRegistry)
+  /** A model the processing server already processed: opened by reference, so there are no source bytes and no `sourceFile`. */
+  processedModel?: import('@/lib/processed-model').ProcessedModelRecord;
+  /** ID offset for this model (from FederationRegistry).
    * All mesh expressIds are globalIds = originalExpressId + idOffset
    * Use this to convert back to original IDs for property lookup
    */
   idOffset: number;
-  /** Maximum original expressId in this model (for range validation) */
+  /** Highest local expressId this model owns (reverse resolvers bound its global ids at `idOffset + maxExpressId`); after a later model's clamp, the published end, which can sit below the store's highest id. */
   maxExpressId: number;
   /** Unified ingest lifecycle state. */
   loadState?: 'pending' | 'streaming-geometry' | 'hydrating-metadata' | 'complete' | 'error';
+  /** Present only on a retained-kernel load (#7955 M2): shape-only, with every unpublished product listed. */
+  retainedGeometry?: import('./retainedGeometry.js').RetainedGeometrySummary;
   /** Geometry-first readiness for large desktop loads. */
   geometryLoadState?: GeometryLoadState;
   /** Metadata availability state for lazy desktop loads. */
   metadataLoadState?: MetadataLoadState;
   /** True once the model is visibly interactive in the viewport. */
   interactiveReady?: boolean;
+  /** Cache hit that published its metadata at the reopen mark; geometry restore not yet finished (lib/geometry-restore-gate.ts). */
+  geometryRestorePending?: boolean;
   /** Cache state for the current load session. */
   cacheState?: 'none' | 'hit' | 'miss' | 'writing';
   /** Optional load error for this model. */
@@ -561,6 +628,9 @@ export interface FederatedModel {
    * when the model is dropped from the store.
    */
   pointCloudHandleId?: number;
+  /** Resident Gaussian capture (#8565): the exact renderer-issued handle with its
+   * uncalibrated placement and summary. Freed by `gaussianAssets` with the model. */
+  gaussianSplat?: GaussianSplatModel;
   /**
    * This model's geometry as it stood before federation alignment re-baked it
    * into the anchor's viewer frame, or `undefined` when no alignment is applied
@@ -576,6 +646,14 @@ export interface FederatedModel {
    * drift apart, because there is one value to write and one to read.
    */
   preAlignment?: PreAlignmentSnapshot;
+  /**
+   * The anchor placement this model's geometry was re-baked into, set with a
+   * `same-crs` or `reprojected` status and absent otherwise. Pinning another
+   * anchor moves no mesh until a re-align, so anything placed next to the
+   * meshes (the selected centreline, #9229) maps through this record, not
+   * through the anchor the federation would pick now.
+   */
+  alignmentReference?: ModelSpatialPlacement;
   /**
    * How this model was placed in the current federation:
    *   - `'anchor'`       — this model drives the world frame, no alignment
@@ -602,32 +680,7 @@ export interface FederatedModel {
  * a published API is free to fail loudly at the corruption site. Keep the
  * two in step on *bugs*, not on contract.
  */
-export function entityRefToString(ref: EntityRef): string {
-  return `${ref.modelId}:${ref.expressId}`;
-}
-
-/** Parse string back to EntityRef */
-export function stringToEntityRef(str: string): EntityRef {
-  const colonIndex = str.indexOf(':');
-  if (colonIndex === -1) {
-    // Invalid format - return a sentinel value
-    return { modelId: '', expressId: -1 };
-  }
-  const modelId = str.substring(0, colonIndex);
-  const expressId = parseInt(str.substring(colonIndex + 1), 10);
-  // Handle NaN case (malformed expressId)
-  if (Number.isNaN(expressId)) {
-    return { modelId, expressId: -1 };
-  }
-  return { modelId, expressId };
-}
-
-/** Check if two EntityRefs are equal */
-export function entityRefEquals(a: EntityRef | null, b: EntityRef | null): boolean {
-  if (a === null && b === null) return true;
-  if (a === null || b === null) return false;
-  return a.modelId === b.modelId && a.expressId === b.expressId;
-}
+export { entityRefEquals, entityRefToString, stringToEntityRef } from './entity-ref.js';
 
 /**
  * Type guard to check if a data store has IFC5 schema version.

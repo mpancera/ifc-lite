@@ -6,49 +6,74 @@
  * Relationships display component for IFC element structural relationships.
  */
 
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
-import { Link2, Focus } from 'lucide-react';
-import type { OverlayRelationships } from '@/lib/mutations/overlayRelationships';
+import { CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { Link2, Focus, ChevronDown } from 'lucide-react';
+import type { EntityRelationshipsData } from '@ifc-lite/sdk';
+import type { RelatedRef } from '@/lib/mutations/overlayRelationships';
+import { useState } from 'react';
+import { useTranslation } from '@/i18n';
+import { formatLocaleNumber } from '@/i18n/intlFormat';
+import { PersistentCollapsible } from './PersistentCollapsible';
+import { INSPECTOR_SECTION, INSPECTOR_TRIGGER, INSPECTOR_TITLE, INSPECTOR_COUNT, INSPECTOR_CHEVRON, INSPECTOR_SUBHEADING } from './inspector-ui';
 
 interface RelationshipsCardProps {
-  /** Parsed relationships plus anything this session authored. */
-  relationships: OverlayRelationships;
+  /** Parsed relationships, plus (fork) what this session authored: the
+   *  product type and the spatial container of an authored element. */
+  relationships: EntityRelationshipsData & { definedBy?: RelatedRef[]; containedIn?: RelatedRef[] };
+  populationUnavailable?: boolean;
   onSelectEntity?: (entityId: number) => void;
   /** Isolate + select all member objects of a group/zone in 3D (#1075). */
   onIsolateGroupMembers?: (groupId: number) => void;
 }
 
-export function RelationshipsCard({ relationships, onSelectEntity, onIsolateGroupMembers }: RelationshipsCardProps) {
+const EXACT_RELATION_PAGE_SIZE = 100;
+
+function relationListKey(relations: NonNullable<EntityRelationshipsData['relations']>): string {
+  const edgeKey = (index: number) => {
+    const edge = relations[index];
+    return edge ? `${edge.direction}:${edge.relationshipId}:${edge.entity.id}:${edge.relationshipType}` : '';
+  };
+  return `${relations.length}:${edgeKey(0)}:${edgeKey(relations.length - 1)}`;
+}
+
+export function RelationshipsCard({ relationships, populationUnavailable = false, onSelectEntity, onIsolateGroupMembers }: RelationshipsCardProps) {
+  const { t, locale } = useTranslation();
   const { voids, fills, groups, connections } = relationships;
-  // Optional so a caller still holding a plain parsed result keeps working.
+  // Keep the exact record rows even when a convenience section below also
+  // names the endpoint. Those legacy arrays collapse repeated IfcRel records
+  // and omit the relationship id/direction, while this view is the lossless
+  // graph surface promised by #4205.
+  const exactRelations = relationships.relations ?? [];
+  const exactKey = relationListKey(exactRelations);
+  const [exactPage, setExactPage] = useState({ key: exactKey, count: EXACT_RELATION_PAGE_SIZE });
+  const visibleExactCount = exactPage.key === exactKey ? exactPage.count : EXACT_RELATION_PAGE_SIZE;
+  const visibleExactRelations = exactRelations.slice(0, visibleExactCount);
   const definedBy = relationships.definedBy ?? [];
   const containedIn = relationships.containedIn ?? [];
-  const totalCount = voids.length + fills.length + groups.length + connections.length
+  const totalCount = voids.length + fills.length + groups.length + connections.length + exactRelations.length
     + definedBy.length + containedIn.length;
 
-  if (totalCount === 0) return null;
+  if (totalCount === 0 && !populationUnavailable) return null;
 
   return (
-    <Collapsible defaultOpen className="border-2 border-zinc-300 dark:border-zinc-700 bg-zinc-50/20 dark:bg-zinc-950/20 w-full max-w-full overflow-hidden">
-      <CollapsibleTrigger className="flex items-center gap-2 w-full p-2.5 hover:bg-zinc-100 dark:hover:bg-zinc-800/30 text-left transition-colors overflow-hidden">
-        <Link2 className="h-3.5 w-3.5 text-zinc-600 dark:text-zinc-400 shrink-0" />
-        <span className="font-bold text-xs text-zinc-700 dark:text-zinc-300 truncate flex-1 min-w-0">
-          Relationships
+    <PersistentCollapsible id="relationships" className={INSPECTOR_SECTION}>
+      <CollapsibleTrigger className={INSPECTOR_TRIGGER}>
+        <Link2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+        <span className={INSPECTOR_TITLE}>
+          {t('properties.relationships.heading')}
         </span>
-        <span className="text-[10px] font-mono bg-zinc-200 dark:bg-zinc-800 px-1.5 py-0.5 border border-zinc-300 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400 shrink-0">
-          {totalCount}
+        <span className={INSPECTOR_COUNT}>
+          {populationUnavailable ? '?' : formatLocaleNumber(locale, totalCount)}
         </span>
+        <ChevronDown className={INSPECTOR_CHEVRON} aria-hidden="true" />
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className="border-t-2 border-zinc-300 dark:border-zinc-700 divide-y divide-zinc-200 dark:divide-zinc-800">
-          {/* Where the element sits and what it is — first, because for an
-              authored device these answer "what is this" before openings and
-              connections do. */}
+        {populationUnavailable && <p className="px-3 py-2 text-xs text-foreground">{t('properties.relationships.unavailableMembership')}</p>}
+        <div className="pb-1">
+          {/* Fork: where an authored element sits and what it is, first. */}
           {containedIn.length > 0 && (
             <div className="px-3 py-2">
-              <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
-                Contained in ({containedIn.length})
-              </div>
+              <div className={INSPECTOR_SUBHEADING}>Contained in ({containedIn.length})</div>
               {containedIn.map((item) => (
                 <RelItem key={item.id} item={item} onSelect={onSelectEntity} />
               ))}
@@ -56,9 +81,7 @@ export function RelationshipsCard({ relationships, onSelectEntity, onIsolateGrou
           )}
           {definedBy.length > 0 && (
             <div className="px-3 py-2">
-              <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
-                Product type ({definedBy.length})
-              </div>
+              <div className={INSPECTOR_SUBHEADING}>Product type ({definedBy.length})</div>
               {definedBy.map((item) => (
                 <RelItem key={item.id} item={item} onSelect={onSelectEntity} />
               ))}
@@ -66,8 +89,8 @@ export function RelationshipsCard({ relationships, onSelectEntity, onIsolateGrou
           )}
           {voids.length > 0 && (
             <div className="px-3 py-2">
-              <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
-                Openings ({voids.length})
+              <div className={INSPECTOR_SUBHEADING}>
+                {t('properties.relationships.openings', { count: voids.length, countDisplay: formatLocaleNumber(locale, voids.length) })}
               </div>
               {voids.map((item) => (
                 <RelItem key={item.id} item={item} onSelect={onSelectEntity} />
@@ -76,8 +99,8 @@ export function RelationshipsCard({ relationships, onSelectEntity, onIsolateGrou
           )}
           {fills.length > 0 && (
             <div className="px-3 py-2">
-              <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
-                Fills ({fills.length})
+              <div className={INSPECTOR_SUBHEADING}>
+                {t('properties.relationships.fills', { count: fills.length, countDisplay: formatLocaleNumber(locale, fills.length) })}
               </div>
               {fills.map((item) => (
                 <RelItem key={item.id} item={item} onSelect={onSelectEntity} />
@@ -86,8 +109,8 @@ export function RelationshipsCard({ relationships, onSelectEntity, onIsolateGrou
           )}
           {groups.length > 0 && (
             <div className="px-3 py-2">
-              <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
-                Groups &amp; Zones ({groups.length})
+              <div className={INSPECTOR_SUBHEADING}>
+                {t('properties.relationships.groupsAndZones', { count: groups.length, countDisplay: formatLocaleNumber(locale, groups.length) })}
               </div>
               {groups.map((item) => (
                 <GroupItem
@@ -101,21 +124,71 @@ export function RelationshipsCard({ relationships, onSelectEntity, onIsolateGrou
           )}
           {connections.length > 0 && (
             <div className="px-3 py-2">
-              <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
-                Connections ({connections.length})
+              <div className={INSPECTOR_SUBHEADING}>
+                {t('properties.relationships.connections', { count: connections.length, countDisplay: formatLocaleNumber(locale, connections.length) })}
               </div>
               {connections.map((item) => (
                 <RelItem key={item.id} item={item} onSelect={onSelectEntity} />
               ))}
             </div>
           )}
+          {exactRelations.length > 0 && (
+            <div className="px-3 py-2">
+              <div className={INSPECTOR_SUBHEADING}>
+                {t('relationshipCard.exactRecords', { count: exactRelations.length })}
+              </div>
+              {visibleExactRelations.map((relation, index) => (
+                <RelationshipEdgeItem
+                  key={`${relation.direction}:${relation.relationshipId}:${relation.entity.id}:${relation.relationshipType}:${index}`}
+                  relation={relation}
+                  onSelect={onSelectEntity}
+                />
+              ))}
+              {visibleExactRelations.length < exactRelations.length && (
+                <button
+                  className="mt-1 text-xs text-primary hover:underline"
+                  onClick={() => setExactPage({
+                    key: exactKey,
+                    count: Math.min(visibleExactCount + EXACT_RELATION_PAGE_SIZE, exactRelations.length),
+                  })}
+                  type="button"
+                >
+                  {t('relationshipCard.showMore', {
+                    count: Math.min(EXACT_RELATION_PAGE_SIZE, exactRelations.length - visibleExactCount),
+                  })}
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </CollapsibleContent>
-    </Collapsible>
+    </PersistentCollapsible>
   );
 }
 
-function RelItem({ item, onSelect }: {
+function RelationshipEdgeItem({ relation, onSelect }: {
+  relation: NonNullable<EntityRelationshipsData['relations']>[number];
+  onSelect?: (id: number) => void;
+}) {
+  return (
+    <button
+      className="flex items-center gap-2 text-xs py-0.5 w-full text-left hover:text-primary transition-colors"
+      onClick={() => onSelect?.(relation.entity.id)}
+      type="button"
+      title={`#${relation.relationshipId} ${relation.relationshipType}`}
+    >
+      <span className="font-mono text-muted-foreground text-2xs">
+        {relation.direction === 'forward' ? '→' : '←'} #{relation.entity.id}
+      </span>
+      <span className="text-foreground truncate">
+        {relation.entity.name || relation.entity.type}
+      </span>
+      <span className="text-2xs text-muted-foreground ml-auto shrink-0">{relation.relationshipType}</span>
+    </button>
+  );
+}
+
+export function RelItem({ item, onSelect }: {
   item: { id: number; name?: string; type: string };
   onSelect?: (id: number) => void;
 }) {
@@ -125,9 +198,9 @@ function RelItem({ item, onSelect }: {
       onClick={() => onSelect?.(item.id)}
       type="button"
     >
-      <span className="font-mono text-zinc-500 dark:text-zinc-500 text-[10px]">#{item.id}</span>
-      <span className="text-zinc-600 dark:text-zinc-400 truncate">{item.name || item.type}</span>
-      <span className="text-[10px] text-zinc-400 ml-auto shrink-0">{item.type}</span>
+      <span className="font-mono text-muted-foreground text-2xs">#{item.id}</span>
+      <span className="text-foreground truncate">{item.name || item.type}</span>
+      <span className="text-2xs text-muted-foreground ml-auto shrink-0">{item.type}</span>
     </button>
   );
 }
@@ -136,28 +209,31 @@ function RelItem({ item, onSelect }: {
  *  the group's own attributes; click the focus button to isolate + select all of
  *  its member objects (e.g. every space in a dwelling) in the 3D view (#1075). */
 function GroupItem({ item, onSelect, onIsolateMembers }: {
-  item: { id: number; name?: string; type: string };
+  item: EntityRelationshipsData['groups'][number];
   onSelect?: (id: number) => void;
   onIsolateMembers?: (id: number) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="flex items-center gap-2 py-0.5 group/rel">
       <button
         className="flex items-center gap-2 text-xs flex-1 min-w-0 text-left hover:text-primary transition-colors"
         onClick={() => onSelect?.(item.id)}
         type="button"
-        title="Show this group's attributes"
+        title={t('properties.relationships.showGroupAttributesTooltip')}
       >
-        <span className="font-mono text-zinc-500 dark:text-zinc-500 text-[10px]">#{item.id}</span>
-        <span className="text-zinc-600 dark:text-zinc-400 truncate">{item.name || `Group #${item.id}`}</span>
-        <span className="text-[10px] text-zinc-400 ml-auto shrink-0">{item.type}</span>
+        <span className="font-mono text-muted-foreground text-2xs">#{item.id}</span>
+        <span className="text-foreground truncate">
+          {item.name || t('properties.relationships.groupFallbackName', { id: item.id })}
+        </span>
+        {item.type && <span className="text-2xs text-muted-foreground ml-auto shrink-0">{item.type}</span>}
       </button>
       {onIsolateMembers && (
         <button
-          className="shrink-0 p-0.5 text-zinc-400 hover:text-primary transition-colors"
+          className="shrink-0 p-0.5 text-muted-foreground hover:text-primary transition-colors"
           onClick={() => onIsolateMembers(item.id)}
           type="button"
-          title="Isolate this group's members in 3D"
+          title={t('properties.relationships.isolateGroupMembersTooltip')}
         >
           <Focus className="h-3.5 w-3.5" />
         </button>

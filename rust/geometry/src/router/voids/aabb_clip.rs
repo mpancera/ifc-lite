@@ -4,7 +4,7 @@
 
 //! Legacy SAT + Sutherland-Hodgman AABB box clip (issue #635 fallback only).
 
-use super::GeometryRouter;
+use crate::program::openings::execute::Execution;
 use crate::csg::{tri_is_needle, ClippingProcessor, Plane, Triangle, TriangleVec};
 use crate::{Mesh, Point3, Vector3};
 
@@ -41,7 +41,7 @@ impl ClipBuffers {
     }
 }
 
-impl GeometryRouter {
+impl Execution {
 
     /// Cut a rectangular opening from a mesh using AABB clipping — the LEGACY
     /// Sutherland-Hodgman box clip, now retained ONLY as the issue-#635
@@ -603,9 +603,9 @@ impl GeometryRouter {
             // Drop hairline needle slivers the Sutherland-Hodgman box clip leaves
             // on a host edge near-tangent to an opening face (the diagonal
             // window-wedge artifact, e.g. schependomlaan). Same scale-relative
-            // power-of-two needle test the exact-kernel consolidate pass uses; a
-            // ~zero-area needle can't open a real gap — the frame around the
-            // opening is closed by the neighbouring non-degenerate triangles.
+            // power-of-two needle test the exact-kernel consolidate pass uses;
+            // `tri_is_needle`'s doc carries the no-gap argument and the
+            // long-span faces the rule also drops.
             if tri_is_needle(&[tri.v0, tri.v1, tri.v2]) {
                 continue;
             }

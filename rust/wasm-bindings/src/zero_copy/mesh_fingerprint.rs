@@ -18,7 +18,7 @@
 //! consumer reads purely by index.
 
 use super::MeshCollection;
-use crate::zero_copy::frame_swap::swap_zup_to_yup_aabb;
+use ifc_lite_geometry::math::frame::aabb_zup_to_yup;
 use wasm_bindgen::prelude::*;
 
 /// Everything one hashing pass learned about one entity, pushed as a unit.
@@ -91,7 +91,7 @@ impl MeshCollection {
         let y_up: Vec<f64> = self
             .geometry_aabb_values
             .chunks_exact(6)
-            .flat_map(|b| swap_zup_to_yup_aabb([b[0], b[1], b[2], b[3], b[4], b[5]]))
+            .flat_map(|b| aabb_zup_to_yup([b[0], b[1], b[2], b[3], b[4], b[5]]))
             .collect();
         js_sys::Float64Array::from(&y_up[..])
     }
@@ -157,5 +157,24 @@ impl MeshCollection {
             .extend_from_slice(&fp.aabb.unwrap_or([f64::NAN; 6]));
         self.geometry_volume_values.push(fp.volume.unwrap_or(f64::NAN));
         self.geometry_closure_flags.push(fp.closure_bits);
+    }
+}
+
+/// Native read access for `api` tests, which cannot call the `js_sys` getters.
+#[cfg(test)]
+impl MeshCollection {
+    /// `(express id, hash)` of every pushed fingerprint, in push order.
+    pub(crate) fn test_fingerprints(&self) -> Vec<(u32, u64)> {
+        self.geometry_hash_ids.iter().copied().zip(self.geometry_hash_values.iter().copied()).collect()
+    }
+
+    /// Each mesh as (express id, Y-up positions relative to `origin`, indices,
+    /// colour, origin, geometry class).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn test_meshes(&self) -> Vec<(u32, &[f32], &[u32], [f32; 4], [f64; 3], u8)> {
+        self.meshes
+            .iter()
+            .map(|m| (m.express_id, m.positions.as_slice(), m.indices.as_slice(), m.color, m.origin, m.geometry_class))
+            .collect()
     }
 }

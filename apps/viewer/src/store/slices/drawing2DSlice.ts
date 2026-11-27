@@ -3,28 +3,35 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * 2D Drawing generation state slice
- *
- * Manages state for generating and viewing 2D architectural drawings
- * (floor plans, sections, elevations) from the 3D model.
+ * 2D Drawing generation state slice: manages state for generating and
+ * viewing 2D architectural drawings (floor plans, sections, elevations) from the 3D model.
  */
 
 import type { StateCreator } from 'zustand';
 import type { Drawing2D, DxfPlacement, DxfUnderlay, GraphicOverrideRule, GraphicOverridePreset } from '@ifc-lite/drawing-2d';
-import { BUILT_IN_PRESETS, DEFAULT_DXF_PLACEMENT } from '@ifc-lite/drawing-2d';
+import { BUILT_IN_PRESETS } from '@ifc-lite/drawing-2d';
+import type { DxfReferenceFrame } from '@/hooks/dxfReferencePlane';
+import type { SectionPlane } from '../section-types';
+import { createDxfUnderlayActions } from './drawing2DSlice.dxfActions';
+import { createDimension2DActions, getDefaultDimension2DState, moveDimension2D, type Dimension2DActions, type Dimension2DState } from './drawing2DDimensions';
+export type { Dimension2D, Dimension2DOrientation } from './drawing2DDimensions';
+import { validateDrawingDisplayOptions } from '@/lib/drawing/projection-depth';
 import { DEFAULT_SCAN_SECTION_THICKNESS } from '@/hooks/scanSectionMath';
 import {
   alignmentStep, type AlignmentLine, type DxfAlignmentSession,
 } from '@/lib/heights/alignmentSession';
+import { DEFAULT_SCAN_OUTLINE_MAX_GAP } from '@/lib/scan-outline/scan-outline';
+import { isDegenerateMeasurement, isDegenerateArea, isDegenerateCloud } from './drawing2DDegenerateGuards';
 
 export type Drawing2DStatus = 'idle' | 'generating' | 'ready' | 'error';
 
+/** The semantic cut a drawing was generated at (see `drawnSectionPlane`). */
+export type DrawnSectionPlane = Pick<SectionPlane, 'axis' | 'position' | 'flipped' | 'custom'>;
+
 /** Active 2D annotation tool */
-// `escape-route` is a TWO-CLICK tool, unlike the free-hand ones beside it:
-// the author marks a start and a target, and the path between them is
-// derived from the space graph rather than drawn. See
-// `hooks/useEscapeRouteTool.ts`.
-export type Annotation2DTool = 'none' | 'measure' | 'polygon-area' | 'text' | 'cloud' | 'escape-route';
+// Fork: `escape-route` is a TWO-CLICK tool: start and target, the path between
+// them derived from the space graph (`hooks/useEscapeRouteTool.ts`).
+export type Annotation2DTool = 'none' | 'measure' | 'polygon-area' | 'text' | 'cloud' | 'tag' | 'dimension' | 'escape-route';
 
 /** Point in 2D drawing coordinates */
 export interface Point2D {
@@ -67,9 +74,19 @@ export interface CloudAnnotation2D {
   label: string;      // Optional label text inside cloud
 }
 
+/** Entity-bound markup; labels are always resolved from current IFC data. */
+export interface TagAnnotation2D {
+  id: string;
+  modelId: string;
+  entityId: number;
+  anchor: Point2D;
+  offset: Point2D;
+  template: 'auto';
+}
+
 /** Reference to a selected annotation */
 export interface SelectedAnnotation2D {
-  type: 'measure' | 'polygon' | 'text' | 'cloud';
+  type: 'measure' | 'polygon' | 'text' | 'cloud' | 'tag' | 'dimension';
   id: string;
 }
 
@@ -97,14 +114,9 @@ export interface DxfUnderlayState {
   /** User placement (offset/rotation/scale) in drawing space */
   placement: DxfPlacement;
   /**
-   * Which storey of the height system this plan belongs to, or `undefined`
-   * while it belongs to none.
-   *
-   * The step that turns a pile of drawings into a building: a plan assigned to
-   * a storey sits at that storey's elevation, so several stack instead of
-   * lying on top of each other at zero. Deliberately the storey ID rather than
-   * a copied elevation — moving a storey has to move its plan with it, and a
-   * copy would quietly stop agreeing.
+   * Fork: which storey of the height system this plan belongs to, or
+   * `undefined` while it belongs to none. The storey ID rather than a copied
+   * elevation, so moving a storey moves its plan with it.
    */
   storeyId?: string;
   /**
@@ -139,11 +151,18 @@ export interface DxfUnderlayState {
    * resolved) value, not the raw field.
    */
   georeferenced?: boolean;
+  referenceFrame?: DxfReferenceFrame;
 }
 
-export interface Drawing2DState {
+export interface Drawing2DState extends Dimension2DState {
   /** Current drawing data (null when not generated) */
   drawing2D: Drawing2D | null;
+  /**
+   * The cut `drawing2D` was generated at, published with it by `setDrawing2D`
+   * and cleared with it. The live `sectionPlane` moves first; until the next
+   * drawing lands, export and the canvas describe this one (`drawnSectionPlane`).
+   */
+  drawing2DPlane: DrawnSectionPlane | null;
   /** Generation status */
   drawing2DStatus: Drawing2DStatus;
   /** Generation progress (0-100) */
@@ -154,8 +173,6 @@ export interface Drawing2DState {
   drawing2DError: string | null;
   /** Whether the 2D panel is visible */
   drawing2DPanelVisible: boolean;
-  /** Suppress auto-opening 2D panel on next section tool activation */
-  suppressNextSection2DPanelAutoOpen: boolean;
   /** SVG content for export (cached) */
   drawing2DSvgContent: string | null;
   /** Display options */
@@ -177,10 +194,14 @@ export interface Drawing2DState {
     /**
      * Construction projection (issue #979): project geometry beyond the cut
      * as reference lines — thin solid for the visible floor side, dashed for
-     * overhead elements (beams, roofs, eaves). Plan ('down') sections only.
-     * Off by default; the section view stays cut-only until enabled.
+     * overhead elements (beams, roofs, eaves). Cardinal Down, Front and Side sections.
+     * `null` until the user chooses: then it follows the cut, on for a plan and
+     * off for a section (#8802). `true`/`false` is an explicit choice that holds
+     * on every cut. Resolve it with `constructionProjectionEnabled`.
      */
-    showConstructionProjection: boolean;
+    showConstructionProjection: boolean | null;
+    /** Manual background depth in metres; null selects automatic bands (#6615). */
+    constructionProjectionDepth: number | null;
     /**
      * Point-cloud "scan" overlay on the 2D section view (issue #1805): a
      * thin band of loaded scan points around the cut plane, projected into
@@ -195,6 +216,20 @@ export interface Drawing2DState {
     scanSectionOpacity: number;
     /** Include the scan layer's dots in SVG export/print. */
     scanSectionIncludeInExport: boolean;
+    /**
+     * Vector outline (#6871): trace closed rings from the slab points and
+     * draw them as lines; the DXF export writes them on their own layer.
+     */
+    scanSectionOutline: boolean;
+    /** Widest gap (metres) the outline bridges, about a wall thickness. */
+    scanSectionOutlineMaxGap: number;
+    /**
+     * Print preview (#5496): forces the direct-mode canvas to white paper
+     * with black ink regardless of the active app theme, previewing what
+     * exports already produce. Off by default — the canvas otherwise
+     * follows the theme (dark paper in dark theme).
+     */
+    showPrintPreview: boolean;
   };
   /** Available graphic override presets */
   graphicOverridePresets: GraphicOverridePreset[];
@@ -237,6 +272,7 @@ export interface Drawing2DState {
 
   // Text Annotations
   /** Placed text annotations */
+  tagAnnotations2D: TagAnnotation2D[];
   textAnnotations2D: TextAnnotation2D[];
   /** ID of text annotation currently being edited (null = none) */
   textAnnotation2DEditing: string | null;
@@ -256,14 +292,13 @@ export interface Drawing2DState {
   dxfUnderlays: DxfUnderlayState[];
 }
 
-export interface Drawing2DSlice extends Drawing2DState {
+export interface Drawing2DSlice extends Drawing2DState, Dimension2DActions {
   // Drawing Actions
-  setDrawing2D: (drawing: Drawing2D | null) => void;
+  setDrawing2D: (drawing: Drawing2D | null, plane?: DrawnSectionPlane) => void;
   setDrawing2DStatus: (status: Drawing2DStatus) => void;
   setDrawing2DProgress: (progress: number, phase: string) => void;
   setDrawing2DError: (error: string | null) => void;
   setDrawing2DPanelVisible: (visible: boolean) => void;
-  setSuppressNextSection2DPanelAutoOpen: (suppress: boolean) => void;
   toggleDrawing2DPanel: () => void;
   setDrawing2DSvgContent: (svg: string | null) => void;
   updateDrawing2DDisplayOptions: (options: Partial<Drawing2DState['drawing2DDisplayOptions']>) => void;
@@ -311,6 +346,8 @@ export interface Drawing2DSlice extends Drawing2DState {
   clearPolygonArea2DResults: () => void;
 
   // Text Annotation Actions
+  addTagAnnotation2D: (tag: TagAnnotation2D) => void;
+  updateTagAnnotation2D: (id: string, offset: Point2D) => void;
   addTextAnnotation2D: (annotation: TextAnnotation2D) => void;
   updateTextAnnotation2D: (id: string, updates: Partial<TextAnnotation2D>) => void;
   removeTextAnnotation2D: (id: string) => void;
@@ -333,7 +370,7 @@ export interface Drawing2DSlice extends Drawing2DState {
   moveAnnotation2D: (sel: SelectedAnnotation2D, newOrigin: Point2D) => void;
 
   // Bulk Actions
-  /** Clear all annotations (measurements, polygons, text, clouds) */
+  /** Clear all annotations (measurements, polygons, text, clouds, dimensions) */
   clearAllAnnotations2D: () => void;
 
   // DXF Underlay Actions (issue #1782)
@@ -349,7 +386,7 @@ export interface Drawing2DSlice extends Drawing2DState {
    *     `ingestDxfFile` passes this, so an entry only ever starts in auto
    *     mode when it was created by THIS feature's own import path.
    */
-  addDxfUnderlay: (underlay: DxfUnderlay, options?: { georeferenced?: boolean | 'auto' }) => string;
+  addDxfUnderlay: (underlay: DxfUnderlay, options?: { georeferenced?: boolean | 'auto'; referenceFrame?: DxfReferenceFrame }) => string;
   removeDxfUnderlay: (id: string) => void;
   setDxfUnderlayVisible: (id: string, visible: boolean) => void;
   /** Toggle the 3D viewport overlay independently of the 2D underlay (issue #2043) */
@@ -385,10 +422,10 @@ export interface Drawing2DSlice extends Drawing2DState {
 
 /**
  * Single source of truth for `drawing2DDisplayOptions` defaults. Both the
- * slice initializer and `resetViewerState` (`store/index.ts`) call this so
+ * slice initializer and `drawing2DSlice.teardown.ts` call this so
  * the two paths can't drift — the same pattern `POINT_CLOUD_DEFAULTS` uses.
  */
-export const getDefaultDisplayOptions = (): Drawing2DState['drawing2DDisplayOptions'] => ({
+const getDefaultDisplayOptions = (): Drawing2DState['drawing2DDisplayOptions'] => ({
   showHiddenLines: true,
   showHatching: true,
   showAnnotations: true,
@@ -396,21 +433,25 @@ export const getDefaultDisplayOptions = (): Drawing2DState['drawing2DDisplayOpti
   scale: 100, // 1:100 default
   useSymbolicRepresentations: false, // Default to section cut (Body geometry)
   showIfcAnnotations: true, // Mirror the 3D Class Visibility default
-  showConstructionProjection: false, // Optional reference projection (issue #979), off by default
+  constructionProjectionDepth: null,
+  showConstructionProjection: null, // Reference projection (issue #979): follows the cut, on for plans (#8802)
   showScanSection: true, // Scan overlay (issue #1805) — on by default, no-op without a loaded point cloud
   scanSectionThickness: DEFAULT_SCAN_SECTION_THICKNESS,
   scanSectionOpacity: 0.9,
   scanSectionIncludeInExport: true,
+  scanSectionOutline: false,
+  scanSectionOutlineMaxGap: DEFAULT_SCAN_OUTLINE_MAX_GAP,
+  showPrintPreview: false,
 });
 
-const getDefaultState = (): Drawing2DState => ({
+export const getDefaultDrawing2DState = (): Drawing2DState => ({
   drawing2D: null,
+  drawing2DPlane: null,
   drawing2DStatus: 'idle',
   drawing2DProgress: 0,
   drawing2DPhase: '',
   drawing2DError: null,
   drawing2DPanelVisible: false,
-  suppressNextSection2DPanelAutoOpen: false,
   drawing2DSvgContent: null,
   drawing2DDisplayOptions: getDefaultDisplayOptions(),
   // Graphic overrides
@@ -432,10 +473,12 @@ const getDefaultState = (): Drawing2DState => ({
   annotation2DCursorPos: null,
   polygonArea2DPoints: [],
   polygonArea2DResults: [],
+  tagAnnotations2D: [],
   textAnnotations2D: [],
   textAnnotation2DEditing: null,
   cloudAnnotation2DPoints: [],
   cloudAnnotations2D: [],
+  ...getDefaultDimension2DState(),
   // Selection
   selectedAnnotation2D: null,
   // DXF underlays
@@ -444,11 +487,12 @@ const getDefaultState = (): Drawing2DState => ({
 
 export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2DSlice> = (set, get) => ({
   // Initial state
-  ...getDefaultState(),
+  ...getDefaultDrawing2DState(),
 
   // Drawing Actions
-  setDrawing2D: (drawing) => set({
+  setDrawing2D: (drawing, plane) => set({
     drawing2D: drawing,
+    drawing2DPlane: drawing ? plane ?? null : null,
     drawing2DStatus: drawing ? 'ready' : 'idle',
     drawing2DError: null,
   }),
@@ -466,32 +510,23 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
   }),
 
   setDrawing2DPanelVisible: (visible) => set({ drawing2DPanelVisible: visible }),
-  setSuppressNextSection2DPanelAutoOpen: (suppress) => set({ suppressNextSection2DPanelAutoOpen: suppress }),
 
   toggleDrawing2DPanel: () => set((state) => ({ drawing2DPanelVisible: !state.drawing2DPanelVisible })),
 
   setDrawing2DSvgContent: (svg) => set({ drawing2DSvgContent: svg }),
 
   updateDrawing2DDisplayOptions: (options) => set((state) => ({
-    drawing2DDisplayOptions: { ...state.drawing2DDisplayOptions, ...options },
+    drawing2DDisplayOptions: { ...state.drawing2DDisplayOptions, ...validateDrawingDisplayOptions(options) },
   })),
 
-  /**
-   * Drop the cached drawing so the next generation rebuilds it.
-   *
-   * Clears the DRAWING, not the slice. It used to reset every field in here,
-   * which also deleted every measurement, area, text box and revision cloud the
-   * user had drawn — and the only caller is the "open the 2D view" button,
-   * which wanted a rebuild, not a wipe. Losing an afternoon of markup to a
-   * button that re-opens a panel is the kind of thing nobody reports as a bug
-   * because it looks like the annotations simply expired.
-   *
-   * The user's own marks are removed only by the tool that says it removes
-   * them (`clearAllAnnotations2D`), and the display options, override presets
-   * and underlays are preferences, not per-drawing state.
-   */
+  // Only the drawing-generation fields, NOT the whole slice: this is called
+  // by "View 2D" (SectionPanel.tsx) purely to force regeneration with
+  // current settings, so it must leave graphic overrides, DXF underlays,
+  // and all annotation/measurement state (which `getDefaultDrawing2DState()`
+  // would wipe) untouched.
   clearDrawing2D: () => set({
     drawing2D: null,
+    drawing2DPlane: null,
     drawing2DStatus: 'idle',
     drawing2DProgress: 0,
     drawing2DPhase: '',
@@ -606,8 +641,7 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
       const distance = Math.sqrt(dx * dx + dy * dy);
 
       // Ignore zero-length measurements (click without drag)
-      const MIN_MEASUREMENT_DISTANCE = 0.001; // 1mm minimum
-      if (distance < MIN_MEASUREMENT_DISTANCE) {
+      if (isDegenerateMeasurement(distance)) {
         // Reset state without saving the measurement
         set({
           measure2DStart: null,
@@ -650,7 +684,6 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
   // ═══════════════════════════════════════════════════════════════════════
 
   setAnnotation2DActiveTool: (tool) => {
-    const state = get();
     // Cancel any in-progress work from previous tool
     const resetState: Partial<Drawing2DState> = {
       annotation2DActiveTool: tool,
@@ -665,6 +698,7 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
       measure2DSnapPoint: null,
       polygonArea2DPoints: [],
       cloudAnnotation2DPoints: [],
+      dimension2DPoints: [],
       textAnnotation2DEditing: null,
       selectedAnnotation2D: null,
     };
@@ -682,8 +716,9 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
     const state = get();
     if (state.polygonArea2DPoints.length < 3) return;
 
+    if (isDegenerateArea(area)) { set({ polygonArea2DPoints: [], annotation2DCursorPos: null }); return; } // near-zero-area guard (#4197)
     const result: PolygonArea2DResult = {
-      id: `poly-area-${Date.now()}`,
+      id: `poly-area-${crypto.randomUUID()}`,
       points: [...state.polygonArea2DPoints],
       area,
       perimeter,
@@ -706,6 +741,9 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
   })),
 
   clearPolygonArea2DResults: () => set({ polygonArea2DResults: [] }),
+
+  addTagAnnotation2D: tag => set(state => ({ tagAnnotations2D: [...state.tagAnnotations2D, tag] })),
+  updateTagAnnotation2D: (id, offset) => set(state => ({ tagAnnotations2D: state.tagAnnotations2D.map(tag => tag.id === id ? { ...tag, offset } : tag) })),
 
   // Text Annotation Actions
   addTextAnnotation2D: (annotation) => set((state) => ({
@@ -739,8 +777,9 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
     const state = get();
     if (state.cloudAnnotation2DPoints.length < 2) return;
 
+    if (isDegenerateCloud(state.cloudAnnotation2DPoints)) { set({ cloudAnnotation2DPoints: [], annotation2DCursorPos: null }); return; } // near-zero-size guard (#4197)
     const result: CloudAnnotation2D = {
-      id: `cloud-${Date.now()}`,
+      id: `cloud-${crypto.randomUUID()}`,
       points: [...state.cloudAnnotation2DPoints],
       color: '#E53935',
       label,
@@ -773,6 +812,9 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
     if (!sel) return;
 
     switch (sel.type) {
+      case 'tag':
+        set({ tagAnnotations2D: state.tagAnnotations2D.filter(tag => tag.id !== sel.id), selectedAnnotation2D: null });
+        break;
       case 'measure':
         set({ measure2DResults: state.measure2DResults.filter((r) => r.id !== sel.id), selectedAnnotation2D: null });
         break;
@@ -788,6 +830,10 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
         break;
       case 'cloud':
         set({ cloudAnnotations2D: state.cloudAnnotations2D.filter((a) => a.id !== sel.id), selectedAnnotation2D: null });
+        break;
+      case 'dimension':
+        get().removeDimension2D(sel.id);
+        set({ selectedAnnotation2D: null });
         break;
     }
   },
@@ -831,36 +877,15 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
         ) });
         break;
       }
+      case 'dimension':
+        set({ dimensions2D: moveDimension2D(state.dimensions2D, sel.id, newOrigin) });
+        break;
     }
   },
 
-  // DXF Underlay Actions (issue #1782)
-  addDxfUnderlay: (underlay, options) => {
-    const id = `dxf-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-    const layerVisibility: Record<string, boolean> = {};
-    for (const layer of underlay.layers) layerVisibility[layer.name] = layer.visible;
-    // Tri-state resolution (PR #1965 review, see the field doc above):
-    // 'auto' -> undefined; anything else (including omitted) -> boolean,
-    // defaulting to false. A caller that doesn't explicitly ask for 'auto'
-    // can never accidentally create an auto entry.
-    const georeferenced = options?.georeferenced === 'auto'
-      ? undefined
-      : (options?.georeferenced ?? false);
-    const entry: DxfUnderlayState = {
-      id,
-      name: underlay.name,
-      underlay,
-      visible: true,
-      visible3D: true,
-      opacity: 1,
-      layerVisibility,
-      placement: { ...DEFAULT_DXF_PLACEMENT },
-      georeferenced,
-    };
-    set((state) => ({ dxfUnderlays: [...state.dxfUnderlays, entry] }));
-    return id;
-  },
+  ...createDxfUnderlayActions(set),
 
+  // Fork: two-point DXF alignment and storey assignment.
   dxfAlignment: null,
 
   startDxfAlignment: (underlayId) => set({
@@ -919,45 +944,7 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
     )),
   })),
 
-  removeDxfUnderlay: (id) => set((state) => ({
-    dxfUnderlays: state.dxfUnderlays.filter((u) => u.id !== id),
-  })),
-
-  setDxfUnderlayVisible: (id, visible) => set((state) => ({
-    dxfUnderlays: state.dxfUnderlays.map((u) => (u.id === id ? { ...u, visible } : u)),
-  })),
-
-  setDxfUnderlayVisible3D: (id, visible3D) => set((state) => ({
-    dxfUnderlays: state.dxfUnderlays.map((u) => (u.id === id ? { ...u, visible3D } : u)),
-  })),
-
-  setDxfUnderlayOpacity: (id, opacity) => set((state) => ({
-    dxfUnderlays: state.dxfUnderlays.map((u) =>
-      u.id === id ? { ...u, opacity: Math.max(0, Math.min(1, opacity)) } : u
-    ),
-  })),
-
-  toggleDxfUnderlayLayer: (id, layerName) => set((state) => ({
-    dxfUnderlays: state.dxfUnderlays.map((u) => {
-      if (u.id !== id) return u;
-      const current = u.layerVisibility[layerName]
-        ?? u.underlay.layers.find((l) => l.name === layerName)?.visible
-        ?? true;
-      return { ...u, layerVisibility: { ...u.layerVisibility, [layerName]: !current } };
-    }),
-  })),
-
-  updateDxfUnderlayPlacement: (id, placement) => set((state) => ({
-    dxfUnderlays: state.dxfUnderlays.map((u) =>
-      u.id === id ? { ...u, placement: { ...u.placement, ...placement } } : u
-    ),
-  })),
-
-  setDxfUnderlayGeoreferenced: (id, georeferenced) => set((state) => ({
-    dxfUnderlays: state.dxfUnderlays.map((u) => (u.id === id ? { ...u, georeferenced } : u)),
-  })),
-
-  clearDxfUnderlays: () => set({ dxfUnderlays: [] }),
+  ...createDimension2DActions(set, get),
 
   // Bulk Actions
   clearAllAnnotations2D: () => set({
@@ -969,10 +956,12 @@ export const createDrawing2DSlice: StateCreator<Drawing2DSlice, [], [], Drawing2
     measure2DSnapPoint: null,
     polygonArea2DPoints: [],
     polygonArea2DResults: [],
-    textAnnotations2D: [],
+    tagAnnotations2D: [],
+  textAnnotations2D: [],
     textAnnotation2DEditing: null,
     cloudAnnotation2DPoints: [],
     cloudAnnotations2D: [],
+    ...getDefaultDimension2DState(),
     annotation2DCursorPos: null,
     selectedAnnotation2D: null,
   }),

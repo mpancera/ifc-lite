@@ -7,11 +7,8 @@
 use super::*;
 
 
-/// Two triangles whose index triples are all distinct, so an unswapped
-/// pass-through is distinguishable from a correctly reversed winding.
+/// Two distinct triangles exercise every index in the frame conversion.
 const TRIS: [u32; 6] = [0, 1, 2, 1, 2, 3];
-/// Per triangle `[a, b, c]` the 2nd/3rd entries swap: `[a, c, b]`.
-const TRIS_REVERSED: [u32; 6] = [0, 2, 1, 1, 3, 2];
 
 fn cube_corner_positions() -> Vec<f32> {
     vec![
@@ -26,39 +23,43 @@ fn cube_corner_positions() -> Vec<f32> {
 fn yup_swaps_and_negates_the_expected_axes() {
     // `(x, y, z) -> (x, z, -y)`. Distinct non-zero components in every slot,
     // so neither a dropped negation nor a wrong axis pair can hide.
-    assert_eq!(yup_f32([1.0, 2.0, 3.0]), [1.0, 3.0, -2.0]);
-    assert_eq!(yup_f64([1.0, 2.0, 3.0]), [1.0, 3.0, -2.0]);
+    assert_eq!(zup_to_yup([1.0, 2.0, 3.0]), [1.0, 3.0, -2.0]);
+    assert_eq!(zup_to_yup([1.0, 2.0, 3.0]), [1.0, 3.0, -2.0]);
 }
 
-/// The module header declares reversed triangle winding a load-bearing part
-/// of the Z-up→Y-up contract ("mirrors `MeshDataJs::new`, keeps front
-/// faces"). Nothing pinned it: deleting the swap from BOTH `to_yup_into` and
-/// `to_yup_in_place` AND from `obj.rs`'s hand-written copy left the whole
-/// crate suite green (82/82). glTF materials are emitted `doubleSided: true`
-/// unconditionally, so no renderer-facing assertion can ever fail on
-/// winding, and the `*_is_byte_identical` tests compare the exporter against
-/// itself — a bug applied consistently is invisible to them by construction.
-///
-/// So pin each copy DIRECTLY against a literal, rather than against another
-/// copy: an equivalence test between two implementations of the same
-/// conversion cannot see a mutation applied symmetrically to both.
+// #4056: an independent geometric invariant catches an incorrect reversal in
+// either conversion, even when both implementations make the same mistake.
+fn assert_faces_agree_with_normals(positions: &[f32], normals: &[f32], indices: &[u32]) {
+    for tri in indices.chunks_exact(3) {
+        let p = |i: usize| &positions[tri[i] as usize * 3..][..3];
+        let a = p(0);
+        let b = p(1);
+        let c = p(2);
+        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let cross = [u[1]*v[2] - u[2]*v[1], u[2]*v[0] - u[0]*v[2], u[0]*v[1] - u[1]*v[0]];
+        let n = &normals[tri[0] as usize * 3..][..3];
+        let dot = cross[0]*n[0] + cross[1]*n[1] + cross[2]*n[2];
+        assert!(dot > 0.0, "face must agree with its normal: {dot}");
+    }
+}
+
 #[test]
-fn to_yup_into_reverses_triangle_winding() {
-    let mut scratch = YUpScratch::new();
+fn frame_paths_preserve_face_normal_agreement_4056() {
     let positions = cube_corner_positions();
-    let normals = vec![0.0f32; positions.len()];
-    to_yup_into(&mut scratch, &positions, &normals, &TRIS, [0.0, 0.0, 0.0]);
-    assert_eq!(scratch.indices, TRIS_REVERSED, "streaming path must reverse winding");
-}
+    let normals = [0.0, 0.0, 1.0].repeat(4);
+    assert_faces_agree_with_normals(&positions, &normals, &TRIS);
+    let mut scratch = YUpScratch::new();
+    to_yup_into(&mut scratch, &positions, &normals, &TRIS, [0.0; 3]);
+    assert_faces_agree_with_normals(&scratch.positions, &scratch.normals, &scratch.indices);
+    assert_eq!(scratch.indices, TRIS);
 
-#[test]
-fn to_yup_in_place_reverses_triangle_winding() {
-    let mut positions = cube_corner_positions();
-    let mut normals = vec![0.0f32; positions.len()];
+    let mut positions = positions;
+    let mut normals = normals;
     let mut indices = TRIS;
-    let mut origin = [0.0f64; 3];
-    to_yup_in_place(&mut positions, &mut normals, &mut indices, &mut origin);
-    assert_eq!(indices, TRIS_REVERSED, "in-place path must reverse winding");
+    to_yup_in_place(&mut positions, &mut normals, &mut indices, &mut [0.0; 3]);
+    assert_faces_agree_with_normals(&positions, &normals, &indices);
+    assert_eq!(indices, TRIS);
 }
 
 /// The two frame paths are documented as producing identical output; the
@@ -102,31 +103,26 @@ fn to_yup_into_clears_previous_contents_when_reused() {
     to_yup_into(&mut scratch, &positions, &normals, &TRIS, [0.0, 0.0, 0.0]);
     assert_eq!(scratch.positions.len(), positions.len());
     assert_eq!(scratch.normals.len(), normals.len());
-    assert_eq!(scratch.indices, TRIS_REVERSED);
+    assert_eq!(scratch.indices, TRIS);
 }
 
 #[test]
 fn trailing_partial_triangle_is_left_alone() {
-    // `tri_end` rounds down to a whole triangle; a stray index must not be
-    // swapped into the previous triangle. Kills `% 3` -> `% 2`.
-    //
-    // Both paths compute `tri_end` independently, so both are asserted — the
-    // whole point of this file is that pinning one copy of a duplicated
-    // calculation says nothing about the other.
+    // A frame rotation leaves every index unchanged, including a partial tail.
     let positions = cube_corner_positions();
     let normals = vec![0.0f32; positions.len()];
 
     let mut scratch = YUpScratch::new();
     let indices: Vec<u32> = vec![0, 1, 2, 3];
     to_yup_into(&mut scratch, &positions, &normals, &indices, [0.0, 0.0, 0.0]);
-    assert_eq!(scratch.indices, vec![0, 2, 1, 3], "streaming path");
+    assert_eq!(scratch.indices, vec![0, 1, 2, 3], "streaming path");
 
     let mut ip = positions.clone();
     let mut in_ = normals.clone();
     let mut ii: [u32; 4] = [0, 1, 2, 3];
     let mut io = [0.0f64; 3];
     to_yup_in_place(&mut ip, &mut in_, &mut ii, &mut io);
-    assert_eq!(ii, [0, 2, 1, 3], "in-place path");
+    assert_eq!(ii, [0, 1, 2, 3], "in-place path");
 }
 
 /// IFC Z is up; glTF Y is up. A rotation about the IFC up-axis has to come out
@@ -200,4 +196,43 @@ fn the_bottom_row_is_left_alone() {
     let y = yup_matrix4(&m);
     // Column-major: the bottom row is entries 3, 7, 11, 15.
     assert_eq!([y[3], y[7], y[11], y[15]], [0.0, 0.0, 0.0, 1.0], "{y:?}");
+}
+
+/// #4056: preserving winding during the frame rotation must not erase an
+/// actual reflection carried by an element placement.
+#[test]
+fn frame_change_preserves_a_reflected_placement_4056() {
+    let m = [-1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+             0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+    let y = yup_matrix4(&m);
+    assert_eq!(y, m, "an X reflection remains an X reflection after changing up-axis");
+    assert_eq!(y[0] * y[5] * y[10], -1.0);
+}
+
+/// #7734 review: a from-meshes `world_matrix` the GLB root cannot carry as TRS
+/// (scale, shear, mirror, projective row) is refused, not turned into a root
+/// whose rotation disagrees with the matrix. A rigid one is accepted.
+#[test]
+fn a_non_rigid_world_matrix_is_refused() {
+    let id = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.6e6, 1.2e6, 500.0, 1.0];
+    let (s, c) = 0.7_f64.sin_cos();
+    let mut yawed = id;
+    (yawed[0], yawed[1], yawed[4], yawed[5]) = (c, s, -s, c);
+    assert!(mesh_frame_from_world_matrix(Some(&id)).is_ok());
+    assert!(mesh_frame_from_world_matrix(Some(&yawed)).is_ok());
+    let edit = |i: usize, v: f64| {
+        let mut m = id;
+        m[i] = v;
+        m
+    };
+    for (label, m) in [
+        ("uniform scale", { let mut m = edit(0, 2.0); m[5] = 2.0; m[10] = 2.0; m }),
+        ("mirror", edit(10, -1.0)),
+        ("shear", edit(4, 0.5)),
+        ("projective row", edit(3, 0.1)),
+        ("w", edit(15, 2.0)),
+    ] {
+        let err = mesh_frame_from_world_matrix(Some(&m)).expect_err(label);
+        assert!(matches!(err, crate::error::ExportError::MalformedMeshInput { .. }), "{label}: {err:?}");
+    }
 }

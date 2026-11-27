@@ -1,0 +1,25 @@
+{
+  "name": "ifc-lite-gaussian-splat-spike",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MPL-2.0",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "typecheck": "for file in *.mjs contract/*.mjs test/*.mjs; do node --check \"$file\" || exit; done",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "playcanvas": "2.24.1",
+    "@luma.gl/core": "9.4.2",
+    "@luma.gl/webgpu": "9.4.2",
+    "@luma.gl/splats": "9.4.2",
+    "@playcanvas/splat-transform": "3.11.2"
+  },
+  "devDependencies": {
+    "vite": "^8.3.8",
+    "@playwright/test": "^1.65.1",
+    "tsx": "^4.23.15"
+  }
+}

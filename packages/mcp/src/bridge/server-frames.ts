@@ -1,0 +1,75 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/**
+ * The tab's parser for frames FROM the bridge (#9523). Browser-safe.
+ * Re-exported by `bridge-protocol.ts`.
+ */
+
+import type {
+  BridgeCallMessage,
+  BridgeCancelMessage,
+  BridgeErrorMessage,
+  BridgeResultAckMessage,
+  BridgeServerMessage,
+  BridgeSurfaceMessage,
+  BridgeWelcomeMessage,
+  ParseResult,
+} from './protocol.js';
+import { isRecord } from './json-bounds.js';
+import { clip, quoted } from './sanitize.js';
+
+function isPermission(v: unknown): boolean {
+  return v === 'read-only' || v === 'read-write';
+}
+
+/** Parse a frame from the bridge (for the tab). Lenient: checks `type` and the fields the tab acts on. */
+export function parseServerMessage(text: string, options: { resultAck: true }): ParseResult<BridgeServerMessage | BridgeResultAckMessage>;
+export function parseServerMessage(text: string): ParseResult<BridgeServerMessage>;
+export function parseServerMessage(text: string, options?: { resultAck: true }): ParseResult<BridgeServerMessage | BridgeResultAckMessage> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    return { ok: false, error: `not JSON: ${clip((err as Error).message, 120)}` };
+  }
+  if (!isRecord(raw)) return { ok: false, error: 'message must be a JSON object' };
+  switch (raw.type) {
+    case 'welcome':
+      if (typeof raw.sessionId !== 'string' || !isPermission(raw.permission)) return { ok: false, error: 'malformed welcome' };
+      // `features` is optional (older bridges omit it); anything but strings is dropped, never fatal.
+      return {
+        ok: true,
+        value: {
+          ...(raw as unknown as BridgeWelcomeMessage),
+          features: Array.isArray(raw.features) ? raw.features.filter((f): f is string => typeof f === 'string') : [],
+        },
+      };
+    case 'call':
+      if (typeof raw.sessionId !== 'string' || typeof raw.id !== 'string' || typeof raw.name !== 'string' || !isRecord(raw.arguments)) {
+        return { ok: false, error: 'malformed call' };
+      }
+      return { ok: true, value: raw as unknown as BridgeCallMessage };
+    case 'a2ui-surface':
+      if (typeof raw.sessionId !== 'string' || typeof raw.id !== 'string' || !isRecord(raw.surface)
+        || !Array.isArray(raw.surface.messages) || (raw.surface.title !== undefined && typeof raw.surface.title !== 'string')) {
+        return { ok: false, error: 'malformed A2UI surface' };
+      }
+      return { ok: true, value: raw as unknown as BridgeSurfaceMessage };
+    case 'cancel':
+      if (typeof raw.sessionId !== 'string' || typeof raw.id !== 'string') return { ok: false, error: 'malformed cancel' };
+      return { ok: true, value: raw as unknown as BridgeCancelMessage };
+    case 'result-ack':
+      if (!options?.resultAck) return { ok: false, error: `unknown message type ${quoted(raw.type, 32)}` };
+      if (typeof raw.sessionId !== 'string' || typeof raw.id !== 'string' || typeof raw.accepted !== 'boolean') {
+        return { ok: false, error: 'malformed result acknowledgement' };
+      }
+      return { ok: true, value: { type: 'result-ack', sessionId: raw.sessionId, id: raw.id, accepted: raw.accepted } };
+    case 'error':
+      if (typeof raw.code !== 'string' || typeof raw.message !== 'string') return { ok: false, error: 'malformed error' };
+      return { ok: true, value: raw as unknown as BridgeErrorMessage };
+    default:
+      return { ok: false, error: `unknown message type ${quoted(raw.type, 32)}` };
+  }
+}

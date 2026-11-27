@@ -4,8 +4,11 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyLoadError, errorCaptureProps } from './load-errors.js';
+import { bundleAgeHours, classifyLoadError, errorCaptureProps } from './load-errors.js';
+import { RetainedHostError } from './retained/retained-protocol.js';
+import { RetainedStallError } from './retained/retainedGeometrySource.js';
 import { formatLoadError } from './load-error-message.js';
+import { scrubEvent } from './analytics-scrub.js';
 
 describe('classifyLoadError', () => {
   it('classifies the wasm-bindgen non-OK HTTP status as wasm_engine_load', () => {
@@ -89,6 +92,23 @@ describe('classifyLoadError', () => {
     assert.equal(classifyLoadError(new Error('RuntimeError: unreachable executed')), 'unknown');
   });
 
+  it('attributes a streaming pre-pass worker trap to the geometry worker family (#8246)', () => {
+    // PostHog 01a18270: a 1.6 GB model trapped in the pre-pass and was filed
+    // as `unknown` because the pre-pass rethrew the bare trap text.
+    assert.equal(classifyLoadError(new Error('Pre-pass worker error: unreachable')), 'geometry_worker_crash');
+    assert.equal(
+      classifyLoadError(new Error('Pre-pass worker failed: worker terminated unexpectedly')),
+      'geometry_worker_crash',
+    );
+    // A stale-deploy script 404 still wins (#4886).
+    assert.equal(
+      classifyLoadError(
+        new Error('Pre-pass worker failed: worker script failed to load (possibly a stale deployment)'),
+      ),
+      'wasm_engine_load',
+    );
+  });
+
   it('prefers out_of_memory over worker_crash when the worker died with a clear OOM', () => {
     assert.equal(
       classifyLoadError(new Error('Geometry worker error: Cannot enlarge memory arrays')),
@@ -112,15 +132,37 @@ describe('classifyLoadError', () => {
     );
   });
 
-  it('classifies a WebGPU buffer-allocation failure as out_of_memory', () => {
+  it('classifies a WebGPU buffer-allocation failure as gpu_alloc_failed, not out_of_memory (#4885)', () => {
     // Chromium's wording is misleading — 193 KB is not "too large" for any
-    // device; what failed is mapping host memory. Same user guidance as OOM.
+    // device; what actually failed is mapping host memory, which is as often
+    // device-loss fallout as real memory pressure. Its own bucket lets
+    // `device_lost_at_time` tell the two apart instead of folding both into
+    // out_of_memory, which used to mislabel the common (loss) case.
     assert.equal(
       classifyLoadError(new RangeError(
         "Failed to execute 'createBuffer' on 'GPUDevice': createBuffer failed, size (193836) is too large for the implementation when mappedAtCreation == true",
       )),
-      'out_of_memory',
+      'gpu_alloc_failed',
     );
+  });
+
+  it('still classifies tiny post-loss createBuffer sizes as gpu_alloc_failed (#4885)', () => {
+    // The production sizes from the issue's Edge-user report: 672, 5544 and
+    // 15176 bytes — nowhere near any device limit, and exactly the fallout a
+    // lost device produces on every subsequent allocation.
+    for (const size of [672, 5544, 15176]) {
+      assert.equal(
+        classifyLoadError(new RangeError(
+          `Failed to execute 'createBuffer' on 'GPUDevice': createBuffer failed, size (${size}) is too large for the implementation when mappedAtCreation == true`,
+        )),
+        'gpu_alloc_failed',
+      );
+    }
+  });
+
+  it('keeps a genuinely large allocation out of gpu_alloc_failed only when it is not the mappedAtCreation wording', () => {
+    // out_of_memory still owns every other memory-exhaustion signal.
+    assert.equal(classifyLoadError(new RangeError('Array buffer allocation failed')), 'out_of_memory');
   });
 
   it('classifies an unreadable picked file, not as a memory or model failure', () => {
@@ -135,6 +177,117 @@ describe('classifyLoadError', () => {
     assert.equal(
       classifyLoadError(new Error('The requested file could not be read due to permission problems')),
       'file_unreadable',
+    );
+  });
+
+  it('classifies Gecko\'s NotReadableError wording, which never names itself', () => {
+    // Field reports (Firefox) carry only this sentence once the name is lost on
+    // the analytics path; it used to classify `unknown` and show the raw text.
+    assert.equal(classifyLoadError(new Error('The I/O read operation failed.')), 'file_unreadable');
+    assert.equal(classifyLoadError('NotReadableError: The I/O read operation failed.'), 'file_unreadable');
+    // Anchored: a longer message that merely contains it keeps its own identity.
+    assert.equal(
+      classifyLoadError(new Error('Upload aborted: The I/O read operation failed while streaming chunk 4')),
+      'unknown',
+    );
+  });
+
+  it('tells a cloud-placeholder user how to make the file readable, not just to retry', () => {
+    // NotReadableError on Windows/macOS is most often an online-only OneDrive /
+    // Dropbox / iCloud placeholder: re-picking the same placeholder fails the
+    // same way, so the message has to name the fix.
+    for (const err of [
+      new Error('NotReadableError: The requested file could not be read, typically due to permission problems that have occurred after a reference to a file was acquired.'),
+      new Error('NotFoundError: A requested file or directory could not be found at the time an operation was processed.'),
+      new Error('The I/O read operation failed.'),
+    ]) {
+      const msg = formatLoadError(err, 'tower.ifc');
+      assert.match(msg, /available offline/i);
+      assert.match(msg, /local folder/i);
+      assert.match(msg, /open it again/i);
+    }
+  });
+
+  it('classifies the file-moved NotFoundError as file_unreadable, not as unknown (#3731)', () => {
+    // The SIBLING of NotReadableError, and the one the field reports actually
+    // carry. Chromium throws NotReadableError when the file is still there but
+    // unreadable (permissions), and NotFoundError when the bytes are gone --
+    // the file was moved, renamed, deleted, or rewritten in place by the
+    // authoring tool between `getFile()` and the read. Four PostHog issues
+    // (#2546, #2860, #3324, #3731) carried this wording and every one of them
+    // classified as `unknown`, so the user was shown the raw DOM sentence and
+    // each occurrence spawned its own GitHub issue.
+    assert.equal(
+      classifyLoadError(new Error(
+        'A requested file or directory could not be found at the time an operation was processed.',
+      )),
+      'file_unreadable',
+    );
+    // Stringified name-first, the shape `String(err)` produces.
+    assert.equal(
+      classifyLoadError(new Error(
+        'NotFoundError: A requested file or directory could not be found at the time an operation was processed.',
+      )),
+      'file_unreadable',
+    );
+    // WebKit's wording for the same DOMException (#2860) needs the load
+    // context to be safe - see the Safari test below.
+    assert.equal(
+      classifyLoadError(new Error('The object can not be found here.'), 'ifc_model_load'),
+      'file_unreadable',
+    );
+  });
+
+  it('only trusts the WebKit NotFoundError wording inside a load context', () => {
+    // "The object can not be found here." is WebKit's GENERIC description for
+    // the NotFoundError name, and WebKit - unlike Blink - gives removeChild and
+    // insertBefore no message of their own, so a Safari reconciler crash
+    // (#1229/#1230/#1232) carries this EXACT string. Message-only, the two are
+    // indistinguishable, and claiming it unconditionally shows a user whose
+    // React tree just died a note about re-picking their file.
+    const webkit = new Error('The object can not be found here.');
+
+    assert.equal(
+      classifyLoadError(webkit),
+      'unknown',
+      'no context: the honest answer, because on this engine the string does not say which failure it was',
+    );
+    assert.equal(
+      classifyLoadError(webkit, 'export_glb'),
+      'unknown',
+      'a context that is not a load is as disqualifying as none',
+    );
+    assert.equal(classifyLoadError(webkit, 'ifc_model_load'), 'file_unreadable');
+    assert.equal(classifyLoadError(webkit, 'geometry_processing'), 'file_unreadable');
+
+    // The Chromium wording needs no context: Blink words its DOM failures
+    // "Failed to execute '...' on '...'", so they never reach this text.
+    assert.equal(
+      classifyLoadError(new Error(
+        'A requested file or directory could not be found at the time an operation was processed.',
+      )),
+      'file_unreadable',
+    );
+  });
+
+  it('leaves the DOM-mutation NotFoundError alone - it is not a file failure', () => {
+    // `harden-dom-mutations.ts` exists because a translation extension makes
+    // React's reconciler call removeChild/insertBefore against a parent that no
+    // longer holds the node. Those are NotFoundErrors too, and telling that
+    // user their file was moved would be a lie. The two families are separated
+    // by wording, which is why the matcher above is anchored on the whole
+    // message instead of searching for "could not be found".
+    assert.equal(
+      classifyLoadError(new Error(
+        "Failed to execute 'removeChild' on 'Node': The node to be removed is not a child of this node.",
+      )),
+      'unknown',
+    );
+    assert.equal(
+      classifyLoadError(new Error(
+        "Failed to execute 'insertBefore' on 'Node': The node before which the new node is to be inserted is not a child of this node.",
+      )),
+      'unknown',
     );
   });
 
@@ -282,7 +435,7 @@ describe('classifyLoadError', () => {
   // unanchored `network_unavailable` claims it — which both fingerprints it
   // together with genuine offline blips AND hands it to the benign-severity
   // downgrade in analytics-scrub.ts, silencing a real deploy failure that
-  // survived main.tsx's one-shot chunk-reload budget. #2410 removed the explicit
+  // survived bootstrap.tsx's one-shot chunk-reload budget. #2410 removed the explicit
   // exclusion that used to say so, because the whole-message anchor subsumes it
   // (the message names the module, so it is not the whole wording) — leaving
   // this test as the live gate on that anchor rather than an unreachable branch.
@@ -609,9 +762,20 @@ describe('formatLoadError', () => {
       'tower.ifc',
     );
     assert.match(msg, /"tower\.ifc"/);
-    assert.match(msg, /select the file again/i);
+    assert.match(msg, /open it again/i);
     // Must NOT tell them to close tabs / shrink the model — nothing is too big.
     assert.doesNotMatch(msg, /memory|too large|smaller/i);
+  });
+
+  it('tells the user to re-pick a file that moved out from under the browser (#3731)', () => {
+    const msg = formatLoadError(
+      new Error('A requested file or directory could not be found at the time an operation was processed.'),
+      'tower.ifc',
+    );
+    assert.match(msg, /"tower\.ifc"/);
+    assert.match(msg, /open it again/i);
+    // The raw DOM sentence is what four field reports put in front of a user.
+    assert.doesNotMatch(msg, /at the time an operation was processed/i);
   });
 
   it('preserves the raw message for unknown failures', () => {
@@ -718,5 +882,260 @@ describe('wasm runtime traps (#1898)', () => {
     assert.match(msg, /geometry engine crashed/i);
     assert.match(msg, /memory/i);
     assert.doesNotMatch(msg, /unreachable/);
+  });
+});
+
+describe('bundleAgeHours (#4886)', () => {
+  const built = '2026-09-14T06:36:09.000Z';
+
+  it('reports whole hours since the build', () => {
+    assert.equal(bundleAgeHours(built, Date.parse('2026-09-15T06:52:10.208Z')), 24);
+    assert.equal(bundleAgeHours(built, Date.parse(built)), 0);
+  });
+
+  it('reports nothing when the build date is unknown, invalid, or in the future', () => {
+    assert.equal(bundleAgeHours(undefined, Date.now()), undefined);
+    assert.equal(bundleAgeHours('dev', Date.now()), undefined);
+    assert.equal(bundleAgeHours(built, Date.parse('2026-09-13T00:00:00Z')), undefined);
+  });
+});
+
+
+describe('invalid .ifcZIP contents (#8258)', () => {
+  type ArchiveEvent = { event: string; properties: Record<string, unknown> };
+  const refusals = [
+    'This .ifcZIP archive contains no .ifc/.ifcxml entry — nothing to parse.',
+    'This .ifcZIP archive contains 2 model files (tower.ifc, annex.ifc) — expected exactly one.',
+    'This .ifcZIP archive contains 12 model files (a.ifc, ...) — expected exactly one.',
+    'This .ifcZIP archive\'s model entry "tower.ifc" declares an uncompressed size of 8.0 GiB, over the 4.0 GiB limit — refusing to decompress.',
+    'This .ifcZIP archive\'s extracted entry "tower.ifc" exceeds the 4096 MiB limit.',
+  ];
+
+  it('classifies every parser content/size refusal and gives actionable guidance', () => {
+    for (const message of refusals) {
+      assert.equal(classifyLoadError(new Error(message)), 'invalid_archive', message);
+      const guidance = formatLoadError(new Error(message), 'bundle.ifczip');
+      assert.match(guidance, /"bundle\.ifczip"/);
+      assert.match(guidance, /exactly one \.ifc\/\.ifcxml model/);
+      assert.match(guidance, /extraction size limit/);
+      assert.match(guidance, /Extract and open a single model directly/);
+      assert.match(guidance, /export a smaller model/);
+    }
+  });
+
+  it('retains classification after analytics filename scrubbing, including the production form', () => {
+    const stored = 'This [model] archive contains 2 model files ([file], ...) — expected exactly one.';
+    assert.equal(classifyLoadError(stored), 'invalid_archive');
+    for (const message of refusals) {
+      const event = scrubEvent<ArchiveEvent>({ event: '$exception', properties: {
+        $exception_list: [{ type: 'Error', value: message }],
+        $exception_level: 'error',
+      } });
+      assert.ok(event);
+      assert.equal(event.properties.error_kind, 'invalid_archive');
+      assert.equal(event.properties.$exception_fingerprint, 'ifc-lite:invalid_archive');
+      assert.equal(event.properties.$exception_level, 'warning');
+      const list = event.properties.$exception_list as Array<{ value: string }>;
+      const scrubbed = list[0].value;
+      assert.doesNotMatch(scrubbed, /tower|annex/);
+      // Size-refusal redaction can erase the prefix; tagging above must
+      // happen before scrubbing. Cardinality messages keep their structure.
+      if (message.includes(' contains ')) {
+        assert.equal(classifyLoadError(scrubbed), 'invalid_archive', scrubbed);
+      }
+    }
+  });
+
+  it('does not let user-controlled entry names steal the archive bucket', () => {
+    for (const name of ['out of memory.ifc', 'ifc-lite_bg.wasm.ifc', 'failed to read file.ifc']) {
+      assert.equal(classifyLoadError(
+        `This .ifcZIP archive contains 2 model files (${name}, other.ifc) — expected exactly one.`,
+      ), 'invalid_archive');
+      assert.equal(classifyLoadError(
+        `This .ifcZIP archive's extracted entry "${name}" exceeds the 4096 MiB limit.`,
+      ), 'invalid_archive');
+    }
+    assert.equal(classifyLoadError('out of memory while decompressing archive'), 'out_of_memory');
+  });
+
+  it('keeps unrelated archive bugs and quoted or extended refusals loud', () => {
+    for (const message of [
+      'Failed to update archive index',
+      'This archive contains no .ifc/.ifcxml entry — nothing to parse.',
+      ...refusals.map((message) => `Upload failed: ${message}`),
+      ...refusals.map((message) => `${message} Internal state corrupted.`),
+    ]) {
+      assert.equal(classifyLoadError(message), 'unknown', message);
+      const event = scrubEvent<ArchiveEvent>({ event: '$exception', properties: {
+        $exception_list: [{ type: 'Error', value: message }],
+        $exception_level: 'error',
+      } });
+      assert.equal(event?.properties.$exception_level, 'error');
+      assert.equal(event?.properties.error_kind, undefined);
+      assert.equal(event?.properties.$exception_fingerprint, undefined);
+    }
+  });
+
+  it('preserves an explicitly chosen severity and fingerprint', () => {
+    const event = scrubEvent<ArchiveEvent>({ event: '$exception', properties: {
+      $exception_list: [{ type: 'Error', value: refusals[0] }],
+      $exception_level: 'fatal',
+      $exception_fingerprint: 'chosen-at-capture',
+    } });
+    assert.equal(event?.properties.$exception_level, 'fatal');
+    assert.equal(event?.properties.$exception_fingerprint, 'chosen-at-capture');
+  });
+});
+
+// Invalid-input telemetry regression: synthetic bytes only, never field payloads.
+describe('invalid input content refusals', () => {
+  const messages = [
+    'E57: header truncated (need 48 bytes)',
+    'E57: bad magic "\u0000\ufffd\nTEST" (expected "ASTM-E57")',
+    'E57: bad magic "out of memory" (expected "ASTM-E57")',
+    'E57: pageSize too small', 'E57: invalid pageSize 0',
+    'E57: file contains no Data3D scans',
+    'E57: XML root is not <e57Root> (saw <other>)',
+    'LAS: header truncated', 'LAS: bad magic — expected "LASF"',
+    'LAS: invalid point count', 'LAS: invalid X scale (NaN)', 'LAS: invalid Z offset (Infinity)',
+    'LAS: header point-record length (1) smaller than format 0 baseline (20)',
+    'PLY: invalid vertex count NaN',
+    'PLY: vertex property "x" must not be declared more than once',
+    'PCD: missing DATA line in header (scanned first 4 bytes)',
+    'PCD: malformed DATA line', 'PCD: missing FIELDS',
+    'PCD: SIZE/FIELDS length mismatch', 'PCD: TYPE/FIELDS length mismatch',
+    'PCD: field stride overflow', 'PCD: invalid point count',
+    'PCD: x/y/z fields are required', 'PCD: invalid field SIZE or COUNT (size=0, count=1)',
+    'PLY: missing magic — file does not start with "ply"',
+    'PLY: missing end_header line in first 4 bytes',
+    'PLY: end_header line not terminated by newline',
+    'PLY: missing `format` line in header', 'PLY: missing `vertex` element',
+    'PLY: no vertex element', 'PLY: vertex element must define x, y, z properties',
+    'PLY: invalid element count "-1" for element "vertex"',
+    'PLY: property declared before any element: "property float x"',
+    'PLY: invalid list property declaration: "property list"',
+    'XYZ: file does not look like ASCII point data',
+    'PTS: file does not look like ASCII point data',
+    'CSV: file does not look like ASCII point data',
+    'Invalid IFCX file: JSON parse error - SyntaxError: unexpected token',
+    'Invalid IFCX file "synthetic": missing or invalid header.ifcxVersion',
+    'Unknown file format. Expected IFC (STEP) or IFCX (JSON).',
+  ];
+  for (const message of messages) {
+    it(`classifies and retains a warning: ${JSON.stringify(message)}`, () => {
+      assert.equal(classifyLoadError(new Error(message)), 'invalid_input');
+      const event = scrubEvent<{ event: string; properties: Record<string, unknown> }>({ event: '$exception', properties: {
+        ...errorCaptureProps(new Error(message), 'ifc_model_load'),
+        $exception_list: [{ type: 'Error', value: message }],
+        $exception_level: 'error',
+      } });
+      assert.ok(event);
+      assert.equal(event.properties.error_kind, 'invalid_input');
+      assert.equal(event.properties.$exception_fingerprint, 'ifc-lite:invalid_input');
+      assert.equal(event.properties.$exception_level, 'warning');
+      // Also exercise auto-capture without an explicitly supplied kind.
+      const automatic = scrubEvent<{ event: string; properties: Record<string, unknown> }>({
+        event: '$exception', properties: {
+          $exception_list: [{ type: 'Error', value: message }], $exception_level: 'error',
+        },
+      });
+      assert.equal(automatic?.properties.error_kind, 'invalid_input');
+      assert.equal(automatic?.properties.$exception_level, 'warning');
+      assert.equal(automatic?.properties.$exception_fingerprint, 'ifc-lite:invalid_input');
+      assert.match(formatLoadError(new Error(message)), /file is invalid/);
+    });
+  }
+  it('uses stable STEP error codes without matching arbitrary parser prose', () => {
+    for (const code of ['EMPTY_INPUT', 'INVALID_STEP', 'MISSING_DATA']) {
+      assert.equal(classifyLoadError(Object.assign(new Error('synthetic'), { name: 'IfcInputError', code })), 'invalid_input');
+    }
+    assert.equal(classifyLoadError(Object.assign(new Error('synthetic'), { name: 'IfcInputError', code: 'TRUNCATED_STEP' })), 'unknown');
+  });
+  it('keeps a memory failure during IFCX parsing out of invalid input', () => {
+    assert.equal(
+      classifyLoadError(new Error('Invalid IFCX file: JSON parse error - RangeError: Array buffer allocation failed')),
+      'out_of_memory',
+    );
+  });
+  it('keeps runtime, transport and unsupported-feature failures loud', () => {
+    for (const message of [
+      'Invalid packed parser index offsets', 'Cannot read properties of undefined',
+      'HTTP Range: body length 4 does not match the requested 64 bytes',
+      'E57: truncated DataPacket header', 'LAS: unsupported point data format 11',
+      'PLY: unsupported format "future"', 'XML: missing root element',
+      'Failed: LAS: header truncated', 'LAS: header truncated Internal bug',
+    ]) {
+      assert.equal(classifyLoadError(new Error(message)), 'unknown', message);
+      const event = scrubEvent<{ event: string; properties: Record<string, unknown> }>({
+        event: '$exception', properties: {
+          $exception_list: [{ type: 'Error', value: message }], $exception_level: 'error',
+        },
+      });
+      assert.equal(event?.properties.$exception_level, 'error');
+      assert.equal(event?.properties.$exception_fingerprint, undefined);
+    }
+  });
+});
+
+describe('#7955 retained host errors classify by their typed code', () => {
+  it('out_of_memory is out_of_memory even though the engine only says "unreachable"', () => {
+    const error = new RetainedHostError('out_of_memory', 'unreachable');
+    assert.equal(classifyLoadError(error, 'geometry_processing'), 'out_of_memory');
+    assert.equal(errorCaptureProps(error, 'geometry_processing').error_kind, 'out_of_memory');
+  });
+  it('a worker_crash is a worker crash, not memory, even when its trap says "memory access out of bounds"', () => {
+    const error = new RetainedHostError('worker_crash', 'memory access out of bounds');
+    assert.equal(classifyLoadError(error, 'geometry_processing'), 'geometry_worker_crash');
+    assert.equal(errorCaptureProps(error, 'geometry_processing').error_kind, 'geometry_worker_crash');
+  });
+  it('a retained stall, the one retained failure that is not a host error, is a stall at startup and mid-run', () => {
+    for (const stage of ['startup', 'product'] as const) {
+      const error = new RetainedStallError(35_000, stage);
+      assert.equal(classifyLoadError(error, 'geometry_processing'), 'geometry_stream_stalled', stage);
+      assert.match(formatLoadError(error, 'tower.ifc', 'geometry_processing'), /stalled and was stopped/, stage);
+    }
+  });
+});
+
+describe('WebAssembly SIMD unsupported (#10784)', () => {
+  // The exact message from the PostHog report (V8, a CompileError from compileStreaming).
+  const V8 = 'WebAssembly.compileStreaming(): Compiling function #74 failed: Wasm SIMD unsupported @+117554';
+  const compileError = (message: string) => Object.assign(new Error(message), { name: 'CompileError' });
+
+  it('classifies the engine wordings, bare and worker-wrapped', () => {
+    assert.equal(classifyLoadError(compileError(V8)), 'wasm_simd_unsupported');
+    assert.equal(classifyLoadError(compileError('at offset 117554: SIMD support is not enabled')), 'wasm_simd_unsupported');
+    // A worker-reported compile failure must not read as a crash that a lower tier could fix.
+    assert.equal(classifyLoadError(new Error(`Geometry worker error: CompileError: ${V8}`)), 'wasm_simd_unsupported');
+  });
+
+  it('leaves a message that merely mentions SIMD in its own bucket', () => {
+    assert.equal(classifyLoadError(new Error('SIMD scan finished')), 'unknown');
+    // File names are user-controlled; one with "simd" in it must not claim the benign kind.
+    assert.equal(classifyLoadError(new Error('Failed to load "simd-bench.ifc": format not supported')), 'unknown');
+    assert.equal(classifyLoadError(new Error('Geometry worker error: simd-test.ifc unsupported entity')), 'geometry_worker_crash');
+    assert.equal(classifyLoadError(new Error('Geometry worker error: "Wasm SIMD unsupported.ifc" crashed')), 'geometry_worker_crash');
+    assert.equal(classifyLoadError(new Error('Geometry worker error: "SIMD support is not enabled.ifc" crashed')), 'geometry_worker_crash');
+    assert.equal(classifyLoadError(new Error('Geometry worker error: "x failed: Wasm SIMD unsupported.ifc" crashed')), 'geometry_worker_crash');
+  });
+
+  it('tells the user what is missing instead of the raw compile text', () => {
+    const message = formatLoadError(compileError(V8), 'model.ifc', 'geometry_processing');
+    assert.match(message, /WebAssembly SIMD/);
+    assert.doesNotMatch(message, /Compiling function/);
+  });
+
+  it('groups the analytics event and downgrades it to a warning', () => {
+    const event = scrubEvent<{ event: string; properties: Record<string, unknown> }>({ event: '$exception', properties: {
+      $exception_list: [{ type: 'CompileError', value: V8 }],
+      $exception_level: 'error',
+    } });
+    assert.equal(event?.properties.error_kind, 'wasm_simd_unsupported');
+    assert.equal(event?.properties.$exception_fingerprint, 'ifc-lite:wasm_simd_unsupported');
+    assert.equal(event?.properties.$exception_level, 'warning');
+  });
+
+  it("recognises the viewer's own refusal from its text alone, as the analytics path sees it", () => {
+    assert.equal(classifyLoadError('Wasm SIMD unsupported: this browser cannot compile the geometry engine'), 'wasm_simd_unsupported');
   });
 });

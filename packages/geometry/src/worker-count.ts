@@ -221,3 +221,31 @@ export function computeWorkerCount(inputs: WorkerCountInputs): WorkerCountResult
 export function pickWorkerCount(inputs: WorkerCountInputs): number {
   return computeWorkerCount(inputs).count;
 }
+
+/**
+ * The worker count a parallel load of `fileSizeMB` uses on this host: the
+ * browser's cores and memory, and a file-size proxy for the job count (the
+ * memory cap keeps an over-estimate harmless and still bounds an explicit
+ * `workerCountOverride`, so the A/B knob cannot OOM the tab). Shared by the
+ * load and by the warm pool's prewarm (#7036) so both plan the same count.
+ */
+export function planLoadWorkerCount(fileSizeMB: number, workerCountOverride?: number): WorkerCountResult & { cores: number } {
+  const nav = typeof navigator !== 'undefined' ? navigator as Navigator & { deviceMemory?: number } : undefined;
+  const cores = nav?.hardwareConcurrency ?? 2;
+  const result = computeWorkerCount({
+    fileSizeMB,
+    cores,
+    deviceMemoryGB: nav?.deviceMemory ?? 8,
+    totalJobs: Math.max(1, Math.ceil(fileSizeMB * 100)),
+    workerCountOverride,
+  });
+  return { ...result, cores };
+}
+
+/** Whether this environment can run the geometry worker pool at all: shared memory, workers and more than one core. */
+export function canRunWorkerPool(): boolean {
+  return typeof SharedArrayBuffer !== 'undefined'
+    && typeof Worker !== 'undefined'
+    && typeof navigator !== 'undefined'
+    && (navigator.hardwareConcurrency ?? 1) > 1;
+}

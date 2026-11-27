@@ -1,0 +1,254 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/**
+ * GPU-instancing (IFNS) shards on their way from a load to the renderer.
+ *
+ * Deliberately NOT store state. The shards used to ride the viewer store as
+ * `pendingInstancedShards`: the loader appended per streamed batch, the
+ * Viewport's drain effect uploaded them and cleared the field. That was two
+ * store writes per batch, each running the whole subscriber fan-out and
+ * re-rendering the Viewport, which selected the field: 264 of a Holter cold
+ * load's 462 store updates. Nothing reads the bytes but the drain, so they
+ * travel through this queue and React never hears about them.
+ *
+ * Producers: the streaming loader (primary loads, per batch), the federated
+ * finalize (once its express-id offset is known, #1912), and the two cache-hit
+ * paths. Consumer: `useInstancedShardDrain`, the renderer's single drain.
+ * Placement indexing (`lib/model-placement/spatial-index.ts`) asks whether a
+ * model still has shards in flight and is told when they land.
+ */
+
+import { perfTally } from '@ifc-lite/load-trace';
+import { forgetInstancedShardsBeforeReset, noteInstancedShardModel } from './instancedShardModels.js';
+
+/** One queued shard. The entry object itself is its identity: two entries may share bytes. */
+export interface PendingInstancedShard {
+  readonly modelId: string;
+  readonly bytes: ArrayBuffer;
+}
+
+export interface InstancedShardQueueEvent {
+  /**
+   * `drained`: uploaded by the renderer. `dropped`: settled by the drain without an upload.
+   * `discarded`: removed undrained (a reset, or a model's removal).
+   * `adopted`: uploaded directly by a committed scene snapshot, outside the queue.
+   */
+  readonly kind: 'enqueued' | 'drained' | 'dropped' | 'discarded' | 'adopted' | 'unattested';
+  readonly modelIds: ReadonlySet<string>;
+  /** `enqueued`: the shards this call queued; `adopted`: shards a committed scene snapshot uploaded directly (bytes read, never detached). */
+  readonly shards?: readonly PendingInstancedShard[];
+  /** `dropped`/`discarded`: the shards that never reached the scene. */
+  readonly withheld?: readonly PendingInstancedShard[];
+  /** `discarded` only: a full discard, which also moved the queue generation. */
+  readonly full?: boolean;
+}
+
+type Listener = (event: InstancedShardQueueEvent) => void;
+
+let pending: PendingInstancedShard[] = [];
+/** Shards a drain has taken and `consume` has not yet settled; a discard voids them in place. */
+interface InFlight { readonly shards: readonly PendingInstancedShard[]; readonly outcomes: Map<PendingInstancedShard, InstancedShardOutcome>; readonly voided: Set<PendingInstancedShard> }
+const inFlight = new Set<InFlight>();
+const listeners = new Set<Listener>();
+// Bumped by every full discard (session reset, all models cleared). A load
+// captures it after its own reset; its shards are refused once it is behind.
+let generation = 0;
+const drops = { superseded: 0, ownerless: 0 };
+
+/** Shards that were refused or dropped instead of uploaded, by reason. */
+export function instancedShardDrops(): Readonly<typeof drops> {
+  return { ...drops };
+}
+
+/** Count (and report once per call) shards that never reached the renderer. */
+export function noteDroppedInstancedShards(reason: keyof typeof drops, count: number, modelIds: Iterable<string>): void {
+  if (count === 0) return;
+  drops[reason] += count;
+  perfTally(`viewer.instancedShardsDropped.${reason}`, count, 'shards');
+  console.warn(`[instancedShardQueue] dropped ${count} ${reason} shard(s) for ${[...new Set(modelIds)].join(', ')}`);
+}
+
+/** The queue generation a load should capture after its own reset. */
+export function instancedShardGeneration(): number {
+  return generation;
+}
+
+function emit(event: InstancedShardQueueEvent): void {
+  for (const listener of listeners) {
+    try {
+      listener(event);
+    } catch (error) {
+      console.error('[instancedShardQueue] listener failed:', error);
+    }
+  }
+}
+
+function modelIdsOf(shards: readonly PendingInstancedShard[]): Set<string> {
+  return new Set(shards.map((shard) => shard.modelId));
+}
+
+/**
+ * Queue `modelId`'s shard bytes for upload, oldest first. The bytes are read,
+ * never detached. Every producer passes the `instancedShardGeneration()` it
+ * captured when its load began (after its own reset): shards from a load that
+ * a reset or full clear has since superseded are refused here, so they cannot
+ * sit in the queue holding their buffers. Required, so no producer can skip it.
+ */
+export function enqueueInstancedShards(modelId: string, shards: readonly ArrayBuffer[], fromGeneration: number | InstancedShardSupplyToken): void {
+  if (shards.length === 0) return;
+  if (!supplyCurrent(modelId, fromGeneration)) {
+    noteDroppedInstancedShards('superseded', shards.length, [modelId]);
+    return;
+  }
+  noteInstancedShardModel(modelId);
+  const added = shards.map((bytes) => ({ modelId, bytes }));
+  for (const shard of added) pending.push(shard);
+  emit({ kind: 'enqueued', modelIds: new Set([modelId]), shards: added });
+}
+
+/** What the consumer did with one shard: `waiting` keeps it queued. */
+export type InstancedShardOutcome = 'uploaded' | 'dropped' | 'waiting';
+
+/**
+ * Hand every queued shard to `consume`, which settles each one. Uploaded and
+ * dropped shards leave the queue; a `waiting` shard, and any shard `consume`
+ * did not settle (it returned early or threw), goes back to the front of the
+ * queue in its original order, so a failing consumer loses nothing and
+ * uploads nothing twice. Listeners hear `drained` only for shards that left,
+ * after `consume` finished, so a synchronous upload is done before anyone
+ * treats the model as settled. A throw is rethrown after the queue is
+ * restored. A discard during `consume` wins: it voids the taken shards it covers that are not
+ * yet settled, reports them `withheld` itself, and they are never restored nor settled later.
+ */
+export function drainInstancedShards(
+  consume: (shards: readonly PendingInstancedShard[], settle: (shard: PendingInstancedShard, outcome: InstancedShardOutcome) => void) => void,
+): void {
+  if (pending.length === 0) return;
+  const taken = pending;
+  pending = [];
+  const batch: InFlight = { shards: taken, outcomes: new Map(), voided: new Set() };
+  const { outcomes, voided } = batch;
+  inFlight.add(batch);
+  try {
+    consume(taken, (shard, outcome) => { if (!voided.has(shard)) outcomes.set(shard, outcome); });
+  } finally {
+    inFlight.delete(batch);
+    const gone = (shard: PendingInstancedShard) => outcomes.get(shard) === 'uploaded' || outcomes.get(shard) === 'dropped';
+    const restored = taken.filter((shard) => !gone(shard) && !voided.has(shard));
+    if (restored.length > 0) pending = [...restored, ...pending];
+    const uploaded = taken.filter((shard) => outcomes.get(shard) === 'uploaded');
+    const lost = taken.filter((shard) => outcomes.get(shard) === 'dropped');
+    if (uploaded.length > 0) emit({ kind: 'drained', modelIds: modelIdsOf(uploaded) });
+    // A dropped shard never reached the scene: whatever claimed the model whole before it no longer can.
+    if (lost.length > 0) { const ids = modelIdsOf(lost); for (const id of ids) bumpModelEpoch(id); emit({ kind: 'dropped', modelIds: ids, withheld: lost }); }
+  }
+}
+
+/**
+ * Drop undrained shards: all of them (a session reset or a full model clear,
+ * so a rapid switch cannot upload them into the next scene), or one model's
+ * (its removal: model ids are reused, so its bytes must not reach whoever
+ * takes the id next, nor fall back to another model's index).
+ */
+export function discardInstancedShards(modelId?: string): void {
+  if (modelId === undefined) { generation++; forgetInstancedShardsBeforeReset(); }
+  // A model-scoped discard ends that model's supply even when nothing was queued: a load
+  // still running for it must not feed the next supply (`instancedShardSupplyToken`).
+  else bumpModelEpoch(modelId);
+  const covers = (shard: PendingInstancedShard) => modelId === undefined || shard.modelId === modelId;
+  const dropped = pending.filter(covers);
+  // Taken by a running drain but not settled: it is not in `pending`, yet it never reached the scene.
+  for (const batch of inFlight) {
+    for (const shard of batch.shards) {
+      const outcome = batch.outcomes.get(shard);
+      if (covers(shard) && outcome !== 'uploaded' && outcome !== 'dropped' && !batch.voided.has(shard)) {
+        batch.voided.add(shard); batch.outcomes.delete(shard); dropped.push(shard);
+      }
+    }
+  }
+  if (dropped.length === 0) return;
+
+  pending = modelId === undefined ? [] : pending.filter((shard) => shard.modelId !== modelId);
+  emit({ kind: 'discarded', modelIds: modelIdsOf(dropped), full: modelId === undefined, withheld: dropped });
+}
+
+/** A producer's statement that `modelId`'s whole shard set for `generation` is enqueued: `count` shards, zero included. */
+export interface InstancedShardSupply { readonly modelId: string; readonly generation: number; readonly epoch: number; readonly count: number }
+
+/**
+ * Per model, within one queue generation: bumped whenever the model's queued shards are
+ * dropped or discarded without a full reset. Shards and statements after the bump belong to
+ * a new supply of that model, so it can be replaced without resetting every model.
+ */
+const modelEpochs = new Map<string, number>();
+function bumpModelEpoch(modelId: string): void { modelEpochs.set(modelId, (modelEpochs.get(modelId) ?? 0) + 1); }
+export function instancedShardModelEpoch(modelId: string): number { return modelEpochs.get(modelId) ?? 0; }
+
+/** Captured by a producer when its load begins: the queue generation and the model's epoch. */
+export interface InstancedShardSupplyToken { readonly generation: number; readonly epoch: number }
+export function instancedShardSupplyToken(modelId: string): InstancedShardSupplyToken {
+  return { generation, epoch: instancedShardModelEpoch(modelId) };
+}
+/** Whether shards captured at `token` still belong to `modelId`'s current supply (a direct upload asks first). */
+export function instancedShardSupplyCurrent(modelId: string, token: InstancedShardSupplyToken): boolean { return supplyCurrent(modelId, token); }
+/** A bare generation number fences only full resets; a token also fences the model's own discards. */
+function supplyCurrent(modelId: string, from: number | InstancedShardSupplyToken): boolean {
+  return typeof from === 'number' ? from === generation : from.generation === generation && from.epoch === instancedShardModelEpoch(modelId);
+}
+const supplyListeners = new Set<(supply: InstancedShardSupply) => void>();
+
+/**
+ * Call once a load has enqueued EVERY shard it will produce for `modelId`
+ * (none is a valid answer). Model-scoped completeness proof for consumers that
+ * must know a fresh shard set is whole (the geometry backing, #10264); a
+ * superseded load's statement is ignored. A path that never states it simply
+ * never proves completeness.
+ */
+export function completeInstancedShardSupply(modelId: string, count: number, fromGeneration: number | InstancedShardSupplyToken): void {
+  if (!supplyCurrent(modelId, fromGeneration)) return;
+  const supply = { modelId, generation, epoch: instancedShardModelEpoch(modelId), count };
+  for (const listener of supplyListeners) {
+    try { listener(supply); } catch (error) { console.error('[instancedShardQueue] supply listener failed:', error); }
+  }
+}
+
+export function subscribeInstancedShardSupply(listener: (supply: InstancedShardSupply) => void): () => void {
+  supplyListeners.add(listener);
+  return () => { supplyListeners.delete(listener); };
+}
+
+/**
+ * A scene snapshot uploaded these shards directly (not through this queue) and
+ * its adoption has now COMMITTED: tell listeners that need every shard the scene
+ * draws (the geometry backing, #10264). Counted already at upload
+ * (`noteInstancedShardModel`); a refused adoption requeues them here instead.
+ */
+export function announceAdoptedInstancedShards(modelId: string, shards: readonly ArrayBuffer[], fromGeneration: number | InstancedShardSupplyToken): void {
+  if (shards.length === 0 || !supplyCurrent(modelId, fromGeneration)) return;
+  emit({ kind: 'adopted', modelIds: new Set([modelId]), shards: shards.map((bytes) => ({ modelId, bytes })) });
+}
+
+/**
+ * The scene now draws shards of `modelId` that nothing will attest (a snapshot whose direct upload
+ * failed part-way): no older backing may stand for its instancing any more (#10264).
+ */
+export function unattestInstancedShards(modelId: string): void {
+  emit({ kind: 'unattested', modelIds: new Set([modelId]) });
+}
+
+export function hasPendingInstancedShards(modelId?: string): boolean {
+  return modelId === undefined ? pending.length > 0 : pending.some((shard) => shard.modelId === modelId);
+}
+
+export function subscribeInstancedShards(listener: Listener): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+// The supported observation point for e2e, as the store is for store state:
+// the shards are not store state, so a page subscribes here to see each
+// enqueue's wire bytes (`event.shards`).
+(globalThis as typeof globalThis & { __ifc_lite_instanced_shards__?: { subscribe: typeof subscribeInstancedShards } })
+  .__ifc_lite_instanced_shards__ = { subscribe: subscribeInstancedShards };

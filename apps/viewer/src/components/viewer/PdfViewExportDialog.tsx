@@ -31,10 +31,22 @@
  * The appearance controls live in `PdfViewAppearanceSection`; the default is
  * SHADED, because a sheet that measures correctly and looks nothing like the
  * view it claims to be is its own defect.
+ *
+ * Chrome (open/busy state, the Dialog shell, the guarded Cancel/Export
+ * footer) lives in `ExportDialogShell.tsx` (#5848); this component keeps its
+ * own options and export logic, plus two things the other migrated dialogs
+ * don't need: it gates its heavy view/camera reads on "is the dialog open"
+ * via the shell's `onOpenStateChange`, and it closes on a successful export
+ * (`closeOnSuccess`) rather than showing the result Alert — it always did,
+ * closing straight back to the viewport it just captured. A failed export now
+ * also renders the Alert, which it did not before #5848; that is additive,
+ * not a behaviour any test relied on (a failure was, and still is, toasted).
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { FileText, Loader2 } from 'lucide-react';
+import { useViewPdfSource } from './useViewPdfSource';
+import type { ExportSurface } from '@/lib/analytics-export-events';
+import { useCallback, useMemo, useState } from 'react';
+import { FileText } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -45,21 +57,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '@/components/ui/dialog';
 import { useViewerStore } from '@/store';
-import { posthog } from '@/lib/analytics';
+import { useTranslation } from '@/i18n';
+import { trackExportCompleted } from '@/lib/analytics';
+import { downloadBlob } from '@/lib/export/download';
 import { toast } from '@/components/ui/toast';
 import { formatScaleFactorLabel, formatSheetScaleLabel } from '@ifc-lite/drawing-2d';
 import { collectViewMeshes } from '@/lib/export/view-pdf/collect-view-meshes';
-import { readViewPdfSource, readViewZoom } from '@/lib/export/view-pdf/view-pdf-export-source';
+import { readViewZoom } from '@/lib/export/view-pdf/view-pdf-export-source';
 import { resolveKeptHalfSpace } from '@/lib/export/view-pdf/view-section-plane';
 import {
   estimateViewPdfLayout,
@@ -67,11 +72,13 @@ import {
 } from '@/lib/export/view-pdf/view-pdf-page-estimate';
 import {
   deriveDisplayedScaleFactor,
+  formatMm,
   describePage,
 } from '@/lib/export/view-pdf/view-pdf-scale';
 import { viewPdfPhaseLabel } from '@/lib/export/view-pdf/view-pdf-progress';
 import { PdfViewAppearanceSection } from './PdfViewAppearanceSection';
 import { PdfViewPageNotices } from './PdfViewPageNotices';
+import { ExportDialogShell, type ExportDialogShellResult } from './ExportDialogShell';
 import type {
   ViewPdfExportInput,
   ViewPdfExportResult,
@@ -90,6 +97,7 @@ import type {
 export type ViewPdfExporter = (input: ViewPdfExportInput) => Promise<ViewPdfExportResult>;
 
 interface PdfViewExportDialogProps {
+  surface: ExportSurface;
   trigger?: React.ReactNode;
   /** Test seam for the exporter. See {@link ViewPdfExporter}. */
   exportViewPdf?: ViewPdfExporter;
@@ -98,13 +106,9 @@ interface PdfViewExportDialogProps {
 /** The drafting scales offered as presets, coarsest detail last. */
 const SCALE_PRESETS = [10, 20, 50, 100, 200, 500] as const;
 
-/** Round a millimetre figure for display without inventing precision. */
-function formatMm(value: number): string {
-  const rounded = Math.round(value * 10) / 10;
-  return Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1);
-}
 
-export function PdfViewExportDialog({ trigger, exportViewPdf }: PdfViewExportDialogProps) {
+export function PdfViewExportDialog({ surface, trigger, exportViewPdf }: PdfViewExportDialogProps) {
+  const { t } = useTranslation();
   // Subscribed purely so the readout recomputes when the view changes; the
   // values themselves are read back off `getState()` inside the memo, which
   // keeps this component from restating the shape of half the store.
@@ -113,13 +117,20 @@ export function PdfViewExportDialog({ trigger, exportViewPdf }: PdfViewExportDia
   const hiddenEntities = useViewerStore((s) => s.hiddenEntities);
   const isolatedEntities = useViewerStore((s) => s.isolatedEntities);
   const typeVisibility = useViewerStore((s) => s.typeVisibility);
+  const structuralViewMode = useViewerStore((s) => s.structuralViewMode);
   const sectionPlane = useViewerStore((s) => s.sectionPlane);
   const selectedStoreys = useViewerStore((s) => s.selectedStoreys);
   const classFilter = useViewerStore((s) => s.classFilter);
+  // A retype changes the class a mesh is filtered by without touching the models (#10246).
+  const mutationVersion = useViewerStore((s) => s.mutationVersion);
+  const mutationViews = useViewerStore((s) => s.mutationViews);
   const projectionMode = useViewerStore((s) => s.projectionMode);
   const setProjectionMode = useViewerStore((s) => s.setProjectionMode);
 
-  const [open, setOpen] = useState(false);
+  // Mirrors the shell's own open state (via `onOpenStateChange`) purely to
+  // gate these reads the way the pre-#5848 local `open` state did — the
+  // shell itself owns the Dialog's actual open/close chrome now.
+  const [open, setOpenMirror] = useState(false);
   const [scaleChoice, setScaleChoice] = useState<string>('displayed');
   const [customScale, setCustomScale] = useState('100');
   const [showHiddenEdges, setShowHiddenEdges] = useState(true);
@@ -129,15 +140,18 @@ export function PdfViewExportDialog({ trigger, exportViewPdf }: PdfViewExportDia
   // Shaded by default: the export exists to reproduce the viewport, and the
   // viewport is solid and coloured.
   const [renderMode, setRenderMode] = useState<ViewPdfRenderMode>('shaded');
-  const [isExporting, setIsExporting] = useState(false);
   const [phase, setPhase] = useState<string | null>(null);
 
-  const source = useMemo(
-    () => (open ? readViewPdfSource(useViewerStore.getState()) : null),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- these are invalidation triggers; the values are read from getState() above.
-    [open, models, geometryResult, hiddenEntities, isolatedEntities, typeVisibility,
-      sectionPlane, selectedStoreys, classFilter, projectionMode],
-  );
+  const handleOpenStateChange = useCallback((next: boolean) => {
+    setOpenMirror(next);
+    // Reset the transient bits every time the dialog opens so a previous
+    // run's progress text cannot be read as this run's.
+    if (next) setPhase(null);
+  }, []);
+
+  // Released CPU geometry (#10264) is read back first; resident geometry reads synchronously.
+  const { source, status: sourceStatus } = useViewPdfSource(open, [models, geometryResult, hiddenEntities, isolatedEntities, typeVisibility, structuralViewMode,
+    sectionPlane, selectedStoreys, classFilter, projectionMode, mutationVersion, mutationViews]);
 
   const camera = source?.camera ?? null;
   const drawnMeshes = useMemo(() => (source ? collectViewMeshes(source.view) : []), [source]);
@@ -194,6 +208,7 @@ export function PdfViewExportDialog({ trigger, exportViewPdf }: PdfViewExportDia
       const layout = estimateViewPdfLayout(drawnMeshes, camera, scaleFactor, {
         includeScaleStamp: showScaleStamp,
         keptHalfSpace: source?.section ? resolveKeptHalfSpace(source.section) : null,
+        extraKeptHalfSpaces: source?.extraSections.map(resolveKeptHalfSpace),
       });
       if (!layout) return null;
       return { ...layout, ...describePage(layout.page) };
@@ -204,21 +219,14 @@ export function PdfViewExportDialog({ trigger, exportViewPdf }: PdfViewExportDia
       return null;
     }
   }, [camera, drawnMeshes, scaleFactor, showScaleStamp]);
-
-  // Reset the transient bits every time the dialog opens so a previous run's
-  // progress text cannot be read as this run's.
-  useEffect(() => {
-    if (open) setPhase(null);
-  }, [open]);
-
   const oversize = preview?.oversize ?? false;
-  const canExport =
-    !isExporting && camera !== null && drawnMeshes.length > 0 && scaleFactor !== null && !oversize;
+  const canExport = camera !== null && drawnMeshes.length > 0 && scaleFactor !== null && !oversize;
 
-  const handleExport = useCallback(async () => {
-    if (!source || !camera || scaleFactor === null) return;
-    setIsExporting(true);
-    setPhase('Preparing');
+  const handleExport = useCallback(async (): Promise<ExportDialogShellResult> => {
+    if (!source || !camera || scaleFactor === null) {
+      return { success: false, message: t('sheetsPdf.pdfView.exportFailedGeneric') };
+    }
+    setPhase(t('sheetsPdf.pdfView.exportPhasePreparing'));
     try {
       // Loaded on demand: the orchestrator pulls in the whole 2D drawing
       // pipeline (cutter, edge extractor, hidden-line raster) plus jsPDF behind
@@ -226,13 +234,16 @@ export function PdfViewExportDialog({ trigger, exportViewPdf }: PdfViewExportDia
       // load lands in the catch below, not on the console as an unhandled
       // rejection.
       const runExport = exportViewPdf ?? (async (pdfInput: ViewPdfExportInput) => {
-        const { generateViewPdf } = await import('@/lib/export/view-pdf/generate-view-pdf');
-        return generateViewPdf(pdfInput);
+        const { produceNativeViewPdf } = await import('@/lib/export/native-view-pdf');
+        const { result, blob } = await produceNativeViewPdf(pdfInput);
+        downloadBlob(blob, result.filename);
+        return result;
       });
       const result = await runExport({
         view: source.view,
         camera,
         section: source.section,
+        extraSections: source.extraSections,
         scaleFactor,
         marginMm: VIEW_PDF_MARGIN_MM,
         includeHiddenLines: showHiddenEdges,
@@ -240,15 +251,14 @@ export function PdfViewExportDialog({ trigger, exportViewPdf }: PdfViewExportDia
         includeScaleStamp: showScaleStamp,
         onProgress: (stage) => setPhase(viewPdfPhaseLabel(stage)),
       });
-      const message =
-        `Exported 1:${formatScaleFactorLabel(scaleFactor)} PDF, ` +
-        `page ${formatMm(result.page.widthMm)} x ${formatMm(result.page.heightMm)} mm`;
+      const message = t('sheetsPdf.pdfView.exportSuccessToast', { scale: formatScaleFactorLabel(scaleFactor), width: formatMm(result.page.widthMm), height: formatMm(result.page.heightMm) });
       toast.success(message);
-      posthog.capture('export_completed', {
+      trackExportCompleted({
+        surface,
         format: 'pdf-3d-view',
         scale_factor: scaleFactor,
         projection_mode: camera.projectionMode,
-        section_enabled: source.section !== null,
+        section_enabled: source.section !== null || source.extraSections.length > 0,
         // What the SHEET got, not what was asked for: shaded mode forces hidden
         // edges off, and a capped raster prints below the requested dpi.
         hidden_edges: renderMode === 'shaded' ? false : showHiddenEdges,
@@ -256,14 +266,15 @@ export function PdfViewExportDialog({ trigger, exportViewPdf }: PdfViewExportDia
         shading_dpi: result.shading?.dpi ?? null,
         scale_stamp: showScaleStamp,
       });
-      setOpen(false);
+      return { success: true, message };
     } catch (err) {
       console.error('PDF view export failed:', err);
-      toast.error(
-        err instanceof Error ? `PDF export failed: ${err.message}` : 'PDF export failed.',
-      );
+      const errMsg = err instanceof Error
+        ? t('sheetsPdf.pdfView.exportFailedWithMessage', { message: err.message })
+        : t('sheetsPdf.pdfView.exportFailedGeneric');
+      toast.error(errMsg);
+      return { success: false, message: errMsg };
     } finally {
-      setIsExporting(false);
       setPhase(null);
     }
     // EVERY control the body reads belongs here - `showHiddenEdges` and
@@ -273,135 +284,114 @@ export function PdfViewExportDialog({ trigger, exportViewPdf }: PdfViewExportDia
     // this repo to catch that, and no orchestrator test can see it: the option
     // is honoured correctly one layer down. `PdfViewExportDialog.test.tsx`
     // drives the real dialog through the `exportViewPdf` seam for exactly this.
-  }, [source, camera, scaleFactor, showHiddenEdges, renderMode, showScaleStamp, exportViewPdf]);
+  }, [source, camera, scaleFactor, showHiddenEdges, renderMode, showScaleStamp, exportViewPdf, surface, t]);
 
   const displayedLabel = displayedScale
-    ? `As displayed (about 1:${formatScaleFactorLabel(displayedScale)})`
-    : 'As displayed (not available)';
+    ? t('sheetsPdf.pdfView.displayedScaleOption', { scale: formatScaleFactorLabel(displayedScale) })
+    : t('sheetsPdf.pdfView.displayedScaleUnavailable');
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        {trigger || (
+    <ExportDialogShell
+      trigger={
+        trigger || (
           <Button variant="outline" size="sm">
             <FileText className="h-4 w-4 mr-2" />
-            Export PDF
+            {t('sheetsPdf.pdfView.exportPdfButton')}
           </Button>
-        )}
-      </DialogTrigger>
-      <DialogContent className="sm:max-w-md overflow-hidden">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <FileText className="h-5 w-5" />
-            Export PDF (to-scale 3D view)
-          </DialogTitle>
-          <DialogDescription>
-            Saves everything currently visible, projected along your current view
-            direction at an exact scale. Shaded surfaces are embedded as an image placed
-            at exact size; all line work stays vector, so measurements taken off the
-            print are correct.
-          </DialogDescription>
-        </DialogHeader>
+        )
+      }
+      icon={<FileText className="h-5 w-5" />}
+      title={t('sheetsPdf.pdfView.dialogTitle')}
+      description={t('sheetsPdf.pdfView.dialogDescription')}
+      contentClassName="sm:max-w-md overflow-hidden"
+      cancelLabel={t('sheetsPdf.pdfView.cancelButton')}
+      exportLabel={t('sheetsPdf.pdfView.exportButton')}
+      exportingLabel={phase ? `${phase}...` : t('sheetsPdf.pdfView.exportingLabel')}
+      exportIcon={<FileText className="h-4 w-4 mr-2" />}
+      successTitle={t('sheetsPdf.pdfView.successTitle')}
+      errorTitle={t('sheetsPdf.pdfView.errorTitle')}
+      exportDisabled={!canExport}
+      onExport={handleExport}
+      onOpenStateChange={handleOpenStateChange}
+      closeOnSuccess
+    >
+      <div className="flex items-center gap-4">
+        <Label className="w-24" htmlFor="pdf-view-scale">
+          {t('sheetsPdf.pdfView.scaleLabel')}
+        </Label>
+        <Select value={scaleChoice} onValueChange={setScaleChoice}>
+          <SelectTrigger id="pdf-view-scale">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="displayed">{displayedLabel}</SelectItem>
+            {SCALE_PRESETS.map((preset) => (
+              <SelectItem key={preset} value={String(preset)}>
+                {`1:${preset}`}
+              </SelectItem>
+            ))}
+            <SelectItem value="custom">{t('sheetsPdf.pdfView.customOption')}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
 
-        <div className="grid gap-4 py-4">
-          <div className="flex items-center gap-4">
-            <Label className="w-24" htmlFor="pdf-view-scale">
-              Scale
-            </Label>
-            <Select value={scaleChoice} onValueChange={setScaleChoice}>
-              <SelectTrigger id="pdf-view-scale">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="displayed">{displayedLabel}</SelectItem>
-                {SCALE_PRESETS.map((preset) => (
-                  <SelectItem key={preset} value={String(preset)}>
-                    {`1:${preset}`}
-                  </SelectItem>
-                ))}
-                <SelectItem value="custom">Custom</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          {scaleChoice === 'custom' && (
-            <div className="flex items-center gap-4">
-              <Label className="w-24" htmlFor="pdf-view-custom-scale">
-                1 :
-              </Label>
-              <div className="flex flex-1 flex-col gap-1">
-                <Input
-                  id="pdf-view-custom-scale"
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={customScale}
-                  onChange={(e) => setCustomScale(e.target.value)}
-                  onBlur={() => {
-                    // Show the value that will actually be drawn, so the sheet
-                    // never differs from what the field says.
-                    if (customScaleValid) setCustomScale(String(customScaleValue));
-                  }}
-                  aria-invalid={!customScaleValid}
-                  aria-describedby={customScaleValid ? undefined : 'pdf-view-custom-scale-error'}
-                />
-                {!customScaleValid && (
-                  <p id="pdf-view-custom-scale-error" className="text-xs text-destructive">
-                    Enter a whole number greater than zero, for example 75.
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
-
-          <PdfViewPageNotices
-            preview={preview}
-            oversize={oversize}
-            projectionMode={camera?.projectionMode ?? null}
-            onSwitchToOrthographic={() => setProjectionMode('orthographic')}
-            formatMm={formatMm}
-          />
-
-          <PdfViewAppearanceSection
-            renderMode={renderMode}
-            onRenderModeChange={setRenderMode}
-            showHiddenEdges={showHiddenEdges}
-            onShowHiddenEdgesChange={setShowHiddenEdges}
-            showScaleStamp={showScaleStamp}
-            onShowScaleStampChange={setShowScaleStamp}
-            // Through the SAME formatter the sheet prints, so the note cannot
-            // promise a ratio the paper does not carry.
-            scaleLabel={scaleFactor === null ? null : formatSheetScaleLabel(scaleFactor)}
-            drawingWidthMm={preview?.drawingWidthMm ?? null}
-            drawingHeightMm={preview?.drawingHeightMm ?? null}
-          />
-
-          {source?.sectionEnabled && (
-            <p className="text-xs text-muted-foreground">
-              The active section cut is applied. Cut edges print with a heavy line weight.
-            </p>
-          )}
-        </div>
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => setOpen(false)}>
-            Cancel
-          </Button>
-          <Button onClick={() => { void handleExport(); }} disabled={!canExport}>
-            {isExporting ? (
-              <>
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                {phase ? `${phase}...` : 'Exporting...'}
-              </>
-            ) : (
-              <>
-                <FileText className="h-4 w-4 mr-2" />
-                Export
-              </>
+      {scaleChoice === 'custom' && (
+        <div className="flex items-center gap-4">
+          <Label className="w-24" htmlFor="pdf-view-custom-scale">
+            1 :
+          </Label>
+          <div className="flex flex-1 flex-col gap-1">
+            <Input
+              id="pdf-view-custom-scale"
+              type="number"
+              min="1"
+              step="1"
+              value={customScale}
+              onChange={(e) => setCustomScale(e.target.value)}
+              onBlur={() => {
+                // Show the value that will actually be drawn, so the sheet
+                // never differs from what the field says.
+                if (customScaleValid) setCustomScale(String(customScaleValue));
+              }}
+              aria-invalid={!customScaleValid}
+              aria-describedby={customScaleValid ? undefined : 'pdf-view-custom-scale-error'}
+            />
+            {!customScaleValid && (
+              <p id="pdf-view-custom-scale-error" className="text-xs text-destructive">
+                {t('sheetsPdf.pdfView.customScaleError')}
+              </p>
             )}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          </div>
+        </div>
+      )}
+
+      <PdfViewPageNotices
+        preview={preview}
+        oversize={oversize} sourceStatus={sourceStatus}
+        projectionMode={camera?.projectionMode ?? null}
+        onSwitchToOrthographic={() => setProjectionMode('orthographic')}
+        formatMm={formatMm}
+      />
+
+      <PdfViewAppearanceSection
+        renderMode={renderMode}
+        onRenderModeChange={setRenderMode}
+        showHiddenEdges={showHiddenEdges}
+        onShowHiddenEdgesChange={setShowHiddenEdges}
+        showScaleStamp={showScaleStamp}
+        onShowScaleStampChange={setShowScaleStamp}
+        // Through the SAME formatter the sheet prints, so the note cannot
+        // promise a ratio the paper does not carry.
+        scaleLabel={scaleFactor === null ? null : formatSheetScaleLabel(scaleFactor)}
+        drawingWidthMm={preview?.drawingWidthMm ?? null}
+        drawingHeightMm={preview?.drawingHeightMm ?? null}
+      />
+
+      {source?.sectionEnabled && (
+        <p className="text-xs text-muted-foreground">
+          {t('sheetsPdf.pdfView.sectionCutNote')}
+        </p>
+      )}
+    </ExportDialogShell>
   );
 }

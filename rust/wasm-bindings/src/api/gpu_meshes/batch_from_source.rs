@@ -18,14 +18,14 @@
 //! These are additive: the legacy `data`-taking `processGeometryBatch*` methods
 //! in `batch.rs` are unchanged and remain the fallback for native, non-streaming,
 //! and older-JS callers. Each `*FromSource` method is a thin wrapper that resolves
-//! the held `Arc<Vec<u8>>` and delegates to its legacy twin with that slice — an
+//! the held `Arc<Vec<u8>>` and uses the same internal wire and output adapter — an
 //! internal Rust call, so no marshalling/copy happens at that boundary.
 
 use crate::api::IfcAPI;
 use crate::zero_copy::MeshCollection;
 use wasm_bindgen::prelude::*;
 
-use super::batch::PartitionedBatch;
+use super::partitioned_batch::PartitionedBatch;
 
 impl IfcAPI {
     /// Clone the held session source `Arc` (a cheap refcount bump), or an empty
@@ -33,8 +33,8 @@ impl IfcAPI {
     /// the JS worker (it gates `*FromSource` on a successful `setSourceBytes`),
     /// but is handled defensively: the decoder validates every byte span, so an
     /// empty source simply yields zero meshes instead of panicking.
-    fn source_bytes_arc(&self) -> std::sync::Arc<Vec<u8>> {
-        self.cached_source_bytes
+    pub(super) fn source_bytes_arc(&self) -> std::sync::Arc<Vec<u8>> {
+        self.content.cached_source_bytes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -59,8 +59,12 @@ impl IfcAPI {
     /// single JS→wasm copy directly; we wrap it in `Arc` with no second copy.
     #[wasm_bindgen(js_name = setSourceBytes)]
     pub fn set_source_bytes(&self, data: Vec<u8>) {
-        let mut slot = self
-            .cached_source_bytes
+        self.reset_pipeline_diagnostics();
+        self.content.production_model.invalidate_source();
+        self.invalidate_brep_signatures();
+        // Source-keyed like the brep signatures: a new file must not reuse old mapped meshes.
+        super::super::content_lifetime::discard(&self.content.cached_mapped_item);
+        let mut slot = self.content.cached_source_bytes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *slot = Some(std::sync::Arc::new(data));
@@ -89,25 +93,10 @@ impl IfcAPI {
         material_color_counts: Option<Vec<u32>>,
         material_colors_rgba: Option<Vec<u8>>,
     ) -> MeshCollection {
-        let source = self.source_bytes_arc();
-        self.process_geometry_batch(
-            &source,
-            jobs_flat,
-            unit_scale,
-            rtc_x,
-            rtc_y,
-            rtc_z,
-            needs_shift,
-            void_keys,
-            void_counts,
-            void_values,
-            style_ids,
-            style_colors,
-            plane_angle_to_radians,
-            material_element_ids,
-            material_color_counts,
-            material_colors_rgba,
-        )
+        let wire = super::batch_wire::BatchWire {
+            jobs_flat, unit_scale, rtc_x, rtc_y, rtc_z, needs_shift, void_keys, void_counts, void_values, style_ids, style_colors, plane_angle_to_radians, material_element_ids, material_color_counts, material_colors_rgba,
+        };
+        self.batch_flat(super::batch_wire::BatchSource::Held(self.source_bytes_arc()), wire)
     }
 
     /// Like [`IfcAPI::process_geometry_batch_partitioned`] but reads the source
@@ -133,24 +122,9 @@ impl IfcAPI {
         material_color_counts: Option<Vec<u32>>,
         material_colors_rgba: Option<Vec<u8>>,
     ) -> PartitionedBatch {
-        let source = self.source_bytes_arc();
-        self.process_geometry_batch_partitioned(
-            &source,
-            jobs_flat,
-            unit_scale,
-            rtc_x,
-            rtc_y,
-            rtc_z,
-            needs_shift,
-            void_keys,
-            void_counts,
-            void_values,
-            style_ids,
-            style_colors,
-            plane_angle_to_radians,
-            material_element_ids,
-            material_color_counts,
-            material_colors_rgba,
-        )
+        let wire = super::batch_wire::BatchWire {
+            jobs_flat, unit_scale, rtc_x, rtc_y, rtc_z, needs_shift, void_keys, void_counts, void_values, style_ids, style_colors, plane_angle_to_radians, material_element_ids, material_color_counts, material_colors_rgba,
+        };
+        self.batch_partitioned(super::batch_wire::BatchSource::Held(self.source_bytes_arc()), wire)
     }
 }

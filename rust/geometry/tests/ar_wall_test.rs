@@ -13,17 +13,16 @@
 //! `cargo test -p ifc-lite-geometry --test ar_wall_test -- --ignored`
 
 use ifc_lite_core::{EntityDecoder, EntityScanner};
-use ifc_lite_geometry::{calculate_normals, csg::ClippingProcessor, GeometryRouter, Mesh};
+use ifc_lite_geometry::{calculate_normals, csg::ClippingProcessor, GeometryRouter, GroupCut, Mesh};
 use rustc_hash::FxHashMap;
-use std::fs;
 
-const AR_FILE_PATH: &str = "../../tests/models/local/AR.ifc";
+/// Private local model (not in the manifest): `local_fixture_text` never gates.
+const AR_FIXTURE: &str = "local/AR.ifc";
 const TARGET_GUID: &str = "1NmE6Wndr2xhGbWU4qRRfr";
 
 /// Load AR file content
 fn load_ar_file() -> Option<String> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(AR_FILE_PATH);
-    fs::read_to_string(&path).ok()
+    ifc_lite_testkit::local_fixture_text(AR_FIXTURE)
 }
 
 /// Find entity ID by GUID
@@ -500,7 +499,7 @@ fn test_csg_subtraction_preserves_normals() {
     let result = clipper.subtract_mesh(&wall_mesh, &opening_mesh);
 
     match result {
-        Ok(result_mesh) => {
+        GroupCut::Cut(result_mesh) | GroupCut::Retessellated(result_mesh) => {
             println!("CSG result:");
             println!(
                 "  positions: {}, normals: {}",
@@ -525,8 +524,8 @@ fn test_csg_subtraction_preserves_normals() {
                 "All normals should be finite after CSG"
             );
         }
-        Err(e) => {
-            println!("CSG failed (may be expected for some cases): {}", e);
+        GroupCut::Rejected(why) => {
+            println!("CSG rejected (may be expected for some cases): {why:?}");
         }
     }
 }

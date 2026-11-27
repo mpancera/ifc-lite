@@ -2,11 +2,13 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use super::output_cap::SymbolicAccumulator;
+use super::rebase::RenderFrameRebase;
 use ifc_lite_core::{DecodedEntity, EntityDecoder, IfcType};
 use std::collections::HashMap;
 
 use super::color::resolve_color_via_styles;
-use super::primitives::{SymbolicData, SymbolicText};
+use super::primitives::{SymbolicText};
 use super::transform::{compose_transforms, parse_axis2_placement_2d, Transform2D};
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -20,12 +22,11 @@ pub(super) fn extract_text_literal(
     express_id: u32,
     ifc_type: &str,
     rep_identifier: &str,
-    unit_scale: f32,
+    unit_scale: f64,
     transform: &Transform2D,
-    rtc_x: f32,
-    rtc_z: f32,
+    rebase: RenderFrameRebase,
     styled_items: &HashMap<u32, Vec<u32>>,
-    out: &mut SymbolicData,
+    out: &mut SymbolicAccumulator,
 ) {
     let content = match item.get(0).and_then(|a| a.as_string()) {
         Some(s) => s.to_string(),
@@ -39,19 +40,19 @@ pub(super) fn extract_text_literal(
     let placement_transform = match item.get_ref(1) {
         Some(p_ref) => match decoder.decode_by_id(p_ref) {
             Ok(p) => parse_axis2_placement_2d(&p, decoder, unit_scale),
-            Err(_) => Transform2D::unresolved(), // dangling ref (#2256)
+            Err(e) => Transform2D::undecodable(&e), // refused (#7678), or dangling (#2256)
         },
         None => Transform2D::unresolved(), // mandatory attr absent (#2256)
     };
     let composed = compose_transforms(transform, &placement_transform);
 
-    const CAP_TO_BOX_RATIO: f32 = 0.7;
-    const FALLBACK_CAP_HEIGHT_M: f32 = 0.18;
+    const CAP_TO_BOX_RATIO: f64 = 0.7;
+    const FALLBACK_CAP_HEIGHT_M: f64 = 0.18;
     let height_model_units = if item.ifc_type == IfcType::IfcTextLiteralWithExtent {
         item.get_ref(3)
             .and_then(|extent_ref| decoder.decode_by_id(extent_ref).ok())
             .and_then(|extent| extent.get(1).and_then(|a| a.as_float()))
-            .map(|h| (h as f32) * CAP_TO_BOX_RATIO)
+            .map(|h| h * CAP_TO_BOX_RATIO)
             .unwrap_or(FALLBACK_CAP_HEIGHT_M / unit_scale.max(1e-6))
     } else {
         FALLBACK_CAP_HEIGHT_M / unit_scale.max(1e-6)
@@ -67,6 +68,18 @@ pub(super) fn extract_text_literal(
     };
 
     let (wx, wy) = composed.transform_point(0.0, 0.0);
+    let plan = rebase.plan(wx, wy);
+    // Same finiteness hazard as items.rs's polyline/curve paths and fill.rs's
+    // boundary rings: a malformed STEP REAL (e.g. `1.E400`) in the placement
+    // chain reaches here as Infinity/NaN. Unlike `tz` (which legitimately
+    // carries `f32::NAN` as the "unresolved placement" sentinel via
+    // `Transform2D::unresolved()`), `tx`/`ty` never do — identity leaves them
+    // at 0.0 — so a non-finite (x, y) here is genuine malformed data, not a
+    // sentinel, and the whole text item is dropped rather than emitted with
+    // a corrupt position.
+    if !plan.0.is_finite() || !plan.1.is_finite() {
+        return;
+    }
     let raw_scale = composed.scale();
     // Height keeps a ZERO scale (the glyph collapses exactly as the symbol does);
     // only a non-finite scale falls back. The direction below needs the stricter
@@ -74,23 +87,33 @@ pub(super) fn extract_text_literal(
     let text_scale = if raw_scale.is_finite() { raw_scale } else { 1.0 };
     // Only the X-axis column (m00, m10) feeds the direction — NOT the Y
     // column, which is where a mirroring MappingTarget's reflection lives
-    // (see `parse_cartesian_transformation_operator`). Glyphs therefore stay
+    // (see `resolve_mapping_target`). Glyphs therefore stay
     // readable (non-mirrored) under a mirroring transform, same as before
     // #1994: Axis1 is unaffected by an Axis2 mirror by construction, so this
     // is not a special case — it falls out of reading only the X column.
-    let dir = if raw_scale.is_finite() && raw_scale > 0.0 {
-        (composed.m00 / raw_scale, -composed.m10 / raw_scale)
+    //
+    // Through `plan_direction` for the same reason the anchor goes through
+    // `plan`: the frame can carry a rotation (a site-local response removes
+    // the site's yaw from its meshes), and a baseline left in world axes
+    // would have the glyphs running across a wall that is no longer parallel
+    // to them (#4706). It applies the handedness flip this used to spell
+    // inline as the minus on `m10`.
+    let baseline_length = composed.m00.hypot(composed.m10);
+    let dir = if baseline_length.is_finite() && baseline_length > 0.0 {
+        rebase.plan_direction(composed.m00 / baseline_length, composed.m10 / baseline_length)
     } else {
+        // The degenerate-transform fallback is a RENDER-frame default ("read
+        // left to right"), not a world direction, so it is not re-based.
         (1.0, 0.0)
     };
     let color = resolve_color_via_styles(item.id, styled_items, decoder)
         .unwrap_or([0.05, 0.05, 0.05, 1.0]);
 
-    out.texts.push(SymbolicText {
+    out.push_text(SymbolicText {
         express_id,
         ifc_type: ifc_type.to_string(),
-        x: wx - rtc_x,
-        y: -wy + rtc_z,
+        x: plan.0,
+        y: plan.1,
         // Direction must stay UNIT: `composed`'s linear block can carry a
         // mapped-item Scale (#1985), and consumers read this pair as a bare
         // direction vector. Any scale that is not finite and positive (a
@@ -99,10 +122,10 @@ pub(super) fn extract_text_literal(
         dir_y: dir.1,
         // The glyph height has to pick that same scale up here: a height never
         // passes through `transform_point`.
-        height: height_model_units * unit_scale * text_scale,
+        height: (height_model_units * unit_scale * text_scale) as f32,
         content,
         alignment,
-        world_y: composed.tz,
+        world_y: rebase.elevation(composed.tz),
         color,
         target_px: 0.0,
         representation: rep_identifier.to_string(),

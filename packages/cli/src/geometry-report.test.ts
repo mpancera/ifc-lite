@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import type { GeometryDiagnostics } from '@ifc-lite/geometry';
 import { formatGeometryReport, NO_DIAGNOSTICS_LINE } from './geometry-report.js';
 
@@ -43,6 +43,20 @@ describe('formatGeometryReport', () => {
     expect(report).toContain('Hosts with openings: 3');
     expect(report).toContain('Openings classified: 5 (rectangular 4, diagonal 1, non-rectangular 0)');
     expect(report).toContain('Silent rect no-ops:  1');
+  });
+
+  it('lists dropped representation items by IFC type when present', () => {
+    const report = formatGeometryReport(makeDiagnostics({
+      totalUnsupportedItems: 3,
+      unsupportedItemsByType: [{ reason: 'IfcGeometricSet', count: 3 }],
+    }));
+    expect(report).toContain('Dropped representation items: 3');
+    expect(report).toContain('IfcGeometricSet');
+  });
+
+  it('omits the dropped-items section on a clean model (no spurious warning)', () => {
+    const report = formatGeometryReport(makeDiagnostics());
+    expect(report).not.toContain('Dropped representation items');
   });
 
   it('lists failures by reason, sorted as given', () => {
@@ -103,6 +117,36 @@ describe('formatGeometryReport', () => {
     expect(report).toContain('triangles=1,280');
   });
 
+  describe('on a host whose default locale is not en-US', () => {
+    // Node derives the default locale from the environment (sv-SE groups
+    // thousands with a no-break space); simulate that host by defaulting the
+    // locale argument. The report is pasted into issues and diffed, so it must
+    // read the same everywhere.
+    afterEach(() => vi.restoreAllMocks());
+
+    it('prints the triangle count with en-US grouping', () => {
+      const original = Number.prototype.toLocaleString;
+      vi.spyOn(Number.prototype, 'toLocaleString').mockImplementation(function (
+        this: number,
+        locales?: Intl.LocalesArgument,
+        options?: Intl.NumberFormatOptions,
+      ) {
+        return original.call(this, locales ?? 'sv-SE', options);
+      });
+      expect((1280).toLocaleString()).not.toBe('1,280'); // the simulation bites
+      const report = formatGeometryReport(makeDiagnostics({
+        worstHosts: [
+          {
+            productId: 7, ifcType: 'IfcSlab', openings: 1, csgFailures: 1,
+            bbox: { min: [-1, -2, 0], max: [3, 4, 5] },
+            triangleCount: 1280,
+          },
+        ],
+      }));
+      expect(report).toContain('triangles=1,280');
+    });
+  });
+
   it('does not crash and prints no bbox/triangle line when a host has neither', () => {
     const report = formatGeometryReport(makeDiagnostics({
       worstHosts: [{ productId: 9, ifcType: 'IfcDoor', openings: 1, csgFailures: 1 }],
@@ -129,4 +173,22 @@ describe('formatGeometryReport', () => {
     expect(bboxOnly).toContain('bbox=');
     expect(bboxOnly).not.toContain('triangles=');
   });
+});
+
+it('#9268 prints budget refusal identity and demand separately from dropped items', () => {
+  const report = formatGeometryReport(makeDiagnostics({ budgetRefusals: [{
+    budget: 'walk mapped attempts', limit: 65536, reached: 65537,
+    productId: 25, productType: 'IfcFlowTerminal', GlobalId: 'test', sourceId: 22,
+  }] }));
+  expect(report).toContain('Work budget refusal: walk mapped attempts limit=65536 reached=65537 product=#25 IfcFlowTerminal GlobalId=test source=#22');
+  expect(report).not.toContain('Dropped representation items');
+});
+
+it('issue 9268 caps budget detail and renders missing identity consistently', () => {
+  const refusal = { budget: 'logical mapped attempts', limit: 3, reached: 4,
+    sourceId: 8, productId: null, productType: null, GlobalId: null };
+  const report = formatGeometryReport(makeDiagnostics({ totalBudgetRefusals: 40,
+    budgetRefusals: Array.from({ length: 20 }, () => refusal) }));
+  expect((report.match(/product=#unknown unknown GlobalId=unavailable/g) ?? []).length).toBe(16);
+  expect(report).toContain('and 24 more');
 });

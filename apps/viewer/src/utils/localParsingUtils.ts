@@ -9,7 +9,8 @@
  * Extracted from useIfc.ts for reusability and testability
  */
 
-import type { MeshData } from '@ifc-lite/geometry';
+import { NORMAL_COORD_THRESHOLD_M } from '@ifc-lite/geometry';
+import type { CoordinateInfo, MeshData } from '@ifc-lite/geometry';
 
 // ============================================================================
 // Types
@@ -21,17 +22,6 @@ import type { MeshData } from '@ifc-lite/geometry';
 export interface Bounds3D {
   min: { x: number; y: number; z: number };
   max: { x: number; y: number; z: number };
-}
-
-/**
- * Coordinate information for geometry
- */
-export interface CoordinateInfo {
-  originShift: { x: number; y: number; z: number };
-  originalBounds: Bounds3D;
-  shiftedBounds: Bounds3D;
-  /** True if model had large coordinates requiring RTC shift. NOT the same as proper georeferencing via IfcMapConversion. */
-  hasLargeCoordinates: boolean;
 }
 
 /**
@@ -47,11 +37,16 @@ export interface GeometryStats {
 // ============================================================================
 
 /**
- * Maximum coordinate threshold for valid geometry (10km)
- * Matches CoordinateHandler's NORMAL_COORD_THRESHOLD
- * Coordinates beyond this are likely corrupted or unshifted original coordinates
+ * Maximum coordinate threshold for valid geometry (10km).
+ * Coordinates beyond this are likely corrupted or unshifted original coordinates.
+ *
+ * Re-exported from `CoordinateHandler`'s own threshold rather than restated:
+ * this file, `viewportUtils` and `useGeometryStreaming` each used to hold their
+ * own `10000`, two of them with a comment claiming they match it. Raising all
+ * three to 250 km left the whole viewer suite green, so nothing enforced the
+ * claim.
  */
-export const MAX_VALID_COORD = 10000;
+export const MAX_VALID_COORD = NORMAL_COORD_THRESHOLD_M;
 
 /**
  * Create an initial bounds object with infinite values
@@ -131,6 +126,31 @@ export function calculateMeshBounds(meshes: MeshData[]): { bounds: Bounds3D; sta
     bounds,
     stats: { totalVertices, totalTriangles },
   };
+}
+
+/**
+ * Widen `bounds` to hold every point cloud's extent, so fit-to-view, the
+ * section-plane slider and the camera near/far all see the points too. The
+ * clouds carry their own bounding boxes, so this never walks a point. A cloud
+ * with an f64 `origin` has its bbox relative to it (#10029).
+ */
+export function expandBoundsForPointClouds(
+  bounds: Bounds3D,
+  pointClouds: readonly {
+    origin?: readonly [number, number, number];
+    chunk: { bbox: { min: [number, number, number]; max: [number, number, number] } };
+  }[],
+): void {
+  for (const cloud of pointClouds) {
+    const { min, max } = cloud.chunk.bbox;
+    const [ox, oy, oz] = cloud.origin ?? [0, 0, 0];
+    bounds.min.x = Math.min(bounds.min.x, ox + min[0]);
+    bounds.min.y = Math.min(bounds.min.y, oy + min[1]);
+    bounds.min.z = Math.min(bounds.min.z, oz + min[2]);
+    bounds.max.x = Math.max(bounds.max.x, ox + max[0]);
+    bounds.max.y = Math.max(bounds.max.y, oy + max[1]);
+    bounds.max.z = Math.max(bounds.max.z, oz + max[2]);
+  }
 }
 
 /**

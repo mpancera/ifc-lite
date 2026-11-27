@@ -51,6 +51,7 @@ function makeHarness(modelBounds: typeof MODEL_BOUNDS | null = MODEL_BOUNDS): Ha
     const host: OverlayHost = {
         getModelBounds: () => modelBounds,
         expandModelBoundsWithFlatVertices: () => { /* not exercised here */ },
+        expandModelBoundsWithAnchoredLineVertices: () => { /* not exercised here */ },
         syncCameraSceneBounds: () => { /* not exercised here */ },
         requestRender: () => { renders++; },
     };
@@ -142,9 +143,8 @@ describe('the 2D section cap keeps axis-aligned units (#2447)', () => {
  * Rendering is dirty-flag gated: `requestRender()` sets the flag and the rAF
  * loop drains it. `uploadSection2DOverlay` and `clearSection2DOverlay` changed
  * or dropped overlay GPU geometry and returned without setting it, alone among
- * every sibling on this facade (`setOverlayLineColor`, `uploadAnnotationLines3D`,
- * `uploadGridLines3D`, `uploadDxfLines3D`, `setClashOverlapBox`, ... and all the
- * matching `clear*`). A section drawing uploaded or cleared while nothing else
+ * every sibling on this facade (`setOverlayLineColor`, `setLineOverlay` for
+ * each of the four line channels, `setClashOverlapBox`, ...). A section drawing uploaded or cleared while nothing else
  * dirtied the frame did not appear or disappear until some unrelated
  * interaction happened to drive one.
  *
@@ -186,5 +186,36 @@ describe('the section overlay requests a frame when it changes geometry (#2442)'
         h.overlays.uploadSection2DOverlay([], [], 'side', 50);
         assert.strictEqual(h.uploads.length, 0, 'precondition: the upload bailed');
         assert.strictEqual(h.renderRequests(), 0);
+    });
+});
+
+/**
+ * #7545: an extra plane's cap that was uploaded EMPTY still holds one of the seven cap slots, so
+ * `clearSection2DExtraOverlays` must free it. The old guard asked whether any extra cap held
+ * geometry, so an empty one was never released and a real eighth cap was then refused.
+ */
+describe('clearing the extra caps frees every held slot, empty ones included (#7545)', () => {
+    function withExtras(keys: string[], hasGeometry: boolean) {
+        const h = makeHarness();
+        let kept: ReadonlySet<string> | null = null;
+        const overlay = (h.overlays as unknown as Record<string, Record<string, unknown>>)['section2DOverlayRenderer']!;
+        overlay.extraGeometryKeys = () => keys;
+        overlay.hasExtraGeometry = () => hasGeometry;
+        overlay.clearExtraGeometry = (keep: ReadonlySet<string>) => { kept = keep; };
+        return { h, kept: () => kept };
+    }
+
+    it('releases a cap that holds no geometry', () => {
+        const { h, kept } = withExtras(['empty'], false);
+        h.overlays.clearSection2DExtraOverlays([]);
+        assert.deepStrictEqual([...kept()!], [], 'asked the overlay to keep nothing, so the empty cap is dropped');
+        assert.strictEqual(h.renderRequests(), 1);
+    });
+
+    it('does nothing when no extra cap is held at all', () => {
+        const { h, kept } = withExtras([], false);
+        h.overlays.clearSection2DExtraOverlays([]);
+        assert.strictEqual(kept(), null);
+        assert.strictEqual(h.renderRequests(), 0, 'and wakes nothing');
     });
 });

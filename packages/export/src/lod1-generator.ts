@@ -2,15 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { GeometryQuality, GeometryResult, MeshData } from '@ifc-lite/geometry';
+import type { GeometryResult, MeshData } from '@ifc-lite/geometry';
 import { GeometryProcessor } from '@ifc-lite/geometry';
+import { renderFrameWorldMatrix } from '@ifc-lite/geometry/world-frame';
 import { extractGlbMapping } from './glb.js';
 import { generateLod0 } from './lod0-generator.js';
 import type { GenerateLod1Result, Lod1MetaJson, Lod0Json, LodInput, Vec3 } from './lod-geometry-types.js';
 import { toIfcArrayBuffer } from './lod-geometry-utils.js';
 
 export type GenerateLod1Options = {
-  quality?: GeometryQuality;
   /**
    * Test-only hook to simulate meshing failure and force fallback.
    * Not intended for production use.
@@ -136,7 +136,7 @@ export async function generateLod1(input: LodInput, options: GenerateLod1Options
     }
 
     const buffer = toIfcArrayBuffer(input);
-    const gp = new GeometryProcessor({ quality: options.quality });
+    const gp = new GeometryProcessor();
     let glb: Uint8Array;
     let mapping: ReturnType<typeof extractGlbMapping>;
     try {
@@ -145,7 +145,15 @@ export async function generateLod1(input: LodInput, options: GenerateLod1Options
 
       // Assemble the GLB in Rust over the meshes (no re-meshing); extractGlbMapping
       // reads node `extras.expressId`, which the from-meshes path emits.
-      const result = gp.exportGlbFromMeshes(geom.meshes, true);
+      // The meshes are in the shifted render frame; the GLB root restores the
+      // IFC world position from the frame they were meshed in (#7734).
+      const result = gp.exportGlbFromMeshes(
+        geom.meshes,
+        true,
+        true,
+        false,
+        renderFrameWorldMatrix(geom.coordinateInfo),
+      );
       if (!result) throw new Error('GLB assembly returned no data');
       glb = result;
       mapping = extractGlbMapping(glb);

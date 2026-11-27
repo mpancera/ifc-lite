@@ -1,12 +1,12 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
-
 /**
  * Core types for 2D architectural drawing generation
  */
 
-// ═══════════════════════════════════════════════════════════════════════════
+import type { LineCategory, VisibilityState } from './line-classification.js';
+
 // VECTOR TYPES
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -22,12 +22,13 @@ export interface Vec3 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SECTION CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════
 
 export type SectionAxis = 'x' | 'y' | 'z';
 
 export interface SectionPlaneConfig {
+  /** Scene ids kept whole by all section planes; excluded entities emit no cut geometry (#8015). */
+  sectionExcludedIds?: ReadonlySet<number>;
   /** Axis perpendicular to the section plane */
   axis: SectionAxis;
   /** Position along the axis in world units */
@@ -72,6 +73,7 @@ export interface SectionConfig {
    */
   projectionBelowDepth?: number;
   projectionAboveDepth?: number;
+  clipProjectionBands?: boolean; // Clip exact bands before outlining (#6615).
   /** Whether to compute hidden lines */
   includeHiddenLines: boolean;
   /** Crease angle threshold in degrees (edges sharper than this are feature edges) */
@@ -122,22 +124,7 @@ export interface Bounds2D {
 // LINE CLASSIFICATION
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * Category of line in architectural drawing
- */
-export type LineCategory =
-  | 'cut'         // Geometry intersected by section plane (thickest lines)
-  | 'projection'  // Visible geometry beyond cut plane
-  | 'hidden'      // Occluded geometry (rendered as dashed)
-  | 'silhouette'  // Outer contour edges
-  | 'crease'      // Sharp feature edges (angle > threshold)
-  | 'boundary'    // Mesh boundary edges (open edges)
-  | 'annotation'; // Dimensions, labels, etc.
-
-/**
- * Visibility state for hidden line removal
- */
-export type VisibilityState = 'visible' | 'hidden' | 'partial';
+export type { LineCategory, VisibilityState };
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DRAWING ELEMENTS
@@ -151,6 +138,8 @@ export interface DrawingLine {
   line: Line2D;
   /** Line classification */
   category: LineCategory;
+  /** A `cut` line through an open surface (#8664): no polygon outlines it, so draw it. */
+  openSurfaceCut?: true;
   /** Visibility after hidden line removal */
   visibility: VisibilityState;
   /** Source IFC entity expressId */
@@ -189,14 +178,14 @@ export interface DrawingPolygon {
   modelIndex: number;
   /** True if from section cut, false if projection */
   isCut: boolean;
-  /** Per-sub-mesh RGBA fill (0–1), present only when the source entity cut
-   *  into >1 distinct material — i.e. an `IfcMaterialLayerSet` wall/slab whose
-   *  layers each carry their `IfcMaterial`'s surface-style colour, or a
-   *  frame+glass window. Renderers showing IFC materials use this so each
-   *  layer fills with its own colour instead of one colour for the whole
-   *  element; absent for single-material elements (keep the existing
-   *  per-`ifcType` / per-entity fill). */
+  /** Per-layer fill and identity. `color` (RGBA 0–1) is present only when the entity cut into
+   *  >1 layer (an `IfcMaterialLayerSet` wall/slab, a frame+glass window), so each layer fills
+   *  with its own colour; absent for single-material elements (keep the per-`ifcType` / per-entity
+   *  fill). `materialId` is the layer's `IfcMaterial` (`MeshData.materialId`) when the mesh has one:
+   *  same id space as `entityId`, so a federated session re-homes both and they resolve alike. */
   color?: [number, number, number, number];
+  materialId?: number;
+  sourceColor?: [number, number, number, number]; // source sub-mesh RGBA (absent when it has none); unlike `color`, set on single-material cuts too — the 3D cap's element-colour fill reads it
   /** Set on the OPAQUE BASE polygon emitted for a multi-material entity: the
    *  entity's full closed cross-section (built from the watertight union of all
    *  its layer bands, so it always closes). It is drawn BEHIND the per-layer
@@ -229,10 +218,10 @@ export interface CutSegment {
   ifcType: string;
   /** Model index */
   modelIndex: number;
-  /** Source sub-mesh RGBA colour (0–1) — the cut triangle's `MeshData.color`.
-   *  Carried so the polygon builder can split one entity's cut into per-material
-   *  loops (material-layer walls/slabs). Absent when the cutter has no colour. */
+  /** Source sub-mesh RGBA colour (0–1) and `IfcMaterial` id (`MeshData.color` / `.materialId`): the
+   *  polygon builder splits one entity's cut into per-layer loops on both. Absent when the mesh has none. */
   color?: [number, number, number, number];
+  materialId?: number;
   /** Max |coordinate| of the source triangle's LOCAL vertex positions —
    *  i.e. the `Float32Array` values BEFORE the per-mesh RTC `origin` was
    *  added. This is the quantity that actually bounds float32 rounding
@@ -268,6 +257,8 @@ export interface SectionCutResult {
   segments: CutSegment[];
   /** Reconstructed polygons per entity */
   polygons: DrawingPolygon[];
+  /** Segments through open surfaces (#8664): no polygon covers these. */
+  openSurfaceSegments: Set<CutSegment>;
   /** Processing statistics */
   stats: {
     totalTriangles: number;
@@ -420,6 +411,14 @@ export type EntityKey = `${number}:${number}`; // modelIndex:entityId
  */
 export function makeEntityKey(modelIndex: number, entityId: number): EntityKey {
   return `${modelIndex}:${entityId}`;
+}
+
+/**
+ * A triangulation-edge `cut` line whose geometry a polygon outline already draws,
+ * so renderers of `cutPolygons` skip it. Open-surface cuts have no such outline.
+ */
+export function isPolygonCutLine(line: DrawingLine): boolean {
+  return line.category === 'cut' && !line.openSurfaceCut;
 }
 
 /**
@@ -785,12 +784,11 @@ export interface EntityMetadata {
   /** IFC type name */
   ifcType: string;
   /** 3D bounding box */
-  bounds?: {
-    min: Vec3;
-    max: Vec3;
-  };
+  bounds?: { min: Vec3; max: Vec3 };
   /** Property set values (for door operation, etc.) */
   properties?: Record<string, unknown>;
+  /** Host-supplied `OperationType` of the element's type (`IfcDoorType`; `IfcDoorStyle` in IFC2X3), used when a door's own is NOTDEFINED or absent. drawing-2d does not resolve `IfcRelDefinesByType`. */
+  typeOperationType?: string;
 }
 
 /**

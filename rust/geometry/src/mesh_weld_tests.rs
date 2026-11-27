@@ -7,6 +7,17 @@
 //! `#[path]`.
 
 use super::*;
+use std::cell::Cell;
+
+thread_local! {
+    /// Test-only probe: key components `vkey` quantised with the inline
+    /// rounding (bumped from `vkey` under `cfg(test)` only).
+    static INLINE_ROUNDS: Cell<u64> = const { Cell::new(0) };
+}
+
+pub(super) fn note_inline_rounds(count: u64) {
+    INLINE_ROUNDS.with(|rounds| rounds.set(rounds.get() + count));
+}
 
 #[test]
 fn merges_coplanar_shared_vertices() {
@@ -233,4 +244,118 @@ fn deterministic_and_first_seen_order() {
     // First-seen: vertex 0's position takes new id 0, vertex 1 takes id 1.
     assert_eq!(&p1[0..3], &[9.0, 9.0, 9.0]);
     assert_eq!(i1, vec![0, 1, 0]);
+}
+
+/// #4122 — `weld_mesh` (called from `apply_placement`) is one of only two
+/// setters of `Mesh::welded_in_object_frame`, and it must stamp `true` even
+/// when the weld is a no-op (already-welded input): `build_mesh_data`'s
+/// debug_assert reads this bit to check the trust it places in
+/// `instance_meta.is_some()`, so a setter that only fires on an actual merge
+/// would leave an unwelded-but-nothing-to-merge mesh reading `false` forever.
+#[test]
+fn weld_mesh_stamps_welded_in_object_frame_even_on_a_no_op() {
+    // Already-welded triangle soup: one triangle, nothing to merge.
+    let mut mesh = crate::Mesh::new();
+    mesh.positions = vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    mesh.normals = vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+    mesh.indices = vec![0, 1, 2];
+    assert!(!mesh.welded_in_object_frame, "unset by construction");
+    weld_mesh(&mut mesh);
+    assert!(
+        mesh.welded_in_object_frame,
+        "weld_mesh must stamp the bit regardless of whether anything merged"
+    );
+}
+
+/// [`weld_sub_mesh`]'s half of the same contract.
+#[test]
+fn weld_sub_mesh_stamps_welded_in_object_frame() {
+    let mut mesh = crate::Mesh::new();
+    mesh.positions = vec![
+        0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, //
+        1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, //
+    ];
+    mesh.normals = [0.0f32, 0.0, 1.0].repeat(6);
+    mesh.indices = vec![0, 1, 2, 3, 4, 5];
+    let mut sub = crate::SubMesh::new(1, mesh);
+    assert!(!sub.mesh.welded_in_object_frame);
+    weld_sub_mesh(&mut sub);
+    assert!(
+        sub.mesh.welded_in_object_frame,
+        "weld_sub_mesh must stamp the underlying mesh's bit"
+    );
+}
+
+/// #4122's actual finding: `router::voids::probe::get_opening_item_meshes_world`
+/// bakes with `transform_mesh_world_framed` directly, never calling
+/// `weld_mesh`/`weld_sub_mesh`, so a mesh can legitimately carry
+/// `instance_meta` while `welded_in_object_frame` stays `false`. Before this
+/// field existed nothing could distinguish that mesh from one that went
+/// through a placement applier — this test pins that the two are in fact
+/// independent, which is the gap `build_mesh_data`'s debug_assert now checks.
+#[test]
+fn instance_meta_does_not_imply_welded_in_object_frame() {
+    let mut mesh = crate::Mesh::new();
+    mesh.positions = vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    mesh.normals = vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+    mesh.indices = vec![0, 1, 2];
+    mesh.instance_meta = Some(crate::InstanceMeta {
+        transform: [
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ],
+        local_transform: None,
+        canonical_transform: None,
+        rep_identity: 0,
+        instanceable: true,
+    });
+    // No weld ever ran — this is exactly the probe.rs shape.
+    assert!(
+        mesh.instance_meta.is_some() && !mesh.welded_in_object_frame,
+        "a mesh can carry instance_meta without ever being welded in the \
+         object frame — instance_meta.is_some() alone cannot answer \
+         `build_mesh_data`'s \"was this already welded?\" question"
+    );
+}
+
+/// The weld's pooled key map must cost what the CURRENT mesh needs: after a
+/// large weld, a small one leaves a table sized for itself, not the large one
+/// (whose every control byte a `clear()` used to rewrite on each later mesh).
+#[test]
+fn a_small_weld_after_a_large_one_resets_a_small_key_table() {
+    let grid = |n: usize| {
+        let mut positions = Vec::with_capacity(n * 3);
+        for i in 0..n {
+            positions.extend_from_slice(&[i as f32, (i % 7) as f32, 0.0]);
+        }
+        let normals = [0.0f32, 0.0, 1.0].repeat(n);
+        let indices: Vec<u32> = (0..n as u32).collect();
+        (positions, normals, indices)
+    };
+    WELD_SCRATCH.with(|slot| *slot.borrow_mut() = Some(WeldScratch::default()));
+    let (positions, normals, indices) = grid(60_000);
+    let _ = weld_indexed(&positions, &normals, None, &indices);
+    let large = WELD_SCRATCH.with(|slot| slot.borrow().as_ref().unwrap().map.capacity());
+    assert!(large >= 60_000, "the large weld grew the table: {large}");
+    let (positions, normals, indices) = grid(3);
+    let _ = weld_indexed(&positions, &normals, None, &indices);
+    let small = WELD_SCRATCH.with(|slot| slot.borrow().as_ref().unwrap().map.capacity());
+    assert!(small <= 1_024, "a 3-vertex weld kept a {small}-entry table");
+    WELD_SCRATCH.with(|slot| *slot.borrow_mut() = Some(WeldScratch::default()));
+}
+
+/// The work, not the key: every component of a weld key (3 normal, 2 UV) is
+/// quantised by the inline half-away rounding, not by a libm `roundf` call per
+/// component. Four vertices make four keys, twenty inline roundings.
+#[test]
+fn weld_keys_are_quantised_without_libm_round() {
+    let positions = [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+    let normals = [0.0f32, 0.0, 1.0].repeat(4);
+    let indices = [0u32, 1, 2, 3, 1, 2];
+    let before = INLINE_ROUNDS.with(Cell::get);
+    let welded = weld_indexed(&positions, &normals, None, &indices).expect("vertices 0 and 3 merge");
+    assert_eq!(INLINE_ROUNDS.with(Cell::get) - before, 20, "five inline roundings per key");
+    assert_eq!(welded.0.len(), 9, "the duplicate corner still merges");
 }

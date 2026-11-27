@@ -63,7 +63,7 @@ export type {
   EntityKey,
 } from './types.js';
 
-export { DEFAULT_SECTION_CONFIG, makeEntityKey, parseEntityKey } from './types.js';
+export { DEFAULT_SECTION_CONFIG, isPolygonCutLine, makeEntityKey, parseEntityKey } from './types.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SECTION CUTTING
@@ -82,12 +82,7 @@ export { PolygonBuilder, simplifyPolygon, polygonBounds } from './polygon-builde
 // LINE MERGING
 // ═══════════════════════════════════════════════════════════════════════════
 
-export {
-  mergeDrawingLines,
-  mergeCollinearLines,
-  deduplicateLines,
-  splitLineAtParams,
-} from './line-merger.js';
+export { mergeDrawingLines, mergeCollinearLines, deduplicateLines, splitLineAtParams } from './line-merger.js';
 export type { LineMergerOptions } from './line-merger.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -119,8 +114,10 @@ export {
 export type { ProjectionBand, ProjectionBandDepths } from './projection-bands.js';
 
 // Current-floor scoping + feature-element exclusion (issue #979 follow-up)
-export { currentFloorBands, storeyFloorsFromMeshes, storeyFloorLevelsFromMeshes } from './storey-bands.js';
+export { currentFloorBands, storeyFloorsFromMeshes, storeyFloorLevelsFromMeshes, StoreyFloorLevels } from './storey-bands.js';
 export type { StoreyFloorMesh } from './storey-bands.js';
+export { storeyCutElevation } from './storey-cut.js';
+export type { StoreyCut, StoreyCutFrame } from './storey-cut.js';
 export { isFeatureElementType } from './feature-elements.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -171,12 +168,12 @@ export type { HatchLine, HatchResult, CustomHatchSettings } from './hatch-genera
 // SVG EXPORT
 // ═══════════════════════════════════════════════════════════════════════════
 
+export { escapeXml, entityIdAttr, svgNum } from './xml-escape.js';
 export { SVGExporter, exportToSVG } from './svg-exporter.js';
 export type { SVGExportOptions } from './svg-exporter.js';
 
-// Scaled PDF export (issue #2042): pure scale/extent arithmetic only —
-// the PDF is assembled by the viewer using jsPDF, which is not a
-// dependency of this package.
+// Scaled PDF export (issue #2042): pure scale/extent arithmetic only; the
+// viewer assembles the PDF with jsPDF, which is not a dependency of this package.
 export {
   computePdfScaleLayout, worldPointToPdfMm, worldLengthToPdfMm, flipBounds2D, formatScaleFactorLabel,
   // The ratio a sheet PRINTS: the same number as the filename, hedged with
@@ -226,14 +223,12 @@ export type { ColorRaster, ColorRasterOptions, RasterFit } from './color-raster.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Only the exporter facade is public. The low-level writer internals
-// (DxfWriter, sanitizeDxfLayerName, cssToAci, the linetype/justification
-// types) stay package-private: no external consumer exists, and an unused
-// public export is permanent semver liability (PR #1871 review).
-export { DXFExporter, exportToDXF } from './dxf-exporter.js';
-export type {
-  DXFExportOptions, DXFUnderlayOptions,
-  DXFPlanOverlays, DXFPlanText, DXFRoomPolygon,
-} from './dxf-exporter.js';
+// (DxfWriter, sanitizeDxfLayerName, cssToAci, linetype/justification types)
+// stay package-private: an unused public export is permanent semver liability.
+export { DXFExporter, exportToDXF, isDxfDimensionExportable } from './dxf-exporter.js';
+export type { DXFExportOptions, DXFPolylineLayer, DXFText, DXFTextLayer, DXFUnderlayOptions } from './dxf-exporter.js';
+export { encodeDxfCp1252, type Cp1252EncodeResult } from './dxf/encoding.js'; // public: $DWGCODEPAGE ANSI_1252, not UTF-8
+export type { DXFPlanOverlays, DXFPlanText, DXFRoomPolygon } from './dxf-exporter.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GPU ACCELERATION
@@ -245,13 +240,11 @@ export { GPUSectionCutter, isGPUComputeAvailable } from './gpu-section-cutter.js
 // HIGH-LEVEL GENERATOR
 // ═══════════════════════════════════════════════════════════════════════════
 
-export {
-  Drawing2DGenerator,
-  createSectionConfig,
-  generateFloorPlan,
-  generateSection,
-} from './drawing-generator.js';
+export { Drawing2DGenerator, createSectionConfig, generateFloorPlan, generateSection } from './drawing-generator.js';
 export type { GeneratorOptions, GeneratorProgress } from './drawing-generator.js';
+export type { DrawingMeshSource, DrawingPass } from './drawing-mesh-source.js';
+export { DrawingSession } from './drawing-session.js';
+export type { DrawingOcclusionNeeds, DrawingSessionOptions } from './drawing-session.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MATH UTILITIES
@@ -472,7 +465,7 @@ export {
   convertDxfToUnderlay,
   applyDxfPlacement,
   aciToCss,
-  DEFAULT_DXF_PLACEMENT,
+  DEFAULT_DXF_PLACEMENT, DXF_TEXT_LINE_HEIGHT_FACTOR, dxfTextLineOffset,
 } from './dxf/index.js';
 
 export type {
@@ -523,6 +516,7 @@ export {
   // Sheet utilities
   calculateViewportBounds,
   calculateDrawingTransform,
+  calculateDrawingTransformForAxis,
 
   // Multi-view sheets: a sheet may carry several views, each with its own
   // scale and rotation. `sheetViewports` answers with a list for every sheet,
@@ -542,8 +536,6 @@ export {
   // Sheet renderers
   renderFrame,
   renderTitleBlock,
-  renderScaleBar,
-  renderNorthArrow,
 } from './sheet/index.js';
 
 export type {
@@ -567,9 +559,6 @@ export type {
   TitleBlockConfig,
 
   // Scale bar types
-  ScaleBarStyle,
-  ScaleBarPosition,
-  ScaleBarUnits,
   ScaleBarConfig,
   NorthArrowStyle,
   NorthArrowConfig,
@@ -592,5 +581,4 @@ export type {
   FrameInnerBounds,
   TitleBlockRenderResult,
   TitleBlockExtras,
-  PositionMm,
 } from './sheet/index.js';

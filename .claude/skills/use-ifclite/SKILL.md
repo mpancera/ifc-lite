@@ -54,6 +54,12 @@ ifc-lite merge arch.ifc struct.ifc mep.ifc --out federated.ifc
 ifc-lite convert model.ifc --schema IFC4 --out v4.ifc
 ifc-lite diff v1.ifc v2.ifc --by-entity --json
 
+# Models in an OCI registry: any model argument may be oci://host/repo:tag
+# (creds via IFC_LITE_OCI_USERNAME+IFC_LITE_OCI_PASSWORD or IFC_LITE_OCI_TOKEN)
+ifc-lite info oci://ghcr.io/acme/tower-model:rev-b --json
+# Publish a local .ifc (refuses an existing tag unless --overwrite; .ifczip not yet)
+ifc-lite oci push oci://ghcr.io/acme/tower-model:rev-c tower.ifc --json
+
 # Structural sanity check
 ifc-lite validate model.ifc --json
 ```
@@ -111,10 +117,17 @@ mutation) plus pre-baked prompts.
 ```bash
 ifc-lite mcp ./model.ifc                 # stdio transport (default)
 ifc-lite mcp ./model.ifc --read-only     # hide all mutation tools
-ifc-lite mcp ./arch.ifc ./struct.ifc --federate
+ifc-lite mcp ./arch.ifc ./struct.ifc     # several files, one session
 ifc-lite mcp --transport http --port 8765 --token <secret>
 # (equivalent standalone binary: ifc-lite-mcp …)
 ```
 
-Tool families and the discovery-first calling pattern are documented in
+In Claude Code, the `ifc-lite` plugin from this repository runs the viewer bridge for you:
+
+```bash
+claude plugin marketplace add LTplus-AG/ifc-lite
+claude plugin install ifc-lite@ifc-lite
+```
+
+Tool families, the discovery-first calling pattern and interactive result surfaces are documented in
 [`mcp-tools.md`](./mcp-tools.md).

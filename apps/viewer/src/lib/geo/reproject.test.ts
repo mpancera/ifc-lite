@@ -11,11 +11,9 @@ import {
   computeModelCenterInIfcMeters,
   effectiveMapConversionForGeometry,
   reprojectFromLatLon,
-  reprojectionInputKey,
   reprojectPointToLatLon,
   reprojectToLatLon,
   resolveProjection,
-  sanitizeProj4,
 } from './reproject.js';
 import type { CoordinateInfo } from '@ifc-lite/geometry';
 import type { MapConversion, ProjectedCRS } from '@ifc-lite/parser';
@@ -49,35 +47,6 @@ function makeCoordinateInfo(): CoordinateInfo {
   };
 }
 
-describe('sanitizeProj4 datum shift (#1357)', () => {
-  const SJTSK = '+towgs84=570.8,85.7,462.8,4.998,1.587,5.261,3.56';
-
-  it('adds the datum +towgs84 to an offset-datum def that lacks any shift (e.g. Ferro Krovak EPSG:2065)', () => {
-    const ferro = '+proj=krovak +axis=swu +lat_0=49.5 +lon_0=42.5 +alpha=30.2881397527778 '
-      + '+k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +pm=ferro +units=m +no_defs';
-    const out = sanitizeProj4(ferro, '2065', 'S-JTSK');
-    assert.ok(out.includes(SJTSK), `expected +towgs84 to be injected, got: ${out}`);
-    assert.ok(out.includes('+pm=ferro'), 'must preserve the rest of the definition');
-  });
-
-  it('strips an unusable +nadgrids and substitutes the datum +towgs84', () => {
-    const withGrid = '+proj=krovak +ellps=bessel +nadgrids=cz_cuzk_CR-2005.tif +units=m +no_defs';
-    const out = sanitizeProj4(withGrid, '5514', 'S-JTSK');
-    assert.ok(!out.includes('+nadgrids'), 'must drop the grid reference');
-    assert.ok(out.includes(SJTSK), 'must add the +towgs84 fallback');
-  });
-
-  it('leaves an existing +towgs84 untouched', () => {
-    const def = '+proj=utm +zone=33 +ellps=bessel +towgs84=1,2,3,0,0,0,0 +units=m +no_defs';
-    assert.equal(sanitizeProj4(def, '9999', 'S-JTSK'), def);
-  });
-
-  it('leaves a WGS84-aligned def (unknown datum) unchanged', () => {
-    const def = '+proj=utm +zone=32 +datum=WGS84 +units=m +no_defs';
-    assert.equal(sanitizeProj4(def, '32632', 'WGS 84'), def);
-  });
-});
-
 describe('reproject helpers', () => {
   it('computes the IFC-space model center from originShift and RTC', () => {
     const center = computeModelCenterInIfcMeters(makeCoordinateInfo());
@@ -108,7 +77,7 @@ describe('reproject helpers', () => {
 
     const latLon = await reprojectToLatLon(conversion, crs, undefined, 0.001);
     assert.ok(latLon);
-    const roundTrip = await reprojectFromLatLon(latLon!, crs, conversion, undefined, 0.001);
+    const roundTrip = await reprojectFromLatLon(latLon!, crs, 0.001);
     assert.ok(roundTrip);
     assert.ok(Math.abs(roundTrip!.easting - conversion.eastings) < 0.001);
     assert.ok(Math.abs(roundTrip!.northing - conversion.northings) < 0.001);
@@ -118,7 +87,9 @@ describe('reproject helpers', () => {
     assert.ok(Math.abs(origin!.longitude - latLon!.lon) < 1e-9);
     assert.ok(Math.abs(origin!.latitude - latLon!.lat) < 1e-9);
     assert.strictEqual(origin!.ifcOriginHeight, 244);
-    assert.strictEqual(origin!.horizontalScale, 1);
+    assert.strictEqual(origin!.scaleX, 1);
+    assert.strictEqual(origin!.scaleY, 1);
+    assert.strictEqual(origin!.scaleZ, 1);
   });
 
   it('resolves EPSG:28992 and round-trips projected coordinates', async () => {
@@ -145,21 +116,16 @@ describe('reproject helpers', () => {
 
     const latLon = await reprojectToLatLon(conversion, crs);
     assert.ok(latLon);
-    const roundTrip = await reprojectFromLatLon(latLon!, crs, conversion);
+    const roundTrip = await reprojectFromLatLon(latLon!, crs);
     assert.ok(roundTrip);
     assert.ok(Math.abs(roundTrip!.easting - conversion.eastings) < 0.01);
     assert.ok(Math.abs(roundTrip!.northing - conversion.northings) < 0.01);
   });
 
-  it('round-trips with a non-identity rotation AND a non-zero geometry center (mutation-testing round 6)', async () => {
-    // Every other round-trip test in this file uses BOTH xAxisOrdinate: 0
-    // (no rotation) AND an omitted/default coordinateInfo (geometry center
-    // ifcX = ifcY = 0). Mutation testing found that combination makes the
-    // rotation cross-term (ordinate * ifcX/ifcY) in computeProjectedCenter
-    // and reprojectFromLatLon's inverse vanish for EITHER reason alone, so a
-    // sign flip in either function's rotation term survives undetected. This
-    // fixture uses a non-trivial rotation AND a non-zero model-center offset
-    // so the cross-term is load-bearing in both directions.
+  it('projects a non-identity rotation AND a non-zero geometry center (mutation-testing round 6)', async () => {
+    // Keep rotation cross-terms load-bearing in the geometry transform. The
+    // origin inverse deliberately returns the projected point without undoing
+    // geometry, so it is an independent observation of the forward result.
     const crs: ProjectedCRS = { id: 1, name: 'EPSG:28992', mapUnit: 'METRE', mapUnitScale: 1 };
     const conversion: MapConversion = {
       id: 2,
@@ -180,14 +146,14 @@ describe('reproject helpers', () => {
 
     const latLon = await reprojectToLatLon(conversion, crs, coordinateInfo);
     assert.ok(latLon);
-    const roundTrip = await reprojectFromLatLon(latLon!, crs, conversion, coordinateInfo);
+    const roundTrip = await reprojectFromLatLon(latLon!, crs);
     assert.ok(roundTrip);
     assert.ok(
-      Math.abs(roundTrip!.easting - conversion.eastings) < 0.01,
+      Math.abs(roundTrip!.easting - (conversion.eastings + 0.6 * ifcX - 0.8 * ifcY)) < 0.01,
       `easting round-trip: ${roundTrip!.easting} vs ${conversion.eastings}`,
     );
     assert.ok(
-      Math.abs(roundTrip!.northing - conversion.northings) < 0.01,
+      Math.abs(roundTrip!.northing - (conversion.northings + 0.8 * ifcX + 0.6 * ifcY)) < 0.01,
       `northing round-trip: ${roundTrip!.northing} vs ${conversion.northings}`,
     );
   });
@@ -518,50 +484,6 @@ describe('reprojectPointToLatLon (#1657 measure geo lat/lon)', () => {
   });
 });
 
-describe('reprojectionInputKey (effect dependency correctness)', () => {
-  const crs: ProjectedCRS = {
-    id: 1,
-    name: 'EPSG:32760',
-    mapUnit: 'MILLIMETRE',
-    mapUnitScale: 0.001,
-    mapZone: '60S',
-    description: 'WGS 84 / UTM zone 60S',
-    mapProjection: 'UTM',
-  };
-
-  it('quantises sub-millimetre E/N jitter to the same key', () => {
-    // mm CRS: eastings are millimetres, so nudges within the same millimetre
-    // bucket round identically (both 729013348.x -> 729013348).
-    const a = reprojectionInputKey(729013348.1, 9063992684.1, crs, 0.001);
-    const b = reprojectionInputKey(729013348.4, 9063992684.4, crs, 0.001);
-    assert.strictEqual(a, b, 'sub-mm changes must not change the key');
-  });
-
-  it('changes the key when E/N moves by more than a millimetre', () => {
-    const a = reprojectionInputKey(729013348.1, 9063992684.1, crs, 0.001);
-    const b = reprojectionInputKey(729013350.1, 9063992684.1, crs, 0.001);
-    assert.notStrictEqual(a, b, 'a >1 mm move must change the key');
-  });
-
-  it('folds every reprojection input (codex #1671 P2): a projection-metadata edit changes the key even when name + E/N are unchanged', () => {
-    const base = reprojectionInputKey(729013348.1, 9063992684.1, crs, 0.001);
-    // Each field resolveProjection / reprojectPointToLatLon reads must move the key.
-    const edits: Array<Partial<ProjectedCRS>> = [
-      { mapZone: '59S' },
-      { description: 'something else' },
-      { mapProjection: 'TM' },
-      { mapUnitScale: 1 },
-    ];
-    for (const edit of edits) {
-      const mutated = reprojectionInputKey(729013348.1, 9063992684.1, { ...crs, ...edit }, 0.001);
-      assert.notStrictEqual(mutated, base, `editing ${Object.keys(edit)[0]} must change the key`);
-    }
-    // lengthUnitScale is a non-CRS input the reprojection reads too.
-    const diffLength = reprojectionInputKey(729013348.1, 9063992684.1, crs, 0.01);
-    assert.notStrictEqual(diffLength, base, 'a lengthUnitScale change must change the key');
-  });
-});
-
 describe('map-absolute geometry detection (#2526 Vectorworks EPSG:25833)', () => {
   // Shape of the issue #2526 file: Vectorworks placed the IfcSite at the
   // ABSOLUTE map coordinates (311988180.54 mm E, 5996148564.99 mm N, 14 m up)
@@ -675,23 +597,16 @@ describe('map-absolute geometry detection (#2526 Vectorworks EPSG:25833)', () =>
     close(origin.ifcOriginHeight, 15.78, 0.01);
   });
 
-  it('the map-pick Apply loop stays self-consistent: saving reprojectFromLatLon output and recomputing lands the pin where picked', async () => {
-    // LocationMap's Apply saves reprojectFromLatLon's E/N into the mutated
-    // MapConversion while the authored rotation stays. The invariant that
-    // must hold for a map-absolute file is NOT the shape of the intermediate
-    // values but that the recomputed pin equals the picked location — the
-    // saved anchor moves the mutated conversion out of the map-absolute
-    // detection window, so the forward math applies the authored rotation to
-    // exactly the values the inverse accounted for.
+  it('#6677 the map-pick Apply loop round-trips the declared origin independently of absolute geometry', async () => {
     const picked = { lat: 54.081, lon: 12.13 };
-    const saved = await reprojectFromLatLon(picked, vwCrs, vwConversion, vwCoordinateInfo, 0.001);
+    const saved = await reprojectFromLatLon(picked, vwCrs, 0.001);
     assert.ok(saved, 'expected projected coordinates');
     const mutated: MapConversion = {
       ...vwConversion,
       eastings: saved.easting,
       northings: saved.northing,
     };
-    const recomputed = await reprojectToLatLon(mutated, vwCrs, vwCoordinateInfo, 0.001);
+    const recomputed = await reprojectPointToLatLon(mutated.eastings, mutated.northings, vwCrs, 0.001);
     assert.ok(recomputed, 'expected a recomputed pin');
     close(recomputed.lat, picked.lat, 1e-6);
     close(recomputed.lon, picked.lon, 1e-6);

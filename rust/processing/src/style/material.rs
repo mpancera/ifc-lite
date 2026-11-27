@@ -31,7 +31,7 @@ const MAX_MATERIAL_RESOLVE_DEPTH: u8 = 4;
 
 /// Build the `element id → material colours` map: every colour each element
 /// inherits from its associated material(s), in resolution order. The single
-/// general-path fallback picks the first opaque colour ([`pick_opaque_first`]);
+/// general-path fallback is [`element_material_fallback_color`];
 /// the opening sub-mesh path alternates transparent/opaque
 /// ([`pick_material_style_for_submesh`]) to split glass vs frame.
 ///
@@ -96,6 +96,21 @@ pub fn pick_opaque_first(colors: &[[f32; 4]]) -> Option<[f32; 4]> {
     )
 }
 
+/// THE element-level material fallback colour: what an element with no
+/// representation-level style renders in, from its material colour list
+/// ([`build_element_material_colors`]). The first opaque colour, else the
+/// first colour, so a window listing `[glass, frame]` falls back to its frame.
+///
+/// One rule for every pipeline (PROCESSING-4, #7691): the native orchestrator
+/// and canonical appearance resolve it in process, and the browser pre-pass
+/// folds it into the `styleIds`/`styleColors` wire that `processGeometryBatch`
+/// reads back per element. The wire used to carry the first colour instead,
+/// so the same element fell back to glass in the viewer and to frame on the
+/// server.
+pub fn element_material_fallback_color(colors: &[[f32; 4]]) -> Option<[f32; 4]> {
+    pick_opaque_first(colors)
+}
+
 /// Pick a material colour for one sub-mesh, alternating preference so a window
 /// distributes its frame (opaque) and glazing (transparent) colours across
 /// sub-meshes instead of painting every part the same. `prefer_transparent`
@@ -120,11 +135,13 @@ pub fn pick_material_style_for_submesh(
 /// This owns the precedence *below* the direct geometry style and the stateful
 /// transparent/opaque alternation, so every consumer (the native pipeline and
 /// the browser) applies the identical rule — the §4.2 "one place for the colour
-/// decision" guarantee. The caller resolves `direct_color` itself (its
-/// geometry-style index + `IfcMappedItem` traversal differ by data layout —
-/// `GeometryStyleInfo` vs `[f32; 4]` — so that one step stays at the boundary):
+/// decision" guarantee. Product style-source traversal is shared in
+/// `element/element_color.rs` (`find_geometry_item_style_source` and the
+/// product/map helpers); typed style-map lookup adapters supply `direct_color`:
 ///
-/// 1. `direct_color` (a direct `IfcStyledItem`, incl. mapped geometry) wins;
+/// 1. `direct_color` wins: a direct `IfcStyledItem` on the geometry, incl.
+///    mapped geometry, else (with material colours present) the style on the
+///    `IfcMappedItem` occurrence that maps it;
 /// 2. else the material chain, alternating transparent/opaque per sub-mesh via
 ///    `mat_color_idx` (incremented here, only when a material list is present),
 ///    so a window's glass and frame split across its parts;
@@ -135,17 +152,37 @@ pub fn resolve_submesh_color(
     mat_color_idx: &mut usize,
     element_color: [f32; 4],
 ) -> [f32; 4] {
+    resolve_submesh_color_branch(direct_color, material_colors, mat_color_idx, element_color).0
+}
+
+/// Which step of [`resolve_submesh_color`] decided a colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubmeshColorBranch {
+    Direct,
+    Material,
+    Element,
+}
+
+/// [`resolve_submesh_color`] and the step that decided it, from the one
+/// decision, so a caller pairs the colour with its source without comparing
+/// colours.
+pub(crate) fn resolve_submesh_color_branch(
+    direct_color: Option<[f32; 4]>,
+    material_colors: Option<&[[f32; 4]]>,
+    mat_color_idx: &mut usize,
+    element_color: [f32; 4],
+) -> ([f32; 4], SubmeshColorBranch) {
     if let Some(color) = direct_color {
-        return color;
+        return (color, SubmeshColorBranch::Direct);
     }
     if let Some(colors) = material_colors {
         let prefer_transparent = (*mat_color_idx).is_multiple_of(2);
         *mat_color_idx += 1;
         if let Some(color) = pick_material_style_for_submesh(colors, prefer_transparent) {
-            return color;
+            return (color, SubmeshColorBranch::Material);
         }
     }
-    element_color
+    (element_color, SubmeshColorBranch::Element)
 }
 
 /// material id → colours, by following each material's styled representations to
@@ -162,7 +199,7 @@ pub fn build_material_style_index(
                 continue;
             };
             // IfcStyledRepresentation : IfcRepresentation — Items is attr 3.
-            for styled_item_id in extract_refs_from_list(&styled_repr, 3) {
+            for styled_item_id in styled_repr.get_refs(3).unwrap_or_default() {
                 if let Some(&color) = orphan_styled_items.get(&styled_item_id) {
                     material_styles.entry(material_id).or_default().push(color);
                 }
@@ -191,7 +228,7 @@ fn resolve_material_ids_inner(
     match entity.ifc_type {
         IfcType::IfcMaterial => vec![material_select_id],
         // IfcMaterialList.Materials (attr 0)
-        IfcType::IfcMaterialList => extract_refs_from_list(&entity, 0),
+        IfcType::IfcMaterialList => entity.get_refs(0).unwrap_or_default(),
         // IfcMaterialLayerSetUsage.ForLayerSet (attr 0) → IfcMaterialLayerSet
         IfcType::IfcMaterialLayerSetUsage => entity
             .get_ref(0)
@@ -220,7 +257,7 @@ fn extract_nested_material_ids(
     decoder: &mut EntityDecoder,
 ) -> Vec<u32> {
     let mut materials = Vec::new();
-    for container_id in extract_refs_from_list(entity, container_list_attr_idx) {
+    for container_id in entity.get_refs(container_list_attr_idx).unwrap_or_default() {
         if let Ok(container) = decoder.decode_by_id(container_id) {
             if let Some(mat_id) = container.get_ref(material_attr_idx) {
                 materials.push(mat_id);
@@ -228,14 +265,6 @@ fn extract_nested_material_ids(
         }
     }
     materials
-}
-
-fn extract_refs_from_list(entity: &DecodedEntity, index: usize) -> Vec<u32> {
-    entity
-        .get(index)
-        .and_then(|attr| attr.as_list())
-        .map(|list| list.iter().filter_map(|v| v.as_entity_ref()).collect())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

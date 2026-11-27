@@ -7,15 +7,16 @@
  *
  * Orbit uses a pivot point:
  * - Default pivot = camera.target (standard orbit — position rotates, target stays)
- * - When orbitCenter is set (raycast hit / selected object), position orbits
- *   around the pivot and the look direction is rotated by the exact same
- *   axis-angle rotation (Rodrigues). A small vertical clamp on the look
- *   direction prevents the view matrix from degenerating (model flip).
- *   Approach mirrors Blender's turntable: Y-axis horizontal + right-axis vertical.
+ * - When orbitCenter is set (raycast hit / selected object), position orbits around
+ *   the pivot and the look direction is rotated by the exact same axis-angle rotation
+ *   (Rodrigues). A small vertical clamp on the look direction prevents the view matrix
+ *   from degenerating (model flip). Mirrors Blender's turntable: Y-axis horizontal + right-axis vertical.
  */
 
 import type { Vec3 } from './types.js';
+import { acceptZoomStep, captureZoomState, shiftTargetTowardsMouse, zoomOrthographic, zoomPerspective } from './camera-zoom.js';
 import { CAMERA_CONSTANTS as CC } from './constants.js';
+import { viewBasis } from './math.js';
 import type { CameraInternalState } from './camera-state.js';
 import {
   areFiniteNumbers,
@@ -160,16 +161,33 @@ function clampPhi(phi: number): number {
 // ---------------------------------------------------------------------------
 
 /**
+ * Restricts which gestures {@link CameraControls.orbit}/{@link
+ * CameraControls.pan}/{@link CameraControls.zoom} act on. `'all'` (the
+ * default) is unrestricted; `'none'` freezes the view entirely. Mirrors the
+ * embed protocol's `controls` URL param / `EmbedConfig.controls` (#2934).
+ */
+export type InteractionMode = 'orbit' | 'pan' | 'all' | 'none';
+
+/**
  * Handles core camera movement: orbit, pan, and zoom.
  */
 export class CameraControls {
   /** Optional orbit pivot (set on object selection). null = orbit around camera.target. */
   private orbitCenter: Vec3 | null = null;
+  /** See {@link InteractionMode}. Gates orbit/pan/zoom; unrestricted by default. */
+  private interactionMode: InteractionMode = 'all';
 
   constructor(
     private readonly state: CameraInternalState,
     private readonly updateMatrices: () => void,
   ) {}
+
+  /** Restrict interactive orbit/pan/zoom. Does not affect programmatic moves
+   *  (`setRotation`, `setPresetView`, `zoomExtent`, ...) — only the gesture
+   *  entry points below. */
+  setInteractionMode(mode: InteractionMode): void {
+    this.interactionMode = mode;
+  }
 
   /**
    * Set the orbit center without moving the camera.
@@ -187,15 +205,14 @@ export class CameraControls {
   /**
    * Orbit the camera around a pivot point.
    *
-   * `camera.up` is always world Y — setPresetView positions the camera at
-   * phi ∈ [MIN_PHI, MAX_PHI] (never on the exact pole), so the orbit math
-   * never hits the spherical singularity and no special pole-handling is
-   * needed. Phi is clamped to [MIN_PHI, π − MIN_PHI], keeping it just
-   * off both poles so sinφ stays nonzero in the spherical tangent math.
-   *
-   * Pattern is the same as yomotsu/camera-controls and Autodesk Viewer.
+   * `camera.up` is world Y while orbiting. A pose exactly on a pole (the top
+   * and bottom presets, #9501) is first stepped to the edge of the orbit range
+   * by `leavePole`, so the orbit math never hits the spherical singularity.
+   * Phi is clamped to [MIN_PHI, π − MIN_PHI], keeping it just off both poles
+   * so sinφ stays nonzero in the spherical tangent math. Pattern is the same
+   * as yomotsu/camera-controls and Autodesk Viewer.
    */
-  orbit(deltaX: number, deltaY: number): void {
+  orbit(deltaX: number, deltaY: number): boolean {
     // The pose guards below are not enough: the *arguments* are a second input
     // class and they reach the same arithmetic (#2473). A non-finite `deltaX`
     // survives `toSpherical`/`fromSpherical` and `rodrigues` alike, and both
@@ -204,10 +221,11 @@ export class CameraControls {
     // side. Measured, not reasoned: `orbit(NaN, 0)` and `orbit(Infinity, 0)`
     // each came back with a non-finite position on a single call.
     //
-    // Rejecting before the `up` reset means a rejected gesture changes nothing
-    // at all, rather than half-applying its side effect.
-    if (!areFiniteNumbers(deltaX, deltaY)) return;
+    // Rejecting before `up` means a rejection changes nothing -- `boolean` lets `Camera` gate its own side effects the same way, one level up (#2934).
+    if (!areFiniteNumbers(deltaX, deltaY)) return false;
+    if (this.interactionMode === 'pan' || this.interactionMode === 'none') return false;
 
+    this.leavePole();
     this.state.camera.up = { x: 0, y: 1, z: 0 };
 
     const dx = -deltaX * CC.ORBIT_SENSITIVITY;
@@ -235,6 +253,50 @@ export class CameraControls {
     }
 
     this.updateMatrices();
+    return true;
+  }
+
+  /**
+   * Step a pose that sits closer to a pole than the orbit range allows back
+   * out to `MIN_PHI` (or `MAX_PHI`), keeping its screen orientation (#9501).
+   *
+   * The top and bottom presets, a horizontal section's "Set view" and a
+   * plan BCF viewpoint look exactly down (or up) the Y axis, so their pose has
+   * no horizontal offset and `camera.up` alone says which way the screen
+   * faces. The orbit math resets `up` to world Y and needs that offset for
+   * its polar tangent; without it a horizontal drag spun nothing and the
+   * first frame snapped to the `-Z` fallback screen orientation. Moving the
+   * camera to the orbit range's edge, on the side opposite screen-up (top) or
+   * along it (bottom), is the pose world Y up draws the same way. The step is
+   * `MIN_PHI` (0.01 rad) and lands inside the drag that asked for it.
+   */
+  private leavePole(): void {
+    const { position, target, up } = this.state.camera;
+    const offset = sub(position, target);
+    const dist = length(offset);
+    if (!isUsableDistance(dist, 1e-6)) return;
+    const cosPhi = offset.y / dist;
+    const poleCos = Math.cos(CC.MIN_PHI);
+    if (Math.abs(cosPhi) <= poleCos) return;
+    const sign = cosPhi > 0 ? 1 : -1;
+
+    // Screen-up's horizontal direction, from the same basis the view matrix
+    // is built with: the raw `up` can be tilted out of the image plane (a
+    // BCF viewpoint whose up is not orthogonal to its direction), and a
+    // vertical or unusable one falls back to `viewBasis`'s -Z hint. Near the
+    // pole screen-up is nearly horizontal, so its horizontal part is usable.
+    const screenUp = viewBasis(position, target, up).up;
+    const upHoriz = Math.hypot(screenUp.x, screenUp.z);
+    if (!(upHoriz > 1e-9)) return;
+    // Top: the camera sits opposite screen-up. Bottom: on its side.
+    const hx = (-sign * screenUp.x) / upHoriz;
+    const hz = (-sign * screenUp.z) / upHoriz;
+    const sinPhi = Math.sin(CC.MIN_PHI);
+    copyInto(this.state.camera.position, {
+      x: target.x + dist * sinPhi * hx,
+      y: target.y + dist * sign * poleCos,
+      z: target.z + dist * sinPhi * hz,
+    });
   }
 
   /**
@@ -321,12 +383,13 @@ export class CameraControls {
    * Pan camera (Y-up coordinate system).
    * Moves both position and target by the same offset (preserves orbit relationship).
    */
-  pan(deltaX: number, deltaY: number): void {
+  pan(deltaX: number, deltaY: number): boolean {
     // Argument-side counterpart of the pose guard below (#2473). `translateAll`
     // adds the offset to position, target *and* the orbit centre, so one
     // non-finite delta becomes nine bad coordinates — the same blast radius a
     // malformed pose has, reached from the caller instead.
-    if (!areFiniteNumbers(deltaX, deltaY)) return;
+    if (!areFiniteNumbers(deltaX, deltaY)) return false;
+    if (this.interactionMode === 'orbit' || this.interactionMode === 'none') return false;
 
     const dir = sub(this.state.camera.position, this.state.camera.target);
     const dist = length(dir);
@@ -336,7 +399,7 @@ export class CameraControls {
     // the orbit centre alike, so one malformed coordinate becomes nine. A
     // zero-length pose is still pannable — the polar fallback below covers it —
     // so the floor here is 0, not the 1e-6 the orbit paths use.
-    if (!isUsableDistance(dist, 0)) return;
+    if (!isUsableDistance(dist, 0)) return false;
 
     // Standard Y-up reference for the screen-right axis. When the camera is
     // looking straight up or down (e.g., top/bottom preset view), dir's
@@ -375,6 +438,7 @@ export class CameraControls {
 
     this.translateAll(offset);
     this.updateMatrices();
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -389,7 +453,7 @@ export class CameraControls {
    * @param canvasWidth - Canvas width
    * @param canvasHeight - Canvas height
    */
-  zoom(delta: number, mouseX?: number, mouseY?: number, canvasWidth?: number, canvasHeight?: number, fastZoom?: boolean): void {
+  zoom(delta: number, mouseX?: number, mouseY?: number, canvasWidth?: number, canvasHeight?: number, fastZoom?: boolean): boolean {
     // `Math.sign(NaN) * Math.min(NaN, MAX)` is NaN, so the clamp below does not
     // absorb a non-finite delta — it forwards it into `zoomFactor` and from
     // there into the pose and (orthographic) into `orthoSize` (#2473/#2461).
@@ -397,14 +461,17 @@ export class CameraControls {
     // absorb `Infinity` (`Math.min(Infinity, MAX_ZOOM_DELTA)` is the cap), so
     // only NaN gets through here. Guarding both anyway keeps this agreeing
     // with `orbit`/`pan`, where the two behave differently.
-    if (!Number.isFinite(delta)) return;
+    if (!Number.isFinite(delta)) return false;
+    // `!== 'all'`: `controls` documents "Restricts orbit/pan/zoom ... `'all'`
+    // is unrestricted", so `'orbit'` and `'pan'` refuse a dolly too (#2934).
+    if (this.interactionMode !== 'all') return false;
 
     const dir = sub(this.state.camera.position, this.state.camera.target);
     const distance = length(dir);
     // Degenerate (position ≈ target, nothing to zoom) or non-finite: `forward`
     // is `dir` scaled by `-1 / distance`, and both branches below write the
     // result back into the pose.
-    if (!isUsableDistance(distance, CC.MIN_PERSPECTIVE_DISTANCE)) return;
+    if (!isUsableDistance(distance, CC.MIN_PERSPECTIVE_DISTANCE)) return false;
 
     const normalizedDelta = Math.sign(delta) * Math.min(Math.abs(delta) * CC.ZOOM_SENSITIVITY, CC.MAX_ZOOM_DELTA);
     const zoomFactor = 1 + normalizedDelta;
@@ -423,6 +490,7 @@ export class CameraControls {
       ? { mouseX, mouseY, canvasWidth, canvasHeight }
       : null;
 
+    const before = captureZoomState(this.state, this.orbitCenter);
     if (this.state.projectionMode === 'orthographic') {
       // Compute the effective factor after clamping so mouse anchoring matches
       // the actual zoom applied — prevents drift when orthoSize hits the floor.
@@ -431,119 +499,23 @@ export class CameraControls {
       // notch overflows to `Infinity` is the reachable case, and `Math.max`
       // would have forwarded it. Leave the zoom un-applied rather than write
       // a half-height `getOrthoSize()` would hand to a saved viewpoint (#2461).
-      if (nextOrthoSize === null) return;
+      if (nextOrthoSize === null) return false;
       const effectiveFactor = nextOrthoSize / this.state.orthoSize;
 
       if (anchor) {
-        this.shiftTargetTowardsMouse(dir, distance, forward, effectiveFactor, anchor.mouseX, anchor.mouseY, anchor.canvasWidth, anchor.canvasHeight);
+        shiftTargetTowardsMouse(this.state, dir, distance, forward, effectiveFactor, anchor.mouseX, anchor.mouseY, anchor.canvasWidth, anchor.canvasHeight);
       }
-      this.zoomOrthographic(dir, nextOrthoSize);
+      zoomOrthographic(this.state, dir, nextOrthoSize);
     } else {
       if (anchor) {
-        this.shiftTargetTowardsMouse(dir, distance, forward, zoomFactor, anchor.mouseX, anchor.mouseY, anchor.canvasWidth, anchor.canvasHeight);
+        shiftTargetTowardsMouse(this.state, dir, distance, forward, zoomFactor, anchor.mouseX, anchor.mouseY, anchor.canvasWidth, anchor.canvasHeight);
       }
-      this.zoomPerspective(distance, forward, zoomFactor, fastZoom);
+      zoomPerspective(this.state, this.orbitCenter, distance, forward, zoomFactor, fastZoom);
     }
 
+    if (!acceptZoomStep(this.state, this.orbitCenter, before)) return false;
     this.updateMatrices();
-  }
-
-  /**
-   * Orthographic: set view volume size, keep camera distance unchanged.
-   *
-   * `nextOrthoSize` has already been through {@link usableOrthoSize} — this is
-   * one of the two writers that bypass `Camera.setOrthoSize`, and the read-site
-   * backstop in `updateMatrices` only keeps the projection *matrix* finite:
-   * `getOrthoSize()` reads the state directly and that is what a saved
-   * viewpoint persists (#2461).
-   */
-  private zoomOrthographic(dir: Vec3, nextOrthoSize: number): void {
-    this.state.orthoSize = nextOrthoSize;
-    this.state.camera.position.x = this.state.camera.target.x + dir.x;
-    this.state.camera.position.y = this.state.camera.target.y + dir.y;
-    this.state.camera.position.z = this.state.camera.target.z + dir.z;
-  }
-
-  /**
-   * Perspective: dolly-zoom — combines distance reduction with forward travel.
-   *
-   * Pure multiplicative zoom suffers from Zeno's paradox: each step covers a
-   * smaller absolute distance, so the user asymptotically approaches the target
-   * but can never pass it. By splitting each zoom step into distance reduction +
-   * forward dolly, the camera always makes real progress through the scene.
-   */
-  private zoomPerspective(distance: number, forward: Vec3, zoomFactor: number, fastZoom?: boolean): void {
-    const zoomStep = distance * (1 - zoomFactor); // positive when zooming in
-
-    // Fast zoom (Shift+scroll or Cesium mode): pure dolly — the full zoom step
-    // translates the rig forward, distance stays constant, no Zeno slow-down.
-    // Normal zoom: half dolly + half distance reduction — gives zoom-to-cursor
-    // convergence but decelerates as the camera approaches the target.
-    const dolly = fastZoom ? zoomStep : zoomStep * 0.5;
-    const newDistance = fastZoom ? distance : Math.max(CC.MIN_PERSPECTIVE_DISTANCE, distance - zoomStep * 0.5);
-
-    // Move target (and orbit center) forward to traverse the scene
-    const dollyOffset = scale(forward, dolly);
-    addInPlace(this.state.camera.target, dollyOffset);
-    if (this.orbitCenter) addInPlace(this.orbitCenter, dollyOffset);
-
-    // Position camera at new distance from updated target
-    const t = this.state.camera.target;
-    copyInto(this.state.camera.position, {
-      x: t.x - forward.x * newDistance,
-      y: t.y - forward.y * newDistance,
-      z: t.z - forward.z * newDistance,
-    });
-  }
-
-  /** Shift target toward the world point under the mouse cursor. */
-  private shiftTargetTowardsMouse(
-    dir: Vec3, distance: number, forward: Vec3, zoomFactor: number,
-    mouseX: number, mouseY: number, canvasWidth: number, canvasHeight: number,
-  ): void {
-    // The cursor anchor is the one place a gesture reads `up` and writes the
-    // result into the pose, and `up` is as externally authored as `position`
-    // and `target` are — so the distance guard in `zoom()` is not the whole
-    // check. An unusable `up` makes `right` and `actualUp` non-finite, and the
-    // three lines at the bottom put that straight into `camera.target`, which
-    // `zoomPerspective`/`zoomOrthographic` then copy into `camera.position`:
-    // one bad component of `up` becomes all six of the pose in a single wheel
-    // notch. The guard belongs here rather than in `zoom()` because `up` feeds
-    // only this branch — returning from `zoom()` would also kill the plain
-    // zoom, which never touches `up` — and rather than in `setUp`, because the
-    // animated viewpoint-restore path writes `camera.up` through
-    // `animateToWithUp` without going near the setter.
-    //
-    // Dropping the anchor is the fallback the surrounding code already uses:
-    // it is exactly what a zero-length or view-parallel `up` produces today
-    // (`normalize` returns `{0,0,0}`, so `mouseWorld` collapses onto `target`
-    // and the target does not move). The zoom itself still happens, centred
-    // rather than cursor-anchored, and the pose is left as it was found.
-    if (!isUsableUp(this.state.camera.up)) return;
-
-    const ndcX = (mouseX / canvasWidth) * 2 - 1;
-    const ndcY = 1 - (mouseY / canvasHeight) * 2;
-
-    const right = normalize(cross(forward, this.state.camera.up));
-    const actualUp = cross(right, forward);
-
-    const halfHeight = this.state.projectionMode === 'orthographic'
-      ? this.state.orthoSize
-      : distance * Math.tan(this.state.camera.fov / 2);
-    const halfWidth = halfHeight * this.state.camera.aspect;
-
-    // World point under mouse cursor (on the target plane)
-    const t = this.state.camera.target;
-    const mouseWorld = {
-      x: t.x + right.x * ndcX * halfWidth + actualUp.x * ndcY * halfHeight,
-      y: t.y + right.y * ndcX * halfWidth + actualUp.y * ndcY * halfHeight,
-      z: t.z + right.z * ndcX * halfWidth + actualUp.z * ndcY * halfHeight,
-    };
-
-    const moveAmount = 1 - zoomFactor;
-    t.x += (mouseWorld.x - t.x) * moveAmount;
-    t.y += (mouseWorld.y - t.y) * moveAmount;
-    t.z += (mouseWorld.z - t.z) * moveAmount;
+    return true;
   }
 
   // -------------------------------------------------------------------------

@@ -10,7 +10,10 @@ import { DEFAULT_CAP_STYLE, HATCH_PATTERN_IDS } from './section-cap-style.js';
 import type { SectionPlaneRenderer } from './section-plane.js';
 import type { Section2DOverlayRenderer } from './section-2d-overlay.js';
 import type { Camera } from './camera.js';
+import { MathUtils } from './math.js';
+import { RelativeToEyeFrame } from './relative-to-eye.js';
 import type { RenderOptions } from './types.js';
+import { sectionBoxClipPlanes } from './section-box-caps.js';
 
 /**
  * The section DRAW half, extracted from `RendererOverlays.draw()` so the
@@ -34,27 +37,43 @@ interface Stubs {
     cap: Section2DOverlayRenderer;
     gizmoDraws: DrawCall[];
     capDraws: DrawCall[];
+    /** The planes each primary / extra cap draw was told to clip against (#7545). */
+    primaryClippedBy: unknown[];
+    /** Every highlight the draw handed the cap (#7950). */
+    highlights: unknown[];
+    extraDraws: Array<{ params: Record<string, unknown>; caps: Array<{ key: string; clippedBy: unknown[] }> }>;
 }
 
 /** `hasGeometry` gates the cap draw, so it is part of the fixture, not a detail. */
-function makeStubs(capHasGeometry = true): Stubs {
+function makeStubs(capHasGeometry = true, extraHasGeometry = false): Stubs {
     const gizmoDraws: DrawCall[] = [];
     const capDraws: DrawCall[] = [];
+    const primaryClippedBy: unknown[] = [];
+    const extraDraws: Stubs['extraDraws'] = [];
+    const highlights: unknown[] = [];
     return {
+        highlights,
         gizmoDraws,
         capDraws,
+        primaryClippedBy,
+        extraDraws,
         gizmo: {
             draw(_pass: unknown, params: Record<string, unknown>) { gizmoDraws.push({ params }); },
         } as unknown as SectionPlaneRenderer,
         cap: {
             hasGeometry: () => capHasGeometry,
-            draw(_pass: unknown, params: Record<string, unknown>) { capDraws.push({ params }); },
+            hasExtraGeometry: () => extraHasGeometry,
+            setCapHighlight(highlight: unknown) { highlights.push(highlight); },
+            draw(_pass: unknown, params: Record<string, unknown>, clippedBy: unknown[] = []) {
+                capDraws.push({ params });
+                primaryClippedBy.push(clippedBy);
+            },
+            drawExtras(_pass: unknown, params: Record<string, unknown>, caps: Array<{ key: string; clippedBy: unknown[] }>) {
+                extraDraws.push({ params, caps });
+            },
             // Every 3D line family reports empty, so the facade's draw() reaches
             // nothing but the section block under test.
-            hasAnnotationLines3D: () => false,
-            hasAlignmentLines3D: () => false,
-            hasGridLines3D: () => false,
-            hasDxfLines3D: () => false,
+            hasLineOverlay: () => false,
             hasClashBoxLines3D: () => false,
         } as unknown as Section2DOverlayRenderer,
     };
@@ -79,12 +98,32 @@ describe('the extracted section draw keeps its parameters (#2451 review)', () =>
         assert.strictEqual(s.capDraws.length, 1);
     });
 
+    it('hands the cap the selection / hover highlight, or null when there is none (#7950)', () => {
+        const s = makeStubs();
+        const highlight = new Map([['*:5', [0.3, 0.6, 1, 1] as const]]);
+        const base = ctxFor({ axis: 'side', position: 40, enabled: true });
+        drawSectionOverlays(PASS, s.gizmo, s.cap, { ...base, options: { ...base.options, capHighlight: highlight } });
+        drawSectionOverlays(PASS, s.gizmo, s.cap, base);
+        assert.deepStrictEqual(s.highlights, [highlight, null]);
+    });
+
     it('draws the gizmo as PREVIEW and no cap when the section is off', () => {
         const s = makeStubs();
         drawSectionOverlays(PASS, s.gizmo, s.cap, ctxFor({ axis: 'down', position: 10, enabled: false }));
 
         assert.strictEqual(s.gizmoDraws[0].params.isPreview, true);
         assert.strictEqual(s.capDraws.length, 0, 'a preview plane has no cut to cap');
+    });
+
+    it('routes the camera-owned RTE frame to the preview gizmo (#5049)', () => {
+        const s = makeStubs();
+        const frame = new RelativeToEyeFrame();
+        frame.update({ x: 5_000_000, y: 0, z: 0 }, MathUtils.identity(), MathUtils.identity());
+        drawSectionOverlays(PASS, s.gizmo, s.cap, {
+            ...ctxFor({ axis: 'down', position: 50, enabled: false }),
+            relativeToEyeFrame: frame,
+        });
+        assert.strictEqual(s.gizmoDraws[0].params.relativeToEyeFrame, frame);
     });
 
     it('skips the cap while the overlay has no geometry', () => {
@@ -140,6 +179,7 @@ describe('the overlay facade still routes its draw pass to it (#2451 review)', (
         const host: OverlayHost = {
             getModelBounds: () => BOUNDS,
             expandModelBoundsWithFlatVertices: () => { /* unused */ },
+            expandModelBoundsWithAnchoredLineVertices: () => { /* unused */ },
             syncCameraSceneBounds: () => { /* unused */ },
             requestRender: () => { /* unused */ },
         };
@@ -162,5 +202,116 @@ describe('the overlay facade still routes its draw pass to it (#2451 review)', (
         assert.strictEqual(s.gizmoDraws.length, 1, 'the section gizmo must still be drawn by the facade');
         assert.strictEqual(s.gizmoDraws[0].params.axis, 'front');
         assert.strictEqual(s.capDraws.length, 1, 'the cut cap must still be drawn by the facade');
+    });
+});
+
+describe('the caps of the cutting planes beyond the first (#7545)', () => {
+    const extra = (id: string | undefined, nx: number, distance: number) =>
+        ({ normal: [nx, 0, 0] as [number, number, number], distance, flipped: false, ...(id ? { id } : {}) });
+    const primary = { normal: [0, 1, 0] as [number, number, number], distance: 5, flipped: false };
+    const withExtras = (sectionPlane: RenderOptions['sectionPlane'], extraPlanes: ReturnType<typeof extra>[], primaryPlane = primary) =>
+        ({ ...ctxFor(sectionPlane), extraPlanes, primaryPlane });
+
+    it('clips the primary cap by every extra plane and each extra cap by every OTHER plane, the primary included', () => {
+        const s = makeStubs(true, true);
+        const b = extra('b', 1, 2);
+        const c = extra('c', 1, 4);
+        drawSectionOverlays(PASS, s.gizmo, s.cap, withExtras({ axis: 'down', position: 50, enabled: true }, [b, c]));
+        assert.deepStrictEqual(s.primaryClippedBy[0], [b, c]);
+        assert.strictEqual(s.extraDraws.length, 1);
+        assert.deepStrictEqual(s.extraDraws[0].caps, [
+            { key: 'b', clippedBy: [primary, c] },
+            { key: 'c', clippedBy: [primary, b] },
+        ]);
+    });
+
+    it('a primary plane that is not cutting clips nothing and its extras\' caps are not clipped by it', () => {
+        const s = makeStubs(false, true);
+        const b = extra('b', 1, 2);
+        drawSectionOverlays(PASS, s.gizmo, s.cap, withExtras({ axis: 'down', position: 50, enabled: false }, [b], null as never));
+        assert.deepStrictEqual(s.extraDraws[0].caps, [{ key: 'b', clippedBy: [] }]);
+    });
+
+    it('draws the extra caps with the primary plane\'s cap style, and with no primary plane at all with the defaults', () => {
+        const withStyle = makeStubs(false, true);
+        drawSectionOverlays(PASS, withStyle.gizmo, withStyle.cap, withExtras(
+            { axis: 'down', position: 50, enabled: true, capStyle: { pattern: 'brick' } }, [extra('b', 1, 2)],
+        ));
+        assert.strictEqual((withStyle.extraDraws[0].params.capStyle as { patternId: number }).patternId, HATCH_PATTERN_IDS.brick);
+
+        const bare = makeStubs(false, true);
+        drawSectionOverlays(PASS, bare.gizmo, bare.cap, withExtras(undefined, [extra('b', 1, 2)], null as never));
+        assert.strictEqual(bare.gizmoDraws.length, 0, 'no primary plane, no gizmo');
+        assert.strictEqual((bare.extraDraws[0].params.capStyle as { patternId: number }).patternId, HATCH_PATTERN_IDS[DEFAULT_CAP_STYLE.pattern]);
+    });
+
+    it('skips a plane without an id (it cannot key a cap) and draws nothing when no extra cap exists', () => {
+        const s = makeStubs(true, true);
+        drawSectionOverlays(PASS, s.gizmo, s.cap, withExtras({ axis: 'down', position: 50, enabled: true }, [extra(undefined, 1, 2)]));
+        assert.deepStrictEqual(s.extraDraws[0].caps, []);
+        const none = makeStubs(true, false);
+        drawSectionOverlays(PASS, none.gizmo, none.cap, withExtras({ axis: 'down', position: 50, enabled: true }, [extra('b', 1, 2)]));
+        assert.strictEqual(none.extraDraws.length, 0);
+    });
+
+    it('with no extra planes the primary cap is told it is clipped by nothing', () => {
+        const s = makeStubs();
+        drawSectionOverlays(PASS, s.gizmo, s.cap, ctxFor({ axis: 'down', position: 50, enabled: true }));
+        assert.deepStrictEqual(s.primaryClippedBy, [[]]);
+    });
+});
+
+describe('the section box\'s face caps (#8696)', () => {
+    const box = { min: [0, 0, 0] as [number, number, number], max: [4, 3, 2] as [number, number, number] };
+    const boxed = (clipBox: RenderOptions['clipBox'], extraPlanes: SectionDrawContext['extraPlanes'] = [], sectionPlane?: RenderOptions['sectionPlane']): SectionDrawContext =>
+        ({ options: { sectionPlane, clipBox }, viewProj: new Float32Array(16), modelBounds: BOUNDS, extraPlanes, primaryPlane: null });
+    const faces = sectionBoxClipPlanes(box);
+    const face = (key: string) => faces.find((f) => f.id === `section-box:${key}`)!;
+
+    it('draws a cap per face, each clipped by the four faces around it, never by itself or the opposite face', () => {
+        const s = makeStubs(false, true);
+        drawSectionOverlays(PASS, s.gizmo, s.cap, boxed({ ...box, enabled: true }));
+        const draw = s.extraDraws.at(-1)!;
+        assert.deepStrictEqual(draw.caps.map((c) => c.key), ['minX', 'maxX', 'minY', 'maxY', 'minZ', 'maxZ'].map((f) => `section-box:${f}`));
+        assert.deepStrictEqual(draw.caps[0].clippedBy, [face('minY'), face('maxY'), face('minZ'), face('maxZ')]);
+        assert.deepStrictEqual(draw.caps[5].clippedBy, [face('minX'), face('maxX'), face('minY'), face('maxY')]);
+    });
+
+    it('the faces remove the outside of the box, as the box clip does', () => {
+        assert.deepStrictEqual(face('maxX'), { id: 'section-box:maxX', normal: [1, 0, 0], distance: 4, flipped: false });
+        assert.deepStrictEqual(face('minY'), { id: 'section-box:minY', normal: [0, -1, 0], distance: -0, flipped: false });
+        assert.deepStrictEqual(face('maxZ'), { id: 'section-box:maxZ', normal: [0, 0, 1], distance: 2, flipped: false });
+    });
+
+    it('draws the face caps in the box\'s own cap look', () => {
+        const s = makeStubs(false, true);
+        drawSectionOverlays(PASS, s.gizmo, s.cap, boxed({ ...box, enabled: true, showOutlines: false, capStyle: { pattern: 'brick' } }));
+        const params = s.extraDraws.at(-1)!.params;
+        assert.strictEqual((params.capStyle as { patternId: number }).patternId, HATCH_PATTERN_IDS.brick);
+        assert.strictEqual(params.showOutlines, false);
+        assert.strictEqual(params.showFills, true);
+
+        const off = makeStubs(false, true);
+        drawSectionOverlays(PASS, off.gizmo, off.cap, boxed({ ...box, enabled: true, showCap: false }));
+        assert.strictEqual(off.extraDraws.at(-1)!.params.capStyle, undefined, 'Surfaces off: outlines only');
+    });
+
+    it('a cutting plane clips the face caps, and the box clips the planes\' caps', () => {
+        const s = makeStubs(true, true);
+        const b = { id: 'b', normal: [1, 0, 0] as [number, number, number], distance: 2, flipped: false };
+        drawSectionOverlays(PASS, s.gizmo, s.cap, boxed({ ...box, enabled: true }, [b], { axis: 'down', position: 50, enabled: true }));
+        assert.deepStrictEqual(s.primaryClippedBy[0], [b, ...faces]);
+        assert.strictEqual(s.extraDraws.length, 2);
+        assert.deepStrictEqual(s.extraDraws[0].caps, [{ key: 'b', clippedBy: [...faces] }]);
+        assert.deepStrictEqual(s.extraDraws[1].caps[0].clippedBy.at(-1), b);
+    });
+
+    it('a box that does not cut, or no cap geometry, draws no face caps', () => {
+        const off = makeStubs(false, true);
+        drawSectionOverlays(PASS, off.gizmo, off.cap, boxed({ ...box, enabled: false }));
+        assert.deepStrictEqual(off.extraDraws.flatMap((d) => d.caps), [], 'only the (empty) extra planes\' draw');
+        const none = makeStubs(false, false);
+        drawSectionOverlays(PASS, none.gizmo, none.cap, boxed({ ...box, enabled: true }));
+        assert.strictEqual(none.extraDraws.length, 0);
     });
 });

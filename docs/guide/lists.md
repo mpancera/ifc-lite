@@ -8,9 +8,9 @@ A **list definition** describes what to tabulate:
 
 - **Entity types** - Which IFC classes to include (e.g. all `IfcDoor`)
 - **Columns** - Which values to pull for each entity (attributes, properties, quantities, ...)
-- **Conditions** - Optional filters on property values
+- **Filter groups** - Optional shared Rules predicates, evaluated by the viewer before column extraction
 
-`executeList` runs the definition against a **data provider** (an adapter over your parsed model) and returns a `ListResult` with one row per matching entity.
+`executeList` runs a definition with empty filter groups against a **data provider** (an adapter over your parsed model) and returns a `ListResult` with one row per matching entity. See [migrating saved v1 conditions](#migrating-saved-v1-conditions) for Rules-backed definitions.
 
 ## Quick Start
 
@@ -43,6 +43,7 @@ Each `ColumnDefinition` has a `source` that says where the value comes from:
 | `spatial` | Containing spatial element name; `propertyName` picks the level (`Storey` (default), `Building`, `Site`, `Project`) | `Level 2` |
 | `model` | Source file name | `office.ifc` |
 | `zone` | Location-zone assignment and per-zone volume (user-defined 3D zone boxes, viewer-computed); `psetName` holds the zone-set id, `propertyName` picks the mode — see [Zone columns](#zone-columns) | `Section A` |
+| `customGrouping` | The element's group in a custom grouping (in the viewer, a rule-based Lens): the first enabled rule it matches, as the `customGrouping` filter rule applies it. `propertyName` holds the grouping name, `psetName` its id hint; the provider answers through `getCustomGroup` | `Structure` |
 
 A column looks like:
 
@@ -59,6 +60,22 @@ const fireRating: ColumnDefinition = {
 ```
 
 For `quantity` columns, `psetName` holds the quantity set name (e.g. `Qto_DoorBaseQuantities`).
+
+### Triangle counts
+
+Choose **Triangles** to add a numeric geometry column (`source: 'geometry'`,
+`propertyName: 'TriangleCount'`). Sort it descending to find heavily triangulated
+objects, or use the geometry filter to select objects above a count. Providers
+implement the optional `getTriangleCount(expressId)` accessor; absent or
+unavailable geometry produces a blank cell, while a known empty object reports
+zero. After renderer replacement, viewer counts remain unavailable until the viewport
+has supplied its complete source snapshot; a first mesh does not establish a
+complete model count. Counts have no length unit.
+
+The viewer counts each occurrence of instanced geometry and every mesh piece
+belonging to an object. It also shows the model total in project information and
+an object's own count in its information palette. These are geometry counts,
+independent of camera position, visibility and rendering detail level.
 
 ### Zone columns
 
@@ -140,7 +157,11 @@ const csv = listResultToCSV(result);
 
 ### CSV Safety
 
-`listResultToCSV` guards against spreadsheet formula injection (CWE-1236): any cell that starts with `=`, `+`, `-`, `@`, tab, or carriage return is prefixed with a single quote so Excel and Google Sheets treat it as text rather than a formula. Standard CSV quoting (double quotes, `""` escaping) is applied on top.
+`listResultToCSV` guards against spreadsheet formula injection (CWE-1236): a cell that starts with `=`, `+`, `-`, `@`, tab, or carriage return is prefixed with a single quote so Excel and Google Sheets treat it as text rather than a formula. The trigger is looked for past any leading invisible characters, so a zero-width space in front of `=` does not slip through.
+
+One exception, deliberate: a cell that is **wholly** a number (`-0.35`, `+1`, `-1.5e-3`) is left alone, so a column of negative measures still sums in a spreadsheet. Such a cell cannot carry a formula, since the accepted characters are only `+ - . e E` and the digits. Anything with a trigger and a non-numeric tail (`-0.35=cmd`) is still prefixed. The consequence to know about is that a numeric-looking *identifier* held as text — a `+`-prefixed phone number, a zero-padded code like `-007` — is now written as a number rather than preserved as text.
+
+Standard CSV quoting (double quotes, `""` escaping) is applied on top.
 
 ## Grouping, Aggregation & Schedules
 
@@ -185,6 +206,10 @@ for (const row of scheduleRows) {
 
 `summariseListRows(definition, rows)` is what `executeList` calls internally to build `groups`/`summary`; call it directly when you already have rows from elsewhere (e.g. merged across federated models) and just need to re-derive the grouping.
 
+## Lists in documents
+
+A list can be printed inside a [document](./documents.md): **Analyze → Document → Add block → Table (from a list)** takes a copy of a saved list or a preset and prints it the way the list's own export does — unit-converted cells, group rows with count and sums or the schedule view, a totals row when something is summed — re-running it on the loaded models whenever the document is shown or printed. The block's *Edit in Lists* opens the copy in the Lists panel; saving there and *Update from saved list* on the block brings the edit back. A copy never carries a search-selection snapshot (`expressIdsByModel`), which is bound to one load of one model.
+
 ## The Data Provider
 
 `executeList` reads model data through the `ListDataProvider` interface, so the package has no hard dependency on how you parsed the model. Required methods include `getEntitiesByType`, `getEntityName`, `getEntityGlobalId`, `getPropertySets`, and `getQuantitySets`; optional methods (`getMaterialNames`, `getClassifications`, `getStoreyName`, `getProjectName`, `getZoneAssignment`, `getZoneSetNames`, `getZoneVolumeShares`, ...) unlock the `material`, `classification`, `spatial`, `model`, and `zone` column sources, and the engine degrades gracefully when they are absent (a `zone` column simply resolves to `null` on a provider without zone data). The two volume modes go through `getZoneVolumeShares` specifically, so a provider that implements `getZoneAssignment` but not `getZoneVolumeShares` still answers `Zone` and `Straddles` and returns `null` for the volumes.
@@ -216,18 +241,97 @@ Conditions and lookups that match by name accept either an exact string or a reg
 
 `isNamePattern(pattern)` tells you whether a string will be treated as a regex.
 
+## Migrating saved v1 conditions
+
+`migrateLegacyListDefinition(definition)` converts a saved v1 definition's flat
+`conditions`, and the provider-only rows lists saved before #6190, into
+`groups: FilterGroup[]` before the viewer runs it. A plain property comparison
+becomes a `property` rule; every other predicate becomes a `listCondition`
+rule (see below), so no saved predicate changes the rows it keeps. Flat
+conditions narrow every group: they are ANDed into each one, and an OR group is
+split into one AND group per rule. The conversion is idempotent.
+
+Only data no build can evaluate stays in `unreadableConditions`: a malformed
+member, an unknown operator or source, or a saved rule this build does not
+know. A saved list is not hidden because of one; the viewer shows each row
+with a warning and a Remove button, and the list cannot run until they are
+gone. `migrateLegacyListConditions(conditions)` exposes the pure condition
+conversion for other v1 importers.
+
+`executeList` is the synchronous provider-only source and column engine. First
+evaluate any Rules groups, then pass an execution copy such as
+`{ ...definition, groups: [], expressIdsByModel: filteredIdsByModel }`.
+Passing the original definition with nonempty groups throws, even when it has
+an `expressIdsByModel` snapshot, to avoid silently returning extra rows.
+
+## Lists predicates inside Rules groups
+
+A Lists value predicate with no canonical Rules equivalent (zone assignment and
+zone volume modes, exact Container/Storey/Building/Site/Project levels,
+quantity and material presence, the model file name, the Lists attributes such
+as `Class`, `Type` and `GlobalId`, and properties inherited through
+aggregation) can sit in a `FilterGroup` as a `listCondition` rule. Its fields
+are the saved condition, verbatim, and the Lists engine answers it, so it keeps
+the same rows it keeps as a list scope while composing with other rules under
+AND or OR. Give each evaluated model the provider's matcher:
+
+```ts
+import { listConditionMatcher, type ListDataProvider } from '@ifc-lite/lists';
+import { Rule, evaluateFilterGroupsFederated } from '@ifc-lite/rules';
+import type { IfcDataStore } from '@ifc-lite/parser';
+
+declare const store: IfcDataStore;
+declare const provider: ListDataProvider;
+
+const straddlers = await evaluateFilterGroupsFederated(
+  [{ id: 'm1', store, listConditions: listConditionMatcher(provider) }],
+  [{ combinator: 'OR', rules: [
+    Rule.listCondition({ source: 'zone', psetName: 'zone-set-id', propertyName: 'Straddles', operator: 'equals', value: 'true' }),
+    Rule.name('eq', 'Core wall'),
+  ] }],
+);
+```
+
 ## Key Exports
+
+`ListDefinition.capturedScope` is a durable selected or visible population captured once. It intersects the list's existing type or explicit snapshot source criteria; clearing or changing the current selection does not widen it. Unlike `expressIdsByModel`, its members are tied to a source fingerprint and the host's full-content source identity, so runtime model IDs may change after reload.
+
+Resolve the complete scope with Rules `resolveCapturedEntityScope` before evaluating any model. A `ListDataProvider` can supply `resolveCapturedScope(scope, modelId)`, or a host can pass that model's already validated `ReadonlySet<number>` as the fourth `executeList` argument. Unsupported providers refuse a scoped definition. Missing, ambiguous, or replaced sources and missing members refuse instead of silently dropping the scope. Authored members require the original authored record creation identity; recovery that does not retain it requires a fresh capture.
 
 | Export | Description |
 |--------|-------------|
-| `executeList(definition, provider, modelId?)` | Run a list definition, returns `ListResult` |
+| `executeList(definition, provider, modelId?, capturedExpressIds?)` | Run a list definition, optionally with a host-validated captured population, returns `ListResult` |
 | `listResultToCSV(result, delimiter?)` | CSV export with formula-injection guard |
 | `summariseListRows` | Aggregate rows into group summaries (`ListGroup[]` + whole-result `ListSummary`) |
 | `groupingColumnIds(grouping)` | Resolve a grouping config's ordered group-by column ids |
 | `toScheduleRows(groups, levelCount)` | Project grouped `ListGroup[]` to a schedule/pivot `ListScheduleRow[]` — one row per group-value tuple |
 | `discoverColumns(providers, entityTypes)` | Sample available attributes/properties/quantities |
 | `compileNameMatcher(pattern)` / `isNamePattern(pattern)` | Exact-or-regex name matching |
+| `migrateLegacyListConditions(conditions)` | Decode saved v1 conditions into one AND `FilterGroup` and explicit unreadable rows |
+| `migrateLegacyListDefinition(definition)` | Normalize a saved v1 definition to the public `groups` shape |
+| `listConditionMatcher(provider)` | The reader Rules' `listCondition` rules need on each evaluated model |
+| `listConditionValueKind(source, propertyName)` | The kind of value the engine compares for a condition (number, boolean, text, several texts, or any), for offering matching operators |
 | `LIST_PRESETS` | Built-in schedule definitions |
 | `ENTITY_ATTRIBUTES` | The attribute names available to `attribute` columns |
 
 See the [package README](https://github.com/LTplus-AG/ifc-lite/tree/main/packages/lists) and the type definitions (`ListDefinition`, `ColumnDefinition`, `PropertyCondition`, `ListDataProvider`) for the full API.
+
+## Result source and coverage
+
+The results header identifies the executed list and the models its native IFC
+providers evaluated. It retains that identity when the current model picker or
+model names change. Known targeted models without IFC table data are named as
+coverage gaps; a stored result without recorded provenance reports an unknown
+source rather than borrowing the current picker.
+Selected snapshot entities from a removed model remain an unavailable coverage
+gap. An unavailable provider outside that snapshot does not create a gap, and
+the native model-tag scope still determines which snapshot members apply.
+
+Matched entities, returned rows and currently visible rows have separate counts.
+Matches absent from the returned rows remain a partial coverage gap; they are
+not attributed to search or visibility filters. Search and visibility filters
+keep the native result intact, and a filtered-empty table
+is distinct from an explicit empty element scope. The viewer does not infer a
+scanned-entity denominator from the match count. Nested and schedule tables use
+the same result vocabulary, while their native grouping, units, selection and
+exports remain available. Native run errors retain their existing error surface.

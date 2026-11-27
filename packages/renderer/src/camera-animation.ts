@@ -27,7 +27,9 @@ import {
   zoomExtentTarget,
   type FramingBounds,
 } from './camera-framing.js';
-import { presetViewTarget, resolvePresetBounds } from './camera-preset-view.js';
+import { presetDirectionTarget, presetViewTarget, resolvePresetBounds } from './camera-preset-view.js';
+import { applyImmediateCameraPose } from './camera-animation-immediate.js';
+import { inertiaStep } from './camera-inertia.js';
 
 /**
  * Manages camera animations: tweened transitions between positions,
@@ -66,14 +68,10 @@ export class CameraAnimator {
 
   // --- Velocity management (called by Camera class) ---
 
-  // Every one of these accumulates **in place**, and the inertia loop spends a
-  // velocity only while `Math.abs(v) > minVelocity` — false for NaN. So a
-  // single non-finite gesture argument does not cost one frame of inertia: it
-  // latches the channel dead for the rest of the session, and the value never
-  // decays back under the threshold either. That is the same latch
-  // `moveFirstPerson`'s `walkVelocity` had (#2441), reached from the argument
-  // side rather than the pose side (#2473). Skip the contribution instead;
-  // the gesture itself has already been rejected by the same test downstream.
+  // Each accumulates **in place**; the inertia loop spends a velocity only
+  // while `Math.abs(v) > minVelocity` — false for NaN forever, so one
+  // non-finite delta latches the channel dead for the session instead of one
+  // frame (same latch as `moveFirstPerson`'s `walkVelocity`, #2441/#2473).
 
   addOrbitVelocity(deltaX: number, deltaY: number): void {
     if (!areFiniteNumbers(deltaX, deltaY)) return;
@@ -100,13 +98,17 @@ export class CameraAnimator {
     this.presetViewRotation = 0;
   }
 
+  /** A timed pose tween has started and no update() has applied its final pose yet; needs no frame (inertia excluded). */
+  isTweening(): boolean {
+    return this.animationStartTime > 0 && this.animationDuration > 0;
+  }
+
   /**
    * Update camera animation and inertia
    * Returns true if camera is still animating
    */
-  update(_deltaTime: number): boolean {
-    // deltaTime reserved for future physics-based animation smoothing
-    void _deltaTime;
+  update(deltaTime: number): boolean {
+    const step = inertiaStep(deltaTime, this.damping);
     let isAnimating = false;
 
     // Handle animation
@@ -124,12 +126,9 @@ export class CameraAnimator {
         this.state.camera.target.y = this.animationStartTarget.y + (this.animationEndTarget.y - this.animationStartTarget.y) * t;
         this.state.camera.target.z = this.animationStartTarget.z + (this.animationEndTarget.z - this.animationStartTarget.z) * t;
 
-        // Interpolate orthoSize if animating orthographic zoom.
-        // The animator is the second writer that bypasses `Camera.setOrthoSize`
-        // (#2461): the read-site backstop in `updateCameraMatrices` keeps the
-        // projection matrix finite but not the state, and `getOrthoSize()`
-        // reads the state — which is what a saved viewpoint persists. Keep the
-        // previous half-height when the interpolation yields nothing usable.
+        // Interpolate orthoSize if animating orthographic zoom. Bypasses
+        // `Camera.setOrthoSize` (#2461), so keep the previous half-height
+        // rather than a NaN one when the interpolation yields nothing usable.
         if (this.animationStartOrthoSize !== null && this.animationEndOrthoSize !== null) {
           const next = usableOrthoSize(
             this.animationStartOrthoSize + (this.animationEndOrthoSize - this.animationStartOrthoSize) * t,
@@ -176,41 +175,44 @@ export class CameraAnimator {
           if (next !== null) this.state.orthoSize = next;
         }
         this.updateMatrices();
-
-        this.animationStartTime = 0;
-        this.animationDuration = 0;
-        this.animationStartPos = null;
-        this.animationEndPos = null;
-        this.animationStartTarget = null;
-        this.animationEndTarget = null;
-        this.animationStartUp = null;
-        this.animationEndUp = null;
-        this.animationStartOrthoSize = null;
-        this.animationEndOrthoSize = null;
-        this.animationEasing = null;
+        this.clearTween();
       }
     }
 
-    // Apply inertia
+    // Apply inertia, gated like `Camera`'s own wrappers (#2934 review): a
+    // refused tick (`interactionMode` can flip mid-decay) skips the side
+    // effects and zeroes that channel's velocity instead of letting it decay,
+    // so it can't survive frozen ticks and jump once the mode lifts back.
     if (Math.abs(this.velocity.orbit.x) > this.minVelocity || Math.abs(this.velocity.orbit.y) > this.minVelocity) {
-      this.resetPresetTracking();
-      this.controls.orbit(this.velocity.orbit.x * 100, this.velocity.orbit.y * 100);
-      this.velocity.orbit.x *= this.damping;
-      this.velocity.orbit.y *= this.damping;
-      isAnimating = true;
+      if (this.controls.orbit(this.velocity.orbit.x * 100 * step.travel, this.velocity.orbit.y * 100 * step.travel)) {
+        this.resetPresetTracking();
+        this.velocity.orbit.x *= step.decay;
+        this.velocity.orbit.y *= step.decay;
+        isAnimating = true;
+      } else {
+        this.velocity.orbit.x = 0;
+        this.velocity.orbit.y = 0;
+      }
     }
 
     if (Math.abs(this.velocity.pan.x) > this.minVelocity || Math.abs(this.velocity.pan.y) > this.minVelocity) {
-      this.controls.pan(this.velocity.pan.x * 1000, this.velocity.pan.y * 1000);
-      this.velocity.pan.x *= this.damping;
-      this.velocity.pan.y *= this.damping;
-      isAnimating = true;
+      if (this.controls.pan(this.velocity.pan.x * 1000 * step.travel, this.velocity.pan.y * 1000 * step.travel)) {
+        this.velocity.pan.x *= step.decay;
+        this.velocity.pan.y *= step.decay;
+        isAnimating = true;
+      } else {
+        this.velocity.pan.x = 0;
+        this.velocity.pan.y = 0;
+      }
     }
 
     if (Math.abs(this.velocity.zoom) > this.minVelocity) {
-      this.controls.zoom(this.velocity.zoom * 1000);
-      this.velocity.zoom *= this.damping;
-      isAnimating = true;
+      if (this.controls.zoom(this.velocity.zoom * 1000 * step.travel)) {
+        this.velocity.zoom *= step.decay;
+        isAnimating = true;
+      } else {
+        this.velocity.zoom = 0;
+      }
     }
 
     return isAnimating;
@@ -239,8 +241,8 @@ export class CameraAnimator {
    * Frame selection - zoom to fit bounds while keeping current view direction
    * This is what "Frame Selection" should do - zoom to fill screen
    */
-  async frameBounds(min: Vec3, max: Vec3, duration = 300): Promise<void> {
-    const fit = frameBoundsTarget(this.state, min, max);
+  async frameBounds(min: Vec3, max: Vec3, duration = 300, padding?: number): Promise<void> {
+    const fit = frameBoundsTarget(this.state, min, max, padding);
     if (!fit) return;
     return this.animateTo(fit.position, fit.target, duration, fit.orthoSize);
   }
@@ -281,9 +283,23 @@ export class CameraAnimator {
   }
 
   /**
-   * Animate camera to position and target
+   * Animate to a diagonal preset (a ViewCube edge or corner). `direction` is
+   * in the named presets' face frame (+X right, +Y top, +Z front). Ends the
+   * face-click rotation cycle, so the next face click starts it afresh.
    */
+  setPresetDirection(direction: Vec3, bounds?: FramingBounds, buildingRotation?: number): void {
+    const useBounds = resolvePresetBounds(this.state, bounds);
+    if (!useBounds) return;
+    const fit = presetDirectionTarget(this.state, direction, useBounds, buildingRotation);
+    if (!fit) return;
+    this.lastPresetView = null;
+    this.presetViewRotation = 0;
+    this.animateToWithUp(fit.position, fit.target, fit.up, 300);
+  }
+
+  /** Animate camera to position and target. */
   async animateTo(endPos: Vec3, endTarget: Vec3, duration = 500, endOrthoSize?: number): Promise<void> {
+    if (duration <= 0) { this.reset(); applyImmediateCameraPose(this.state, endPos, endTarget, null, endOrthoSize, this.updateMatrices); return; }
     this.animationStartPos = { ...this.state.camera.position };
     this.animationStartTarget = { ...this.state.camera.target };
     this.animationEndPos = endPos;
@@ -314,10 +330,9 @@ export class CameraAnimator {
     });
   }
 
-  /**
-   * Animate camera to position, target, and up vector (for orthogonal preset views)
-   */
-  async animateToWithUp(endPos: Vec3, endTarget: Vec3, endUp: Vec3, duration = 500): Promise<void> {
+  /** Animate camera to position, target, and up vector (for orthogonal preset views). */
+  async animateToWithUp(endPos: Vec3, endTarget: Vec3, endUp: Vec3, duration = 500, endOrthoSize?: number): Promise<void> {
+    if (duration <= 0) { this.reset(); applyImmediateCameraPose(this.state, endPos, endTarget, endUp, endOrthoSize, this.updateMatrices); return; }
     // Clear all velocities to prevent inertia from interfering with animation
     this.velocity.orbit.x = 0;
     this.velocity.orbit.y = 0;
@@ -331,8 +346,8 @@ export class CameraAnimator {
     this.animationEndPos = endPos;
     this.animationEndTarget = endTarget;
     this.animationEndUp = endUp;
-    this.animationStartOrthoSize = null;
-    this.animationEndOrthoSize = null;
+    this.animationStartOrthoSize = endOrthoSize !== undefined ? this.state.orthoSize : null;
+    this.animationEndOrthoSize = endOrthoSize ?? null;
     this.animationDuration = duration;
     this.animationStartTime = Date.now();
     this.animationEasing = this.easeOutCubic;
@@ -350,9 +365,7 @@ export class CameraAnimator {
     });
   }
 
-  /**
-   * Easing function: easeOutCubic
-   */
+  /** Easing function: easeOutCubic. */
   private easeOutCubic(t: number): number {
     return 1 - Math.pow(1 - t, 3);
   }
@@ -374,7 +387,14 @@ export class CameraAnimator {
    */
   reset(): void {
     this.stopInertia();
-    // Cancel any ongoing animations
+    this.clearTween();
+    // Reset preset view tracking
+    this.lastPresetView = null;
+    this.presetViewRotation = 0;
+  }
+
+  /** Drop the in-flight pose tween (finished, or cancelled by a reset). */
+  private clearTween(): void {
     this.animationStartTime = 0;
     this.animationDuration = 0;
     this.animationStartPos = null;
@@ -386,8 +406,5 @@ export class CameraAnimator {
     this.animationStartOrthoSize = null;
     this.animationEndOrthoSize = null;
     this.animationEasing = null;
-    // Reset preset view tracking
-    this.lastPresetView = null;
-    this.presetViewRotation = 0;
   }
 }

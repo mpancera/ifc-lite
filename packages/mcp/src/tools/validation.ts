@@ -3,29 +3,28 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * Validation tools (spec §7.4): IDS, audit, gherkin.
+ * Validation tools (spec §7.4): IDS and audit.
  *
  * IDS validation pulls in the buildingSMART rule engine via @ifc-lite/ids.
  * model_audit produces a Lighthouse-style health score per category.
- * gherkin_check is stubbed (UNSUPPORTED_OPERATION) until the bSI Gherkin
- * engine ships into the workspace.
  */
 
 import { readFile } from 'node:fs/promises';
-import { parseIDS, validateIDS, type IFCDataAccessor } from '@ifc-lite/ids';
-import { IFC_ENTITY_NAMES } from '@ifc-lite/data';
+import { parseIDS, validateIDS, createTranslationService, type IDSValidationReport, type SupportedLocale } from '@ifc-lite/ids';
+import { IFC_ENTITY_NAMES, iterateEffectiveEntities } from '@ifc-lite/data';
 import { getInheritanceChainAcrossSchemas } from '@ifc-lite/parser';
-import { foldedTypeCounts, pendingMutationsField, pendingOverlay } from '../overlay.js';
-import { isProductType } from '../backend-query.js';
+import { foldedTypeCounts, pendingMutationsField, pendingOverlay, stepText, effectiveSourceIds, pendingEntityMembership, isProductType } from '@ifc-lite/sdk/headless';
 import { EntityNode } from '@ifc-lite/query';
 import type { Tool } from './types.js';
-import { okResult, resolveModel } from './util.js';
+import { fmtInt, okResult, resolveModel } from './util.js';
 import { ToolErrorCode, ToolExecutionError } from '../errors.js';
 import { resolveSafePath } from '../safe-path.js';
 import type { ToolContext } from '../context.js';
 import { buildIdsAccessor } from './ids-accessor.js';
+import { nativeReviewModel, reviewCaptures, reviewAccess } from './review-captures.js';
+import { buildDropCensusIssues, dropCensusJson } from './drop-census-issues.js';
 
-const idsValidate: Tool = {
+export const idsValidate = {
   name: 'ids_validate',
   description: 'Run an IDS rule set against the model. Either pass `ids_xml` inline or `ids_path` to read from disk.',
   scope: 'validate',
@@ -44,26 +43,41 @@ const idsValidate: Tool = {
     const xml = await loadIdsXml(input, ctx);
 
     const idsDoc = parseIDS(xml);
-    const accessor = buildIdsAccessor(m.store) as IFCDataAccessor;
-    const report = await validateIDS(
-      idsDoc,
-      accessor,
-      { modelId: m.id, schemaVersion: m.store.schemaVersion, entityCount: m.store.entityCount },
-      {
-        onProgress: (p) => {
-          ctx.progress.report(p.percentage / 100, `Validating ${p.phase} (${p.specificationIndex + 1}/${p.totalSpecifications})`, 100);
+    // `m.backend.getMutationView()` is null until the first `bim.mutate.*`
+    // call (built lazily, #4857's pattern); `buildIdsAccessor` passes
+    // `undefined` on to `createDataAccessor` for that same-shape null, which
+    // is the byte-identical no-visibility-view path (#5184).
+    const accessor = buildIdsAccessor(m.store, m.backend.getMutationView() ?? undefined);
+    const locale = (input.locale as SupportedLocale | undefined) ?? 'en';
+    const captures = reviewCaptures(ctx);
+    const capture = await captures.begin('ids', xml, [nativeReviewModel(m)], reviewAccess(ctx, 'validate').models, reviewAccess(ctx, 'validate').allowed, ctx.signal);
+    try {
+      if (ctx.signal.aborted) throw new DOMException('Validation aborted', 'AbortError');
+      const report = await validateIDS(
+        idsDoc,
+        accessor,
+        { modelId: m.id, schemaVersion: m.store.schemaVersion, entityCount: m.store.entityCount },
+        {
+          translator: createTranslationService(locale),
+          onProgress: (p) => {
+            ctx.progress.report(p.percentage / 100, `Validating ${p.phase} (${p.specificationIndex + 1}/${p.totalSpecifications})`, 100);
+          },
         },
-      },
-    );
-    void input.locale;
+      );
 
-    const summary = summarizeIdsReport(report);
-    return okResult(
-      `IDS: ${summary.passedSpecifications}/${summary.totalSpecifications} specs passed; ${summary.failedEntities} entity failures.`,
-      { summary, report },
-    );
+      if (ctx.signal.aborted) throw new DOMException('Validation aborted', 'AbortError');
+      captures.finish(capture, report);
+      const summary = summarizeIdsReport(report);
+      return okResult(
+        `IDS: ${summary.passedSpecifications}/${summary.totalSpecifications} specs passed; ${summary.failedEntities} entity failures.`,
+        { summary, report },
+      );
+    } catch (error) {
+      captures.abandon(capture, ctx.signal.aborted ? 'aborted' : 'producer-failed');
+      throw error;
+    }
   },
-};
+} satisfies Tool;
 
 /**
  * Resolve IDS source from `ids_xml` (inline) or `ids_path` (disk),
@@ -72,7 +86,7 @@ const idsValidate: Tool = {
  * the previous arrangement let `ids_explain` read arbitrary paths in
  * restricted stdio deployments.
  */
-async function loadIdsXml(
+export async function loadIdsXml(
   input: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<string> {
@@ -87,36 +101,41 @@ async function loadIdsXml(
   });
 }
 
-function summarizeIdsReport(report: unknown): {
+/**
+ * Project the validator's own `report.summary` into the shape this tool
+ * has always returned, instead of re-deriving pass/fail counts from
+ * `specificationResults`.
+ *
+ * A prior version recomputed everything from `entityResults`, treated
+ * `report` as an `unknown` cast to a hand-written minimal interface, and
+ * used `entityResults.length > 0` as the pass condition for a
+ * specification — so a specification that legitimately passes while
+ * matching zero entities (`minOccurs="0"`, or a prohibited spec that
+ * correctly matches nothing) was reported as failed. Because the report
+ * is typed as the real `IDSValidationReport` here, `report.summary` is
+ * the only field this function can read for these numbers — there is no
+ * `entityResults` shape left to drift back onto.
+ */
+function summarizeIdsReport(report: IDSValidationReport): {
   totalSpecifications: number;
   passedSpecifications: number;
   failedSpecifications: number;
+  notApplicableSpecifications: number;
   totalEntities: number;
   passedEntities: number;
   failedEntities: number;
+  overallPassRate: number;
 } {
-  const r = report as { specificationResults?: Array<{ entityResults?: Array<{ passed: boolean }> }> };
-  const specs = r.specificationResults ?? [];
-  let totalEntities = 0;
-  let passedEntities = 0;
-  let passedSpecifications = 0;
-  for (const spec of specs) {
-    const ents = spec.entityResults ?? [];
-    let specPassed = ents.length > 0;
-    for (const e of ents) {
-      totalEntities++;
-      if (e.passed) passedEntities++;
-      else specPassed = false;
-    }
-    if (specPassed) passedSpecifications++;
-  }
+  const s = report.summary;
   return {
-    totalSpecifications: specs.length,
-    passedSpecifications,
-    failedSpecifications: specs.length - passedSpecifications,
-    totalEntities,
-    passedEntities,
-    failedEntities: totalEntities - passedEntities,
+    totalSpecifications: s.totalSpecifications,
+    passedSpecifications: s.passedSpecifications,
+    failedSpecifications: s.failedSpecifications,
+    notApplicableSpecifications: s.totalSpecifications - s.passedSpecifications - s.failedSpecifications,
+    totalEntities: s.totalEntitiesChecked,
+    passedEntities: s.totalEntitiesPassed,
+    failedEntities: s.totalEntitiesFailed,
+    overallPassRate: s.overallPassRate,
   };
 }
 
@@ -210,28 +229,6 @@ const modelAudit: Tool = {
       list.push(id);
       seen.set(gid, list);
     };
-    for (const [type, ids] of m.store.entityIndex.byType) {
-      if (!getInheritanceChainAcrossSchemas(type).includes('IfcRoot')) continue;
-      for (const id of ids) {
-        if (overlay?.deleted.has(id)) continue;
-        addGid(new EntityNode(m.store, id).globalId, id);
-      }
-    }
-    // Queued entities are held to the same rule, chain check included — an agent
-    // creating a second entity under an existing GlobalId is exactly the mistake
-    // this check exists to catch, and it was invisible here.
-    for (const created of overlay?.created ?? []) {
-      if (!getInheritanceChainAcrossSchemas(created.ifcType).includes('IfcRoot')) continue;
-      addGid(created.globalId, created.expressId);
-    }
-    let duplicates = 0;
-    for (const [gid, ids] of seen) {
-      if (ids.length > 1) {
-        duplicates++;
-        issues.push({ severity: 'error', category: 'identity', rule: 'duplicate-globalid', message: `Duplicate GlobalId ${gid} on ${ids.length} entities` });
-      }
-    }
-
     // 3. Naming
     let unnamed = 0;
     let totalProducts = 0;
@@ -246,27 +243,59 @@ const modelAudit: Tool = {
     // geometry it had rather than on how well its products were named. This is
     // the same rule an untyped `query_entities` uses for "a product".
     const edits = overlay?.attributesByEntity();
-    for (const [type, ids] of m.store.entityIndex.byType) {
-      if (!isProductType(type)) continue;
-      for (const id of ids) {
-        if (overlay?.deleted.has(id)) continue;
-        // The store's stored-name fast path, with the overlay consulted only for
-        // the handful of entities that actually have a queued write. Routing
-        // every id through `bim.entity` reparsed attributes on demand for the
-        // whole model to serve a rename count.
-        countName(edits?.get(id)?.get('Name') ?? new EntityNode(m.store, id).name);
+    const classFlags = new Map<string, { root: boolean; product: boolean }>();
+    for (const { expressId, type, overlayCreated } of iterateEffectiveEntities(
+      m.store, pendingEntityMembership(overlay), undefined, effectiveSourceIds(m.store),
+    )) {
+      let flags = classFlags.get(type);
+      if (!flags) {
+        flags = { root: getInheritanceChainAcrossSchemas(type).includes('IfcRoot'), product: isProductType(type) };
+        classFlags.set(type, flags);
+      }
+      if (!flags.root && !flags.product) continue;
+
+      const created = overlayCreated ? overlay?.createdEntity(expressId) : null;
+      const edited = overlayCreated ? undefined : edits?.get(expressId);
+      const positional = overlayCreated ? undefined : overlay?.positionalAttributes(expressId);
+      let node: EntityNode | undefined;
+      const sourceNode = (): EntityNode => node ??= new EntityNode(m.store, expressId);
+
+      if (flags.root) {
+        const globalId = created ? created.globalId
+          : edited?.has('GlobalId') ? edited.get('GlobalId') ?? ''
+          : positional?.has(0) ? stepText(positional.get(0)) ?? ''
+          : sourceNode().globalId;
+        addGid(globalId, expressId);
+      }
+      if (flags.product) {
+        const name = created ? created.name ?? ''
+          : edited?.has('Name') ? edited.get('Name') ?? ''
+          : positional?.has(2) ? stepText(positional.get(2)) ?? ''
+          : sourceNode().name;
+        countName(name);
       }
     }
-    for (const created of overlay?.createdAll ?? []) {
-      if (!isProductType(created.ifcType)) continue;
-      countName(edits?.get(created.expressId)?.get('Name') ?? created.name ?? '');
+    let duplicates = 0;
+    for (const [gid, ids] of seen) {
+      if (ids.length > 1) {
+        duplicates++;
+        issues.push({ severity: 'error', category: 'identity', rule: 'duplicate-globalid', message: `Duplicate GlobalId ${gid} on ${ids.length} entities` });
+      }
     }
     if (unnamed > 0) {
       issues.push({
         severity: 'warning', category: 'data-quality', rule: 'has-name', entityCount: unnamed,
-        message: `${unnamed.toLocaleString()} of ${totalProducts.toLocaleString()} entities have no Name attribute.`,
+        message: `${fmtInt(unnamed)} of ${fmtInt(totalProducts)} entities have no Name attribute.`,
       });
     }
+
+    // 4. Semantic drop census (#4208): classes the loader silently skipped.
+    // dropCensus is only absent for a store built by a path that doesn't
+    // compute one (e.g. a cache-restored store) — surface that explicitly
+    // rather than rendering it the same as "nothing was dropped". Issue
+    // construction lives in drop-census-issues.ts (module-size split).
+    const dropCensus = m.store.dropCensus;
+    issues.push(...buildDropCensusIssues(dropCensus));
 
     // Lighthouse-style category scores: % of entities that pass each category check.
     const scores = {
@@ -282,6 +311,7 @@ const modelAudit: Tool = {
         scores,
         issues,
         totals: { products: totalProducts, unnamed, duplicateGlobalIds: duplicates },
+        dropCensus: dropCensusJson(dropCensus),
         ...pendingMutationsField(overlay),
       },
     );
@@ -298,21 +328,4 @@ function clamp(v: number): number {
   return Math.max(0, Math.min(100, v));
 }
 
-const gherkinCheck: Tool = {
-  name: 'gherkin_check',
-  description: 'Run buildingSMART Gherkin validation rules. Not implemented in v0.1.',
-  scope: 'validate',
-  inputSchema: {
-    type: 'object',
-    properties: { model_id: { type: 'string' } },
-    additionalProperties: false,
-  },
-  handler() {
-    throw new ToolExecutionError({
-      code: ToolErrorCode.UNSUPPORTED_OPERATION,
-      message: 'gherkin_check is planned for v0.2; use ids_validate or model_audit.',
-    });
-  },
-};
-
-export const validationTools: Tool[] = [idsValidate, idsExplain, modelAudit, gherkinCheck];
+export const validationTools: Tool[] = [idsValidate, idsExplain, modelAudit];

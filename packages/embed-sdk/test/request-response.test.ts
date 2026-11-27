@@ -173,6 +173,41 @@ describe('request correlation', () => {
     await assertion;
   });
 
+  it('a command whose post throws rejects with that error and leaves no timer or entry behind', async () => {
+    vi.useFakeTimers();
+    const harness = mount({});
+    h = harness;
+    harness.emit('READY', { version: PROTOCOL_VERSION });
+    harness.emit('INIT_ACK');
+    const embed = await harness.created;
+    const post = harness.frameWindow.postMessage;
+    harness.frameWindow.postMessage = () => { throw new DOMException('could not be cloned', 'DataCloneError'); };
+    await expect(embed.getModelInfo()).rejects.toThrow('could not be cloned');
+    expect(vi.getTimerCount()).toBe(0);
+    harness.frameWindow.postMessage = post;
+    harness.posted.length = 0;
+    const next = embed.getModelInfo();
+    reply(harness, { models: [] });
+    await expect(next).resolves.toEqual({ models: [] });
+  });
+
+  it('a command that times out fails alone: the next command still resolves', async () => {
+    vi.useFakeTimers();
+    const harness = mount({});
+    h = harness;
+    harness.emit('READY', { version: PROTOCOL_VERSION });
+    harness.emit('INIT_ACK');
+    const embed = await harness.created;
+    const slow = embed.getScreenshot();
+    const timedOut = expect(slow).rejects.toThrow('GET_SCREENSHOT timed out (30s)');
+    await vi.advanceTimersByTimeAsync(30_000);
+    await timedOut;
+    harness.posted.length = 0;
+    const next = embed.getModelInfo();
+    reply(harness, { models: [] });
+    await expect(next).resolves.toEqual({ models: [] });
+  });
+
   it('does not time out a request that was already answered', async () => {
     vi.useFakeTimers();
     const harness = mount({});
@@ -209,7 +244,11 @@ describe('command payloads', () => {
       [() => embed.setView('left'), 'SET_VIEW', { preset: 'left' }],
       [() => embed.setSection({ axis: 'down', enabled: true }), 'SET_SECTION', { axis: 'down', enabled: true }],
       [() => embed.setTheme('dark', '000000'), 'SET_THEME', { theme: 'dark', bg: '000000' }],
-      [() => embed.setTypeVisibility({ spaces: false }), 'SET_TYPE_VISIBILITY', { spaces: false }],
+      // `ifcGrid` is one of the four flags the payload type did not name until
+      // the protocol grew `TypeVisibilityFlags`. Kills (at typecheck, via
+      // scripts/typecheck-tests.mjs): re-narrowing `setTypeVisibility` to its
+      // old inline `{ spaces?; openings?; site? }` — this line stops compiling.
+      [() => embed.setTypeVisibility({ spaces: false, ifcGrid: false }), 'SET_TYPE_VISIBILITY', { spaces: false, ifcGrid: false }],
       [() => embed.getProperties(9), 'GET_PROPERTIES', { id: 9 }],
       [() => embed.getScreenshot(800, 600), 'GET_SCREENSHOT', { width: 800, height: 600 }],
       [() => embed.getModelInfo(), 'GET_MODEL_INFO', undefined],

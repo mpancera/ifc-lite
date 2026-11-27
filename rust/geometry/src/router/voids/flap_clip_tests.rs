@@ -142,6 +142,25 @@ fn world_host_bounds_folds_the_origin_back_in() {
     assert!((mxz - 3001.5).abs() < 0.01, "max.z {mxz}");
 }
 
+/// A local-frame cut may itself carry an origin. Returning it through a rotated
+/// parent frame must rotate and compose that offset with the parent's centre;
+/// assigning the centre loses a nested cut's translation (#3446).
+#[test]
+fn rotate_mesh_from_frame_composes_a_nested_origin() {
+    let mut inner = Mesh::new();
+    inner.positions = vec![1.0, 0.0, 0.0];
+    inner.origin = [2.0, 3.0, 4.0];
+    let quarter_turn = Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+    let out = geom::rotate_mesh_from_frame(
+        &inner,
+        &quarter_turn,
+        &Point3::new(1000.0, 2000.0, 3000.0),
+    );
+
+    assert_eq!(out.positions, vec![0.0, 1.0, 0.0], "positions rotate without a far f32 translation");
+    assert_eq!(out.origin, [997.0, 2002.0, 3004.0], "parent centre must compose rotated inner origin");
+}
+
 /// End-to-end: a host stored in a per-element local frame (nonzero
 /// `mesh.origin`, the wasm default) reports a WORLD-space `bbox` in the
 /// drained per-host diagnostic — NOT the near-zero local box. Regression
@@ -157,7 +176,7 @@ fn nonzero_origin_host_records_world_space_bbox() {
     // Rectangular openings are); `apply_void_context` relativises it by the
     // host origin so it lands on the local box.
     let o = host.origin;
-    let opening = OpeningType::Rectangular(
+    let opening = CutterKind::Rectangular(
         Point3::new(o[0] - 0.5, o[1] - 0.5, o[2] - 0.5),
         Point3::new(o[0] + 0.5, o[1] + 0.5, o[2] + 0.5),
         None,
@@ -215,30 +234,8 @@ fn budget_tripped_engulfing_cutter_skips_aabb_fallback() {
     // — so a per-element cap of 1 is invisible to every other test.
     //
     // Serialise against the other cap-mutating tests (they share this lock).
-    let _cap_guard = budget::GLOBAL_CAP_LOCK.lock().unwrap();
-    // Restore BOTH global caps AND reset THIS worker thread's thread-local
-    // element scope to unbounded on the way out (even on panic): thread-locals
-    // persist across tests on a reused worker thread, so a left-armed element
-    // cap would false-trip whatever CSG test cargo schedules next on it.
-    struct RestoreBudget {
-        cap: Option<u64>,
-        ecap: Option<u64>,
-    }
-    impl Drop for RestoreBudget {
-        fn drop(&mut self) {
-            // Re-open an UNBOUNDED element scope on this thread (elem cap 0 ⇒
-            // thread-local ELEM_CAP = u64::MAX, ELEM_COUNT = 0), matching a
-            // thread that never opened a scope, THEN restore the globals.
-            budget::set_element_cap(None);
-            budget::begin_element();
-            budget::set_cap(self.cap);
-            budget::set_element_cap(self.ecap);
-        }
-    }
-    let _restore = RestoreBudget {
-        cap: budget::cap(),
-        ecap: budget::element_cap(),
-    };
+    let _cap_guard = budget::GLOBAL_CAP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let profile = budget::TestProfile::new();
 
     let router = GeometryRouter::new();
 
@@ -272,7 +269,7 @@ fn budget_tripped_engulfing_cutter_skips_aabb_fallback() {
     );
 
     let (cmn, cmx) = cutter.bounds();
-    let engulf_open = OpeningType::NonRectangular(
+    let engulf_open = CutterKind::NonRectangular(
         cutter,
         Point3::new(cmn.x as f64, cmn.y as f64, cmn.z as f64),
         Point3::new(cmx.x as f64, cmx.y as f64, cmx.z as f64),
@@ -287,8 +284,8 @@ fn budget_tripped_engulfing_cutter_skips_aabb_fallback() {
 
     // Arm a per-element cap of 1 so the FIRST exact escalation trips the
     // element budget deterministically (the per-boolean cap stays at its
-    // default, untouched, so concurrent tests are unaffected).
-    budget::set_element_cap(Some(1));
+    // default; this fixture's configuration is local to its thread).
+    profile.set_element_cap(Some(1));
 
     let engulf_id = 91_109_u32;
     budget::begin_element(); // fresh element scope; element cap 1 is the trip
@@ -332,7 +329,7 @@ fn budget_tripped_engulfing_cutter_skips_aabb_fallback() {
     // box-cut fires because `engulfs_host` is false, so dropping the `!capped`
     // term left this case untouched.
     let small = box_mesh_at(0.0, [0.15, 0.2, 0.15]); // 0.3 × 0.4 × 0.3, through the wall
-    let small_open = OpeningType::NonRectangular(
+    let small_open = CutterKind::NonRectangular(
         small,
         Point3::new(-0.15, -0.2, -0.15),
         Point3::new(0.15, 0.2, 0.15),
@@ -366,4 +363,18 @@ fn budget_tripped_engulfing_cutter_skips_aabb_fallback() {
 fn opening_obb_if_malformed_bails_on_nan_vertex_not_panic() {
     let cutter = box_cutter_mesh([1.0, 1.0, 1.0], &[[f64::NAN, 0.0, 0.0]]);
     assert!(opening_obb_if_malformed(&cutter).is_none());
+}
+
+/// ROUTER-30 (#7674): `thin_axis` was `partial_cmp(..).unwrap()`, which aborts
+/// the wasm worker on a NaN half-extent. `OpeningBox::thin_axis` was a second
+/// copy of it and now calls this one. Finite triples keep the old answer
+/// (first minimum wins, `-0.0 == +0.0`); a NaN is never the thin axis.
+#[test]
+fn thin_axis_is_total_on_nan_half_extents_7674() {
+    assert_eq!(thin_axis(&[2.0, 0.1, 1.0]), 1);
+    assert_eq!(thin_axis(&[0.1, 0.1, 1.0]), 0, "a tie keeps the first minimum");
+    assert_eq!(thin_axis(&[0.0, -0.0, 1.0]), 0, "-0 and +0 tie; the first wins");
+    assert_eq!(thin_axis(&[f64::NAN, 0.3, 0.2]), 2, "a NaN half-extent is never the thin axis");
+    assert_eq!(thin_axis(&[0.3, -f64::NAN, 0.2]), 2, "nor is a negative NaN");
+    assert_eq!(thin_axis(&[f64::NAN; 3]), 0);
 }

@@ -2,9 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-/**
- * WebGPU device initialization
- */
+/** WebGPU device initialization */
+import { requestAdapterWithTimeout } from './adapter-request.js';
+export { ADAPTER_REQUEST_TIMEOUT_MS, requestAdapterWithTimeout } from './adapter-request.js';
+import { meterGpuDevice } from './gpu-counters.js';
 
 /**
  * Vendor/architecture identity of the GPU adapter, copied out of
@@ -35,8 +36,8 @@ export class WebGPUDevice {
   _lastUncapturedError: string = '';
 
   /**
-   * Notified when the GPU device is lost for a reason OTHER than intentional
-   * teardown (`reason === 'destroyed'`) — e.g. a driver reset from the OS GPU
+   * Notified when the current GPU device is lost outside owned teardown
+   * (including browser-initiated destruction) — e.g. a driver reset from the OS GPU
    * watchdog (Windows TDR) or VRAM exhaustion on a weak/integrated GPU. Once a
    * device is lost every GPU resource created from it is dead, so the renderer
    * cannot present again until it is fully re-initialised. Consumers subscribe
@@ -46,6 +47,8 @@ export class WebGPUDevice {
   private deviceLostHandler: ((info: { message: string; reason: string }) => void) | null = null;
   /** Guards against firing the handler more than once for a single device. */
   private deviceLostFired: boolean = false;
+  /** Invalidates delayed `lost` settlements from a superseded GPUDevice. */
+  private deviceLifetime: number = 0;
   /** See `getAdapterInfo()`. Null until `init()` succeeds in reading it. */
   private adapterInfoSnapshot: AdapterInfoSnapshot | null = null;
 
@@ -53,6 +56,7 @@ export class WebGPUDevice {
    * Initialize WebGPU device and canvas context
    */
   async init(canvas: HTMLCanvasElement): Promise<void> {
+    const deviceLifetime = ++this.deviceLifetime;
     // Each init() begins a fresh GPUDevice lifetime. Clear the once-per-device
     // guard so a destroy()+init() re-entry can still report a later loss (the
     // previous device's `lost` promise already resolved and set this true).
@@ -62,7 +66,7 @@ export class WebGPUDevice {
       throw new Error('WebGPU not available');
     }
 
-    this.adapter = await navigator.gpu.requestAdapter();
+    this.adapter = await requestAdapterWithTimeout(navigator.gpu);
     if (!this.adapter) {
       throw new Error('Failed to get GPU adapter');
     }
@@ -109,13 +113,76 @@ export class WebGPUDevice {
     if (limits?.maxStorageBufferBindingSize) {
       requiredLimits.maxStorageBufferBindingSize = limits.maxStorageBufferBindingSize;
     }
-    try {
-      this.device = await this.adapter.requestDevice({ requiredLimits });
-    } catch {
-      // Some drivers reject requiredLimits they nominally advertise — fall back to a
-      // default device rather than failing to initialise the renderer entirely.
-      this.device = await this.adapter.requestDevice();
+
+    // Request 'timestamp-query' when the adapter advertises it (issue #2670
+    // perf-verdict gate — see frame-timing-gpu.ts). It is an OPTIONAL feature
+    // per the WebGPU spec, not all adapters/backends support it, so it is
+    // only added to requiredFeatures when already present in
+    // adapter.features — asking for a feature the adapter doesn't have would
+    // make requestDevice() reject outright. this.hasTimestampQueryFeature()
+    // reports the outcome; nothing in the renderer requests query sets
+    // unless a caller opts into GpuFrameTimingRecorder.create().
+    const requiredFeatures: GPUFeatureName[] = [];
+    if (this.adapter.features?.has('timestamp-query')) {
+      requiredFeatures.push('timestamp-query');
     }
+
+    // Degrade one ask at a time, most-wanted first. The two asks are NOT
+    // equally important and must not be surrendered together:
+    //
+    //  - `requiredLimits` is load-bearing for rendering at all. Without the
+    //    raise, a large IFC's vertex buffer exceeds the 256 MiB default and
+    //    "nothing renders" (see the comment on `requiredLimits` above).
+    //  - `requiredFeatures` is pure opt-in diagnostics ('timestamp-query',
+    //    which only does anything once a caller constructs a
+    //    GpuFrameTimingRecorder).
+    //
+    // A single try/catch around both would let a feature-caused rejection
+    // cost the user their render for a diagnostic they never asked for. So a
+    // rejection of the full request is retried with the LIMITS ALONE, and
+    // only a rejection of that reaches the bare request.
+    // `hasTimestampQueryFeature()` reports which stage was reached.
+    let device: GPUDevice | null = null;
+
+    // Stage 1: everything we want.
+    try {
+      device = await this.adapter.requestDevice({ requiredLimits, requiredFeatures });
+    } catch (e) {
+      if (requiredFeatures.length > 0) {
+        console.warn(
+          '[WebGPU] requestDevice() rejected the request carrying requiredFeatures; ' +
+            'retrying with the buffer limits alone (GPU timestamp queries unavailable):',
+          e,
+        );
+      }
+    }
+
+    // Stage 2: drop the optional diagnostic feature, KEEP the limits. Skipped
+    // when no feature was requested — the request would then be identical to
+    // the one that just failed, so that case degrades exactly as it did
+    // before 'timestamp-query' was ever asked for.
+    if (!device && requiredFeatures.length > 0) {
+      try {
+        device = await this.adapter.requestDevice({ requiredLimits });
+      } catch (e) {
+        console.warn('[WebGPU] requestDevice() also rejected the limits-only request:', e);
+      }
+    }
+
+    // Stage 3, last resort: some drivers reject requiredLimits they nominally
+    // advertise — fall back to a default device rather than failing to
+    // initialise the renderer entirely. This degradation is the damaging one,
+    // so it is logged rather than silent: without the raised limits a large
+    // model's geometry upload can exceed the default maxBufferSize.
+    if (!device) {
+      console.warn(
+        '[WebGPU] falling back to a default device with no required limits — ' +
+          'a large model may exceed the default maxBufferSize and fail to render.',
+      );
+      device = await this.adapter.requestDevice();
+    }
+
+    this.device = meterGpuDevice(device, this, () => deviceLifetime === this.deviceLifetime);
     this.format = navigator.gpu.getPreferredCanvasFormat();
     this.canvas = canvas;
 
@@ -139,13 +206,18 @@ export class WebGPUDevice {
     };
     if (deviceWithLost.lost) {
       deviceWithLost.lost.then((info) => {
+        // A destroyed GPUDevice is allowed to settle its `lost` promise after
+        // this wrapper has already initialized a replacement. Never let that
+        // stale settlement invalidate the replacement context or notify its
+        // recovery subscriber (#4885).
+        if (deviceLifetime !== this.deviceLifetime) return;
         const reason = info.reason ?? 'unknown';
         console.warn('[WebGPU] Device lost:', info.message, `(reason: ${reason})`);
         this.contextConfigured = false;
-        // `reason === 'destroyed'` is an intentional teardown (a `device.destroy()`
-        // call or the page dropping the device) — not a fault, so don't wake the
-        // recovery path. Any other reason is a real loss the consumer must react to.
-        if (reason !== 'destroyed' && !this.deviceLostFired) {
+        // #7655: Chromium can destroy a device on GPU-channel failure without
+        // our calling destroy(). Ownership is proven by the lifetime guard,
+        // not the reason string: every remaining loss needs recovery.
+        if (!this.deviceLostFired) {
           this.deviceLostFired = true;
           this.deviceLostHandler?.({ message: info.message, reason });
         }
@@ -169,7 +241,7 @@ export class WebGPUDevice {
     this.context.configure({
       device: this.device,
       format: this.format,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
         alphaMode: 'premultiplied',
     });
       this.contextConfigured = true;
@@ -231,11 +303,11 @@ export class WebGPUDevice {
   }
 
   getDevice(): GPUDevice {
-    if (!this.device) {
-      throw new Error('Device not initialized');
-    }
+    if (!this.device) throw new Error('Device not initialized');
     return this.device;
   }
+
+  getAdapter(): GPUAdapter | null { return this.adapter; } // borrowed by the Gaussian adapter's luma wrapper (#8564)
 
   /**
    * Register the callback fired when this device is lost for a non-intentional
@@ -267,6 +339,20 @@ export class WebGPUDevice {
     return this.adapterInfoSnapshot;
   }
 
+  /**
+   * Whether this device's adapter supports GPU timestamp queries (issue
+   * #2670 perf-verdict gate — see frame-timing-gpu.ts). Reflects what was
+   * actually granted on `this.device`, not merely what the adapter
+   * advertised, so it stays correct on the rare path where `requestDevice()`
+   * with `requiredFeatures` was rejected and `init()` degraded to one of the
+   * later stages (limits-only, or the bare request) with the feature never
+   * granted. False before `init()` has run, same as every other
+   * device-derived getter here.
+   */
+  hasTimestampQueryFeature(): boolean {
+    return this.device?.features?.has('timestamp-query') ?? false;
+  }
+
   getContext(): GPUCanvasContext {
     if (!this.context) {
       throw new Error('Context not initialized');
@@ -286,12 +372,15 @@ export class WebGPUDevice {
    * Intentionally tear down the GPU device, freeing the device, its queue, and
    * the canvas-context configuration. An app that recreates a renderer per model
    * otherwise leaks one live GPUDevice (and its VRAM) per reload. The device's
-   * `lost` promise resolves with reason `'destroyed'`, which the loss handler
-   * above deliberately ignores (intentional teardown, not a fault). After this
+   * `lost` promise is excluded by the lifetime invalidation below, independently
+   * of the reported reason (intentional teardown, not a fault). After this
    * `isInitialized()` reports false, so the renderer's per-frame guard skips
    * rendering until a fresh `init()`. Idempotent — safe to call more than once.
    */
   destroy(): void {
+    // Invalidate the current GPUDevice before asking it to destroy. Its `lost`
+    // promise settles asynchronously and may otherwise race a later init().
+    this.deviceLifetime++;
     if (this.device) {
       try {
         this.device.destroy();

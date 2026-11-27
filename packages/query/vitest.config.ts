@@ -12,12 +12,22 @@ export default defineConfig({
   resolve: {
     alias: {
       '@ifc-lite/data': path.resolve(__dirname, '../data/src/index.ts'),
+      '@ifc-lite/encoding': path.resolve(__dirname, '../encoding/src/index.ts'),
       '@ifc-lite/parser': path.resolve(__dirname, '../parser/src/index.ts'),
+      '@ifc-lite/load-trace': path.resolve(__dirname, '../load-trace/src/index.ts'),
       '@ifc-lite/spatial': path.resolve(__dirname, '../spatial/src/index.ts'),
       '@ifc-lite/geometry': path.resolve(__dirname, '../geometry/src/index.ts'),
+      '@ifc-lite/ifcx': path.resolve(__dirname, '../ifcx/src/index.ts'),
+      '@ifc-lite/pointcloud/ifcx': path.resolve(__dirname, '../pointcloud/src/ifcx.ts'),
+      '@ifc-lite/pointcloud': path.resolve(__dirname, '../pointcloud/src/index.ts'),
     },
   },
   test: {
+    reporters: [
+      'default',
+      ...(process.env.GITHUB_ACTIONS === 'true' ? ['github-actions'] : []),
+      '@mergifyio/vitest',
+    ],
     environment: 'node',
     globals: true,
   },

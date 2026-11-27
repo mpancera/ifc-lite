@@ -75,7 +75,17 @@ export interface AnnotationText2D {
  * IfcFillAreaStyleHatching. When absent the fill is solid (color only).
  */
 export interface AnnotationFill2D {
+  /** Direct source fill item, retained for precise 3D mesh/overlay routing. */
+  geometryItemId?: number;
   points: Float32Array;
+  /**
+   * The source-local ring retained when a federated placement is applied.
+   * The 2D drawing still reads `points`; the 3D RTE path uses this pair so a
+   * national-grid placement is never first rounded into world f32.
+   */
+  rteLocalPoints?: Float32Array;
+  /** Exact renderer-world anchor paired with {@link rteLocalPoints}. */
+  rteOrigin?: [number, number, number];
   holesOffsets: Uint32Array;
   color: [number, number, number, number];
   /** Express ID of the owning IfcAnnotation / IfcGridAxis entity (per-entity hide). */
@@ -94,9 +104,10 @@ export interface AnnotationFill2D {
  * collections (issue #862). They share the same parse pass and the same
  * storey-resolution logic, but the renderer treats them differently:
  *
- *   - Annotation buckets always lift every storey (memory
- *     `feedback_3d_annotation_overlay_no_section_filter.md`: the user
- *     expects every storey's dimensions to be visible in 3D).
+ *   - Annotation buckets lift at each authored elevation, subject to the mesh
+ *     hidden/isolation sets (#8767). Unlike the old #1480 assumption, the
+ *     parser's spatial hierarchy includes contained IfcAnnotation in byStorey:
+ *     storey solo keeps its own annotations and drops uncontained ones.
  *   - Grid buckets get optional section-plane filtering and an
  *     independent visibility toggle, so dense-grid models can hide
  *     grids per storey without losing dimensions.

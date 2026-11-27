@@ -46,10 +46,15 @@
  * following the anchor.
  */
 
-import { importDxf } from '@ifc-lite/drawing-2d';
+import { importDxf, parseDxf, convertDxfToUnderlay } from '@ifc-lite/drawing-2d';
 import { useViewerStore } from '@/store';
 import { toast } from '@/components/ui/toast';
+import { resolve } from '@/i18n/registry';
 import { resolveDxfExportGeoreference } from '@/hooks/dxfExportGeoref';
+
+import type { DxfReferenceFrame } from '../dxfReferencePlane';
+export interface DxfIngestOptions { referenceFrame?: DxfReferenceFrame; units?: 'm' | 'mm' | 'cm' | 'ft' | 'in' }
+const METERS_PER_UNIT = {m:1,mm:0.001,cm:0.01,ft:0.3048,in:0.0254};
 
 export function isDxfFileName(name: string): boolean {
   return name.toLowerCase().endsWith('.dxf');
@@ -66,24 +71,44 @@ export function splitDxfFiles(files: File[]): { dxfFiles: File[]; modelFiles: Fi
 }
 
 /** Parse one DXF file and register it as a reference underlay. */
-export async function ingestDxfFile(file: File): Promise<void> {
+export async function ingestDxfFile(file: File, options: DxfIngestOptions = {}): Promise<string | null> {
+  const capturedOptions = structuredClone(options);
   let text: string;
   try {
     text = await file.text();
   } catch (err) {
     console.error(`[dxfIngest] reading "${file.name}" failed:`, err);
     toast.error(`Couldn't read "${file.name}".`);
-    return;
+    return null;
   }
 
+  return ingestDxfText(text, file.name, capturedOptions);
+}
+
+/** Parse and register an already-read DXF using the same native ingestion path. */
+export function ingestDxfText(text: string, filename: string, capturedOptions: DxfIngestOptions = {}): string | null {
   let underlay: ReturnType<typeof importDxf>;
   try {
-    underlay = importDxf(text, file.name);
+    if (capturedOptions.referenceFrame || capturedOptions.units) {
+      const document = parseDxf(text);
+      // DXF $INSUNITS declares standard unit codes 1–24; 0 is unitless.
+      // The converter owns their scales. Validate the declaration, not warnings.
+      const knownUnits = Number.isInteger(document.insunits) && document.insunits >= 1 && document.insunits <= 24;
+      if (capturedOptions.referenceFrame && !capturedOptions.units && !knownUnits) {
+        toast.error(resolve('drawingUnderlay.dxf.explicitUnitsRequired', { name: filename }));
+        return null;
+      }
+      underlay = convertDxfToUnderlay(document, filename, capturedOptions.units
+        ? { metersPerUnit: METERS_PER_UNIT[capturedOptions.units] } : undefined);
+    } else {
+      // Preserve survey/site-plan auto-unit conversion and its legacy heuristic.
+      underlay = importDxf(text, filename);
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[dxfIngest] parsing "${file.name}" failed:`, err);
-    toast.error(`DXF import failed for "${file.name}": ${message}`);
-    return;
+    console.error(`[dxfIngest] parsing "${filename}" failed:`, err);
+    toast.error(`DXF import failed for "${filename}": ${message}`);
+    return null;
   }
 
   let count = 0;
@@ -91,12 +116,12 @@ export async function ingestDxfFile(file: File): Promise<void> {
     count += layer.paths.length + layer.fills.length + layer.texts.length;
   }
   if (count === 0) {
-    console.warn(`[dxfIngest] "${file.name}" contained no drawable 2D entities`, underlay.skipped, underlay.warnings);
-    toast.error(`"${file.name}" contains no drawable 2D entities.`);
-    return;
+    console.warn(`[dxfIngest] "${filename}" contained no drawable 2D entities`, underlay.skipped, underlay.warnings);
+    toast.error(`"${filename}" contains no drawable 2D entities.`);
+    return null;
   }
   if (underlay.warnings.length > 0) {
-    console.warn(`[dxfIngest] "${file.name}" import warnings:`, underlay.warnings);
+    console.warn(`[dxfIngest] "${filename}" import warnings:`, underlay.warnings);
   }
 
   const store = useViewerStore.getState();
@@ -121,7 +146,7 @@ export async function ingestDxfFile(file: File): Promise<void> {
   // not auto) so a later-loaded georeferenced model can't silently apply
   // that compounded error, and tell the user why in the toast below.
   const georeferenced: boolean | 'auto' = assumedMm ? false : 'auto';
-  store.addDxfUnderlay(underlay, { georeferenced });
+  const id = store.addDxfUnderlay(underlay, { georeferenced, referenceFrame: capturedOptions.referenceFrame });
 
   // For the import toast's wording ONLY — this does not seed the toggle
   // (that is seeded above: 'auto' normally, explicit `false` when the
@@ -132,7 +157,7 @@ export async function ingestDxfFile(file: File): Promise<void> {
   // omitted here; this function's own claim that import and export "always
   // agree on which model is authoritative" was not true until this
   // matched).
-  const georeference = assumedMm
+  const georeference = assumedMm || capturedOptions.referenceFrame
     ? null
     : resolveDxfExportGeoreference({
       models: store.models,
@@ -147,20 +172,22 @@ export async function ingestDxfFile(file: File): Promise<void> {
   if (store.models.size > 0) {
     // Surface the result immediately: the underlay renders in the 2D
     // drawing panel, so open it (the user still picks/moves the section).
-    store.setDrawing2DPanelVisible(true);
+    store.openPanelInHome('drawing', 'programmatic');
     toast.success(
-      `"${file.name}" imported as reference layer: ${count} elements on ${layerCount} layer${layerCount === 1 ? '' : 's'}${unitsNote}${georefNote}.`,
+      `"${filename}" imported as reference layer: ${count} elements on ${layerCount} layer${layerCount === 1 ? '' : 's'}${unitsNote}${georefNote}.`,
     );
   } else {
     toast.success(
-      `"${file.name}" imported as reference layer${unitsNote}. Load a model and open the 2D section view to see it.`,
+      `"${filename}" imported as reference layer${unitsNote}. Load a model and open the 2D section view to see it.`,
     );
   }
+  return id;
 }
 
 /** Ingest several DXF files sequentially (order = pick order). */
-export async function ingestDxfFiles(files: File[]): Promise<void> {
+export async function ingestDxfFiles(files: File[], options: DxfIngestOptions = {}): Promise<void> {
+  const capturedOptions = structuredClone(options);
   for (const file of files) {
-    await ingestDxfFile(file);
+    await ingestDxfFile(file, capturedOptions);
   }
 }

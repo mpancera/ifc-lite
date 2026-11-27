@@ -2,11 +2,25 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { PluginContext } from '@ifc-lite/plugin-api';
+import { readWithProgress, type DownloadOptions, type PluginContext } from '@ifc-lite/plugin-api';
+import { canonicalFieldNodeUrl } from './node-url.js';
+import { cacheIdentity } from './cache-identity.js';
+import { DaluxHttpError, DaluxPaginationError } from './http-errors.js';
+export { DaluxHttpError, DaluxPaginationError } from './http-errors.js';
 
 export interface DaluxCredentials {
   readonly baseUrl: string;
   readonly apiKey: string;
+  /**
+   * Dalux node name (`node2`, ...) when the user is not on the default node.
+   *
+   * Sent as a query parameter rather than baked into `baseUrl` on purpose:
+   * the host only rewrites a URL to the same-origin relay when it still
+   * matches the manifest's declared upstream, and Dalux serves no CORS
+   * headers, so changing the base URL here would bypass the relay and fail
+   * in the browser. The server resolves the name to an origin (#2792).
+   */
+  readonly node?: string;
 }
 
 interface DaluxPageLink {
@@ -38,47 +52,63 @@ function truncate(text: string, max = MAX_ERROR_BODY_CHARS): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
-/** Thrown when Dalux's bookmark pagination looks broken in a way that can't
- * be reconciled with "the listing is simply done": a `nextPage` link with no
- * bookmark, or a bookmark that repeats while the page carrying it still has
- * items on it (see {@link fetchPage}). Callers must not treat this as "no
- * more data": it means the listing is truncated and the caller should say
- * so, not report a clean success with fewer rows than actually exist
- * upstream. */
-export class DaluxPaginationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'DaluxPaginationError';
-  }
-}
-
-/** Thrown for a non-2xx Dalux API response. Carries the actual HTTP status
- * so callers that need to branch on it (auth-failure detection in
- * `testConnection`, for one) match on `status` rather than on substrings of
- * the interpolated error message — a truncated upstream body can contain
- * digits that happen to look like a status code without being one. */
-export class DaluxHttpError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-  ) {
-    super(message);
-    this.name = 'DaluxHttpError';
-  }
-}
-
 export class BrowserDaluxApiClient {
   constructor(
     private readonly credentials: DaluxCredentials,
     private readonly ctx: PluginContext,
   ) {}
 
+  /** Reuse only while the current context's exact credentials still match. */
+  matchesCredentials(credentials: DaluxCredentials): boolean {
+    return this.credentials.baseUrl === credentials.baseUrl && this.credentials.apiKey === credentials.apiKey
+      && this.credentials.node === credentials.node;
+  }
+
   get baseUrl(): string {
     return this.credentials.baseUrl;
   }
 
+  /** Distinguish API keys and nodes without keeping the raw key in cache keys. */
+  readonly cacheIdentity = cacheIdentity();
+
+  /**
+   * Add the caller's node selector, but ONLY to URLs that go through our relay.
+   *
+   * Dalux also hands back opaque links (a file's `downloadLink`, `nextPage`
+   * hrefs) which can point at a different host such as a CDN and can carry a
+   * signature computed over the query string. Those are not routed through the
+   * node-aware relay, so adding a parameter would be useless at best and would
+   * invalidate a signed URL at worst. They must stay byte-for-byte intact.
+   */
+  private stampNode(url: URL): void {
+    if (!this.credentials.node) return;
+    if (url.origin !== new URL(this.credentials.baseUrl).origin) return;
+    url.searchParams.set('daluxNode', this.credentials.node);
+  }
+
+  /**
+   * The stamped form of `rawUrl`, or undefined when nothing would be added.
+   *
+   * Returning undefined rather than the unchanged string is deliberate: it
+   * lets the caller pass the ORIGINAL bytes through instead of a re-serialised
+   * equivalent. See the note in `getBinary`.
+   */
+  private nodeSelectorFor(rawUrl: string): string | undefined {
+    if (!this.credentials.node) return undefined;
+    const parsed = new URL(rawUrl);
+    if (parsed.origin !== new URL(this.credentials.baseUrl).origin) return undefined;
+    parsed.searchParams.set('daluxNode', this.credentials.node);
+    return parsed.toString();
+  }
+
   debug(message: string, details?: Record<string, unknown>): void {
     this.ctx.log.debug(`Dalux ${message}`, details ?? {});
+  }
+
+  /** For a skip that costs the caller real data (review on #8647) — as
+   * opposed to {@link debug}, for one that doesn't. */
+  warn(message: string, details?: Record<string, unknown>): void {
+    this.ctx.log.warn(`Dalux ${message}`, details ?? {});
   }
 
   async get(
@@ -87,6 +117,7 @@ export class BrowserDaluxApiClient {
     signal?: AbortSignal,
   ): Promise<unknown> {
     const url = new URL(path.startsWith('/') ? `${this.credentials.baseUrl}${path}` : path);
+    this.stampNode(url);
     for (const [key, value] of Object.entries(params)) {
       if (value === undefined || value === null || value === '') continue;
       url.searchParams.set(key, String(value));
@@ -124,14 +155,25 @@ export class BrowserDaluxApiClient {
     return response.json() as Promise<unknown>;
   }
 
-  async getBinary(url: string, signal?: AbortSignal): Promise<ArrayBuffer> {
+  async getBinary(rawUrl: string, options?: DownloadOptions, sizeBytes?: number): Promise<ArrayBuffer> {
+    // Binary downloads take a fully-built URL (revision content, and any
+    // `nextPage` link Dalux hands back), so they need the node selector too.
+    // Missing it here would send file downloads to the default node while
+    // listings went to the user's own — the failure would look like "the file
+    // is gone" rather than "wrong host".
+    // Only re-serialise when we added the selector or rerouted onto the
+    // canonical origin (`canonicalFieldNodeUrl`, #3308) — `new URL(x)
+    // .toString()` is NOT identity, so doing it unconditionally would
+    // re-break the signed links the guard above protects.
+    const url =
+      this.nodeSelectorFor(rawUrl) ?? canonicalFieldNodeUrl(rawUrl, this.credentials.baseUrl) ?? rawUrl;
     this.debug('binary GET request', { url });
     const response = await this.ctx.fetch(url, {
       headers: {
         'X-API-KEY': this.credentials.apiKey,
         Accept: '*/*',
       },
-      signal,
+      signal: options?.signal,
     });
     this.debug('binary GET response', {
       url,
@@ -154,7 +196,7 @@ export class BrowserDaluxApiClient {
       );
     }
 
-    return response.arrayBuffer();
+    return readWithProgress(response, options?.onProgress, sizeBytes);
   }
 }
 
@@ -312,21 +354,16 @@ export async function fetchPage(
  * this — they call {@link fetchPage} once and return that page to the host,
  * so a large tenant or file area is never loaded eagerly.
  *
- * Bounded by `MAX_SWEEP_PAGES` (a server minting endlessly fresh bookmarks
- * can't loop forever) and tracks every bookmark seen across the whole sweep,
- * throwing if one reappears — a longer cycle than the immediate, empty-page
- * echo `fetchPage` already treats as end-of-listing on its own. Unlike that
- * immediate echo, a bookmark resurfacing several pages later means the
- * server is about to hand back content already read under an earlier
- * bookmark instead of making forward progress, which is a stuck listing, not
- * a finished one — regardless of whether the page that reveals the cycle
- * happens to have items on it.
+ * Bounded by `MAX_SWEEP_PAGES`, with visited bookmarks to reject cycles.
+ * Unlike fetchPage's immediate empty echo, revisiting any earlier bookmark
+ * is a stuck listing, even if the page contains items.
  */
 export async function fetchAllPages(
   client: BrowserDaluxApiClient,
   endpoint: string,
   params: Record<string, unknown> = {},
   signal?: AbortSignal,
+  stopAfterPage?: (items: readonly unknown[]) => boolean,
 ): Promise<unknown[]> {
   const items: unknown[] = [];
   const seenBookmarks = new Set<string>();
@@ -343,6 +380,7 @@ export async function fetchAllPages(
 
     const page = await fetchPage(client, endpoint, params, cursor, signal);
     items.push(...page.items);
+    if (stopAfterPage?.(page.items)) break;
 
     if (!page.cursor) break;
     if (seenBookmarks.has(page.cursor)) {

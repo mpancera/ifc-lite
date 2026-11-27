@@ -1,6 +1,6 @@
 {
   "name": "@ifc-lite/lens",
-  "version": "1.18.0",
+  "version": "2.2.1",
   "description": "Rule-based 3D filtering and colorization for IFC models",
   "type": "module",
   "main": "./dist/index.js",
@@ -18,10 +18,14 @@
     "dev": "pnpm exec tsc --watch",
     "test": "vitest run"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@ifc-lite/rules": "workspace:^"
+  },
   "devDependencies": {
+    "@ifc-lite/data": "workspace:^",
+    "@mergifyio/vitest": "^2026.11.8",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^5.1.0"
   },
   "license": "MPL-2.0",
   "author": "Louis True",

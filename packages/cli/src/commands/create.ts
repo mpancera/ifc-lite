@@ -19,6 +19,7 @@
 
 import { writeFile } from 'node:fs/promises';
 import { IfcCreator } from '@ifc-lite/create';
+import { viewerUrl } from '@ifc-lite/viewer-core/url';
 import type {
   WallParams, SlabParams, ColumnParams, BeamParams, StairParams, RoofParams, GableRoofParams,
   DoorParams, WindowParams, WallDoorParams, WallWindowParams, RampParams, RailingParams,
@@ -106,13 +107,10 @@ export async function createCommand(args: string[]): Promise<void> {
   let viewerOk = false;
   if (viewerPort) {
     try {
-      const resp = await fetch(`http://localhost:${viewerPort}/api/command`, {
+      const resp = await fetch(viewerUrl(viewerPort, '/api/command'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'addGeometry',
-          ifcContent: result.content,
-        }),
+        body: JSON.stringify({ action: 'addGeometry', ifcContent: result.content }),
       });
       if (!resp.ok) {
         process.stderr.write(`Viewer HTTP ${resp.status}: ${resp.statusText}\n`);
@@ -434,6 +432,12 @@ export function addElement(creator: IfcCreator, storey: number, elementType: str
         Name: (p.Name as string) ?? 'Rectangle Hollow Beam',
         ...p,
       } as unknown as Parameters<typeof creator.addIfcRectangleHollowBeam>[1]);
+    // `createCommand` has already created the project's storey, so `storey`
+    // is the one listed type that adds nothing: it yields a bare
+    // project+site+building+storey skeleton, and returns the storey so
+    // `--pset`/`--qset`/`--material` still attach to something real.
+    case 'storey':
+      return storey;
     default:
       fatal(`Unknown element type: ${elementType}\n\nSupported: ${ELEMENT_TYPES.join(', ')}`);
   }

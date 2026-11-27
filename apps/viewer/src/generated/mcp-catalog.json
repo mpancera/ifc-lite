@@ -4,8 +4,8 @@
   "tools": [
     { "name": "model_info",          "category": "Discovery",  "scope": "read",   "description": "Schema, entity counts, units, georeferencing — the at-a-glance summary of a loaded IFC.", "inputSchema": { "type": "object", "properties": { "model_id": { "type": "string" } } } },
     { "name": "model_list",          "category": "Discovery",  "scope": "read",   "description": "List every model loaded in the current MCP session.", "inputSchema": { "type": "object" } },
-    { "name": "model_load",          "category": "Discovery",  "scope": "mutate", "description": "Load an additional .ifc from disk into the federated session.", "inputSchema": { "type": "object", "required": ["file_path"], "properties": { "file_path": { "type": "string" }, "model_id": { "type": "string" } } } },
-    { "name": "model_unload",        "category": "Discovery",  "scope": "mutate", "description": "Drop a model from the registry; frees memory.", "inputSchema": { "type": "object", "required": ["model_id"], "properties": { "model_id": { "type": "string" } } } },
+    { "name": "model_load",          "category": "Discovery",  "scope": "read",   "description": "Load an IFC file from disk into the session. The path must be inside the configured allowedPaths roots (when set).", "inputSchema": { "type": "object", "required": ["file_path"], "properties": { "file_path": { "type": "string" }, "model_id": { "type": "string" } } } },
+    { "name": "model_unload",        "category": "Discovery",  "scope": "read",   "description": "Drop a model from session memory. Unsaved edits to it are lost.", "inputSchema": { "type": "object", "required": ["model_id"], "properties": { "model_id": { "type": "string" } } } },
     { "name": "schema_describe",     "category": "Discovery",  "scope": "read",   "description": "Attributes, parent class, and inheritance for any IfcType — useful before mutating.", "inputSchema": { "type": "object", "required": ["type"], "properties": { "type": { "type": "string" }, "include_inherited": { "type": "boolean" } } } },
 
     { "name": "query_entities",      "category": "Query",      "scope": "read",   "description": "Type + property filters with pagination. Returns expressId, GlobalId, name, type for each match.", "inputSchema": { "type": "object", "properties": { "type": { "type": "string" }, "limit": { "type": "integer" } } } },
@@ -20,6 +20,8 @@
     { "name": "classifications_list","category": "Query",      "scope": "read",   "description": "Distinct classification references (system + identification) and how often each is used.", "inputSchema": { "type": "object" } },
     { "name": "georeferencing",      "category": "Query",      "scope": "read",   "description": "MapConversion, projected CRS, project north, true north — the geo handshake.", "inputSchema": { "type": "object" } },
     { "name": "units",               "category": "Query",      "scope": "read",   "description": "Length unit scale + the unit assignments declared in the file.", "inputSchema": { "type": "object" } },
+    { "name": "cost_data",           "category": "Query",      "scope": "read",   "description": "Canonical IFC 5D cost graph from the loaded source snapshot.", "inputSchema": { "type": "object", "properties": { "model_id": { "type": "string" } } } },
+    { "name": "cost_evaluate",       "category": "Query",      "scope": "read",   "description": "Evaluate one IfcCostItem or IfcCostValue from the loaded source snapshot with decimal arithmetic and diagnostics.", "inputSchema": { "type": "object", "required": ["target", "express_id"], "properties": { "model_id": { "type": "string" }, "target": { "type": "string", "enum": ["item", "value"] }, "express_id": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }, "precision": { "type": "integer", "minimum": 1, "maximum": 10000 } } } },
 
     { "name": "geometry_bbox",       "category": "Geometry",   "scope": "read",   "description": "Per-entity axis-aligned bounding box (read from quantity sets when available).", "inputSchema": { "type": "object", "required": ["global_id"] } },
     { "name": "geometry_volume",     "category": "Geometry",   "scope": "read",   "description": "Net/gross volume in m³ for a single entity or a type aggregate.", "inputSchema": { "type": "object", "required": ["global_id"] } },
@@ -63,7 +65,6 @@
     { "name": "export_json",         "category": "Export",     "scope": "export", "description": "Structured JSON dump of attributes/properties/quantities for a type set.", "inputSchema": { "type": "object" } },
     { "name": "export_glb",          "category": "Export",     "scope": "export", "description": "(v0.2) Geometry export to glTF binary — needs the WASM mesh pipeline.", "inputSchema": { "type": "object" } },
     { "name": "export_ifcx",         "category": "Export",     "scope": "export", "description": "(v0.2) Export to the new IFCx interchange format.", "inputSchema": { "type": "object" } },
-    { "name": "export_pdf_report",   "category": "Export",     "scope": "export", "description": "(v0.5) Branded PDF audit report with charts.", "inputSchema": { "type": "object" } },
 
     { "name": "viewer_ask",          "category": "Viewer",     "scope": "read",   "description": "Suggest wording the agent can use to ask the user for permission to open the viewer.", "inputSchema": { "type": "object" } },
     { "name": "viewer_open",         "category": "Viewer",     "scope": "read",   "description": "Boot the in-process WebGL viewer and return its URL for the user to open.", "inputSchema": { "type": "object" } },

@@ -7,8 +7,9 @@
  * and execution results.
  */
 
+import type { ScriptResult } from '@ifc-lite/sandbox';
 import type { StateCreator } from 'zustand';
-import type { SavedScript } from '../../lib/scripts/persistence.js';
+import type { SavedScript, SaveResult } from '../../lib/scripts/persistence.js';
 import { loadSavedScripts, saveScripts, validateScriptName, canCreateScript, isScriptWithinSizeLimit } from '../../lib/scripts/persistence.js';
 import type { ScriptEditOperation, ScriptEditorSelection, ScriptEditorTextChange } from '../../lib/llm/types.js';
 import { applyScriptEditOperations } from '../../lib/llm/script-edit-ops.js';
@@ -28,11 +29,7 @@ export interface LogEntry {
   timestamp: number;
 }
 
-export interface ScriptResult {
-  value: unknown;
-  logs: LogEntry[];
-  durationMs: number;
-}
+export type { ScriptResult } from '@ifc-lite/sandbox';
 
 export interface ScriptEditorApplyAdapter {
   apply: (
@@ -67,7 +64,6 @@ export interface ScriptFallbackOptions {
 export interface ScriptAssistantTurnSnapshot {
   content: string;
   selection: ScriptEditorSelection;
-  revision: number;
 }
 
 export interface ScriptSlice {
@@ -86,6 +82,31 @@ export interface ScriptSlice {
    * baseline-compare a number. Mirrors `clashRunSeq` / `compareRunSeq`.
    */
   scriptRunSeq: number;
+  /**
+   * Shared across ScriptPanel, ChatPanel, CommandPalette and ExecutableCodeBlock.
+   * useSandbox().execute() advances it before awaiting, so guards can detect
+   * runs started by another component instance.
+   * It lives in the store so every instance reads/writes the same
+   * counter. A run captures the value right after bumping it and re-checks
+   * it, synchronously, before every terminal store write that follows an
+   * await (`setScriptResult`/`setScriptError`) — a stale run whose epoch no
+   * longer matches the current one skips the write. Without this, two
+   * scripts started in either order publish to the shared
+   * `scriptLastResult`/`scriptExecutionState` in FINISH order, so an older,
+   * slower run can silently clobber a newer, already-displayed result.
+   *
+   * This gates the STORE WRITE only, not what `execute()` resolves with to
+   * its OWN caller — that is a separate, per-instance `runEpochRef` inside
+   * `useSandbox()`. A run that a DIFFERENT instance's newer run made stale
+   * here still genuinely succeeded (or failed) on its own terms, and its own
+   * caller (`ExecutableCodeBlock.handleRun`, `ChatPanel`'s auto-execute) gets
+   * that real outcome — being skipped here only means it lost the race to be
+   * the document's displayed state, not that the run itself failed. Only a
+   * run THIS SAME instance itself superseded (a second `execute()` call, or
+   * its own `reset()`) resolves `null`, matching the #1922 teardown-abort
+   * path's contract for a run that actually died.
+   */
+  scriptRunEpoch: number;
   scriptLastResult: ScriptResult | null;
   scriptLastError: string | null;
   scriptLastDiagnostics: ScriptDiagnostic[];
@@ -100,14 +121,21 @@ export interface ScriptSlice {
   scriptAssistantTurnSnapshot: ScriptAssistantTurnSnapshot | null;
 
   // Actions
-  createScript: (name: string, code?: string) => string;
-  saveActiveScript: () => void;
-  deleteScript: (id: string) => void;
-  renameScript: (id: string, name: string) => void;
+  createScript: (name: string, code?: string, persistence?: { onResult: (result: SaveResult) => void; required: boolean }) => string;
+  saveActiveScript: () => SaveResult | undefined;
+  deleteScript: (id: string) => SaveResult;
+  renameScript: (id: string, name: string) => SaveResult | undefined;
   setActiveScriptId: (id: string | null) => void;
   setScriptEditorContent: (content: string) => void;
   setScriptExecutionState: (state: ScriptExecutionState) => void;
   bumpScriptRunSeq: () => void;
+  /** Bump the run-supersession token and return the new value (this run's epoch). */
+  bumpScriptRunEpoch: () => number;
+  /**
+   * Publish a run's result. Clears any error and its diagnostics, and moves
+   * `scriptExecutionState` to `'success'` — or to `'idle'` for a `null`
+   * result, which is not a successful run but the absence of one.
+   */
   setScriptResult: (result: ScriptResult | null) => void;
   setScriptError: (error: string | null, diagnostics?: ScriptDiagnostic[]) => void;
   setScriptDiagnostics: (diagnostics: ScriptDiagnostic[]) => void;
@@ -162,6 +190,7 @@ export const createScriptSlice: StateCreator<ScriptSlice, [], [], ScriptSlice> =
   scriptEditorDirty: false,
   scriptExecutionState: 'idle',
   scriptRunSeq: 0,
+  scriptRunEpoch: 0,
   scriptLastResult: null,
   scriptLastError: null,
   scriptLastDiagnostics: [],
@@ -176,13 +205,12 @@ export const createScriptSlice: StateCreator<ScriptSlice, [], [], ScriptSlice> =
   scriptAssistantTurnSnapshot: null,
 
   // Actions
-  createScript: (name, code) => {
+  createScript: (name, code, persistence) => {
     const { savedScripts } = get();
     if (!canCreateScript(savedScripts.length)) {
       console.warn('[Scripts] Maximum script limit reached');
       return '';
     }
-
     const validName = validateScriptName(name) ?? 'Untitled Script';
     const scriptCode = code ?? DEFAULT_CODE;
     if (!isScriptWithinSizeLimit(scriptCode)) {
@@ -200,6 +228,10 @@ export const createScriptSlice: StateCreator<ScriptSlice, [], [], ScriptSlice> =
       version: 1,
     };
     const updated = [...savedScripts, script];
+    const result = saveScripts(updated);
+    if (!result.ok) console.warn('[Scripts] Save failed:', result.message);
+    persistence?.onResult(result);
+    if (persistence?.required && !result.ok) return '';
     set({
       savedScripts: updated,
       activeScriptId: id,
@@ -209,10 +241,6 @@ export const createScriptSlice: StateCreator<ScriptSlice, [], [], ScriptSlice> =
       scriptEditorSelection: { from: script.code.length, to: script.code.length },
       scriptAppliedOpIds: new Set(),
     });
-    const result = saveScripts(updated);
-    if (!result.ok) {
-      console.warn('[Scripts] Save failed:', result.message);
-    }
     return id;
   },
 
@@ -224,11 +252,10 @@ export const createScriptSlice: StateCreator<ScriptSlice, [], [], ScriptSlice> =
         ? { ...s, code: scriptEditorContent, updatedAt: Date.now() }
         : s,
     );
-    set({ savedScripts: updated, scriptEditorDirty: false });
     const result = saveScripts(updated);
-    if (!result.ok) {
-      console.warn('[Scripts] Save failed:', result.message);
-    }
+    if (!result.ok) console.warn('[Scripts] Save failed:', result.message);
+    set({ savedScripts: updated, scriptEditorDirty: !result.ok }); // a refused write leaves the edits unsaved
+    return result;
   },
 
   deleteScript: (id) => {
@@ -245,7 +272,7 @@ export const createScriptSlice: StateCreator<ScriptSlice, [], [], ScriptSlice> =
       scriptEditorSelection: { from: scriptEditorContent.length, to: scriptEditorContent.length },
       scriptAppliedOpIds: new Set(),
     });
-    saveScripts(updated);
+    return saveScripts(updated);
   },
 
   renameScript: (id, name) => {
@@ -255,7 +282,7 @@ export const createScriptSlice: StateCreator<ScriptSlice, [], [], ScriptSlice> =
       s.id === id ? { ...s, name: validName, updatedAt: Date.now() } : s,
     );
     set({ savedScripts: updated });
-    saveScripts(updated);
+    return saveScripts(updated);
   },
 
   setActiveScriptId: (activeScriptId) => {
@@ -311,8 +338,29 @@ export const createScriptSlice: StateCreator<ScriptSlice, [], [], ScriptSlice> =
 
   bumpScriptRunSeq: () => set((s) => ({ scriptRunSeq: s.scriptRunSeq + 1 })),
 
+  bumpScriptRunEpoch: () => {
+    const next = get().scriptRunEpoch + 1;
+    set({ scriptRunEpoch: next });
+    return next;
+  },
+
+  // `'success'` describes a run whose outcome this call is publishing, so it
+  // is conditional on there BEING one. A `null` result is the absence of a
+  // run — the only caller that passes it is `useSandbox().reset()`, which
+  // clears the panel — and reporting that as a successful execution left the
+  // store claiming a success with no result and no error to explain it. That
+  // was survivable while the next completing run overwrote it; with the
+  // run-supersession epoch (`scriptRunEpoch`) a run superseded by that very
+  // `reset()` no longer writes at all, so the incoherent state became the
+  // terminal one. `'idle'` is what every other "nothing has run" path in this
+  // slice uses (`setActiveScriptId`, the model-load reset in `store/index.ts`).
   setScriptResult: (scriptLastResult) =>
-    set({ scriptLastResult, scriptLastError: null, scriptLastDiagnostics: [], scriptExecutionState: 'success' }),
+    set({
+      scriptLastResult,
+      scriptLastError: null,
+      scriptLastDiagnostics: [],
+      scriptExecutionState: scriptLastResult === null ? 'idle' : 'success',
+    }),
 
   // Error and execution state are set independently — clearing an error
   // does NOT change execution state unless explicitly transitioned
@@ -419,7 +467,6 @@ export const createScriptSlice: StateCreator<ScriptSlice, [], [], ScriptSlice> =
       scriptAssistantTurnSnapshot: {
         content: state.scriptEditorContent,
         selection: state.scriptEditorSelection,
-        revision: state.scriptEditorRevision,
       },
     });
   },
@@ -436,7 +483,9 @@ export const createScriptSlice: StateCreator<ScriptSlice, [], [], ScriptSlice> =
     set({
       scriptEditorContent: snapshot.content,
       scriptEditorSelection: snapshot.selection,
-      scriptEditorRevision: snapshot.revision,
+      // Restore content, never the revision number: a client may hold a revision
+      // issued during the turn, and reusing it would let that edit hit this source.
+      scriptEditorRevision: state.scriptEditorRevision + 1,
       scriptEditorDirty: true,
       scriptAppliedOpIds: new Set(),
       scriptAssistantTurnSnapshot: null,

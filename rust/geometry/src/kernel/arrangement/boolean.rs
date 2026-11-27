@@ -2,13 +2,15 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use super::super::broadphase::tris_aabb;
 use super::super::interner::{Interner, Vid};
 use super::super::rational::point_of;
 use super::classify::{
-    boolean_vids, boolean_vids_components, cross3, operand_extent, point_inside, rotate_min_first,
-    sub_f64, to_f64_pt, BComponents,
+    boolean_vids, boolean_vids_components, cross3, rotate_min_first, sub_f64, to_f64_pt,
+    BComponents,
 };
-use super::{arrange, arrange_many, BoolOp, MultiArrangement, Tri};
+use super::ray_parity::{operand_extent, point_inside};
+use super::{arrange, arrange_many, Arrangement, BoolOp, MultiArrangement, Tri};
 use num_traits::ToPrimitive;
 
 /// `∪ meshes` as a watertight triangle list — the N-ary union.
@@ -48,6 +50,10 @@ pub fn union_all(meshes: &[&[Tri]]) -> (Vec<Tri>, bool) {
     let arr = arrange_many(meshes);
     let conforming = arr.unrecovered == 0;
     let exts: Vec<f64> = meshes.iter().map(|m| operand_extent(m)).collect();
+    // Each mesh's exact bounding box, hoisted once instead of having
+    // `point_inside` rescan `meshes[m]` on every OTHER mesh's sub-triangle probe
+    // against it below (an O(N) rescan repeated per-probe, not just per-mesh).
+    let aabbs: Vec<_> = meshes.iter().map(|m| tris_aabb(m)).collect();
     // Owner map: oriented (winding-preserving) Vid key → lowest mesh index that
     // KEEPS that face. A later mesh's identical co-oriented copy is dropped.
     let mut owner: HashMap<[Vid; 3], usize> = HashMap::new();
@@ -64,7 +70,7 @@ pub fn union_all(meshes: &[&[Tri]]) -> (Vec<Tri>, bool) {
             // on the union boundary iff the outer side is outside ALL other meshes
             let on_boundary = (0..meshes.len())
                 .filter(|&m| m != k)
-                .all(|m| !point_inside(outer, meshes[m], exts[m]));
+                .all(|m| !point_inside(outer, meshes[m], exts[m], aabbs[m]));
             let mut keep_this = on_boundary;
             if keep_this {
                 let key = rotate_min_first(tri);
@@ -146,12 +152,37 @@ fn point_via_interner(it: &Interner, v: Vid) -> [f64; 3] {
 /// Compute the boolean `op` of operand meshes `a` and `b`, materialised to f64
 /// triangles. `A−B = (A outside B) ∪ flip(B inside A)`;
 /// `A∪B = (A outside B) ∪ (B outside A)`; `A∩B = (A inside B) ∪ (B inside A)`.
+///
+/// This deliberately does NOT gate on `Arrangement::unrecovered` the way
+/// [`difference_all`] does — see [`boolean_with_conformity`], which computes
+/// the identical result and additionally surfaces that signal for callers
+/// that want it (diagnostics; issue #3353's classification-level tear).
+///
+/// An operand past [`super::MAX_OPERAND_COORD`] (or non-finite) is refused:
+/// the result is empty and [`boolean_with_conformity`] reports `false`
+/// (#7677). Never a wrong solid.
+///
+/// An exhausted exact-work budget also returns no triangles. Callers must start
+/// their operation with [`crate::kernel::budget::begin`] and check
+/// [`crate::kernel::budget::tripped`] immediately afterward, before interpreting
+/// an empty result or starting another operation. [`boolean_with_conformity`]
+/// additionally reports `false` for a budget failure; its status also includes
+/// unrecovered constraints, which this raw entry deliberately permits.
 pub fn boolean(a: &[Tri], b: &[Tri], op: BoolOp) -> Vec<Tri> {
+    boolean_with_conformity(a, b, op).0
+}
+
+/// Like [`boolean`], but also reports whether the pairwise arrangement
+/// conformed (`Arrangement::unrecovered == 0`) and classification completed
+/// within its exact-work budget. `boolean()` computes the same triangles and
+/// discards this signal. Unrecovered constraints retain the historical lenient
+/// behavior; an exhausted classification emits no partial faces and must not
+/// be mistaken for a genuine conforming empty result.
+pub fn boolean_with_conformity(a: &[Tri], b: &[Tri], op: BoolOp) -> (Vec<Tri>, bool) {
     let arr = arrange(a, b);
+    let conforming = arr.unrecovered == 0;
     let vids = boolean_vids(&arr, a, b, op);
-    vids.into_iter()
-        .map(|t| [to_f64_pt(&arr, t[0]), to_f64_pt(&arr, t[1]), to_f64_pt(&arr, t[2])])
-        .collect()
+    (vids_to_tris(&arr, vids), conforming && !super::super::budget::tripped())
 }
 
 /// `a − (∪ comps)` for PAIRWISE-DISJOINT, per-component-closed, OUTWARD-wound
@@ -170,12 +201,17 @@ pub fn boolean(a: &[Tri], b: &[Tri], op: BoolOp) -> Vec<Tri> {
 /// grid re-jitters carve vertices off shared planes, so cut N+1 re-cracks what
 /// cut N reconciled (many-void walls' compounding open edges) — and is
 /// ~N× cheaper on N box cutters.
-pub fn difference_all(a: &[Tri], comps: &[&[Tri]]) -> Option<Vec<Tri>> {
+///
+/// Also returns `None` if classification exhausts the exact-work budget.
+/// Returns `(difference, changed)`, the same shape as [`union_all`]'s
+/// `(union, conforming)`. `changed == false` means no cutter reaches the solid
+/// `a` bounds (every A sub-triangle kept, no B sub-triangle kept): the
+/// triangles are `a` re-tessellated, not a cut.
+pub fn difference_all(a: &[Tri], comps: &[&[Tri]]) -> Option<(Vec<Tri>, bool)> {
     if comps.is_empty() {
-        return Some(a.to_vec());
+        return Some((a.to_vec(), false));
     }
-    let b_all: Vec<Tri> = comps.iter().flat_map(|c| c.iter().copied()).collect();
-    let arr = arrange(a, &b_all);
+    let arr = super::binary::arrange_components(a, comps);
     // Hard conformity gate (unlike the binary `boolean`'s graceful degrade):
     // an unrecovered constraint means some sub-triangle STRADDLES a cutter
     // boundary and its centroid classification can silently over/under-cut
@@ -185,13 +221,8 @@ pub fn difference_all(a: &[Tri], comps: &[&[Tri]]) -> Option<Vec<Tri>> {
     if arr.unrecovered > 0 {
         return None;
     }
-    let bc = BComponents::new(comps);
-    let vids = boolean_vids_components(&arr, a, &bc, BoolOp::Difference);
-    Some(
-        vids.into_iter()
-            .map(|t| [to_f64_pt(&arr, t[0]), to_f64_pt(&arr, t[1]), to_f64_pt(&arr, t[2])])
-            .collect(),
-    )
+    let result = classify_difference(&arr, a, comps);
+    (!super::super::budget::tripped()).then_some(result)
 }
 
 /// Like [`difference_all`] but WITHOUT the conformity gate — returns the batched
@@ -199,17 +230,39 @@ pub fn difference_all(a: &[Tri], comps: &[&[Tri]]) -> Option<Vec<Tri>> {
 /// exact batched topology is cleaner than the sequential re-jitter on dense
 /// faceted-reveal walls (issue #098), but its centroid classification can
 /// over/under-cut volume, so the caller (`subtract_many`) VERIFIES the removed
-/// volume against a sequential reference before trusting it.
-pub fn difference_all_lenient(a: &[Tri], comps: &[&[Tri]]) -> Vec<Tri> {
-    if comps.is_empty() {
-        return a.to_vec();
-    }
-    let b_all: Vec<Tri> = comps.iter().flat_map(|c| c.iter().copied()).collect();
-    let arr = arrange(a, &b_all);
+/// volume against a sequential reference before trusting it. The second
+/// element is the same `changed` bit [`difference_all`] returns. On a pair the
+/// admission check refuses it returns empty with `changed == false`; callers
+/// must check conformity (see [`difference_all_lenient_with_conformity`]).
+pub fn difference_all_lenient(a: &[Tri], comps: &[&[Tri]]) -> (Vec<Tri>, bool) {
+    let (tris, changed, _) = difference_all_lenient_with_conformity(a, comps);
+    (tris, changed)
+}
+
+/// [`difference_all_lenient`] plus whether the arrangement CONFORMED
+/// (`unrecovered == 0`) and classification completed within its budget.
+/// A non-conforming `changed == false` is not proof
+/// that no cutter reaches `a`: straddling sub-triangles can be misclassified
+/// (#5362 review), so a caller must not read it as "disjoint".
+pub fn difference_all_lenient_with_conformity(a: &[Tri], comps: &[&[Tri]]) -> (Vec<Tri>, bool, bool) {
+    if comps.is_empty() { return (a.to_vec(), false, true); }
+    let arr = super::binary::arrange_components(a, comps);
+    let (tris, changed) = classify_difference(&arr, a, comps);
+    (tris, changed, arr.unrecovered == 0 && !super::super::budget::tripped())
+}
+
+/// The shared tail of [`difference_all`] and [`difference_all_lenient`]:
+/// classify `a − ∪comps` over `arr` and return `(triangles, changed)`.
+fn classify_difference(arr: &Arrangement, a: &[Tri], comps: &[&[Tri]]) -> (Vec<Tri>, bool) {
     let bc = BComponents::new(comps);
-    boolean_vids_components(&arr, a, &bc, BoolOp::Difference)
-        .into_iter()
-        .map(|t| [to_f64_pt(&arr, t[0]), to_f64_pt(&arr, t[1]), to_f64_pt(&arr, t[2])])
+    let (vids, changed) = boolean_vids_components(arr, a, &bc, BoolOp::Difference);
+    (vids_to_tris(arr, vids), changed)
+}
+
+/// Classified Vid triangles back to f64 coordinates.
+fn vids_to_tris(arr: &Arrangement, vids: Vec<[Vid; 3]>) -> Vec<Tri> {
+    vids.into_iter()
+        .map(|t| [to_f64_pt(arr, t[0]), to_f64_pt(arr, t[1]), to_f64_pt(arr, t[2])])
         .collect()
 }
 
@@ -222,14 +275,13 @@ pub fn boolean_topology_hash(a: &[Tri], b: &[Tri], op: BoolOp) -> u64 {
     let mut tris: Vec<[Vid; 3]> =
         boolean_vids(&arr, a, b, op).into_iter().map(rotate_min_first).collect();
     tris.sort_unstable();
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h = ifc_lite_core::hash::Fnv1a64::new();
     for t in tris {
         for v in t {
-            h ^= v as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            h.mix_word(v as u64);
         }
     }
-    h
+    h.finish()
 }
 
 /// Axis-aligned box `[lo,hi]` as 12 outward-wound triangles.

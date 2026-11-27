@@ -3,8 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * WebGPU pipelines for IfcAnnotation overlays — filled regions and text
- * labels. Each pipeline is self-contained (owns its own buffers, bind groups,
+ * WebGPU pipelines for IfcAnnotation overlays: text labels here, filled regions
+ * in `symbolic-fill-pipeline.ts` (re-exported below). Each pipeline is self-contained (owns its own buffers, bind groups,
  * pipeline state, optional atlas texture) and exposes a `render(pass,
  * viewProj)` entry point that the caller invokes from inside an existing
  * RGBA-blended render pass.
@@ -14,29 +14,33 @@
  * the result is ear-clipped.
  */
 
-import { SymbolicTextAtlas } from './symbolic-text-atlas.js';
+import type { AnnotationPickGlyph } from './annotation-picking.js';
+import { haloGlyphQuad, SymbolicTextAtlas } from './symbolic-text-atlas.js';
 import {
-  SYMBOLIC_FILL_WGSL,
   SYMBOLIC_TEXT_WGSL,
 } from './shaders/symbolic-overlay.wgsl.js';
+import type { PickClipState } from './pick-types.js';
+import { pointClipped } from './scene-raycaster.js';
 import { PIPELINE_CONSTANTS } from './constants.js';
-import { triangulateRings, type Pt } from './fill-triangulate.js';
+import type { WorldPoint } from './relative-to-eye.js';
+import type { InstanceRun } from './instanced-rte.js';
+import { packTextRteDeltas, TEXT_RTE_DELTA_FLOATS, TEXT_RTE_DELTA_STRIDE_BYTES } from './symbolic-text-rte.js';
+import { parseBoxAlignment } from './symbolic-overlay-geometry.js';
+export { parseBoxAlignment } from './symbolic-overlay-geometry.js';
+// The fill half lives in its own module (#8767); this path keeps exporting it.
+export { SymbolicFillPipeline, type SymbolicFillInput } from './symbolic-fill-pipeline.js';
 
-const FILL_VERTEX_STRIDE_BYTES = (3 + 4) * 4; // pos.xyz + color.rgba, 4 bytes each
-const TEXT_INSTANCE_STRIDE_BYTES = (3 + 3 + 3 + 4 + 4 + 3 + 1 + 1 + 4 + 1) * 4;
-// origin.xyz + rightAxis.xyz + upAxis.xyz + uvBounds.xyzw + color.rgba
-// + anchor.xyz + capHeight (shared per text label, used by the shader to
-//   compute a single screen-space scale for every glyph in the row)
-// + billboard (1 = use camera-aligned axes, 0 = authored — IfcGridAxis only)
-// + glyphOffsetSize.xyzw (baseline-relative 2D atlas-pixel offset + size
-//   in world units; only consulted on the billboard branch)
-// + targetPxOverride (per-instance screen-pixel target cap height; 0 falls
-//   back to the uniform default — grid bubble glyphs use a larger value
-//   than tag text so the bubble stays proportional at all zoom levels).
-
-// Uniform: viewProj (64 B) + viewportAndTarget (16 B) + cameraRight (16 B)
-// + cameraUp (16 B) = 112 B.
-const TEXT_UNIFORM_BYTES = 112;
+const TEXT_INSTANCE_FLOATS = 3 + 3 + 3 + 4 + 4 + 3 + 1 + 1 + 4 + 1;
+const TEXT_INSTANCE_STRIDE_BYTES = TEXT_INSTANCE_FLOATS * 4;
+// Static glyph fields: origin, axes, UV/color, label anchor, cap height,
+// billboard, glyph offset/size and target override (108 B/glyph). A separate
+// dynamic RTE delta stream updates only 32 B/glyph per camera frame; low.w marks anchor-local legacy origins.
+// Uniform: global viewProj (64 B) + RTE viewProj (64 B) + viewport/target
+// (16 B) + camera basis (32 B) + f64 camera split (32 B) = 208 B. Keeping
+// both projections is deliberate: a mixed legacy/anchored upload must keep
+// legacy world-f32 labels on the original matrix while anchored labels use the
+// eye-relative matrix selected by their instance record.
+const TEXT_UNIFORM_BYTES = 208;
 // Default target glyph cap height in physical pixels. Roughly matches a
 // 13–14px body font at 1× DPR — readable at any zoom without dominating
 // the model. Authored IFC text height is ignored in screen space, but the
@@ -44,22 +48,18 @@ const TEXT_UNIFORM_BYTES = 112;
 // their relative proportions.
 const DEFAULT_TEXT_TARGET_PX = 14;
 
-// ─── Fill input ─────────────────────────────────────────────────────────────
-
-export interface SymbolicFillInput {
-  /** Flat ring buffer: [x, z, x, z, …]. Y is taken from `worldY`. */
-  points: Float32Array;
-  /** Vertex indices marking the start of each hole. Empty = no holes. */
-  holesOffsets: Uint32Array;
-  worldY: number;
-  /** Straight-alpha RGBA in [0..1]. The shader premultiplies. */
-  color: [number, number, number, number];
-}
-
 // ─── Text input ─────────────────────────────────────────────────────────────
 
 export interface SymbolicTextInput {
+  /** Scene owner id for annotation picking; omitted reference layers remain unpickable. */
+  ownerId?: number;
   worldPos: [number, number, number];
+  /**
+   * Opt-in canonical f64 label anchor. When supplied, `worldPos` is a small
+   * local offset from this origin; legacy callers omit it and retain their
+   * world-f32 projection path without a fabricated precision claim.
+   */
+  origin?: [number, number, number];
   /** Baseline direction (X axis in 3D world space). */
   dirX: number;
   dirZ: number;
@@ -86,183 +86,19 @@ export interface SymbolicTextInput {
    * disappear behind the character.
    */
   targetPx?: number;
-}
-
-// ─── Fill pipeline ──────────────────────────────────────────────────────────
-
-export class SymbolicFillPipeline {
-  private readonly device: GPUDevice;
-  private readonly format: GPUTextureFormat;
-  private readonly sampleCount: number;
-  private pipeline: GPURenderPipeline | null = null;
-  private bindGroupLayout: GPUBindGroupLayout | null = null;
-  private uniformBuffer: GPUBuffer | null = null;
-  private bindGroup: GPUBindGroup | null = null;
-  private vertexBuffer: GPUBuffer | null = null;
-  private vertexCount = 0;
-
-  constructor(device: GPUDevice, presentationFormat: GPUTextureFormat, sampleCount: number = 1) {
-    this.device = device;
-    this.format = presentationFormat;
-    this.sampleCount = sampleCount;
-  }
-
-  private init(): void {
-    if (this.pipeline) return;
-
-    this.bindGroupLayout = this.device.createBindGroupLayout({
-      label: 'symbolic-fill-bgl',
-      entries: [
-        {
-          binding: 0,
-          visibility: GPUShaderStage.VERTEX,
-          buffer: { type: 'uniform' },
-        },
-      ],
-    });
-
-    const module = this.device.createShaderModule({
-      label: 'symbolic-fill-shader',
-      code: SYMBOLIC_FILL_WGSL,
-    });
-
-    this.pipeline = this.device.createRenderPipeline({
-      label: 'symbolic-fill-pipeline',
-      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] }),
-      vertex: {
-        module,
-        entryPoint: 'vs_main',
-        buffers: [
-          {
-            arrayStride: FILL_VERTEX_STRIDE_BYTES,
-            attributes: [
-              { shaderLocation: 0, offset: 0, format: 'float32x3' },        // position
-              { shaderLocation: 1, offset: 3 * 4, format: 'float32x4' },    // color
-            ],
-          },
-        ],
-      },
-      fragment: {
-        module,
-        entryPoint: 'fs_main',
-        // The main render pass attaches 2 colour targets (presentation + the
-        // picker objectId) and runs MSAA. Pipelines used inside that pass
-        // must declare matching targets and sampleCount or WebGPU rejects
-        // them at validation time. The objectId slot is write-masked off so
-        // the picker IDs from the opaque pass underneath are preserved.
-        targets: [
-          {
-            format: this.format,
-            blend: {
-              // Standard "one * src + (1 - src.a) * dst" composite — the
-              // shader writes premultiplied alpha.
-              color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-            },
-            writeMask: GPUColorWrite.ALL,
-          },
-          { format: 'rgba8unorm', writeMask: 0 },
-        ],
-      },
-      primitive: { topology: 'triangle-list', cullMode: 'none' },
-      depthStencil: {
-        format: PIPELINE_CONSTANTS.DEPTH_FORMAT,
-        depthWriteEnabled: false,
-        // Reverse-Z: the renderer clears depth to 0.0 and uses 'greater' /
-        // 'greater-equal' for everything in the main pass. 'less-equal'
-        // would fail the test on every visible surface.
-        depthCompare: 'greater-equal',
-        // Decal bias: nudge fills slightly closer to camera so they don't
-        // z-fight when coplanar with a wall/floor face (issue #812).
-        // Reverse-Z → larger depth is closer → negative bias.
-        depthBias: -4,
-        depthBiasSlopeScale: -0.5,
-        depthBiasClamp: 0,
-      },
-      multisample: { count: this.sampleCount },
-    });
-
-    this.uniformBuffer = this.device.createBuffer({
-      label: 'symbolic-fill-camera',
-      size: 64,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-
-    this.bindGroup = this.device.createBindGroup({
-      label: 'symbolic-fill-bg',
-      layout: this.bindGroupLayout,
-      entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }],
-    });
-  }
-
-  /**
-   * Upload a list of fill regions. Each region is triangulated by the shared
-   * even-odd triangulator (`fill-triangulate.ts`) into a single vertex buffer.
-   *
-   * Pass an empty array to clear. Rings with fewer than 3 vertices are
-   * dropped, and so is any ring set that yields no triangle at all (a fully
-   * collinear bound). Inner bounds themselves are never dropped: since #2516
-   * the bridge always finds an anchor, so a hole cannot fall out of the
-   * result the way it used to when it "couldn't be merged".
+  /** Does this label DEFINE the model's extent? Default true; see `uploadTexts` (#3359). */
+  definesExtent?: boolean;  /**
+   * Hide this label while the section plane, an extra cutting plane or the clip box removes its
+   * anchor, as the model is clipped (#8767). The label goes whole with its anchor; it is never cut
+   * through. Default false.
    */
-  upload(fills: readonly SymbolicFillInput[]): void {
-    this.init();
-
-    // Drop the previous buffer eagerly so swapping models doesn't accumulate.
-    if (this.vertexBuffer) {
-      this.vertexBuffer.destroy();
-      this.vertexBuffer = null;
-    }
-    this.vertexCount = 0;
-
-    if (fills.length === 0) return;
-
-    // Triangulate everything into one big flat vertex stream.
-    const stream: number[] = [];
-    for (const fill of fills) {
-      triangulateFillTo(stream, fill);
-    }
-    if (stream.length === 0) return;
-
-    const data = new Float32Array(stream);
-    this.vertexBuffer = this.device.createBuffer({
-      label: 'symbolic-fill-vbuf',
-      size: data.byteLength,
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-    });
-    this.device.queue.writeBuffer(this.vertexBuffer, 0, data);
-    this.vertexCount = data.length / (FILL_VERTEX_STRIDE_BYTES / 4);
-  }
-
-  hasGeometry(): boolean {
-    return this.vertexCount > 0;
-  }
-
-  render(pass: GPURenderPassEncoder, viewProj: Float32Array): void {
-    if (!this.pipeline || !this.uniformBuffer || !this.bindGroup || !this.vertexBuffer) return;
-    if (this.vertexCount === 0) return;
-    this.device.queue.writeBuffer(this.uniformBuffer, 0, viewProj);
-    pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, this.bindGroup);
-    pass.setVertexBuffer(0, this.vertexBuffer);
-    pass.draw(this.vertexCount);
-  }
-
-  destroy(): void {
-    if (this.vertexBuffer) this.vertexBuffer.destroy();
-    if (this.uniformBuffer) this.uniformBuffer.destroy();
-    this.vertexBuffer = null;
-    this.uniformBuffer = null;
-    this.bindGroup = null;
-    this.bindGroupLayout = null;
-    this.pipeline = null;
-    this.vertexCount = 0;
-  }
+  sectionClipped?: boolean;
 }
 
 // ─── Text pipeline ──────────────────────────────────────────────────────────
 
 export class SymbolicTextPipeline {
+  pickGlyphs: AnnotationPickGlyph[] = [];
   private readonly device: GPUDevice;
   private readonly format: GPUTextureFormat;
   private readonly sampleCount: number;
@@ -272,11 +108,21 @@ export class SymbolicTextPipeline {
   private uniformBuffer: GPUBuffer | null = null;
   private cornerBuffer: GPUBuffer | null = null;
   private instanceBuffer: GPUBuffer | null = null;
+  private rteDeltaBuffer: GPUBuffer | null = null;
   private atlasTexture: GPUTexture | null = null;
   private atlasView: GPUTextureView | null = null;
   private sampler: GPUSampler | null = null;
   private bindGroup: GPUBindGroup | null = null;
   private instanceCount = 0;
+  /** CPU-side dynamic delta stream; never derived from f32 instance lanes. */
+  private rteDeltaData: Float32Array | null = null;
+  private instanceAnchors: Array<WorldPoint | null> = [];
+  /**
+   * Per glyph, its label's world anchor when the label is section-clipped (#8767), else null. The
+   * whole label hides with its anchor, so every glyph of one label carries the same point.
+   */
+  private instanceClipAnchors: Array<WorldPoint | null> = [];
+  private hasClippedGlyphs = false;
   private uploadedAtlasVersion = -1;
 
   constructor(
@@ -342,6 +188,15 @@ export class SymbolicTextPipeline {
               { shaderLocation: 8,  offset: (3 + 3 + 3 + 4 + 4 + 3 + 1) * 4,           format: 'float32'   }, // billboard
               { shaderLocation: 9,  offset: (3 + 3 + 3 + 4 + 4 + 3 + 1 + 1) * 4,       format: 'float32x4' }, // glyphOffsetSize
               { shaderLocation: 10, offset: (3 + 3 + 3 + 4 + 4 + 3 + 1 + 1 + 4) * 4,   format: 'float32'   }, // targetPxOverride
+            ],
+          },
+          {
+            // Per-frame f64-split drawable-minus-camera delta.
+            arrayStride: TEXT_RTE_DELTA_STRIDE_BYTES,
+            stepMode: 'instance',
+            attributes: [
+              { shaderLocation: 11, offset: 0, format: 'float32x4' },
+              { shaderLocation: 12, offset: 4 * 4, format: 'float32x4' },
             ],
           },
         ],
@@ -458,7 +313,16 @@ export class SymbolicTextPipeline {
       this.instanceBuffer.destroy();
       this.instanceBuffer = null;
     }
+    if (this.rteDeltaBuffer) {
+      this.rteDeltaBuffer.destroy();
+      this.rteDeltaBuffer = null;
+    }
     this.instanceCount = 0;
+    this.pickGlyphs = [];
+    this.rteDeltaData = null;
+    this.instanceAnchors = [];
+    this.instanceClipAnchors = [];
+    this.hasClippedGlyphs = false;
 
     if (texts.length === 0) return;
 
@@ -477,6 +341,8 @@ export class SymbolicTextPipeline {
       glyphOffsetSize: [number, number, number, number];
       // 0 → use renderer global default; otherwise override (in screen px).
       targetPxOverride: number;
+      rteAnchor: WorldPoint | null;
+      clipAnchor: WorldPoint | null;
     }> = [];
 
     for (const text of texts) {
@@ -486,10 +352,6 @@ export class SymbolicTextPipeline {
       const tint: [number, number, number, number] =
         text.color ?? [0.05, 0.05, 0.05, 1.0];
 
-      // The IFC text direction (dirX, dirZ) is the baseline X axis in world
-      // space. We want a 3D right-axis = baseline direction, up-axis = scene
-      // up (0, 1, 0). The glyph is scaled by the world-height and the per-
-      // glyph atlas-pixel size relative to the atlas-pixel cap height.
       const heightWorld = text.height;
       const heightAtlas = this.atlas.glyphPx;
       const dirLen = Math.hypot(text.dirX, text.dirZ) || 1;
@@ -501,18 +363,9 @@ export class SymbolicTextPipeline {
       const baselineOffset = align.vertical * this.atlas.glyphPx;
       const horizontalOffset = align.horizontal * layout.totalAdvancePx;
 
-      // Detect "true visual center" alignment so a single-line label
-      // anchors the GLYPH's geometric centre on the anchor (rather than
-      // the atlas-slot midline — the canonical `parseBoxAlignment` output
-      // assumes the slot height equals the visual glyph which is rarely
-      // true for sans-serif digits and produces noticeable top-bias on
-      // grid bubble tags).
       const isCenterH = align.horizontal === -0.5;
       const isCenterV = align.vertical === -0.5;
 
-      // For horizontal centring across a multi-glyph label, the row's
-      // visual width is (lastXOffset + lastGlyphWidth) - firstXOffset.
-      // For a single-glyph label this collapses to the glyph's widthPx.
       let visualWidthPx = layout.totalAdvancePx;
       if (isCenterH && layout.glyphs.length > 0) {
         const first = layout.glyphs[0];
@@ -532,8 +385,8 @@ export class SymbolicTextPipeline {
         const pyBottom = isCenterV
           ? -glyph.heightPx * 0.5
           : -baselineOffset - (glyph.heightPx - glyph.baselinePx);
-        const widthAtlas = glyph.widthPx;
-        const heightGlyphAtlas = glyph.heightPx;
+        // Quad widened by the halo margin on every side (#5388).
+        const { qx0, qyBottom, widthAtlas, heightGlyphAtlas, uvBounds } = haloGlyphQuad(glyph, px0, pyBottom, this.atlas.atlasSize);
 
         // Convert atlas-pixel local coords to world-space offsets:
         //   right axis in world = (ux, 0, uz) * (widthAtlas * heightWorld / heightAtlas)
@@ -543,31 +396,44 @@ export class SymbolicTextPipeline {
         const heightGlyphWorld = heightGlyphAtlas * wScale;
 
         // Bottom-left origin of the glyph quad in world space.
-        const ox = text.worldPos[0] + ux * px0 * wScale;
-        const oy = text.worldPos[1] + pyBottom * wScale;
-        const oz = text.worldPos[2] + uz * px0 * wScale;
-
+        const anchored = text.origin !== undefined;
+        const ax = anchored ? text.origin![0] + text.worldPos[0] : text.worldPos[0];
+        const ay = anchored ? text.origin![1] + text.worldPos[1] : text.worldPos[1];
+        const az = anchored ? text.origin![2] + text.worldPos[2] : text.worldPos[2];
+        const ox = anchored ? ux * qx0 * wScale : ax + ux * qx0 * wScale;
+        const oy = anchored ? qyBottom * wScale : ay + qyBottom * wScale;
+        const oz = anchored ? uz * qx0 * wScale : az + uz * qx0 * wScale;
+        if (text.ownerId && tint[3] > 0 && text.content.trim()) this.pickGlyphs.push({
+          ownerId: text.ownerId, anchor: [ax, ay, az], right: [ux, 0, uz],
+          offsetSize: [qx0*wScale, qyBottom*wScale, widthWorld, heightGlyphWorld],
+          capHeight: heightWorld, targetPx: text.targetPx && text.targetPx > 0 ? text.targetPx : DEFAULT_TEXT_TARGET_PX,
+          anchored, billboard: text.billboard === true, sectionClipped: text.sectionClipped === true,
+        });
         layouts.push({
           origin: [ox, oy, oz],
           rightAxis: [ux * widthWorld, 0, uz * widthWorld],
           upAxis: [0, heightGlyphWorld, 0],
-          uvBounds: [glyph.u0, glyph.v0, glyph.u1, glyph.v1],
+          uvBounds,
           color: tint,
           // Shared per-label anchor (text.worldPos) lets the shader compute
           // one screen-space scale and apply it uniformly across all glyphs.
-          anchor: [text.worldPos[0], text.worldPos[1], text.worldPos[2]],
+          // Retain a world-f32 anchor for the legacy projection. The dynamic
+          // RTE draw rewrites the final two lanes from rteAnchor below.
+          anchor: [ax, ay, az],
           capHeight: heightWorld,
           billboard: text.billboard ? 1.0 : 0.0,
           // Per-glyph offset + size in world units. The shader uses these
           // (via cameraRight/cameraUp) when billboard=1 so the glyph quad
           // tracks the screen instead of the floor plane.
           glyphOffsetSize: [
-            px0 * wScale,         // offsetX from anchor along baseline
-            pyBottom * wScale,    // offsetY (ascender / descender / baseline)
+            qx0 * wScale,         // offsetX from anchor along baseline
+            qyBottom * wScale,    // offsetY (ascender / descender / baseline)
             widthAtlas * wScale,  // glyph width
             heightGlyphAtlas * wScale, // glyph height
           ],
           targetPxOverride: text.targetPx ?? 0,
+          rteAnchor: anchored ? [ax, ay, az] : null,
+          clipAnchor: text.sectionClipped === true ? [ax, ay, az] : null,
         });
       }
     }
@@ -575,7 +441,7 @@ export class SymbolicTextPipeline {
     if (layouts.length === 0) return;
 
     // Pack into a Float32Array.
-    const stride = TEXT_INSTANCE_STRIDE_BYTES / 4;
+    const stride = TEXT_INSTANCE_FLOATS;
     const data = new Float32Array(layouts.length * stride);
     let off = 0;
     for (const l of layouts) {
@@ -592,6 +458,9 @@ export class SymbolicTextPipeline {
       data[off + 22] = l.glyphOffsetSize[0]; data[off + 23] = l.glyphOffsetSize[1];
       data[off + 24] = l.glyphOffsetSize[2]; data[off + 25] = l.glyphOffsetSize[3];
       data[off + 26] = l.targetPxOverride;
+      this.instanceAnchors.push(l.rteAnchor);
+      this.instanceClipAnchors.push(l.clipAnchor);
+      if (l.clipAnchor) this.hasClippedGlyphs = true;
       off += stride;
     }
 
@@ -601,12 +470,32 @@ export class SymbolicTextPipeline {
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     });
     this.device.queue.writeBuffer(this.instanceBuffer, 0, data);
+    this.rteDeltaData = new Float32Array(layouts.length * TEXT_RTE_DELTA_FLOATS);
+    this.rteDeltaBuffer = this.device.createBuffer({
+      label: 'symbolic-text-rte-deltas',
+      size: this.rteDeltaData.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(this.rteDeltaBuffer, 0, this.rteDeltaData);
     this.instanceCount = layouts.length;
   }
 
-  hasGeometry(): boolean {
-    return this.instanceCount > 0;
+  /** Refresh the per-glyph delta stream; returns the glyph runs to draw (see `packTextRteDeltas`). */
+  private updateRteInstanceDeltas(camera: WorldPoint | undefined, clip: PickClipState | null | undefined): InstanceRun[] {
+    if (!this.rteDeltaBuffer || !this.rteDeltaData || this.instanceAnchors.length === 0) {
+      return [{ first: 0, count: this.instanceCount }];
+    }
+    // A section-clipped label hides while the model's clip removes its anchor (#8767).
+    const clipAnchors = this.instanceClipAnchors;
+    const hidden = clip && this.hasClippedGlyphs
+      ? (index: number) => { const a = clipAnchors[index]; return !!a && pointClipped(clip, a[0], a[1], a[2]); }
+      : undefined;
+    const runs = packTextRteDeltas(this.instanceAnchors, camera, this.rteDeltaData, hidden);
+    this.device.queue.writeBuffer(this.rteDeltaBuffer, 0, this.rteDeltaData);
+    return runs;
   }
+
+  hasGeometry(): boolean { return this.instanceCount > 0; }
 
   render(
     pass: GPURenderPassEncoder,
@@ -616,47 +505,72 @@ export class SymbolicTextPipeline {
     cameraRight: readonly [number, number, number],
     cameraUp: readonly [number, number, number],
     targetGlyphPx: number = DEFAULT_TEXT_TARGET_PX,
+    rteViewProj?: Float32Array,
+    rteCamera?: readonly [number, number, number],
+    /** The frame's model clip, for the section-clipped labels (#8767). */
+    clip?: PickClipState | null,
   ): void {
-    if (!this.pipeline || !this.uniformBuffer || !this.cornerBuffer || !this.instanceBuffer) return;
+    if (!this.pipeline || !this.uniformBuffer || !this.cornerBuffer || !this.instanceBuffer || !this.rteDeltaBuffer) return;
     if (this.instanceCount === 0) return;
     this.syncAtlasTexture();
     this.ensureBindGroup();
     if (!this.bindGroup) return;
 
     // Pack the uniform:
-    //   [0..15]  viewProj                (64 B)
-    //   [16..19] (viewportW, viewportH, targetPx, pad)
-    //   [20..23] cameraRight.xyz + pad
-    //   [24..27] cameraUp.xyz + pad
+    //   [0..15]  legacy world-f32 viewProj
+    //   [16..31] anchored RTE viewProj
+    //   [32..35] (viewportW, viewportH, targetPx, pad)
+    //   [36..39] cameraRight.xyz + pad
+    //   [40..43] cameraUp.xyz + pad
+    //   [44..47] camera high.xyz + pad
+    //   [48..51] camera low.xyz + pad
     const uniformData = new Float32Array(TEXT_UNIFORM_BYTES / 4);
     uniformData.set(viewProj, 0);
-    uniformData[16] = viewportPxWidth;
-    uniformData[17] = viewportPxHeight;
-    uniformData[18] = targetGlyphPx;
-    uniformData[19] = 0;
-    uniformData[20] = cameraRight[0];
-    uniformData[21] = cameraRight[1];
-    uniformData[22] = cameraRight[2];
-    uniformData[23] = 0;
-    uniformData[24] = cameraUp[0];
-    uniformData[25] = cameraUp[1];
-    uniformData[26] = cameraUp[2];
-    uniformData[27] = 0;
+    uniformData.set(rteViewProj ?? viewProj, 16);
+    uniformData[32] = viewportPxWidth;
+    uniformData[33] = viewportPxHeight;
+    uniformData[34] = targetGlyphPx;
+    uniformData[35] = 0;
+    uniformData[36] = cameraRight[0];
+    uniformData[37] = cameraRight[1];
+    uniformData[38] = cameraRight[2];
+    uniformData[39] = 0;
+    uniformData[40] = cameraUp[0];
+    uniformData[41] = cameraUp[1];
+    uniformData[42] = cameraUp[2];
+    uniformData[43] = 0;
+    if (rteCamera) {
+      for (let axis = 0; axis < 3; axis++) {
+        const high = Math.fround(rteCamera[axis]);
+        uniformData[44 + axis] = high;
+        uniformData[48 + axis] = Math.fround(rteCamera[axis] - high);
+      }
+    }
+    // RTE text consumes CPU-packed per-instance drawable deltas. Retain the
+    // camera split slots above for the established 208-byte uniform ABI.
+    const runs = this.updateRteInstanceDeltas(rteViewProj && rteCamera ? rteCamera : undefined, clip);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
     pass.setVertexBuffer(0, this.cornerBuffer);
     pass.setVertexBuffer(1, this.instanceBuffer);
-    pass.draw(4, this.instanceCount);
+    pass.setVertexBuffer(2, this.rteDeltaBuffer);
+    for (const run of runs) pass.draw(4, run.count, 0, run.first);
   }
 
   destroy(): void {
     if (this.instanceBuffer) this.instanceBuffer.destroy();
+    if (this.rteDeltaBuffer) this.rteDeltaBuffer.destroy();
     if (this.cornerBuffer) this.cornerBuffer.destroy();
     if (this.uniformBuffer) this.uniformBuffer.destroy();
     if (this.atlasTexture) this.atlasTexture.destroy();
     this.instanceBuffer = null;
+    this.rteDeltaBuffer = null;
+    this.rteDeltaData = null;
+    this.instanceAnchors = [];
+    this.instanceClipAnchors = [];
+    this.hasClippedGlyphs = false;
     this.cornerBuffer = null;
     this.uniformBuffer = null;
     this.atlasTexture = null;
@@ -666,84 +580,7 @@ export class SymbolicTextPipeline {
     this.bindGroupLayout = null;
     this.pipeline = null;
     this.instanceCount = 0;
+    this.pickGlyphs = [];
     this.uploadedAtlasVersion = -1;
-  }
-}
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-/**
- * IFC BoxAlignment → normalized offsets in [-1, 0] for vertical and
- * horizontal axes. Returned offset is multiplied by the relevant span.
- *
- * Vertical:
- *   "top"     →  0   (no offset)
- *   "middle"  → -0.5
- *   "bottom"  → -1   (default per IFC)
- * Horizontal:
- *   "left"    →  0   (default per IFC)
- *   "center"  → -0.5
- *   "right"   → -1
- *
- * Unknown values fall back to ("bottom", "left"). Single-token values like
- * "center" are interpreted as { vertical: "middle", horizontal: "center" }.
- */
-function parseBoxAlignment(s: string): { horizontal: number; vertical: number } {
-  const norm = s.toLowerCase().trim();
-  let horizontal = 0;
-  let vertical = -1;
-
-  if (norm === '') return { horizontal, vertical };
-
-  if (norm.includes('top')) vertical = 0;
-  else if (norm.includes('middle')) vertical = -0.5;
-  else if (norm.includes('center') && !norm.includes('center-')) vertical = -0.5;
-  else vertical = -1;
-
-  if (norm.includes('right')) horizontal = -1;
-  else if (norm.includes('center')) horizontal = -0.5;
-  else horizontal = 0;
-
-  return { horizontal, vertical };
-}
-
-/**
- * Triangulate a fill region (outer bound plus inner bounds) and append every
- * output triangle to `stream` as 3 x (x, y, z, r, g, b, a) entries, matching
- * the fill pipeline's vertex layout.
- *
- * `holesOffsets` splits the flat `points` buffer into rings; rings with fewer
- * than 3 vertices are dropped. Which of those rings are filled and which are
- * voids is decided by nesting, not by position, so an inner bound that itself
- * contains an island fills that island (see `fill-triangulate.ts`).
- */
-function triangulateFillTo(stream: number[], fill: SymbolicFillInput): void {
-  const { points, holesOffsets, worldY, color } = fill;
-  if (points.length < 6) return;
-
-  // Convert the flat ring buffer into rings of {x, z} (Y is constant).
-  const totalVerts = points.length / 2;
-  const ringStarts: number[] = [0, ...Array.from(holesOffsets), totalVerts];
-  if (ringStarts.length < 2) return;
-
-  const rings: Pt[][] = [];
-  for (let r = 0; r < ringStarts.length - 1; r++) {
-    const start = ringStarts[r];
-    const end = ringStarts[r + 1];
-    if (end - start < 3) continue;
-    const ring: Pt[] = [];
-    for (let v = start; v < end; v++) {
-      ring.push({ x: points[v * 2], z: points[v * 2 + 1] });
-    }
-    rings.push(ring);
-  }
-  if (rings.length === 0) return;
-
-  const { points: verts, triangles } = triangulateRings(rings);
-  for (const tri of triangles) {
-    for (const idx of tri) {
-      const v = verts[idx];
-      stream.push(v.x, worldY, v.z, color[0], color[1], color[2], color[3]);
-    }
   }
 }

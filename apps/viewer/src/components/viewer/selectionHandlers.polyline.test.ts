@@ -7,7 +7,7 @@
  * Measure tool's multi-click mode: start / accumulate / close-the-loop, all
  * from one click. These tests drive it against the REAL store (the function
  * reads/writes `useViewerStore.getState()` directly, the same pattern the
- * pre-existing addElement click flow in this file already uses) so the
+ * other click flows in this file use) so the
  * store's own invariants (mode exclusivity, minimum point counts) are
  * exercised for real rather than through a mock.
  */
@@ -40,6 +40,7 @@ function fakeCtx(
     getDistance: () => 10,
   };
   const renderer = {
+    getScene: () => ({}), // a resident scene: the #10264 measure readback gate asks first
     raycastSceneMagnetic: () => ({
       intersection: hit ? { point: hit } : null,
       snapTarget: null,

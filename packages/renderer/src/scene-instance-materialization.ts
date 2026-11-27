@@ -1,0 +1,125 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+import type { DecodedInstancedShard, MeshData } from '@ifc-lite/geometry';
+import { INSTANCE_COLOR_OFFSET, INSTANCE_STRIDE_BYTES, prepareInstancedRender } from './instanced-render.js';
+interface Occurrence { templateIndex: number; byteOffset: number; originalColor: [number, number, number, number]; itemId?: number }
+interface Template { modelIndex: number; positions: Float32Array; normals: Float32Array; indices: Uint32Array; instanceData: ArrayBuffer; canonicalAnchors?: Float64Array; canonicalMatrixTranslations?: Float32Array }
+/** CPU expansion retains the canonical f64 occurrence anchor rather than
+ * round-tripping a national-grid translation through the V1 f32 matrix. */
+export function materializeInstances(expressId: number, occ: readonly Occurrence[], templates: readonly (Template | undefined)[]): MeshData[] | undefined {
+    const out: MeshData[] = [];
+    for (const o of occ) {
+      const tpl = templates[o.templateIndex];
+      if (!tpl || tpl.positions.length === 0) continue;
+      const dv = new DataView(tpl.instanceData);
+      const b = o.byteOffset;
+      const m0 = dv.getFloat32(b + 0, true), m1 = dv.getFloat32(b + 4, true), m2 = dv.getFloat32(b + 8, true);
+      const m4 = dv.getFloat32(b + 16, true), m5 = dv.getFloat32(b + 20, true), m6 = dv.getFloat32(b + 24, true);
+      const m8 = dv.getFloat32(b + 32, true), m9 = dv.getFloat32(b + 36, true), m10 = dv.getFloat32(b + 40, true);
+      const anchorOffset = (b / INSTANCE_STRIDE_BYTES) * 3;
+      const raw12 = dv.getFloat32(b + 48, true), raw13 = dv.getFloat32(b + 52, true), raw14 = dv.getFloat32(b + 56, true);
+      const anchors = tpl.canonicalAnchors, baseline = tpl.canonicalMatrixTranslations;
+      // Model/entity placement mutates the matrix after decode. Do not apply a
+      // stale anchor to an edited occurrence whose matrix no longer matches its
+      // baseline. Unedited occurrences retain source precision.
+      const canonical = anchors && baseline
+        && raw12 === baseline[anchorOffset] && raw13 === baseline[anchorOffset + 1] && raw14 === baseline[anchorOffset + 2];
+      const m12 = canonical ? anchors[anchorOffset] : raw12;
+      const m13 = canonical ? anchors[anchorOffset + 1] : raw13;
+      const m14 = canonical ? anchors[anchorOffset + 2] : raw14;
+      const n = tpl.positions.length;
+      const positions = new Float32Array(n);
+      const normals = new Float32Array(tpl.normals.length);
+      for (let i = 0; i < n; i += 3) {
+        const x = tpl.positions[i], y = tpl.positions[i + 1], z = tpl.positions[i + 2];
+        // Keep the transformed template local. Adding the occurrence anchor
+        // here would narrow a 5,000-km f64 placement back into Float32 before
+        // raycast/snap/section consumers can use it.
+        positions[i] = m0 * x + m4 * y + m8 * z;
+        positions[i + 1] = m1 * x + m5 * y + m9 * z;
+        positions[i + 2] = m2 * x + m6 * y + m10 * z;
+        if (i + 2 < tpl.normals.length) {
+          // Rotate normals by the upper-3×3 (instancing transforms are rigid +
+          // uniform scale, so this is correct up to a renormalize).
+          const nx = tpl.normals[i], ny = tpl.normals[i + 1], nz = tpl.normals[i + 2];
+          let rx = m0 * nx + m4 * ny + m8 * nz;
+          let ry = m1 * nx + m5 * ny + m9 * nz;
+          let rz = m2 * nx + m6 * ny + m10 * nz;
+          const len = Math.hypot(rx, ry, rz) || 1;
+          rx /= len; ry /= len; rz /= len;
+          normals[i] = rx; normals[i + 1] = ry; normals[i + 2] = rz;
+        }
+      }
+      const color: [number, number, number, number] = [...o.originalColor];
+      // Per-occurrence key so CPU caches that would otherwise key on `expressId`
+      // alone (measure-snap geometry cache) don't collide across occurrences of
+      // this instanced entity, which share `expressId` but hold distinct
+      // world-space positions (issue #1405). templateIndex+byteOffset uniquely
+      // and stably identifies an occurrence within the instance buffers.
+      const occurrenceKey = `${expressId}:inst:${o.templateIndex}:${o.byteOffset}`;
+      // #2985: the same drill-to-source id a flat mesh carries, so a consumer of
+      // these pieces is not worse off for the geometry having been instanced.
+      const item = o.itemId !== undefined ? { geometryItemId: o.itemId } : {};
+      // The transform changes coordinates, not template topology. Preserve the
+      // decoded template's exact index reference as the canonical source fence,
+      // and carry its model-scoped slot onto the materialized occurrence.
+      const indices = tpl.indices;
+      out.push({ expressId, modelIndex: tpl.modelIndex, positions, normals, indices, color, origin: [m12, m13, m14], occurrenceKey, ...item,
+        appearanceSource: { kind: 'canonical-item', indices, sourceIndices: indices } });
+    }
+    return out.length > 0 ? out : undefined;
+}
+
+/**
+ * Materialize occurrences of a DECODED shard that is not on the GPU, e.g. read
+ * back from local storage after CPU geometry release (#10264). Prepared exactly
+ * as `Scene.addInstancedShard` prepares an upload (`prepareInstancedRender`:
+ * opaque occurrences only, composed matrices, canonical f64 anchors), then
+ * expanded by the same `materializeInstances`. The result is in the model's
+ * own frame: place it like any flat source (`placeAppearanceSource`).
+ * `occurrenceKey`s are prefixed with `keyPrefix`, so caches keyed on them never
+ * collide with the scene's own occurrences or another shard's.
+ *
+ * With `budgetBytes`, each occurrence's bytes (its template's positions, normals and indices) are charged
+ * BEFORE it is expanded, and a `RangeError` is thrown as soon as the total would exceed the budget: a read
+ * too large is refused without allocating it first.
+ */
+export function materializeShardOccurrences(
+  shard: DecodedInstancedShard, modelIndex: number, keyPrefix: string,
+  wanted?: (entityId: number) => boolean, budgetBytes?: number,
+): MeshData[] {
+  const prepared = prepareInstancedRender(shard);
+  const templates = prepared.map((t) => ({ modelIndex, positions: t.positions, normals: t.normals, indices: t.indices,
+    instanceData: t.instanceBuffer, canonicalAnchors: t.canonicalAnchors, canonicalMatrixTranslations: t.canonicalMatrixTranslations }));
+  const byEntity = new Map<number, Occurrence[]>();
+  prepared.forEach((t, slot) => {
+    const view = new DataView(t.instanceBuffer);
+    for (let i = 0; i < t.instanceCount; i++) {
+      const entityId = t.entityIds[i];
+      if (wanted && !wanted(entityId)) continue;
+      const byteOffset = i * INSTANCE_STRIDE_BYTES;
+      const at = byteOffset + INSTANCE_COLOR_OFFSET;
+      const originalColor: [number, number, number, number] = [view.getFloat32(at, true), view.getFloat32(at + 4, true),
+        view.getFloat32(at + 8, true), view.getFloat32(at + 12, true)];
+      const occurrences = byEntity.get(entityId) ?? [];
+      occurrences.push({ templateIndex: slot, byteOffset, originalColor, itemId: t.itemIds?.[i] || undefined });
+      byEntity.set(entityId, occurrences);
+    }
+  });
+  const out: MeshData[] = [];
+  let charged = 0;
+  for (const [entityId, occurrences] of byEntity) {
+    for (const occurrence of occurrences) {
+      const tpl = templates[occurrence.templateIndex];
+      if (budgetBytes !== undefined && tpl && tpl.positions.length > 0) {
+        charged += tpl.positions.byteLength + tpl.normals.byteLength + tpl.indices.byteLength;
+        if (!(charged <= budgetBytes)) throw new RangeError(`Instanced occurrences exceed their ${budgetBytes}-byte budget`);
+      }
+      for (const mesh of materializeInstances(entityId, [occurrence], templates) ?? []) {
+        out.push({ ...mesh, occurrenceKey: `${keyPrefix}${mesh.occurrenceKey}` });
+      }
+    }
+  }
+  return out;
+}

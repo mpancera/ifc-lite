@@ -11,13 +11,15 @@
  */
 
 import { useCallback } from 'react';
+import { useServerModelProperties } from './ingest/useServerModelProperties.js';
 import { useViewerStore } from '../store/index.js';
 import type { MeshData, CoordinateInfo } from '@ifc-lite/geometry';
 import {
   IfcServerClient,
   decodeDataModel,
+  isProcessedModelRef,
+  processedModelSize,
   type ParquetBatch,
-  type DataModel,
   type ParquetParseResponse,
   type ParquetStreamResult,
   type ParseResponse,
@@ -25,80 +27,25 @@ import {
   type ProcessingStats,
 } from '@ifc-lite/server-client';
 
-import { SERVER_URL } from '../utils/ifcConfig.js';
+import type { ProcessedModelSource } from '../lib/processed-model.js';
+import { getProcessingServerUrl, hasRuntimeProcessingServer } from '../lib/processing-server.js';
+import { isServerAvailable, isServerReachable } from './ingest/serverAvailability.js';
+import { ProcessedModelUnavailable } from './ingest/processedModel.js';
 import {
   createEmptyBounds,
   updateBoundsFromPositions,
   calculateMeshBounds,
   MAX_VALID_COORD,
-  createCoordinateInfo,
   getServerStreamIntervalMs,
 } from '../utils/localParsingUtils.js';
 
 // Server data model conversion
 import { convertServerDataModel, type ServerParseResult } from '../utils/serverDataModel.js';
 import { convertServerMesh } from '../utils/serverMesh.js';
-import { buildSpatialIndexGuarded } from '../utils/loadingUtils.js';
+import { serverOriginShift } from '../utils/serverOriginShift.js';
 
 /** Server parse result type - union of streaming and non-streaming responses */
 type ServerParseResultType = ParquetParseResponse | ParquetStreamResult | ParseResponse;
-
-// Module-level server availability cache - avoids repeated failed connection attempts
-let serverAvailabilityCache: { available: boolean; checkedAt: number } | null = null;
-const SERVER_CHECK_CACHE_MS = 30000; // Re-check server availability every 30 seconds
-
-/**
- * Check if server URL is reachable from current origin
- * Returns false immediately if localhost server from non-localhost origin (would cause CORS)
- */
-function isServerReachable(serverUrl: string): boolean {
-  try {
-    const server = new URL(serverUrl);
-    const isServerLocalhost = server.hostname === 'localhost' || server.hostname === '127.0.0.1';
-
-    // In browser, check if we're on localhost
-    if (typeof window !== 'undefined') {
-      const isClientLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-
-      // Skip localhost server when running from remote origin (avoids CORS error in console)
-      if (isServerLocalhost && !isClientLocalhost) {
-        return false;
-      }
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Silently check if server is available (no console logging on failure)
- * Returns cached result if recently checked
- */
-async function isServerAvailable(serverUrl: string, client: IfcServerClient): Promise<boolean> {
-  // First check if server is even reachable (prevents CORS errors)
-  if (!isServerReachable(serverUrl)) {
-    return false;
-  }
-
-  const now = Date.now();
-
-  // Use cached result if recent
-  if (serverAvailabilityCache && (now - serverAvailabilityCache.checkedAt) < SERVER_CHECK_CACHE_MS) {
-    return serverAvailabilityCache.available;
-  }
-
-  // Perform silent health check
-  try {
-    await client.health();
-    serverAvailabilityCache = { available: true, checkedAt: now };
-    return true;
-  } catch {
-    // Silent failure - don't log network errors for unavailable server
-    serverAvailabilityCache = { available: false, checkedAt: now };
-    return false;
-  }
-}
 
 /**
  * Hook for server-side IFC file parsing
@@ -106,6 +53,7 @@ async function isServerAvailable(serverUrl: string, client: IfcServerClient): Pr
  * and ServerClient lifecycle
  */
 export function useIfcServer() {
+  const { start: hydrateProperties, cancel: cancelProperties } = useServerModelProperties();
   /**
    * Load from server - uses server-side PARALLEL parsing for maximum speed
    * Uses full parse endpoint (not streaming) for all-at-once parallel processing
@@ -114,28 +62,73 @@ export function useIfcServer() {
    * subscribing the hook to the entire store (which would cause unnecessary re-renders).
    */
   const loadFromServer = useCallback(async (
-    file: File,
-    buffer: ArrayBuffer,
-    /** Optional staleness check — returns true if this load has been superseded. */
-    isStale?: () => boolean,
+    /** The IFC to upload, or a model the server already processed (then `buffer` is unused: there are no bytes here). */
+    file: File | ProcessedModelSource,
+    buffer: Pick<ArrayBuffer, 'byteLength'>,
+    /**
+     * Optional staleness check — returns true if this load has been
+     * superseded. Same contract as `loadFromCache`'s (useIfcCache.ts:194):
+     * re-checked before every write into the active model slot, including
+     * inside the streaming batch callback below — a stale batch (or a stale
+     * post-stream/post-parse result) writes nothing.
+     */
+    isStale: (() => boolean) | undefined,
+    signal: AbortSignal | undefined,
+    modelId: string,
+    /** Replace the prior scene only once server geometry is available. */
+    beforePublish?: () => void,
   ): Promise<boolean> => {
-    const { setProgress, setIfcDataStore, setGeometryResult } = useViewerStore.getState();
+    const cancelled = () => signal?.aborted || isStale?.();
+    if (cancelled()) return false;
+    if (!beforePublish) cancelProperties(modelId);
+    const { setProgress, setGeometryResult } = useViewerStore.getState();
+    // A processed model has no fallback, so its failures reach the caller to be worded; an
+    // upload's stay silent here and fall back to local processing.
+    const processed = isProcessedModelRef(file);
+    let published = false;
+    const publishGeometry: typeof setGeometryResult = result => {
+      if (beforePublish) {
+        const progress = useViewerStore.getState().progress;
+        beforePublish();
+        setProgress(progress);
+      }
+      if (!published) cancelProperties(modelId);
+      published = true;
+      setGeometryResult(result);
+    };
     try {
       setProgress({ phase: 'Connecting to server', percent: 5 });
 
-      const client = new IfcServerClient({ baseUrl: SERVER_URL });
+      const serverUrl = (processed ? file.serverUrl : undefined) ?? getProcessingServerUrl();
+      const client = new IfcServerClient({ baseUrl: serverUrl });
 
-      // Silent server availability check (cached, no error logging)
-      const serverAvailable = await isServerAvailable(SERVER_URL, client);
+      // Silent server availability check (cached, no error logging). A processed model skips the
+      // health round trip: its geometry request asks the same question, and a down server ends in
+      // the same error card either way.
+      const explicitlyConfigured = (processed && file.serverUrl !== undefined) || hasRuntimeProcessingServer();
+      const serverAvailable = processed
+        ? isServerReachable(serverUrl, undefined, explicitlyConfigured)
+        : await isServerAvailable(serverUrl, client, explicitlyConfigured);
       if (!serverAvailable) {
+        if (processed) throw new ProcessedModelUnavailable(serverUrl === '' ? 'no-server' : 'unreachable');
         return false; // Silently fall back - caller handles logging
       }
+      // The route follows the size the server parses; the model info shows the file as opened.
+      // They differ for an .ifcZIP upload, whose buffer is already unwrapped.
+      const parsedBytes = processed ? processedModelSize(file.bytes) : buffer.byteLength;
+      const openedBytes = processed ? parsedBytes : file.size;
 
-      if (isStale?.()) return false;
+      if (cancelled()) return false;
       setProgress({ phase: 'Processing on server (parallel)', percent: 15 });
 
       // Check if Parquet is supported (requires parquet-wasm)
       const parquetSupported = await client.isParquetSupported();
+
+      // A newer load (or model removal) may have superseded this one while
+      // the capability check above was in flight — same reasoning as every
+      // other post-await re-check in this function: an `await` is a window
+      // for `isStale` to flip, not just the streaming/parse calls below.
+      if (cancelled()) return false;
 
       let allMeshes: MeshData[];
       let result: ServerParseResultType;
@@ -145,10 +138,12 @@ export function useIfcServer() {
       // Streaming overhead: ~67 batch serializations + background re-processing (~1100ms)
       // Non-streaming: single serialization (~218ms for 60k meshes)
       // Threshold chosen to balance UX (progressive rendering) vs performance (overhead)
-      const fileSizeMB = buffer.byteLength / (1024 * 1024);
+      const fileSizeMB = parsedBytes / (1024 * 1024);
       const USE_STREAMING_THRESHOLD_MB = 150;
+      // A processed model of unknown size streams: the streamed route works at any size.
+      const streaming = parquetSupported && (fileSizeMB > USE_STREAMING_THRESHOLD_MB || (processed && parsedBytes === 0));
 
-      if (parquetSupported && fileSizeMB > USE_STREAMING_THRESHOLD_MB) {
+      if (streaming) {
         // STREAMING PATH - for large files, render progressively
         allMeshes = [];
         let totalVertices = 0;
@@ -163,10 +158,18 @@ export function useIfcServer() {
 
         // Throttle server streaming updates - large files get less frequent UI updates
         let lastServerStreamRenderTime = 0;
-        const SERVER_STREAM_INTERVAL_MS = getServerStreamIntervalMs(fileSizeMB);
+        const SERVER_STREAM_INTERVAL_MS = getServerStreamIntervalMs(parsedBytes === 0 ? Infinity : fileSizeMB); // unknown size: the large-file throttle
 
         // Use streaming endpoint with batch callback
         const streamResult = await client.parseParquetStream(file, (batch: ParquetBatch) => {
+          // Re-check on every batch: `onBatch` fires once per batch of ONE
+          // long-running awaited stream, so a newer load can own the active
+          // slot by the time any batch after the first arrives. Same
+          // contract, same reason, as useIfcCache.ts's per-chunk guard in its
+          // streaming loop — without it a superseded load's later batches
+          // keep painting into the model the user just opened.
+          if (cancelled()) return;
+
           batchCount++;
 
           // Convert batch meshes to viewer format (snake_case to camelCase, number[] to TypedArray)
@@ -213,14 +216,21 @@ export function useIfcServer() {
               hasLargeCoordinates: false,
             };
 
-            setGeometryResult({
+            publishGeometry({
               meshes: [...allMeshes], // Clone to trigger re-render
               totalVertices,
               totalTriangles,
               coordinateInfo,
             });
           }
-        });
+        }, { signal });
+
+        // Re-check after the stream's single big await resolves: supersession
+        // can land at any point during it, including after the LAST batch's
+        // onBatch call returns. Without this the "final geometry set with
+        // complete bounds" write below still lands in the active slot for a
+        // load nobody owns any more.
+        if (cancelled()) return false;
 
         cacheKey = streamResult.cache_key;
         streamMetadata = streamResult.metadata;
@@ -237,9 +247,8 @@ export function useIfcServer() {
         // Final geometry set with complete bounds
         // Server already applies RTC shift to mesh positions, so bounds are shifted
         // Reconstruct originalBounds by adding originShift back to shifted bounds
-        const originShift = streamMetadata?.coordinate_info?.origin_shift
-          ? { x: streamMetadata.coordinate_info.origin_shift[0], y: streamMetadata.coordinate_info.origin_shift[1], z: streamMetadata.coordinate_info.origin_shift[2] }
-          : { x: 0, y: 0, z: 0 };
+        // (Y-up like the meshes: the server leaves the shift in IFC Z-up.)
+        const originShift = serverOriginShift(streamMetadata?.coordinate_info?.origin_shift);
         const finalCoordinateInfo = {
           originShift,
           // Original bounds = shifted bounds + originShift (reconstruct world coordinates)
@@ -261,7 +270,7 @@ export function useIfcServer() {
           hasLargeCoordinates: streamMetadata?.coordinate_info?.is_geo_referenced ?? false,
         };
 
-        setGeometryResult({
+        publishGeometry({
           meshes: allMeshes,
           totalVertices,
           totalTriangles,
@@ -271,7 +280,11 @@ export function useIfcServer() {
       } else if (parquetSupported) {
         // NON-STREAMING PATH - for smaller files, use batch request (with cache check)
         // Use Parquet endpoint - much smaller payload (~15x compression)
-        const parquetResult = await client.parseParquet(file);
+        const parquetResult = await client.parseParquet(file, { signal });
+        // Re-check right after this await, before the first write below —
+        // same reason as the streaming re-check above: a non-streaming parse
+        // is still one awaited network round trip a newer load can outrun.
+        if (cancelled()) return false;
         result = parquetResult;
 
         setProgress({ phase: 'Converting meshes', percent: 70 });
@@ -280,7 +293,9 @@ export function useIfcServer() {
         allMeshes = parquetResult.meshes.map(convertServerMesh);
       } else {
         // Fallback to JSON endpoint
-        result = await client.parse(file);
+        if (processed) throw new ProcessedModelUnavailable('parquet-init');
+        result = await client.parse(file, { signal });
+        if (cancelled()) return false;
 
         setProgress({ phase: 'Converting meshes', percent: 70 });
 
@@ -291,9 +306,7 @@ export function useIfcServer() {
 
       // For non-streaming paths, calculate bounds and set geometry
       // (Streaming path already handled this progressively)
-      const wasStreaming = parquetSupported && fileSizeMB > USE_STREAMING_THRESHOLD_MB;
-
-      if (!wasStreaming) {
+      if (!streaming) {
         // Calculate bounds from mesh positions for camera fitting
         // IMPORTANT: Server already applies RTC shift to mesh positions, so bounds calculated
         // from mesh positions are ALREADY in shifted coordinates (small values near origin).
@@ -304,9 +317,8 @@ export function useIfcServer() {
         // - shiftedBounds = bounds (already shifted by server)
         // - originalBounds = bounds + originShift (reconstruct original world coordinates)
         const serverCoordInfo = result.metadata.coordinate_info;
-        const originShift = serverCoordInfo?.origin_shift
-          ? { x: serverCoordInfo.origin_shift[0], y: serverCoordInfo.origin_shift[1], z: serverCoordInfo.origin_shift[2] }
-          : { x: 0, y: 0, z: 0 };
+        // (Y-up like the meshes: the server leaves the shift in IFC Z-up.)
+        const originShift = serverOriginShift(serverCoordInfo?.origin_shift);
 
         // When server already shifted meshes, shiftedBounds IS the calculated bounds
         // (don't use createCoordinateInfo which would subtract originShift again)
@@ -336,7 +348,7 @@ export function useIfcServer() {
 
         // Set all geometry at once
         setProgress({ phase: 'Rendering geometry', percent: 80 });
-        setGeometryResult({
+        publishGeometry({
           meshes: allMeshes,
           totalVertices: result.stats.total_vertices,
           totalTriangles: result.stats.total_triangles,
@@ -344,59 +356,26 @@ export function useIfcServer() {
         });
       }
 
-      // Fetch and decode data model asynchronously (geometry already displayed)
-      // Data model is processed on server in background, fetch via separate endpoint
-      const cacheKey = result.cache_key;
-
-      // Start data model fetch in background - don't block rendering
-      (async () => {
-        if (isStale?.()) return;
-        setProgress({ phase: 'Fetching data model', percent: 85 });
-        try {
-          // If data model was included in response (ParquetParseResponse), use it directly
-          // Otherwise, fetch from the data model endpoint
-          let dataModelBuffer: ArrayBuffer | null = null;
-          if ('data_model' in result && result.data_model) {
-            dataModelBuffer = result.data_model;
-          }
-
-          if (!dataModelBuffer || dataModelBuffer.byteLength === 0) {
-            dataModelBuffer = await client.fetchDataModel(cacheKey);
-          }
-
-          if (!dataModelBuffer) {
-            return;
-          }
-
-          const dataModel: DataModel = await decodeDataModel(dataModelBuffer);
-
-          // Convert server data model directly to IfcDataStore format
-          const dataStore = convertServerDataModel(
-            dataModel,
-            result as ServerParseResult,
-            file,
-            allMeshes
-          );
-
-          if (isStale?.()) return;
-          setIfcDataStore(dataStore);
-
-          buildSpatialIndexGuarded(allMeshes, dataStore, setIfcDataStore);
-        } catch (err) {
-          if (!isStale?.()) {
-            console.warn('[useIfc] Server data model fetch/decode failed; geometry shown without properties:', err);
-          }
-        }
-      })(); // End of async data model fetch block - runs in background, doesn't block
-
-      // Geometry is ready - mark complete immediately (data model loads in background)
+      if (cancelled()) return false;
+      // Model-owned hydration outlives this load's finally and metadata signal.
+      hydrateProperties(modelId, isStale, async propertySignal => {
+        const included = 'data_model' in result ? result.data_model : null;
+        const dataModelBuffer = included?.byteLength ? included : await client.fetchDataModel(result.cache_key, { signal: propertySignal });
+        if (!dataModelBuffer) return null;
+        const dataModel = await decodeDataModel(dataModelBuffer);
+        return convertServerDataModel(dataModel, result as ServerParseResult, { size: openedBytes }, allMeshes);
+      });
       setProgress({ phase: 'Complete', percent: 100 });
       return true;
     } catch (err) {
+      if (cancelled()) return false;
+      // After replacing the scene, report the server failure rather than ask
+      // for a local fallback consent whose Cancel could not restore that scene.
+      if (processed || (beforePublish && published)) throw err;
       console.error('[useIfc] Server parse failed:', err);
       return false;
     }
-  }, []);
+  }, [hydrateProperties, cancelProperties]);
 
   return { loadFromServer };
 }

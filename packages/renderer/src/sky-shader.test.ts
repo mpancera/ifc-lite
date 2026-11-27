@@ -40,3 +40,72 @@ describe('sky shader smoothstep edges (WGSL low < high)', () => {
     assert.ok(seen.length >= 2, 'expected the sky shader to keep its literal-edge smoothstep calls');
   });
 });
+
+/**
+ * Regression (#5583): the below-horizon `groundColor` fill used to reach
+ * full strength by elevation -0.1 (`smoothstep(-0.1, 0.0, elevation)`), so
+ * the ordinary downward-pitched BIM camera saw an abrupt flat-colour wall
+ * a few degrees below the horizon instead of a gradient. The falloff was
+ * widened to span -0.5..0.0 so most downward views land inside the
+ * transition rather than past its end.
+ */
+describe('sky shader ground falloff (#5583)', () => {
+  it('spans a wide elevation range, not the old near-instant -0.1', () => {
+    const m = skyShaderSource.match(/let groundMix = 1\.0 - smoothstep\((-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?), elevation\);/);
+    assert.ok(m, 'expected a literal-edge groundMix smoothstep to match against');
+    const low = Number(m![1]);
+    const high = Number(m![2]);
+    assert.equal(high, 0.0, 'the transition should still end exactly at the horizon');
+    assert.ok(low <= -0.4, `expected a gradual falloff (low <= -0.4), got low=${low} (the old, flatter value was -0.1)`);
+  });
+
+  it('does not regress to the old -0.1 cutoff', () => {
+    assert.ok(
+      !skyShaderSource.includes('smoothstep(-0.1, 0.0, elevation)'),
+      'the ground falloff should no longer use the narrow -0.1..0.0 range',
+    );
+  });
+});
+
+/**
+ * #8688: the lens shift rides in two former `_pad` slots, so the CPU writer
+ * and the WGSL struct must agree on where they are, and the per-pixel ray
+ * must remove the shift the projection matrix applied to the geometry.
+ */
+describe('sky lens shift uniforms (#8688)', () => {
+  /** Float index of each `SkyUniforms` field (vec3 starts a 16-byte row; f32 packs after it). */
+  function uniformFloatIndex(): Map<string, number> {
+    const body = skyShaderSource.match(/struct SkyUniforms \{([^}]*)\}/)![1];
+    const index = new Map<string, number>();
+    let offset = 0;
+    for (const [, name, type] of body.matchAll(/(\w+): (vec3<f32>|f32),/g)) {
+      if (type === 'vec3<f32>') offset = Math.ceil(offset / 4) * 4;
+      index.set(name, offset);
+      offset += type === 'vec3<f32>' ? 3 : 1;
+    }
+    return index;
+  }
+
+  it('writes the shift into the slots the shader reads', async () => {
+    (globalThis as Record<string, unknown>).GPUBufferUsage ??= { COPY_DST: 8, UNIFORM: 64 };
+    (globalThis as Record<string, unknown>).GPUShaderStage ??= { VERTEX: 1, FRAGMENT: 2, COMPUTE: 4 };
+    const { SkyPass } = await import('./sky-pass.js');
+    let written: Float32Array | null = null;
+    const device = {
+      createBuffer: () => ({ destroy() {} }),
+      createBindGroupLayout: () => ({}), createBindGroup: () => ({}), createPipelineLayout: () => ({}),
+      createShaderModule: () => ({}), createRenderPipeline: () => ({}),
+      queue: { writeBuffer: (_b: unknown, _o: number, data: Float32Array) => { written = new Float32Array(data); } },
+    } as unknown as GPUDevice;
+    const sky = new SkyPass(device, { colorFormat: 'rgba8unorm', objectIdFormat: 'rgba8unorm', depthFormat: 'depth32float', sampleCount: 1 }, skyShaderSource);
+    const pass = { setPipeline() {}, setBindGroup() {}, draw() {} } as unknown as GPURenderPassEncoder;
+    const env = { exposure: 1, sunDirection: [0, 1, 0], sunIntensity: 1, sky: { zenith: [0, 0, 1], horizon: [1, 1, 1], ground: [0.5, 0.5, 0.5] } };
+    sky.draw(pass, { forward: [0, 0, -1], right: [1, 0, 0], up: [0, 1, 0], fovY: 1, aspect: 1, lensShift: { x: 0.25, y: -0.5 } },
+      env as unknown as Parameters<typeof sky.draw>[2]);
+    const index = uniformFloatIndex();
+    assert.equal(written![index.get('lensShiftX')!], 0.25);
+    assert.equal(written![index.get('lensShiftY')!], -0.5);
+    assert.ok(skyShaderSource.includes('(input.ndc.x - sky.lensShiftX)'));
+    assert.ok(skyShaderSource.includes('(input.ndc.y - sky.lensShiftY)'));
+  });
+});

@@ -2,51 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! Properties of the REGION-SCOPED sliver refinement used by the prism void
-//! fast path (`refine_high_aspect_slivers_within`).
-//!
-//! The scoped path differs from the unscoped one in ways that are easy to get
-//! silently wrong and that fixture tests would not localise: it splits MANY
-//! edges per round instead of one, it skips triangles outside the cut region,
-//! and it has two independent guards against a degenerate needle that
-//! bisection cannot improve. Each test below pins one of those behaviours as a
-//! stated invariant rather than an output snapshot.
+//! Invariants for vertex canonicalization scoped to the analytic cut region.
 
 use super::*;
 
-/// Directed-edge closure, canonicalised BY POSITION — every directed edge
-/// appears exactly once and its reverse exists exactly once. This is the same
-/// watertightness notion the void path audits with `directed_closed`, and it is
-/// what the batched (many-edges-per-round) split has to preserve.
-///
-/// Position-canonical, NOT index-canonical: this refinement rebuilds its output
-/// with per-triangle (unshared) vertices — the repo keeps meshes unwelded so
-/// flat shading survives (#846) — so pairing raw index ids would report every
-/// edge as unpaired for both the scoped and the unscoped pass alike.
+#[path = "facet_weld/adopt_tests.rs"]
+mod unchanged_cut_tests;
+
 fn directed_closed_mesh(mesh: &Mesh) -> bool {
-    let key = |i: u32| -> (i64, i64, i64) {
-        let i = i as usize;
-        let q = |c: f32| (c as f64 / 1.0e-6).round() as i64;
-        (
-            q(mesh.positions[i * 3]),
-            q(mesh.positions[i * 3 + 1]),
-            q(mesh.positions[i * 3 + 2]),
-        )
-    };
-    type K = (i64, i64, i64);
-    let mut seen: std::collections::BTreeMap<(K, K), i32> = std::collections::BTreeMap::new();
-    for t in mesh.indices.chunks_exact(3) {
-        for k in 0..3 {
-            let a = key(t[k]);
-            let b = key(t[(k + 1) % 3]);
-            if a == b {
-                continue; // zero-length edge of a degenerate tri — not a seam
-            }
-            *seen.entry((a, b)).or_insert(0) += 1;
-        }
-    }
-    seen.iter()
-        .all(|(&(a, b), &n)| n == 1 && seen.get(&(b, a)).copied().unwrap_or(0) == 1)
+    use crate::mesh_check::{Degenerate, EdgeLedger, VertexKey};
+    EdgeLedger::build(mesh, VertexKey::GridDiv(1.0e-6), Degenerate::SkipEdge).strictly_paired()
 }
 
 fn signed_volume(mesh: &Mesh) -> f64 {
@@ -68,12 +33,8 @@ fn signed_volume(mesh: &Mesh) -> f64 {
     v
 }
 
-/// A closed 1×1 bar subdivided into `strips` segments of `seg_len` metres each.
-/// With `seg_len` >> 1 every side triangle is a long thin sliver (aspect ≈
-/// `seg_len`), which is the shape this refinement exists to bisect. Aspect is
-/// the longest/shortest EDGE ratio, so `seg_len = 100` gives ≈100 — well over
-/// the `SLIVER_ASPECT` threshold of 8.
-fn slivered_box(strips: usize, seg_len: f32) -> Mesh {
+/// A closed 1×1 bar with long side triangles when `seg_len` exceeds 8 m.
+pub(super) fn slivered_box(strips: usize, seg_len: f32) -> Mesh {
     let len = seg_len * strips as f32;
     let mut positions: Vec<f32> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
@@ -116,7 +77,7 @@ fn slivered_box(strips: usize, seg_len: f32) -> Mesh {
     }
 }
 
-fn whole_mesh_box(mesh: &Mesh) -> ([f64; 3], [f64; 3]) {
+pub(super) fn whole_mesh_box(mesh: &Mesh) -> ([f64; 3], [f64; 3]) {
     let mut lo = [f64::INFINITY; 3];
     let mut hi = [f64::NEG_INFINITY; 3];
     for p in mesh.positions.chunks_exact(3) {
@@ -129,100 +90,83 @@ fn whole_mesh_box(mesh: &Mesh) -> ([f64; 3], [f64; 3]) {
 }
 
 #[test]
-fn scoped_batched_refinement_stays_closed_and_volume_exact() {
-    let mesh = slivered_box(200, 100.0);
+fn scoped_canonicalization_preserves_closed_bar_without_splitting_10511() {
+    let mesh = slivered_box(8, 100.0);
     assert!(directed_closed_mesh(&mesh), "fixture must start closed");
-    let v0 = signed_volume(&mesh);
-    let region = vec![whole_mesh_box(&mesh)];
+    let region = [whole_mesh_box(&mesh)];
     let out = refine_high_aspect_slivers_within(&mesh, &region);
-    assert!(
-        out.indices.len() > mesh.indices.len(),
-        "the fixture is all high-aspect — refinement must fire"
-    );
-    // Batching splits many edges per round; both triangles incident to a split
-    // edge must take the SAME snapped midpoint or the mesh unzips here.
-    assert!(
-        directed_closed_mesh(&out),
-        "batched scoped refinement broke directed-edge closure"
-    );
-    // Midpoints sit ON the original straight edge ⇒ volume is preserved.
-    let v1 = signed_volume(&out);
-    assert!(
-        (v1 - v0).abs() < 1e-6 * v0.abs().max(1.0),
-        "volume drifted: {v0} -> {v1}"
-    );
+    assert_eq!(out.indices.len(), mesh.indices.len());
+    assert!(directed_closed_mesh(&out));
+    assert_eq!(signed_volume(&out), signed_volume(&mesh));
 }
 
-/// The point of scoping: geometry away from the cut is not refined. Compared
-/// against the SAME batched algorithm run over the whole mesh — comparing to
-/// the unscoped entry point would be meaningless, since that one splits a
-/// single edge per round and is bounded by MAX_BISECT_ROUNDS regardless.
 #[test]
-fn scoped_refinement_does_less_work_than_whole_mesh_region() {
-    let mesh = slivered_box(60, 100.0);
+fn scoped_canonicalization_skips_slivers_outside_the_region() {
+    let mesh = slivered_box(4, 100.0);
+    let (_, hi) = whole_mesh_box(&mesh);
+    let beyond_bar = [([hi[0] + 1.0, 0.0, 0.0], [hi[0] + 2.0, 1.0, 1.0])];
+    let out = refine_high_aspect_slivers_within(&mesh, &beyond_bar);
+    assert_eq!(out.positions, mesh.positions);
+    assert_eq!(out.indices, mesh.indices);
+}
+
+/// Once a rim triangle triggers the pass, the rebuild also canonicalizes
+/// vertices outside the cutter boxes (#4698).
+#[test]
+fn scoped_canonicalization_still_dedups_vertices_outside_the_region_4698() {
+    let mut mesh = slivered_box(4, 20.0);
     let (lo, hi) = whole_mesh_box(&mesh);
-    // A region covering only the first tenth of the bar's length.
+    let far_x = hi[0] as f32;
+    let near_far_corner = far_x - 3.0e-5;
+    let base = (mesh.positions.len() / 3) as u32;
+    for v in [[near_far_corner, 0.0, 0.0], [far_x, -1.0, 0.0], [far_x, -1.0, 1.0]] {
+        mesh.positions.extend_from_slice(&v);
+    }
+    mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
+    let spread = |m: &Mesh| {
+        let mut xs: Vec<i64> = m
+            .positions
+            .chunks_exact(3)
+            .filter(|p| (p[0] - far_x).abs() < 1.0e-4)
+            .map(|p| (f64::from(p[0]) * 1.0e9).round() as i64)
+            .collect();
+        xs.sort_unstable();
+        xs.dedup();
+        xs.len()
+    };
+    assert_eq!(spread(&mesh), 2, "the fixture must go in with two positions in that cell");
+
+    // A region covering only the first tenth of the bar, far from the fin.
     let narrow = vec![(lo, [lo[0] + 0.1 * (hi[0] - lo[0]), hi[1], hi[2]])];
-    let whole = vec![(lo, hi)];
-    let scoped = refine_high_aspect_slivers_within(&mesh, &narrow);
-    let full = refine_high_aspect_slivers_within(&mesh, &whole);
+    let out = refine_high_aspect_slivers_within(&mesh, &narrow);
+
+    assert_eq!(out.indices.len(), mesh.indices.len());
+    assert_eq!(spread(&out), 1, "the out-of-region corner must come back on one position");
+    // ...because it was deduped onto the bar's corner, not because the fin left.
     assert!(
-        scoped.indices.len() < full.indices.len(),
-        "narrow region must refine strictly less than the whole-mesh region \
-         (narrow {}, whole {})",
-        scoped.indices.len(),
-        full.indices.len()
+        out.positions.chunks_exact(3).any(|p| (p[1] + 1.0).abs() < 1.0e-6),
+        "the fin must still be in the output"
     );
-    assert!(
-        scoped.indices.len() > mesh.indices.len(),
-        "…but it must still refine the in-region slivers"
-    );
-    assert!(directed_closed_mesh(&scoped));
 }
 
 #[test]
 fn empty_region_is_a_no_op() {
-    let mesh = slivered_box(20, 100.0);
+    let mesh = slivered_box(4, 100.0);
     let out = refine_high_aspect_slivers_within(&mesh, &[]);
-    assert_eq!(out.indices, mesh.indices, "no boxes ⇒ nothing to refine");
     assert_eq!(out.positions, mesh.positions);
+    assert_eq!(out.indices, mesh.indices);
 }
 
 #[test]
-fn scoped_refinement_is_deterministic() {
-    let mesh = slivered_box(120, 100.0);
-    let region = vec![whole_mesh_box(&mesh)];
-    let a = refine_high_aspect_slivers_within(&mesh, &region);
-    let b = refine_high_aspect_slivers_within(&mesh, &region);
-    assert_eq!(a.indices, b.indices, "index stream must be reproducible");
-    assert_eq!(a.positions, b.positions, "positions must be reproducible");
-}
-
-/// A zero-length edge gives `aspect` = INFINITY; bisecting it never lowers the
-/// aspect, so an unguarded batched fixpoint re-qualifies it every round and
-/// doubles its fragments. The finite-aspect guard must make it a non-candidate,
-/// and the run must terminate with a closed mesh (this hung ISSUE_129 during
-/// development).
-#[test]
-fn degenerate_needle_terminates_without_exploding() {
-    let mut mesh = slivered_box(40, 100.0);
-    // Collapse one vertex onto another to manufacture a zero-length edge.
-    let n = mesh.positions.len() / 3;
-    assert!(n > 8);
-    for k in 0..3 {
-        mesh.positions[3 * 4 + k] = mesh.positions[k];
-    }
-    let region = vec![whole_mesh_box(&mesh)];
-    let before = mesh.indices.len();
+fn scoped_canonicalization_drops_triangles_with_collapsed_corners_10511() {
+    let mut mesh = slivered_box(4, 100.0);
+    let base = (mesh.positions.len() / 3) as u32;
+    mesh.positions.extend_from_slice(&[0.0, 0.0, 0.0, 0.00003, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
+    let region = [whole_mesh_box(&mesh)];
     let out = refine_high_aspect_slivers_within(&mesh, &region);
-    // Bounded by the scoped split budget (2048 splits ⇒ ≤2 new tris each), not
-    // by an exponential cascade.
-    assert!(
-        out.indices.len() <= before + 2 * 2048 * 3,
-        "scoped split budget did not bind: {} -> {}",
-        before,
-        out.indices.len()
-    );
+    assert_eq!(out.indices.len() + 3, mesh.indices.len());
+    assert!(directed_closed_mesh(&out));
 }
 
 #[cfg(test)]
@@ -638,5 +582,34 @@ mod offset_anchor_tests {
                 );
             }
         }
+    }
+
+    /// `weld_near_coplanar_facets` writes back only the dedup cells it welds
+    /// (#4698, C8). A jittered slab gives it something to weld; a separate facet
+    /// pair 5 m away has two corners 20 µm apart in one 100 µm dedup cell that no
+    /// cluster welds. The weld must hand those back exactly as they came in.
+    #[test]
+    fn weld_leaves_vertices_it_did_not_weld_where_they_were_4698() {
+        let j = 15.0e-6;
+        let mesh = mesh_from_tris(&[
+            // Welded: a z = 0 slab split in two, the second triangle 15 µm high.
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [[1.0, 0.0, j], [1.0, 1.0, j], [0.0, 1.0, j]],
+            // Not welded: two facets on distinct planes, sharing a dedup cell at
+            // (5.00002, 5, 5) and (5.00004, 5, 5).
+            [[5.00002, 5.0, 5.0], [6.0, 5.0, 5.0], [5.0, 6.0, 5.0]],
+            [[5.00004, 5.0, 5.0], [5.0, 5.0, 6.0], [6.0, 5.0, 5.5]],
+        ]);
+        let welded = weld_near_coplanar_facets(&mesh);
+        assert_eq!(
+            vert(&welded, 0)[2],
+            vert(&welded, 3)[2],
+            "the jittered slab must weld, or this test measures nothing"
+        );
+        assert_eq!(
+            welded.positions[18..],
+            mesh.positions[18..],
+            "vertices outside every welded cell moved"
+        );
     }
 }

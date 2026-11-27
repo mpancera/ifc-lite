@@ -23,10 +23,38 @@
 use ifc_lite_core::{DecodedEntity, EntityDecoder, EntityScanner, IfcType};
 
 mod raster;
-pub use raster::decode_step_binary;
+mod raster_header;
+pub use raster::{embedded_raster_dimensions, MAX_TEX_DIM as MAX_TEXTURE_DIMENSION};
 use raster::{decode_raster_image, MAX_TEX_DIM};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
+
+/// Embedded binaries (`IfcBlobTexture.RasterCode`, `IfcPixelTexture.Pixel`)
+/// refused because they do not decode exactly: a non-zero unused-bits
+/// indicator (not byte-aligned), an odd digit count or a non-hex byte (D18,
+/// F4-1). The texture is dropped, not read as a truncated prefix.
+static REFUSED_BINARIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many embedded texture binaries were refused so far (D18), process-wide.
+pub fn binary_textures_refused() -> u64 {
+    REFUSED_BINARIES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The bytes of a texture attribute that holds a STEP binary, or `None` and
+/// one count when it holds a binary that does not decode exactly, or holds
+/// anything else but `$`/`*`: a single-quoted `'0FF0000'` is a string, no
+/// binary, and was dropped uncounted (F4-1 follow-up, #7776).
+fn texture_binary(attr: &ifc_lite_core::AttributeValue) -> Option<Vec<u8>> {
+    let decoded = match attr.as_binary_hex() {
+        Some(hex) => ifc_lite_core::decode_step_binary(hex.as_bytes()),
+        None if attr.is_null() => return None,
+        None => None,
+    };
+    if decoded.is_none() {
+        REFUSED_BINARIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    decoded
+}
 
 /// A decoded RGBA8 image ready for GPU upload.
 #[derive(Debug, Clone)]
@@ -110,8 +138,7 @@ impl ResolvedTextureMap {
 /// RepeatS(0), RepeatT(1), Mode(2), TextureTransform(3), Parameter(4),
 /// RasterFormat(5), RasterCode(6).
 fn decode_blob_texture(entity: &DecodedEntity) -> Option<MeshTexture> {
-    let raster_code = entity.get(6).and_then(|a| a.as_string())?;
-    let bytes = decode_step_binary(raster_code);
+    let bytes = texture_binary(entity.get(6)?)?;
     if bytes.len() < 8 {
         return None;
     }
@@ -122,8 +149,8 @@ fn decode_blob_texture(entity: &DecodedEntity) -> Option<MeshTexture> {
         rgba: Arc::new(rgba),
         width,
         height,
-        repeat_s: read_bool(entity, 0).unwrap_or(true),
-        repeat_t: read_bool(entity, 1).unwrap_or(true),
+        repeat_s: entity.get_bool(0).unwrap_or(true),
+        repeat_t: entity.get_bool(1).unwrap_or(true),
     })
 }
 
@@ -159,8 +186,7 @@ fn decode_pixel_texture(entity: &DecodedEntity) -> Option<MeshTexture> {
     }
     let mut rgba = Vec::with_capacity(expected * 4);
     for px in pixels.iter() {
-        let s = px.as_string()?;
-        let comp = decode_step_binary(s);
+        let comp = texture_binary(px)?;
         if comp.len() < components {
             return None;
         }
@@ -180,13 +206,9 @@ fn decode_pixel_texture(entity: &DecodedEntity) -> Option<MeshTexture> {
         rgba: Arc::new(rgba),
         width,
         height,
-        repeat_s: read_bool(entity, 0).unwrap_or(true),
-        repeat_t: read_bool(entity, 1).unwrap_or(true),
+        repeat_s: entity.get_bool(0).unwrap_or(true),
+        repeat_t: entity.get_bool(1).unwrap_or(true),
     })
-}
-
-fn read_bool(entity: &DecodedEntity, idx: usize) -> Option<bool> {
-    entity.get(idx).and_then(|a| a.as_enum()).map(|v| v == "T")
 }
 
 /// Read `IfcImageTexture` → an [`ImageTextureRef`] (#1781). Attributes (IFC4):
@@ -201,8 +223,8 @@ fn read_image_texture(entity: &DecodedEntity) -> Option<ImageTextureRef> {
     }
     Some(ImageTextureRef {
         url,
-        repeat_s: read_bool(entity, 0).unwrap_or(true),
-        repeat_t: read_bool(entity, 1).unwrap_or(true),
+        repeat_s: entity.get_bool(0).unwrap_or(true),
+        repeat_t: entity.get_bool(1).unwrap_or(true),
     })
 }
 
@@ -240,7 +262,7 @@ fn resolve_triangle_texture_map(
     entity: &DecodedEntity,
     decoder: &mut EntityDecoder,
     texture_cache: &mut FxHashMap<u32, Option<TextureSource>>,
-) -> Option<(u32, ResolvedTextureMap)> {
+) -> Option<(u32, u32, ResolvedTextureMap)> {
     let face_set_id = entity.get_ref(1)?;
 
     // Maps[0] → surface texture.
@@ -297,6 +319,7 @@ fn resolve_triangle_texture_map(
 
     Some((
         face_set_id,
+        tvl_id,
         ResolvedTextureMap {
             texture_id,
             texture,
@@ -314,22 +337,48 @@ pub fn build_texture_index(
     decoder: &mut EntityDecoder,
 ) -> FxHashMap<u32, ResolvedTextureMap> {
     let mut index = FxHashMap::default();
-    if memchr::memmem::find(content, b"IFCINDEXEDTRIANGLETEXTUREMAP").is_none() {
-        return index;
+    scan_texture_maps(content, decoder, |face_set_id, _, resolved| {
+        index.entry(face_set_id).or_insert(resolved);
+    });
+    index
+}
+
+/// [`build_texture_index`], plus the express id of the `IfcTextureVertexList`
+/// each indexed map read, by the same face set id, for f64 source readers: the
+/// index itself stores `f32`. One scan, so both maps agree on the winning map.
+pub fn build_texture_index_with_vertex_lists(
+    content: &[u8],
+    decoder: &mut EntityDecoder,
+) -> (FxHashMap<u32, ResolvedTextureMap>, FxHashMap<u32, u32>) {
+    let (mut index, mut vertex_lists) = (FxHashMap::default(), FxHashMap::default());
+    scan_texture_maps(content, decoder, |face_set_id, tvl_id, resolved| {
+        index.entry(face_set_id).or_insert(resolved);
+        vertex_lists.entry(face_set_id).or_insert(tvl_id);
+    });
+    (index, vertex_lists)
+}
+
+/// Every resolvable map in file order, as `(face set, vertex list, map)`.
+fn scan_texture_maps(
+    content: &[u8],
+    decoder: &mut EntityDecoder,
+    mut visit: impl FnMut(u32, u32, ResolvedTextureMap),
+) {
+    if ifc_lite_core::find_keyword(content, b"IFCINDEXEDTRIANGLETEXTUREMAP").is_none() {
+        return;
     }
     let mut texture_cache: FxHashMap<u32, Option<TextureSource>> = FxHashMap::default();
     let mut scanner = EntityScanner::new(content);
     while let Some((id, type_name, start, end)) = scanner.next_entity() {
-        if type_name != "IFCINDEXEDTRIANGLETEXTUREMAP" {
+        if !ifc_lite_core::keyword_eq(type_name, "IFCINDEXEDTRIANGLETEXTUREMAP") {
             continue;
         }
         if let Ok(entity) = decoder.decode_at_with_id(id, start, end) {
-            if let Some((face_set_id, resolved)) =
+            if let Some((face_set_id, tvl_id, resolved)) =
                 resolve_triangle_texture_map(&entity, decoder, &mut texture_cache)
             {
-                index.entry(face_set_id).or_insert(resolved);
+                visit(face_set_id, tvl_id, resolved);
             }
         }
     }
-    index
 }

@@ -42,20 +42,21 @@
  *   alignment, it is NOT invalidated by federation re-baking. It is the sum of
  *   EVERY meshed face, not one side, so it is never comparable to a
  *   `NetSideArea`/`GrossSideArea` and is labelled its own "mesh" row.
- *   GPU-instanced-only elements have no flat mesh to sum and are reported as
- *   "no mesh" here too — there is no per-entity area side channel analogous
- *   to `instancedGeometryVolumes`. A mesh record that IS present but never
- *   triangulated anything (`indices.length < 3`, including the empty-array
- *   case) is likewise "no mesh", not "measured 0 m²" — those are different
- *   claims, and only the second one is true of a record with no triangles to
- *   have summed (`measure-modes/mesh-area.ts`'s `collectMeshAreas`). A mesh
- *   whose triangles genuinely sum to zero (e.g. every triangle degenerate)
- *   IS "measured" — that zero is a real answer, not an absence.
- *   Mesh area needs no `IfcDataStore`, so its collection never depends on
- *   one: `collectMeshAreas` takes mesh data alone (see its own doc comment)
- *   specifically so a future store-related early return elsewhere in this
- *   component cannot end up gating it, structurally rather than by
- *   convention.
+ *   GPU-instanced-only elements and mesh records with fewer than three indices
+ *   have no measurable mesh area; a triangulated mesh with degenerate faces
+ *   instead has a measured zero. `collectMeshAreas` takes mesh data without an
+ *   `IfcDataStore`, so missing store data cannot suppress a mesh measurement.
+ *
+ * - **Mass derived** — geometry volume x the material density the file declares
+ *   in `Pset_MaterialCommon.MassDensity` (#2736). This is the ONLY number on
+ *   the panel this tool calculates from two unrelated facts, so it is the one
+ *   that most needs its provenance attached, and `measure-modes/weight.ts`
+ *   attaches it: a declared `Qto` weight is never derived over, an untrusted
+ *   volume never becomes a mass at all, and a density the file did not declare
+ *   would land in a separate "estimated" row rather than this one. The whole
+ *   arithmetic is `kg/m³ x m³`, which is why the row says "Mass" and not
+ *   "Weight" — #2736 §4's mass-vs-force distinction, answered by routing
+ *   through `project_units`' `MASSUNIT` rather than a second convention.
  *
  * Values are normalised to SI at read time, while each value is still next to
  * the `ProjectUnits` that explain it, because a federation can mix a
@@ -63,272 +64,60 @@
  * user's per-unit-type override from #1573.
  */
 
-import { useMemo } from 'react';
-import { Boxes, TriangleAlert } from 'lucide-react';
 import { useViewerStore } from '@/store';
-import { useIfc } from '@/hooks/useIfc';
-import { stringToEntityRef, type EntityRef } from '@/store/types';
-import { toGlobalIdFromModels } from '@/store/globalId';
-import {
-  extractQuantitiesOnDemand,
-  extractTypeQuantitiesOnDemand,
-  extractProjectUnits,
-  ProjectUnits,
-  type IfcDataStore,
-} from '@ifc-lite/parser';
-import { RelationshipType } from '@ifc-lite/data';
-import { geometryVolumesSurviveAlignment } from '@/lib/compare/alignmentTrust';
-import {
-  QUANTITY_TYPE_UNIT,
-  resolveQuantityDisplay,
-  formatConverted,
-} from '@/lib/units/display';
-import { resolveFromUnit, convertValue } from '@/lib/units/convert';
-import {
-  pickElementQuantities,
-  rollupQuantities,
-  rollupGeometryVolumes,
-  rollupMeshArea,
-  type PickedQuantity,
-  type QuantityBasis,
-} from './measure-modes/quantities';
-import { collectMeshAreas } from './measure-modes/mesh-area';
+import { useTranslation } from '@/i18n/useTranslation';
+import type { TranslationKey } from '@/i18n/en';
+import { ProjectUnits } from '@ifc-lite/parser';
+import { resolveQuantityDisplay, formatConverted } from '@/lib/units/display';
+import { MEASURABLE_QUANTITY_TYPES, type QuantityBasis } from './measure-modes/quantities';
+import type { WeightBasis } from './measure-modes/weight';
+import { SourceQuantityInspection } from './SourceQuantityInspection';
+import { QuantityResultView } from './QuantityResultView';
+import { ResultState } from '../result/ResultState';
+import { useSelectionQuantitySummary } from './measure-modes/use-selection-quantity-summary';
 
-const QUANTITY_TYPE_LABEL: Record<number, string> = {
-  0: 'Length',
-  1: 'Area',
-  2: 'Volume',
-  4: 'Weight',
+const QUANTITY_TYPE_LABEL_KEY: Record<number, TranslationKey> = {
+  0: 'measure.qty.length',
+  1: 'measure.qty.area',
+  2: 'measure.qty.volume',
+  4: 'measure.qty.weight',
 };
 
-const BASIS_LABEL: Record<QuantityBasis, string> = {
-  net: 'net',
-  gross: 'gross',
-  unqualified: '',
+const BASIS_LABEL_KEY: Record<QuantityBasis, TranslationKey | null> = {
+  net: 'measure.basis.net',
+  gross: 'measure.basis.gross',
+  unqualified: null,
 };
 
 /**
- * Build the file-unit -> SI converter for one store's declared units.
+ * Row labels for the two DERIVED weight bases (#2736).
  *
- * Goes through `convertValue` rather than multiplying by `siScale` directly so
- * an affine unit would carry its offset. None of the four families here is
- * affine today, which is exactly why doing it by hand would look correct
- * forever and then not be.
+ * `declared` has no entry because it is not rendered from this rollup: a
+ * declared `Qto` weight is already a row of the `declared` quantity table
+ * above, complete with its own net/gross basis, and rendering it twice would
+ * be the second number this panel exists to avoid. The rollup still models it
+ * — that is what lets a declared weight suppress its own derivation — it is
+ * just not drawn from here.
+ *
+ * "Mass" rather than "Weight" is deliberate and is #2736 §4: kg/m³ x m³ is a
+ * mass, and a row that said "Weight" beside a `MASSUNIT` total would leave the
+ * reader to guess whether it meant a force.
  */
-function siConverterFor(units: ProjectUnits) {
-  return (value: number, quantityType: number): number => {
-    const entry = QUANTITY_TYPE_UNIT[quantityType];
-    if (!entry) return value;
-    const fileUnit = units.resolvedForUnitType(entry.unitType)
-      ?? { symbol: entry.defaultSymbol, siScale: 1.0 };
-    return convertValue(value, resolveFromUnit(entry.unitType, fileUnit), { scale: 1 });
-  };
-}
+const DERIVED_WEIGHT_LABEL_KEY: Record<Exclude<WeightBasis, 'declared'>, TranslationKey> = {
+  'derived-ifc-density': 'measure.weight.massDerived',
+  'derived-library-density': 'measure.weight.massEstimated',
+};
 
-/**
- * Occurrence quantities win, with the element's type as fallback (#1755).
- *
- * "Win" requires at least one ACTUAL quantity: a named-but-empty occurrence
- * quantity set must not mask populated type-level ones. Type extraction is
- * cached per type, so a 500-door type is parsed once rather than 500 times.
- *
- * Both parse paths are served, mirroring the Lists adapter's split (#1751):
- * `extractTypeQuantitiesOnDemand` walks the STEP source and returns `null`
- * outright when there is none, which is every server-parsed store — those
- * carry the type's own quantity sets in the prebuilt table instead, keyed by
- * the TYPE's express id. Taking only the source-backed branch would drop
- * type-declared volumes on the server path while the occurrence branch (whose
- * extractor already falls back to that same table) kept working, so the loss
- * would look like a file that simply declares nothing.
- */
-function quantitySetsFor(
-  store: IfcDataStore,
-  expressId: number,
-  typeCache: Map<number, ReturnType<typeof extractQuantitiesOnDemand>>,
-) {
-  const typeQsets = () => {
-    if (!store.relationships) return [];
-    const typeIds = store.relationships.getRelated(expressId, RelationshipType.DefinesByType, 'inverse');
-    if (typeIds.length === 0) return [];
-    const typeId = typeIds[0];
-    let cached = typeCache.get(typeId);
-    if (!cached) {
-      cached = store.source?.length
-        ? (extractTypeQuantitiesOnDemand(store, expressId)?.quantities ?? [])
-        : (store.quantities?.getForEntity(typeId) ?? []);
-      typeCache.set(typeId, cached);
-    }
-    return cached;
-  };
-
-  const own = extractQuantitiesOnDemand(store, expressId);
-  return own.some((qset) => qset.quantities.length > 0) ? own : typeQsets();
-}
+const DERIVED_WEIGHT_TITLE_KEY: Record<Exclude<WeightBasis, 'declared'>, TranslationKey> = {
+  'derived-ifc-density': 'measure.weight.massDerivedTitle',
+  'derived-library-density': 'measure.weight.massEstimatedTitle',
+};
 
 export function MeasureQuantities() {
-  const selectedEntity = useViewerStore((s) => s.selectedEntity);
-  const selectedEntitiesSet = useViewerStore((s) => s.selectedEntitiesSet);
+  const { t } = useTranslation();
   const unitDisplayOverrides = useViewerStore((s) => s.unitDisplayOverrides);
-  const { models, ifcDataStore, geometryResult } = useIfc();
-
-  /** The selection, as model-aware refs. Multi-selection first, primary as fallback. */
-  const refs: EntityRef[] = useMemo(() => {
-    if (selectedEntitiesSet.size > 0) {
-      return [...selectedEntitiesSet].map(stringToEntityRef);
-    }
-    return selectedEntity ? [selectedEntity] : [];
-  }, [selectedEntitiesSet, selectedEntity]);
-
-  // Mesh-derived surface area (issue #2199, "mesh analysis reachable from
-  // TypeScript"): summed live from each submesh's `positions`/`indices`
-  // (`measure-modes/mesh-area.ts`'s `collectMeshAreas`), unlike
-  // `geometryVolume` which is a scalar the wasm hashing pass computed once.
-  // Because it re-reads `positions` every time, it is NOT invalidated by
-  // federation re-baking the way `geometryVolume` is — a
-  // `'same-crs'`/`'reprojected'` alignment mutates `positions` in place
-  // (`geometryVolumesSurviveAlignment`'s own contract), so summing
-  // triangles from the CURRENT positions already reflects the geometry on
-  // screen. `rescaledModelIds` therefore does not gate this collection —
-  // and neither, by construction, does `store`: `collectMeshAreas` takes
-  // mesh data alone, so there is no `store`-shaped parameter for a future
-  // early return to gate it on (see the resolution below, and the
-  // adversarial review of 85ebf7d1's confirmed defect: the lookup used to
-  // sit after `if (!store) continue` and silently drop an already-computed
-  // area for any ref whose model lacked an `IfcDataStore`).
-  //
-  // Its OWN memo, keyed on the mesh data alone: per-entity total mesh area
-  // is selection-independent (it iterates every loaded model's triangles,
-  // never `refs`), so recomputing it inside the selection-keyed `summary`
-  // memo below would re-sum the whole federation's triangles on the main
-  // thread on every selection click.
-  const meshAreaByGlobalId = useMemo(
-    () => collectMeshAreas(
-      models.size > 0
-        ? [...models.values()].map((m) => m.geometryResult?.meshes)
-        : [geometryResult?.meshes],
-    ),
-    [models, geometryResult],
-  );
-
-  const summary = useMemo(() => {
-    if (refs.length === 0) return null;
-
-    // One entry per element. `MeshData.geometryVolume` is a WHOLE-ENTITY value
-    // repeated on every submesh, so it is looked up per element rather than
-    // accumulated per mesh — summing submeshes would multiply an element's
-    // volume by its part count. `instancedGeometryVolumes` holds the same
-    // whole-entity value for entities the pipeline kept ONLY as GPU instances
-    // (no flat mesh exists to carry it), already keyed by global id.
-    const volumeByGlobalId = new Map<number, number>();
-    const collectVolumes = (
-      meshes: ReadonlyArray<{ expressId: number; geometryVolume?: number }> | undefined,
-      instanced?: ReadonlyMap<number, number>,
-    ) => {
-      if (meshes) {
-        for (const mesh of meshes) {
-          if (mesh.geometryVolume === undefined) continue;
-          if (!volumeByGlobalId.has(mesh.expressId)) {
-            volumeByGlobalId.set(mesh.expressId, mesh.geometryVolume);
-          }
-        }
-      }
-      if (instanced) {
-        for (const [id, volume] of instanced) {
-          if (!volumeByGlobalId.has(id)) volumeByGlobalId.set(id, volume);
-        }
-      }
-    };
-    // Models whose vertices federation alignment re-baked. Their volumes are
-    // not merely suspect, they describe a different size — so they are never
-    // read, rather than read and quietly compared.
-    const rescaledModelIds = new Set<string>();
-    if (models.size > 0) {
-      for (const [id, m] of models) {
-        if (!geometryVolumesSurviveAlignment(m.federationAlignmentStatus)) {
-          rescaledModelIds.add(id);
-          continue;
-        }
-        collectVolumes(m.geometryResult?.meshes, m.geometryResult?.instancedGeometryVolumes);
-      }
-    } else {
-      collectVolumes(geometryResult?.meshes, geometryResult?.instancedGeometryVolumes);
-    }
-
-    // Resolved directly from `refs`, BEFORE the store-dependent loop below —
-    // not inside it — so no store-related branch in that loop can ever skip
-    // it again. `meshAreaByGlobalId` needs no store to build or to read.
-    let meshAreaIncomplete = 0;
-    const meshAreas: Array<number | undefined> = refs.map((ref) => {
-      const entry = meshAreaByGlobalId.get(toGlobalIdFromModels(models, ref.modelId, ref.expressId));
-      if (!entry) return undefined;
-      if (entry.incomplete) meshAreaIncomplete += 1;
-      return entry.area;
-    });
-
-    const unitsCache = new Map<string, ProjectUnits>();
-    const typeCaches = new Map<string, Map<number, ReturnType<typeof extractQuantitiesOnDemand>>>();
-    const perElement: PickedQuantity[][] = [];
-    const geometryVolumes: Array<number | undefined> = [];
-    let withoutStore = 0;
-    let rescaled = 0;
-
-    for (const ref of refs) {
-      // A federated ref resolves ONLY through its own model. Falling back to
-      // the legacy store for an id that is not in `models` would read some
-      // other file's quantities for that express id and present them as this
-      // element's — a wrong answer where `withoutStore` should have said "could
-      // not be resolved". The legacy store answers for the legacy ref, and for
-      // the single-model case where `models` is empty.
-      const federated = ref.modelId !== 'legacy' ? models.get(ref.modelId) : undefined;
-      const store = ref.modelId === 'legacy' || models.size === 0
-        ? ((ifcDataStore as IfcDataStore | null) ?? undefined)
-        : (federated?.ifcDataStore as IfcDataStore | undefined);
-      if (!store) {
-        withoutStore += 1;
-        continue;
-      }
-
-      let units = unitsCache.get(ref.modelId);
-      if (!units) {
-        units = store.source?.length && store.entityIndex
-          ? extractProjectUnits(store.source, store.entityIndex)
-          : ProjectUnits.empty();
-        unitsCache.set(ref.modelId, units);
-      }
-      let typeCache = typeCaches.get(ref.modelId);
-      if (!typeCache) {
-        typeCache = new Map();
-        typeCaches.set(ref.modelId, typeCache);
-      }
-
-      perElement.push(
-        pickElementQuantities(
-          quantitySetsFor(store, ref.expressId, typeCache),
-          siConverterFor(units),
-        ),
-      );
-      // A re-baked model contributes no volume AND is not counted as unproved:
-      // the kernel proved one, alignment invalidated it, and the note below
-      // says exactly that.
-      if (rescaledModelIds.has(ref.modelId)) {
-        rescaled += 1;
-      } else {
-        geometryVolumes.push(
-          volumeByGlobalId.get(toGlobalIdFromModels(models, ref.modelId, ref.expressId)),
-        );
-      }
-    }
-
-    return {
-      declared: rollupQuantities(perElement),
-      geometry: rollupGeometryVolumes(geometryVolumes),
-      meshArea: rollupMeshArea(meshAreas),
-      meshAreaIncomplete,
-      elements: refs.length,
-      withoutStore,
-      rescaled,
-    };
-  }, [refs, models, ifcDataStore, geometryResult, meshAreaByGlobalId]);
+  const quantities = useSelectionQuantitySummary();
+  const { summary } = quantities;
 
   // Totals are already SI, so display resolves against an EMPTY unit context —
   // handing it the file's declared millimetres would scale a metre total again.
@@ -340,69 +129,61 @@ export function MeasureQuantities() {
     return disp.unit ? `${formatted} ${disp.unit}` : formatted;
   };
 
-  if (!summary) {
-    return (
-      <div className="border-t px-2 py-2 text-center text-[10px] text-muted-foreground">
-        Select elements to read their quantities
-      </div>
-    );
-  }
+  if (!summary) return <QuantityResultView quantities={quantities} />;
 
-  const { declared, geometry, meshArea, meshAreaIncomplete, elements, withoutStore, rescaled } = summary;
-  const nothing = declared.length === 0 && geometry.proved === 0 && meshArea.withMesh === 0;
+  const { declared, geometry, meshArea, weights, elements } = summary;
+  // Derived-mass rows only. The `declared` basis is already a row of the
+  // `declared` table above; see DERIVED_WEIGHT_LABEL.
+  const derivedWeights = weights.rows.filter((r) => r.basis !== 'declared');
+  // A derived mass needs a trusted proved volume, so `geometry.proved === 0`
+  // already implies `derivedWeights` is empty — stated as a condition rather
+  // than left as an invariant a future edit could break silently.
+  const nothing = declared.length === 0
+    && geometry.proved === 0
+    && meshArea.withMesh === 0
+    && derivedWeights.length === 0;
 
   return (
-    <div className="border-t px-2 py-2 space-y-1.5">
-      <div className="flex items-center justify-between gap-2">
-        <span className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-wider text-primary">
-          <Boxes className="h-3 w-3" />
-          Quantities
-        </span>
-        <span className="font-mono text-[9px] text-muted-foreground">
-          {elements} element{elements === 1 ? '' : 's'}
-        </span>
-      </div>
-
+    <QuantityResultView quantities={quantities} evidence={<SourceQuantityInspection />}>
+    <div className="space-y-1.5 px-3 py-2">
       {nothing ? (
-        <div className="flex items-start gap-1.5 text-[10px] leading-tight text-muted-foreground">
-          <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0 text-amber-500" />
-          <span>
-            The selection declares no quantities, no enclosed volume could be
-            proved from its geometry, and no triangulated mesh area could be
-            measured either.
-          </span>
-        </div>
+        <ResultState kind="partial" title={t('measure.quantities.nothingFound')} />
       ) : (
         <div className="space-y-0.5 overflow-x-auto">
+          {declared.length > 0 && <div className="font-mono text-2xs uppercase tracking-wider text-muted-foreground">{t('measure.quantities.authoredHeading')}</div>}
           {declared.map((r) => (
             <div
               key={`${r.quantityType}-${r.basis}`}
               className="flex items-baseline gap-2 whitespace-nowrap"
               title={r.provenance.join('\n')}
             >
-              <span className="w-[5.5rem] shrink-0 font-mono text-[9px] uppercase tracking-wider text-muted-foreground/70">
-                {QUANTITY_TYPE_LABEL[r.quantityType] ?? r.quantityType} {BASIS_LABEL[r.basis]}
+              <span className="w-[5.5rem] shrink-0 font-mono text-2xs uppercase tracking-wider text-muted-foreground">
+                {QUANTITY_TYPE_LABEL_KEY[r.quantityType] ? t(QUANTITY_TYPE_LABEL_KEY[r.quantityType]) : r.quantityType}{' '}
+                {BASIS_LABEL_KEY[r.basis] ? t(BASIS_LABEL_KEY[r.basis]!) : ''}
               </span>
-              <span className="font-mono text-[11px] tabular-nums">{render(r.total, r.quantityType)}</span>
+              <span className="font-mono text-2xs tabular-nums">{render(r.total, r.quantityType)}</span>
               {r.contributing < elements && (
-                <span className="font-mono text-[9px] text-amber-600 dark:text-amber-500">
+                <span className="font-mono text-2xs text-amber-600 dark:text-amber-500">
                   {r.contributing}/{elements}
                 </span>
               )}
             </div>
           ))}
 
+          {(geometry.proved > 0 || meshArea.withMesh > 0 || derivedWeights.length > 0) &&
+            <div className="font-mono text-2xs uppercase tracking-wider text-muted-foreground">{t('measure.quantities.computedHeading')}</div>}
+
           {geometry.proved > 0 && (
             <div
               className="flex items-baseline gap-2 whitespace-nowrap"
-              title="Enclosed volume computed from the meshed geometry, after opening cuts. Not an IFC GrossVolume."
+              title={t('measure.quantities.volumeMeshTitle')}
             >
-              <span className="w-[5.5rem] shrink-0 font-mono text-[9px] uppercase tracking-wider text-muted-foreground/70">
-                Volume mesh
+              <span className="w-[5.5rem] shrink-0 font-mono text-2xs uppercase tracking-wider text-muted-foreground">
+                {t('measure.quantities.volumeMeshLabel')}
               </span>
-              <span className="font-mono text-[11px] tabular-nums">{render(geometry.total, 2)}</span>
+              <span className="font-mono text-2xs tabular-nums">{render(geometry.total, 2)}</span>
               {geometry.unproved > 0 && (
-                <span className="font-mono text-[9px] text-amber-600 dark:text-amber-500">
+                <span className="font-mono text-2xs text-amber-600 dark:text-amber-500">
                   {geometry.proved}/{elements}
                 </span>
               )}
@@ -412,19 +193,45 @@ export function MeasureQuantities() {
           {meshArea.withMesh > 0 && (
             <div
               className="flex items-baseline gap-2 whitespace-nowrap"
-              title="Total triangulated surface of the meshed geometry — every face, not one side. Not an IFC NetSideArea/GrossSideArea."
+              title={t('measure.quantities.areaMeshTitle')}
             >
-              <span className="w-[5.5rem] shrink-0 font-mono text-[9px] uppercase tracking-wider text-muted-foreground/70">
-                Area mesh
+              <span className="w-[5.5rem] shrink-0 font-mono text-2xs uppercase tracking-wider text-muted-foreground">
+                {t('measure.quantities.areaMeshLabel')}
               </span>
-              <span className="font-mono text-[11px] tabular-nums">{render(meshArea.total, 1)}</span>
+              <span className="font-mono text-2xs tabular-nums">{render(meshArea.total, 1)}</span>
               {meshArea.withoutMesh > 0 && (
-                <span className="font-mono text-[9px] text-amber-600 dark:text-amber-500">
+                <span className="font-mono text-2xs text-amber-600 dark:text-amber-500">
                   {meshArea.withMesh}/{elements}
                 </span>
               )}
             </div>
           )}
+
+          {/* Derived mass (#2736). Each basis is its own row: a mass computed
+              from a density the FILE declared and one estimated from a library
+              default are different claims, and one total labelled "Weight"
+              covering both would be exactly the false precision the gross/net
+              split above exists to avoid. The label is never rendered apart
+              from the number — they are the same element. */}
+          {derivedWeights.map((r) => (
+            <div
+              key={r.basis}
+              className="flex items-baseline gap-2 whitespace-nowrap"
+              title={[t(DERIVED_WEIGHT_TITLE_KEY[r.basis as Exclude<WeightBasis, 'declared'>]), ...r.provenance].join('\n')}
+            >
+              <span className="w-[5.5rem] shrink-0 font-mono text-2xs uppercase tracking-wider text-muted-foreground">
+                {t(DERIVED_WEIGHT_LABEL_KEY[r.basis as Exclude<WeightBasis, 'declared'>])}
+              </span>
+              <span className="font-mono text-2xs tabular-nums">
+                {render(r.total, MEASURABLE_QUANTITY_TYPES.Weight)}
+              </span>
+              {r.contributing < elements && (
+                <span className="font-mono text-2xs text-amber-600 dark:text-amber-500">
+                  {r.contributing}/{elements}
+                </span>
+              )}
+            </div>
+          ))}
         </div>
       )}
 
@@ -435,48 +242,22 @@ export function MeasureQuantities() {
           volume; stating it here is what lets the two features be compared
           instead of quietly differing. */}
       {!nothing && (
-        <div className="font-mono text-[9px] leading-tight text-muted-foreground/70">
-          net = openings excluded · gross = openings included · mesh = as built,
-          after opening cuts (volume) or total triangulated surface (area)
+        <div className="font-mono text-2xs leading-tight text-muted-foreground">
+          {t('measure.quantities.legend')}
         </div>
       )}
 
-      {geometry.unproved > 0 && (
-        <div className="font-mono text-[9px] leading-tight text-muted-foreground/70">
-          {geometry.unproved} element{geometry.unproved === 1 ? '' : 's'} had no
-          provable enclosed volume (open shell, layered or multi-part geometry).
-        </div>
-      )}
-      {meshArea.withoutMesh > 0 && (
-        <div className="font-mono text-[9px] leading-tight text-muted-foreground/70">
-          {meshArea.withoutMesh} element{meshArea.withoutMesh === 1 ? '' : 's'} had
-          no triangulated mesh to measure (e.g. instanced-only geometry).
-        </div>
-      )}
-      {meshAreaIncomplete > 0 && (
-        <div className="flex items-start gap-1.5 font-mono text-[9px] leading-tight text-amber-600 dark:text-amber-500">
-          <TriangleAlert className="mt-0.5 h-2.5 w-2.5 shrink-0" />
-          <span>
-            {meshAreaIncomplete} element{meshAreaIncomplete === 1 ? '' : 's'} included in
-            the mesh area total {meshAreaIncomplete === 1 ? 'has' : 'have'} a submesh with
-            invalid vertex data; {meshAreaIncomplete === 1 ? 'its' : 'their'} contribution
-            is a partial sum, not a complete measurement.
-          </span>
-        </div>
-      )}
-      {rescaled > 0 && (
-        <div className="font-mono text-[9px] leading-tight text-muted-foreground/70">
-          {rescaled} element{rescaled === 1 ? '' : 's'} sit{rescaled === 1 ? 's' : ''} in
-          a model federation alignment rescaled; {rescaled === 1 ? 'its' : 'their'} proved
-          volume no longer describes the geometry on screen and is withheld.
-        </div>
-      )}
-      {withoutStore > 0 && (
-        <div className="font-mono text-[9px] leading-tight text-muted-foreground/70">
-          {withoutStore} selected element{withoutStore === 1 ? '' : 's'} could not
-          be resolved to a loaded model.
+      {/* #2736's provenance requirement, stated rather than implied by a row
+          label: a derived mass is a calculation of ours, not a quantity the
+          file authored, and the reader is told which density it used. */}
+      {derivedWeights.length > 0 && (
+        <div className="font-mono text-2xs leading-tight text-muted-foreground">
+          {derivedWeights.some((r) => r.basis === 'derived-library-density')
+            ? t('measure.quantities.massLegendWithEstimated')
+            : t('measure.quantities.massLegend')}
         </div>
       )}
     </div>
+    </QuantityResultView>
   );
 }

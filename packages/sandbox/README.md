@@ -12,9 +12,12 @@ npm install @ifc-lite/sandbox
 
 ```ts
 import { createSandbox } from '@ifc-lite/sandbox';
-import { createBimContext } from '@ifc-lite/sdk';
+import { createBimContext, type BimBackend } from '@ifc-lite/sdk';
 
-const bim = createBimContext({ backend: myBackend });
+// Your BimBackend — the viewer's store adapter, a server client, ...
+declare const backend: BimBackend;
+
+const bim = createBimContext({ backend });
 const sandbox = await createSandbox(bim, {
   permissions: { mutate: true },
   limits: { timeoutMs: 10_000 },
@@ -39,7 +42,10 @@ A script that exhausts the memory limit inside a *drained promise job* — the p
 **`dispose()` can throw, and that throw is the run's verdict.** It rejects with `SandboxAbortError`. The `eval()` that caused it already resolved normally — the reproducer returns `"started"` — so teardown is the *only* place the failure is observable. Treat a throwing `dispose()` as that run having failed, and settle the run's outcome after teardown rather than before it:
 
 ```ts
-import { SandboxAbortError, type ScriptResult } from '@ifc-lite/sandbox';
+import { SandboxAbortError, type Sandbox, type ScriptResult } from '@ifc-lite/sandbox';
+
+declare const sandbox: Sandbox;
+declare const code: string;
 
 let result: ScriptResult | null = await sandbox.eval(code);
 try {
@@ -54,6 +60,11 @@ try {
 **A long-lived sandbox must be discarded once `moduleRetired` is true.** The abort poisons the whole WASM module, so this package retires it and builds the next sandbox on a fresh one — 1-5 ms, no page reload, and nothing for a caller to do. But a host that *keeps* one sandbox across many runs (an extension runtime, a REPL) can be holding one whose module was retired by some other sandbox's abort. That sandbox still executes scripts, yet emscripten's `ABORT` latch is per module and has already fired on it: its own teardown can no longer report a failure, and it will silently leak whatever `JS_FreeRuntime` does not reach. Check before running, and replace rather than reuse:
 
 ```ts
+import { createSandbox, type Sandbox, type SandboxConfig } from '@ifc-lite/sandbox';
+
+declare let sandbox: Sandbox;
+declare const config: SandboxConfig;
+
 if (sandbox.moduleRetired) {
   sandbox.dispose();
   sandbox = await createSandbox(bim, config); // built on a fresh module
@@ -74,6 +85,29 @@ if (sandbox.moduleRetired) {
 - Machine-readable bridge schema (`NAMESPACE_SCHEMAS`, exported at `@ifc-lite/sandbox/schema`) for LLM tool integration
 - Survives the upstream QuickJS teardown abort by retiring the WASM module it poisons (`SandboxAbortError`, `Sandbox.moduleRetired` — see above)
 
+## Present script results
+
+`bim.ui` emits A2UI v1.0 messages alongside a script's return value and logs.
+For example, use the rows returned by the query directly:
+
+```js
+const walls = bim.query.byType('IfcWall');
+bim.ui.table({ columns: [{ path: 'Name' }], rows: walls });
+```
+
+Use `table`, `stats`, `chart`, `legend`, `actions`, `callout`, `entity` or `list`
+for a single section. Use `show({ title, sections })` for several sections in one
+surface. Sections have a `kind` matching the helper name, or `text` for a plain
+text section. Entity references accept `{ modelId, expressId }` or a
+`"modelId:expressId"` string. A table can also use custom row objects with an
+optional `ref` and values keyed by column path.
+
+Each call returns a host-generated surface ID. `ScriptResult.surfaces` contains
+one message batch per successful call, in call order. The sandbox allows up to
+8 surfaces per run, 2,000 rows per table and 256 KiB of UTF-8 JSON per run.
+A call that exceeds a limit throws a script error. Disable the namespace with
+`permissions: { ui: false }`.
+
 ## Links
 
 - Docs: https://ifclite.dev/docs/
@@ -82,3 +116,18 @@ if (sandbox.moduleRetired) {
 ## License
 
 MPL-2.0
+
+The `@ifc-lite/sandbox/network` entry point exposes the same capability-gated
+`coreNetworkRequest` and `FetchTransport` types for hosts that need network
+access without importing the QuickJS bridge. It enforces HTTPS, explicit host
+capabilities, bounded streamed responses, cancellation and refused redirects.
+Host adapters should call `coreNetworkRequest`; `executeUngatedRequest` is a
+low-level transport primitive for controlled test servers and has no host grant
+check.
+
+The shared `@ifc-lite/sandbox/network` request core defaults to HTTPS. Trusted host integrations can explicitly set `NetworkRequestInit.loopbackHttpOrigin` for one exact literal HTTP loopback origin, including its port, and must also supply its exact `network.fetch` host grant. `loopbackHttpOrigin(endpoint)` recognizes eligible raw endpoints; `createLoopbackHostGrant(host)` constructs only a literal `localhost`, `127.0.0.1`, or `[::1]` grant. Generic sandbox scripts and capability parsing receive no automatic HTTP authorization. Redirects and response/cancellation limits remain unchanged.
+
+`NetworkDeniedError.dispatched` distinguishes a proved preflight refusal
+(`false`) from a redirect received after dispatch (`true`). An omitted value
+is unqualified. A POST followed by a refused redirect may already have
+committed; durable write hosts must keep that outcome uncertain.

@@ -13,6 +13,7 @@ import {
   dxfElevationRenderY,
   dxfUnderlayToDrawing,
   dxfUnderlayToWorldLines3D,
+  dxfUnderlayToWorldLines3DAnchored,
   dxfUnderlayDrawingBounds,
   resolveEffectiveGeoreferenced,
 } from './dxfUnderlayMath.js';
@@ -73,6 +74,37 @@ describe('dxfUnderlayToDrawing', () => {
         },
       ],
     },
+  });
+
+  it('maps the aligned/fit span along the mapped baseline', () => {
+    const e = entry({ scale: 1 });
+    e.underlay.layers[0].texts = [{ position: { x: 0, y: 0 }, text: 'Fit', height: 1, dirX: 1, dirY: 0,
+      align: 'left', valign: 'baseline', fitWidth: 1 }];
+    const data = dxfUnderlayToDrawing(e, { x: 0, y: 0 }, false, undefined, false, (p) => ({ x: 2 * p.x, y: p.y }));
+    close(data.texts[0].fitWidth!, 2);
+  });
+
+  it('widens plain text by the stretch of a non-uniform point map', () => {
+    const e = entry({ scale: 1 });
+    e.underlay.layers[0].texts = [{ position: { x: 0, y: 0 }, text: 'W', height: 1, dirX: 1, dirY: 0,
+      align: 'left', valign: 'baseline', widthScale: 0.5 }];
+    const out = dxfUnderlayToDrawing(e, { x: 0, y: 0 }, false, undefined, false, (p) => ({ x: 2 * p.x, y: p.y }));
+    close(out.texts[0].widthScale!, 1);
+    close(out.texts[0].height, 1);
+  });
+
+  it('fits aligned text horizontally and keeps its height under a non-uniform point map', () => {
+    const e = entry({ scale: 1 });
+    e.underlay.layers[0].texts = [{ position: { x: 0, y: 0 }, text: 'Al', height: 1, dirX: 1, dirY: 0,
+      align: 'left', valign: 'baseline', fitWidth: 1.2, fitUniform: true }];
+    const stretched = dxfUnderlayToDrawing(e, { x: 0, y: 0 }, false, undefined, false, (p) => ({ x: 2 * p.x, y: p.y }));
+    close(stretched.texts[0].fitWidth!, 2.4);
+    close(stretched.texts[0].height, 1);
+    assert.equal(stretched.texts[0].fitUniform, false);
+    const uniform = dxfUnderlayToDrawing(e, { x: 0, y: 0 }, false, undefined, false, (p) => ({ x: 2 * p.x, y: 2 * p.y }));
+    assert.equal(uniform.texts[0].fitUniform, true, 'a uniform map keeps aligned fitting');
+    close(uniform.texts[0].height, 2); // and scales the height with the span
+    close(uniform.texts[0].fitWidth!, 2.4);
   });
 
   it('subtracts the render shift and flips world Y to drawing Y', () => {
@@ -363,6 +395,36 @@ describe('dxfElevationRenderY (issue #2043)', () => {
 });
 
 describe('dxfUnderlayToWorldLines3D (issue #2043)', () => {
+  it('keeps a centimetre georeferenced DXF segment local at 5,000 km (#5049)', () => {
+    const e = {
+      name: 'survey.dxf', visible3D: true, opacity: 1, georeferenced: false,
+      placement: { offsetX: 5_000_000.015625, offsetY: 0, rotationDeg: 0, scale: 1 },
+      layerVisibility: {}, underlay: { layers: [{ name: '0', visible: true, paths: [{ points: [{ x: 0, y: 0 }, { x: 0.01, y: 0 }], closed: false }] }] },
+    } as unknown as DxfUnderlayState;
+    const result = dxfUnderlayToWorldLines3DAnchored(e, { x: 0, y: 0 }, 0);
+    assert.ok(result, 'the segment should produce an anchored line payload');
+    assert.ok(!(result instanceof Float32Array) && 'localVertices' in result, 'the short segment needs one local RTE partition');
+    if (!result || result instanceof Float32Array || !('localVertices' in result)) return;
+    assert.deepEqual(result.origin, [5_000_000.015625, 0, 0]);
+    assert.ok(Math.abs(result.localVertices[3] - 0.01) < 1e-8, `DXF local residual became ${result.localVertices[3]}`);
+  });
+
+  it('partitions a 9km DXF path at 5,000 km instead of uploading one invalid local frame (#5049)', () => {
+    const e = {
+      name: 'survey.dxf', visible3D: true, opacity: 1, georeferenced: false,
+      placement: { offsetX: 5_000_000.125, offsetY: 0, rotationDeg: 0, scale: 1 },
+      layerVisibility: {}, underlay: { layers: [{ name: '0', visible: true, paths: [{ points: [{ x: 0, y: 0 }, { x: 9_000, y: 0 }], closed: false }] }] },
+    } as unknown as DxfUnderlayState;
+    const result = dxfUnderlayToWorldLines3DAnchored(e, { x: 0, y: 0 }, 0);
+    assert.ok(Array.isArray(result), 'a 9km segment needs two independently anchored renderer draws');
+    if (!Array.isArray(result)) return;
+    assert.equal(result.length, 2);
+    assert.equal(result[0].origin[0], 5_000_000.125);
+    assert.equal(result[1].origin[0], 5_004_500.125);
+    assert.ok(result.every((partition: { localVertices: Float32Array }) => (
+      partition.localVertices.every((coordinate: number) => Math.abs(coordinate) <= 8_192)
+    )));
+  });
   const entry = (paths: DxfUnderlayState['underlay']['layers'][number]['paths']): DxfUnderlayState => ({
     id: 'u1',
     name: 'test.dxf',

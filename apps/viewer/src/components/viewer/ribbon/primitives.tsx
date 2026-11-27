@@ -3,29 +3,63 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * Ribbon building blocks (issue #1686). Office/IFCFlux-style grammar:
- * a labeled RibbonGroup holds either large one-command buttons (icon
- * over a two-line label) or a stack of small icon+label rows, and the
- * group name sits beneath in drafting-annotation caps. All colors ride
- * the existing shadcn tokens so light/dark/colorful themes just work.
+ * Ribbon building blocks (issue #1686), compacted for #8802 R1. A named
+ * RibbonGroup holds headline commands (a 20px icon over a one-line label)
+ * and stacks of small 24px icon+label rows that flow two to a column, all
+ * inside one 48px band (two rows keep the 24px target floor, #5826). Groups are separated by hairline dividers and spacing; their
+ * names stay on the ARIA group (and in tooltips) instead of a caption row.
+ * Icons are one monochrome family (`.shell-ribbon-band` maps the house
+ * icons' accent paint to the ink) and turn primary only when latched.
  */
 
-import React, { forwardRef } from 'react';
+import React, { Children, forwardRef, useId } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
+import { shortcutLabel, type KeyCommandId } from '@/lib/commands/shortcut-label';
 
-/** Subtle pressed-state tint shared by ribbon toggles (loud solid fills
- *  read as alarm at ribbon scale; Office-style tint + inset ring reads
- *  as "latched"). Per-tool accents (amber annotate, purple edit) pass
- *  their own class instead. */
+/** Pressed state of ribbon toggles: the shared active state (#8802 R4),
+ *  tint + inset ring + active icon (loud solid fills read as alarm at ribbon
+ *  scale). The label keeps the foreground ink. Per-tool accents (amber
+ *  annotate, accent edit) pass their own class instead. */
 export const RIBBON_ACTIVE_CLASS =
-  'bg-primary/15 text-foreground ring-1 ring-inset ring-primary/40';
+  'bg-active-surface text-foreground ring-1 ring-inset ring-active-border';
+
+/** Icon tint of a latched command that uses the shared active state. */
+const RIBBON_ACTIVE_ICON_CLASS = 'text-active';
+
+/** A control that is unavailable but must explain why (#8802 R1): it keeps
+ *  `aria-disabled` instead of `disabled`, so it stays in the tab order and
+ *  under the pointer and its tooltip opens on hover and on focus, while
+ *  `ribbonActivate` drops the activation. Looks like `disabled:`. */
+const RIBBON_ARIA_DISABLED_CLASS =
+  'aria-disabled:cursor-default aria-disabled:opacity-40 aria-disabled:hover:bg-transparent';
+
+function isAriaDisabled(value: React.AriaAttributes['aria-disabled']): boolean {
+  return value === true || value === 'true';
+}
+
+/** Click handler shared by both button sizes: blur to close the tooltip
+ *  after a pointer click (house pattern, `releasePointerFocus`); keyboard
+ *  activation (`detail === 0`) keeps focus on the control. An aria-disabled
+ *  control runs nothing. */
+function ribbonActivate(
+  e: React.MouseEvent<HTMLButtonElement>,
+  ariaDisabled: React.AriaAttributes['aria-disabled'],
+  onClick: React.MouseEventHandler<HTMLButtonElement> | undefined,
+) {
+  if (isAriaDisabled(ariaDisabled)) {
+    e.preventDefault();
+    return;
+  }
+  if (e.detail > 0) e.currentTarget.blur();
+  onClick?.(e);
+}
 
 interface RibbonTooltipProps {
   label: string;
-  /** Extra tooltip line (keyboard shortcut or state hint). */
-  shortcut?: string;
+  /** Keyboard command whose keys the tooltip names (`lib/commands`). */
+  shortcut?: KeyCommandId;
   tooltip?: string;
   children: React.ReactElement;
 }
@@ -39,23 +73,26 @@ function RibbonTooltip({ label, shortcut, tooltip, children }: RibbonTooltipProp
       <TooltipTrigger asChild>{children}</TooltipTrigger>
       <TooltipContent>
         {tooltip ?? label}
-        {shortcut && <span className="ml-2 text-xs opacity-60">({shortcut})</span>}
+        {shortcut && <span className="ml-2 text-xs opacity-60">({shortcutLabel(shortcut)})</span>}
       </TooltipContent>
     </Tooltip>
   );
 }
 
-export interface RibbonButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'children'> {
+export interface RibbonContentButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'children'> {
   icon: React.ElementType;
-  label: string;
+  /** Visible runtime content; static commands use RibbonCommand* and a registry id. */
+  contentLabel: string;
+  contentSource: 'registered' | 'export' | 'extension' | 'panel-browser';
+  contentId: string;
   /** Latched/toggled state (aria-pressed). */
   active?: boolean;
   /** Tailwind classes for the latched state; defaults to the shared tint. */
   activeClassName?: string;
   /** Tooltip body when the visible label isn't the whole story. */
   tooltip?: string;
-  /** Keyboard shortcut shown in the tooltip. */
-  shortcut?: string;
+  /** Keyboard command whose keys the tooltip names (`lib/commands`). */
+  shortcut?: KeyCommandId;
   /** Renders a small chevron: the button opens a menu. */
   hasMenu?: boolean;
   /** Corner count badge (e.g. peers in room, basket size). */
@@ -63,43 +100,51 @@ export interface RibbonButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLB
 }
 
 /**
- * Large ribbon button: icon over a (wrappable) two-line label. The
- * headline commands of each group. Forwards ref so it can serve as a
- * DropdownMenu / Dialog trigger via `asChild`.
+ * Large ribbon button: the headline commands of each group, a 20px icon
+ * over a one-line label. Forwards ref so it can serve as a DropdownMenu /
+ * Dialog trigger via `asChild`.
  */
-export const RibbonLargeButton = forwardRef<HTMLButtonElement, RibbonButtonProps>(
-  function RibbonLargeButton(
-    { icon: Icon, label, active, activeClassName, tooltip, shortcut, hasMenu, badge, className, onClick, ...rest },
+export const RibbonContentLargeButton = forwardRef<HTMLButtonElement, RibbonContentButtonProps>(
+  function RibbonContentLargeButton(
+    { icon: Icon, contentLabel: label, contentSource, contentId, active, activeClassName, tooltip, shortcut, hasMenu, badge, className, onClick, ...rest },
     ref,
   ) {
+    const descriptionId = useId();
+    // A caller-supplied name owns the accessible name; keep its longer
+    // tooltip as a separate, permanently available description.
+    const description = rest['aria-label'] ? tooltip : undefined;
     return (
       <RibbonTooltip label={label} shortcut={shortcut} tooltip={tooltip}>
         <button
           ref={ref}
           type="button"
           aria-label={tooltip ?? label}
+          aria-describedby={description ? descriptionId : undefined}
           aria-pressed={active === undefined ? undefined : active}
-          onClick={(e) => {
-            // Blur to close the tooltip after click (house pattern).
-            (e.currentTarget as HTMLButtonElement).blur();
-            onClick?.(e);
-          }}
+          onClick={(e) => ribbonActivate(e, rest['aria-disabled'], onClick)}
           className={cn(
-            'relative flex h-full w-14 shrink-0 select-none flex-col items-center justify-start gap-1 rounded-md px-1 py-1',
-            'text-[10px] font-medium leading-[1.15] text-foreground/90 transition-colors',
-            'hover:bg-muted/70 disabled:pointer-events-none disabled:opacity-40',
+            // One line, never clipped: the label keeps its natural width
+            // (#5395's "Orthographic" lesson) and the band scrolls instead.
+            'relative flex h-11 min-w-12 shrink-0 select-none flex-col items-center justify-center gap-0.5 self-center rounded-md px-1.5',
+            'text-2xs font-medium text-foreground/90 transition-colors',
+            'hover:bg-muted disabled:pointer-events-none disabled:opacity-40',
+            RIBBON_ARIA_DISABLED_CLASS,
             'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
             active && (activeClassName ?? RIBBON_ACTIVE_CLASS),
             className,
           )}
           {...rest}
+          data-ribbon-content-source={contentSource}
+          data-ribbon-content-id={contentId}
         >
-          <Icon className="h-8 w-8 shrink-0" aria-hidden="true" />
-          <span className="flex h-[2.3em] w-full items-start justify-center gap-0.5">
-            <span className="line-clamp-2 min-w-0 text-center">{label}</span>
+          <Icon className={cn('h-5 w-5 shrink-0', active && !activeClassName && RIBBON_ACTIVE_ICON_CLASS)} aria-hidden="true" />
+          {/* `data-ribbon-label`: the e2e overflow check measures these (#5395). */}
+          <span className="flex items-center gap-0.5">
+            <span data-ribbon-label className="whitespace-nowrap leading-tight">{label}</span>
             {hasMenu && <ChevronDown className="h-2.5 w-2.5 shrink-0 opacity-60" aria-hidden="true" />}
           </span>
           {badge}
+          {description && <span id={descriptionId} className="sr-only">{description}</span>}
         </button>
       </RibbonTooltip>
     );
@@ -107,61 +152,69 @@ export const RibbonLargeButton = forwardRef<HTMLButtonElement, RibbonButtonProps
 );
 
 /**
- * Small ribbon button: one icon+label row, stacked up to three per
- * column inside a group (wrap in `RibbonSmallStack`).
+ * Small ribbon button: one 24px icon+label row (the WCAG 2.5.8 floor, #5826);
+ * a `RibbonSmallStack` flows them two to a column inside the band.
  */
-export const RibbonSmallButton = forwardRef<HTMLButtonElement, RibbonButtonProps>(
-  function RibbonSmallButton(
-    { icon: Icon, label, active, activeClassName, tooltip, shortcut, hasMenu, badge, className, onClick, ...rest },
+export const RibbonContentSmallButton = forwardRef<HTMLButtonElement, RibbonContentButtonProps>(
+  function RibbonContentSmallButton(
+    { icon: Icon, contentLabel: label, contentSource, contentId, active, activeClassName, tooltip, shortcut, hasMenu, badge, className, onClick, ...rest },
     ref,
   ) {
+    const descriptionId = useId();
+    // As the large button: a caller-supplied name keeps the tooltip as a description.
+    const description = rest['aria-label'] ? tooltip : undefined;
     return (
       <RibbonTooltip label={label} shortcut={shortcut} tooltip={tooltip}>
         <button
           ref={ref}
           type="button"
           aria-label={tooltip ?? label}
+          aria-describedby={description ? descriptionId : undefined}
           aria-pressed={active === undefined ? undefined : active}
-          onClick={(e) => {
-            (e.currentTarget as HTMLButtonElement).blur();
-            onClick?.(e);
-          }}
+          onClick={(e) => ribbonActivate(e, rest['aria-disabled'], onClick)}
           className={cn(
-            'relative flex h-[20px] w-full min-w-0 select-none items-center gap-1.5 rounded px-1.5',
-            'text-[11px] leading-none text-foreground/90 transition-colors',
-            'hover:bg-muted/70 disabled:pointer-events-none disabled:opacity-40',
+            'relative flex h-6 w-full min-w-0 select-none items-center gap-1.5 rounded px-1.5',
+            'text-2xs leading-none text-foreground/90 transition-colors',
+            'hover:bg-muted disabled:pointer-events-none disabled:opacity-40',
+            RIBBON_ARIA_DISABLED_CLASS,
             'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
             active && (activeClassName ?? RIBBON_ACTIVE_CLASS),
             className,
           )}
           {...rest}
+          data-ribbon-content-source={contentSource}
+          data-ribbon-content-id={contentId}
         >
-          <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <Icon className={cn('h-4 w-4 shrink-0', active && !activeClassName && RIBBON_ACTIVE_ICON_CLASS)} aria-hidden="true" />
           <span className="truncate">{label}</span>
           {hasMenu && <ChevronDown className="ml-auto h-2.5 w-2.5 shrink-0 opacity-60" aria-hidden="true" />}
           {badge}
+          {description && <span id={descriptionId} className="sr-only">{description}</span>}
         </button>
       </RibbonTooltip>
     );
   },
 );
 
-/** Column of up to three small buttons, vertically centered in the band.
- *  Width is natural (widest row wins) so group labels center on the
- *  actual content instead of padded air. */
+/** Small buttons flowing two to a column, centred in the band. Width is
+ *  natural (widest row of each column wins). A lone button sits on the
+ *  band's centre line instead of the top row. */
 export function RibbonSmallStack({ children, className }: { children: React.ReactNode; className?: string }) {
+  // Two explicit rows make the column flow; a lone row stays auto-sized so
+  // `content-center` can centre it.
+  const rows = Children.toArray(children).length > 1 && 'grid-rows-2';
   return (
-    <div className={cn('flex h-full w-max flex-col justify-center gap-px', className)}>
+    <div className={cn('grid h-full w-max auto-cols-max grid-flow-col content-center gap-x-1', rows, className)}>
       {children}
     </div>
   );
 }
 
 /**
- * One labeled command cluster. Content row on top, the group name in
- * tiny drafting caps beneath — the plan-sheet annotation register.
- * Content is centered over the label (and vice versa) so a one-button
- * group whose label is wider than the button still reads as one axis.
+ * One named command cluster. The name is the ARIA group label (screen
+ * readers and the e2e inventory read it); visually, groups are separated
+ * by `RibbonGroupDivider` and spacing rather than a caption row, which kept
+ * the band at 88px for seven buttons (#8802 R1).
  */
 export function RibbonGroup({ label, children, className }: {
   label: string;
@@ -169,18 +222,16 @@ export function RibbonGroup({ label, children, className }: {
   className?: string;
 }) {
   return (
-    <div role="group" aria-label={label} className={cn('flex h-full shrink-0 flex-col px-1.5', className)}>
-      <div className="flex min-h-0 flex-1 items-stretch justify-center gap-0.5 pt-1">
-        {children}
-      </div>
-      <div className="pb-1 pt-0.5 text-center text-[9px] font-medium uppercase tracking-[0.12em] text-muted-foreground/70">
-        {label}
-      </div>
+    <div
+      // Ribbon commands need a named ARIA group; a fieldset would add form semantics here.
+      // eslint-disable-next-line jsx-a11y/prefer-tag-over-role
+      role="group" aria-label={label} className={cn('flex h-full shrink-0 items-center gap-0.5 px-1', className)}>
+      {children}
     </div>
   );
 }
 
 /** Hairline divider between ribbon groups. */
 export function RibbonGroupDivider() {
-  return <div aria-hidden="true" className="my-2 w-px shrink-0 self-stretch bg-border/70" />;
+  return <div aria-hidden="true" className="mx-1 my-2 w-px shrink-0 self-stretch bg-divider" />;
 }

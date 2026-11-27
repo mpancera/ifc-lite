@@ -3,15 +3,18 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * List execution engine - resolves source sets and extracts column values
- *
+ * List execution engine - resolves source sets and extracts column values.
  * PERF: Uses ListDataProvider.getEntitiesByType() for O(typeRange) entity lookups,
  * and property/quantity accessors for O(1) lookups per entity.
  */
 
 import type { PropertySet, Property, QuantitySet, Quantity } from '@ifc-lite/data';
-import { parsePropertyValue } from '@ifc-lite/encoding';
+import { isWhollyNumeric, parsePropertyValue } from '@ifc-lite/encoding';
+import { resolveSourceSet } from './source-set.js';
 import { compileNameMatcher } from './name-pattern.js';
+import { getWorldCoordinateValue, extractGeometryColumnValue } from './geometry-column.js';
+import { withAggregateInheritance } from './condition-inherit.js';
+import { getAttributeValue } from './entity-attributes.js';
 import type {
   ListDataProvider,
   ListDefinition,
@@ -34,11 +37,13 @@ export function executeList(
   definition: ListDefinition,
   provider: ListDataProvider,
   modelId = 'default',
+  capturedExpressIds?: ReadonlySet<number>,
 ): ListResult {
+  if (definition.groups.some((group) => group.rules.length > 0))
+    throw new Error('executeList requires Rules groups to be evaluated before provider-only execution');
   const startTime = performance.now();
 
-  // Step 1: Resolve source set (which entities match)
-  const matchedIds = resolveSourceSet(definition, provider, modelId);
+  const matchedIds = resolveSourceSet(definition, provider, modelId, matchesAllConditions, capturedExpressIds);
 
   // Step 2: Extract column values for matched entities. `columnMeta` collects,
   // per quantity/property column, the QuantityType / measure dataType of the
@@ -94,7 +99,6 @@ interface ColumnMeta {
 // ============================================================================
 // Grouping & Aggregation
 // ============================================================================
-
 
 /**
  * Effective ordered group-by column ids for a grouping config — `columnIds`
@@ -232,48 +236,6 @@ export function toScheduleRows(groups: ListGroup[] | undefined, levelCount: numb
     .map((g) => ({ key: g.key, path: g.path ?? [g.label], count: g.count, sums: g.sums }));
 }
 
-// ============================================================================
-// Source Set Resolution
-// ============================================================================
-
-function resolveSourceSet(
-  definition: ListDefinition,
-  provider: ListDataProvider,
-  modelId: string,
-): number[] {
-  const { entityTypes, conditions, expressIdsByModel } = definition;
-
-  let entityIds: number[];
-  if (expressIdsByModel) {
-    // Explicit snapshot scope (e.g. from a filter result) — target exactly
-    // the ids captured FOR THIS model. Keyed by model so a federated list
-    // never picks up a foreign model's element that happens to share a
-    // local express ID. Still intersect with this model for safety.
-    const snapshot = expressIdsByModel[modelId] ?? [];
-    entityIds = snapshot.filter((id) => provider.getEntityTypeName(id) !== '');
-  } else if (entityTypes.length === 0) {
-    // No class constraint — target every element in the model. Requires
-    // the provider to enumerate all ids; older providers without it
-    // resolve to an empty set rather than throwing.
-    entityIds = provider.getAllEntityIds?.() ?? [];
-  } else {
-    // Collect entity IDs by type - gather arrays first, then flatten once
-    const chunks: number[][] = [];
-    for (const type of entityTypes) {
-      const ids = provider.getEntitiesByType(type);
-      if (ids.length > 0) chunks.push(ids);
-    }
-    entityIds = chunks.length === 1 ? chunks[0] : chunks.flat();
-  }
-
-  // Apply conditions as filters
-  if (conditions.length === 0) {
-    return entityIds;
-  }
-
-  return entityIds.filter(id => matchesAllConditions(id, conditions, provider));
-}
-
 function matchesAllConditions(
   entityId: number,
   conditions: PropertyCondition[],
@@ -287,7 +249,7 @@ function matchesAllConditions(
   return true;
 }
 
-function matchesCondition(
+export function matchesCondition(
   entityId: number,
   condition: PropertyCondition,
   provider: ListDataProvider,
@@ -368,18 +330,18 @@ function getConditionValue(
   switch (condition.source) {
     case 'attribute':
       return getAttributeValue(entityId, condition.propertyName, provider);
-    case 'property':
-      return getPropertyValue(entityId, condition.psetName ?? '', condition.propertyName, provider);
-    case 'quantity':
-      return getQuantityValue(entityId, condition.psetName ?? '', condition.propertyName, provider);
-    case 'spatial':
-      return getSpatialValue(entityId, condition.propertyName, provider);
-    case 'model':
-      return provider.getModelName?.() || null;
+    case 'property': case 'quantity':
+      return withAggregateInheritance(entityId, condition, provider, (id) => condition.source === 'property'
+        ? getPropertyValue(id, condition.psetName ?? '', condition.propertyName, provider)
+        : getQuantityValue(id, condition.psetName ?? '', condition.propertyName, provider));
+    case 'spatial': return getSpatialValue(entityId, condition.propertyName, provider);
+    case 'model': return provider.getModelName?.() || null;
     case 'zone':
       return getZoneValue(entityId, condition.psetName ?? '', condition.propertyName, provider);
     case 'group':
       return getGroupValue(entityId, condition.propertyName, provider);
+    case 'geometry':
+      return getWorldCoordinateValue(entityId, condition.propertyName, provider);
     default:
       return null;
   }
@@ -600,9 +562,7 @@ function extractColumnValues(
   for (let i = 0; i < columns.length; i++) {
     const col = columns[i];
     switch (col.source) {
-      case 'attribute':
-        values[i] = getAttributeValue(entityId, col.propertyName, provider);
-        break;
+      case 'attribute': values[i] = getAttributeValue(entityId, col.propertyName, provider); break;
       case 'property': {
         // Automatic Type fallback (issue #1745): instance psets win; only when
         // the instance has no matching property do we consult the type's.
@@ -635,12 +595,8 @@ function extractColumnValues(
         // which the engine knows nothing about. The viewer paints the cell.
         values[i] = null;
         break;
-      case 'spatial':
-        values[i] = getSpatialValue(entityId, col.propertyName, provider);
-        break;
-      case 'model':
-        values[i] = provider.getModelName?.() || null;
-        break;
+      case 'spatial': values[i] = getSpatialValue(entityId, col.propertyName, provider); break;
+      case 'model': values[i] = provider.getModelName?.() || null; break;
       case 'zone':
         values[i] = getZoneValue(entityId, col.psetName ?? '', col.propertyName, provider);
         if (isZoneVolumeMode(col.propertyName) && columnMeta[i].quantityType === undefined) {
@@ -650,6 +606,10 @@ function extractColumnValues(
       case 'group':
         values[i] = getGroupValue(entityId, col.propertyName, provider);
         break;
+      case 'geometry':
+        values[i] = extractGeometryColumnValue(entityId, col.propertyName, provider, columnMeta[i]);
+        break;
+      case 'customGrouping': values[i] = provider.getCustomGroup?.(entityId, { id: col.psetName, name: col.propertyName }) ?? null; break;
       default:
         values[i] = null;
     }
@@ -666,32 +626,6 @@ function uniqueJoin(values: string[]): string {
 // ============================================================================
 // Value Accessors
 // ============================================================================
-
-function getAttributeValue(entityId: number, attrName: string, provider: ListDataProvider): CellValue {
-  switch (attrName) {
-    case 'Name':
-      return provider.getEntityName(entityId) || null;
-    case 'GlobalId':
-      return provider.getEntityGlobalId(entityId) || null;
-    case 'Class':
-      return provider.getEntityTypeName(entityId) || null;
-    case 'Type':
-      // The element's IfcTypeProduct name (issue #1754).
-      return provider.getEntityDefiningTypeName?.(entityId) || null;
-    case 'Description':
-      return provider.getEntityDescription(entityId) || null;
-    case 'ObjectType':
-      return provider.getEntityObjectType(entityId) || null;
-    case 'PredefinedType':
-      return provider.getEntityPredefinedType?.(entityId) || null;
-    case 'Tag':
-      return provider.getEntityTag(entityId) || null;
-    case 'LongName':
-      return provider.getEntityLongName?.(entityId) || null;
-    default:
-      return null;
-  }
-}
 
 function getPropertyValue(
   entityId: number,
@@ -818,7 +752,21 @@ export function listResultToCSV(result: ListResult, delimiter = ','): string {
     // is a plain (optionally signed, decimal/exponent) number carries no formula
     // payload, so it is left untouched; anything else with a trigger prefix
     // (including `-cmd` or `-1+cmd`) is still quoted.
-    if (/^[=+\-@\t\r]/.test(str) && !/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(str)) {
+    //
+    // The trigger is looked for PAST any leading invisible characters, and the
+    // invisibles are kept rather than stripped. A BOM, zero-width space,
+    // left-to-right mark, no-break space or U+2028/U+2029 in front of `=` does
+    // not stop Excel/Sheets reading the cell as a formula, but it does stop an
+    // anchored `/^[=+\-@\t\r]/` matching, so `\uFEFF=HYPERLINK(...)` used to
+    // sail through this copy of the guard unguarded (#1944 was fixed in
+    // `packages/sdk/src/namespaces/export.ts` but not here). IFC text
+    // properties are attacker-controllable and can carry any of them.
+    //
+    // `\p{Cf}` and `\p{Z}`, not `\s`: `\s` would swallow a leading TAB, and TAB
+    // is itself a trigger, so "\t=cmd" would stop being guarded. `\p{Z}` rather
+    // than `\p{Zs}` because the separator category also covers `Zl`/`Zp`, so
+    // U+2028/U+2029 would otherwise remain viable hiding prefixes.
+    if (/^[\p{Cf}\p{Z}]*[=+\-@\t\r]/u.test(str) && !isWhollyNumeric(str)) {
       str = `'${str}`;
     }
     if (str.includes(delimiter) || str.includes('"') || str.includes('\n') || str.includes('\r')) {
@@ -834,5 +782,11 @@ export function listResultToCSV(result: ListResult, delimiter = ','): string {
     lines.push(row.values.map(csvEscape).join(delimiter));
   }
 
-  return lines.join('\n');
+  // CRLF, not LF: RFC 4180 s2.1 -- "each record is located on a separate line,
+  // delimited by a line break (CRLF)" -- and the ABNF admits no other record
+  // separator (`file = [header CRLF] record *(CRLF record) [CRLF]`). The
+  // viewer's own Lists CSV writer (`apps/viewer/src/lib/lists/export/csv.ts`)
+  // already emits CRLF; this copy emitted LF, so the two disagreed on the same
+  // export. No trailing terminator is written, which s2.2 explicitly permits.
+  return lines.join('\r\n');
 }

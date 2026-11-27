@@ -27,8 +27,17 @@ import {
   type IDSDocument,
   type IDSValidationReport,
   type ValidationProgress,
+  type SupportedLocale,
 } from '@ifc-lite/ids';
+import { scopedIdsAccessor } from '@/lib/ids/scoped-accessor';
 import { createDataAccessor } from '@ifc-lite/ids/bridge';
+
+import {
+  overlayResolverFromSnapshot,
+  entityVisibilityFromSnapshot,
+  type PropertyOverlaySnapshot,
+  type EntityVisibilitySnapshot,
+} from '@/lib/ids/property-overlay-snapshot';
 
 export interface IdsWorkerRequest {
   type: 'validate';
@@ -39,8 +48,35 @@ export interface IdsWorkerRequest {
   document: IDSDocument;
   schemaVersion: string;
   modelId: string;
-  locale: 'en' | 'de' | 'fr';
+  locale: SupportedLocale;
   includePassingEntities: boolean;
+  /** Model-local candidate IDs, matching the main-thread check. */
+  entityIds?: readonly number[];
+  /**
+   * The model's pending, not-yet-exported property edits, as plain clonable
+   * data (#3946).
+   *
+   * The worker re-parses `source`, so it sees the model as it was written
+   * to disk. Before this field existed, a model with ANY pending edit was
+   * refused the worker entirely and validated on the main thread — a cost
+   * of O(entities x specifications) charged for a single corrected
+   * property, and charged again on every re-run until the edits were
+   * exported or cleared.
+   *
+   * Absent/empty means "no overlay", which is the byte-identical
+   * no-overlay path this worker always took.
+   */
+  propertyOverlay?: PropertyOverlaySnapshot;
+  /**
+   * The model's pending tombstones and surviving overlay-created entity
+   * ids, as plain clonable data (#5184). Same reasoning as
+   * `propertyOverlay` above: the worker re-parses `source`, which still
+   * has a since-deleted entity's bytes and lacks a since-created entity's,
+   * so `getAllEntityIds` needs this to answer the same question the
+   * main-thread accessor does. Absent/empty means "nothing to exclude or
+   * add", the byte-identical no-visibility-view path.
+   */
+  entityVisibility?: EntityVisibilitySnapshot;
 }
 
 export type IdsWorkerResponse =
@@ -75,7 +111,17 @@ self.onmessage = async (event: MessageEvent<IdsWorkerRequest>) => {
     store.schemaVersion =
       (req.schemaVersion as typeof store.schemaVersion) || store.schemaVersion;
 
-    const accessor = createDataAccessor(store);
+    // The SAME resolver the main-thread fallback builds, from the SAME
+    // snapshot — see `@/lib/ids/property-overlay-snapshot` (#3946). The two
+    // realms therefore apply identical overrides on top of identical
+    // parsed bytes, which is what makes routing an edited model here
+    // equivalent to validating it on the main thread rather than merely
+    // similar.
+    const accessor = scopedIdsAccessor(createDataAccessor(
+      store,
+      overlayResolverFromSnapshot(req.propertyOverlay),
+      entityVisibilityFromSnapshot(req.entityVisibility)
+    ), req.entityIds);
     const translator = createTranslationService(req.locale);
 
     const report = await validateIDS(
@@ -84,7 +130,7 @@ self.onmessage = async (event: MessageEvent<IdsWorkerRequest>) => {
       {
         modelId: req.modelId,
         schemaVersion: store.schemaVersion,
-        entityCount: store.entityCount ?? accessor.getAllEntityIds().length,
+        entityCount: req.entityIds === undefined ? store.entityCount ?? accessor.getAllEntityIds().length : accessor.getAllEntityIds().length,
       },
       {
         translator,
@@ -98,6 +144,7 @@ self.onmessage = async (event: MessageEvent<IdsWorkerRequest>) => {
       }
     );
 
+    if (req.entityIds !== undefined) report.targetScope = { kind: 'subset', entityCount: accessor.getAllEntityIds().length };
     post({ type: 'complete', id: req.id, report });
   } catch (err) {
     post({

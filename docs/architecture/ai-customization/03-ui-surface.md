@@ -53,7 +53,7 @@ other contributions.
 | `statusBar.left` `statusBar.right` | Status bar segments | Status text + actions |
 | `exportMenu` | "Export" dropdown items | Exporters |
 | `lensLibrary` | Available lens presets in lens panel | Lens evaluators |
-| `idsRules.custom` | Custom IDS rules in IDS panel | IDS validators |
+| `idsRules.custom` | Custom IDS rules in Data validation panel | IDS validators |
 | `keybindings` | (no UI; affects key dispatch) | Keybinding rules |
 | `onboarding.tips` (future) | Tip carousel on empty state | Tip cards (Phase 3) |
 
@@ -160,7 +160,9 @@ values (functions, DOM nodes, host objects) cannot cross.
 
 Widgets emit events to commands, not to closures. A `Button`'s `command`
 field names a command id; clicking it invokes the command via the
-host's command dispatcher. The host enforces the user's keybindings,
+host's owner-scoped command dispatcher. The button's JSON `args` object is
+forwarded as `ctx.args` to `run(ctx)`; invocations without arguments do not
+retain arguments from a previous run. The host enforces the user's keybindings,
 focus order, and accessibility along the way.
 
 Why this matters: a closure-based event handler invites the extension

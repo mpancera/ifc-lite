@@ -61,6 +61,27 @@ describe('mergeGeometryDiagnostics', () => {
     expect(m.rectFast).toEqual({ fired: 4, openingsCut: 7, deferHostNotBox: 1, deferNotThrough: 4, deferOffFace: 1, deferNearEdge: 2, deferNoOpenings: 3, deferTooManyOpenings: 7 });
   });
 
+  it('keeps triangle-based no-op counts out of the measured schema (#10510)', () => {
+    const legacy = make({ schemaVersion: 5, silentNoOps: 9, hostsWithOpenings: 10 });
+    const measured = make({ schemaVersion: 6, silentNoOps: 2, hostsWithOpenings: 3 });
+    for (const a of [mergeGeometryDiagnostics(legacy, measured), mergeGeometryDiagnostics(measured, legacy)]) {
+      expect(a).toMatchObject({ schemaVersion: 6, silentNoOps: 2, hostsWithOpenings: 13 });
+      expect(mergeGeometryDiagnostics(a, measured)?.silentNoOps).toBe(4);
+    }
+    expect(mergeGeometryDiagnostics(legacy, legacy)).toMatchObject({ schemaVersion: 5, silentNoOps: 18 });
+  });
+
+  it('sums oversizedRefDrops, treating an absent counter as 0 (pre-#3752 payloads)', () => {
+    // The Rust producer always serializes `oversizedRefDrops`, but a payload
+    // from a build predating #3752 has no such key. Absent must fold as 0
+    // rather than turning the merged value into NaN or dropping the field.
+    expect(mergeGeometryDiagnostics(make({ oversizedRefDrops: 2 }), make({ oversizedRefDrops: 3 }))!
+      .oversizedRefDrops).toBe(5);
+    expect(mergeGeometryDiagnostics(make({ oversizedRefDrops: 4 }), make())!
+      .oversizedRefDrops).toBe(4);
+    expect(mergeGeometryDiagnostics(make(), make())!.oversizedRefDrops).toBe(0);
+  });
+
   it('merges failuresByReason by reason and re-sorts desc by count', () => {
     const a = make({ failuresByReason: [{ reason: 'DifferenceEmptiedHost', count: 2 }, { reason: 'KernelError', count: 1 }] });
     const b = make({ failuresByReason: [{ reason: 'DifferenceEmptiedHost', count: 3 }, { reason: 'NoBoundsOverlap', count: 5 }] });
@@ -70,6 +91,34 @@ describe('mergeGeometryDiagnostics', () => {
       { reason: 'NoBoundsOverlap', count: 5 },
       { reason: 'KernelError', count: 1 },
     ]);
+  });
+
+  it('sums totalUnsupportedItems and merges unsupportedItemsByType by IfcType, re-sorted desc', () => {
+    const a = make({
+      totalUnsupportedItems: 2,
+      unsupportedItemsByType: [{ reason: 'IfcGeometricSet', count: 2 }],
+    });
+    const b = make({
+      totalUnsupportedItems: 4,
+      unsupportedItemsByType: [
+        { reason: 'IfcGeometricSet', count: 1 },
+        { reason: 'IfcAnnotationFillArea', count: 3 },
+      ],
+    });
+    const m = mergeGeometryDiagnostics(a, b)!;
+    expect(m.totalUnsupportedItems).toBe(6);
+    expect(m.unsupportedItemsByType).toEqual([
+      { reason: 'IfcAnnotationFillArea', count: 3 },
+      { reason: 'IfcGeometricSet', count: 3 },
+    ]);
+  });
+
+  it('treats totalUnsupportedItems/unsupportedItemsByType as absent-safe (pre-schemaVersion-3 payloads)', () => {
+    const a = make();
+    const b = make({ totalUnsupportedItems: 1, unsupportedItemsByType: [{ reason: 'IfcGeometricSet', count: 1 }] });
+    const m = mergeGeometryDiagnostics(a, b)!;
+    expect(m.totalUnsupportedItems).toBe(1);
+    expect(m.unsupportedItemsByType).toEqual([{ reason: 'IfcGeometricSet', count: 1 }]);
   });
 
   it('folds worstHosts by productId across operands (no duplicate rows, no mutation)', () => {
@@ -175,6 +224,33 @@ describe('the streaming `complete` event payload (buildGeometryWorkerCompleteMes
     expect(typeof wh.ifcType).toBe('string');
   });
 
+  it('does NOT fabricate a counted zero when merging two pre-v3 payloads', () => {
+    // Both operands predate the drop counter, so neither field is present and the
+    // merged schemaVersion stays 2. Writing `totalUnsupportedItems: 0` here would
+    // say "we counted, nothing was dropped" on a payload that never counted —
+    // absence has to stay distinguishable from a real zero, which is the whole
+    // reason v3 was a version bump rather than a silent additive field.
+    const merged = mergeGeometryDiagnostics(
+      make({ schemaVersion: 2, totalCsgFailures: 1 }),
+      make({ schemaVersion: 2, totalCsgFailures: 2 }),
+    )!;
+    expect(merged.schemaVersion).toBe(2);
+    expect('totalUnsupportedItems' in merged).toBe(false);
+    expect('unsupportedItemsByType' in merged).toBe(false);
+  });
+
+  it('keeps a real zero from a v3 producer that counted and found nothing', () => {
+    // The mirror case: a v3 operand DID count. Its 0 is a measurement and must
+    // survive, so the field is present and the merge stays additive.
+    const merged = mergeGeometryDiagnostics(
+      make({ schemaVersion: 3, totalUnsupportedItems: 0, unsupportedItemsByType: [] }),
+      make({ schemaVersion: 2 }),
+    )!;
+    expect(merged.schemaVersion).toBe(3);
+    expect(merged.totalUnsupportedItems).toBe(0);
+    expect(merged.unsupportedItemsByType).toEqual([]);
+  });
+
   it('leaves bbox/triangleCount absent on a worstHosts entry that never captured a cut effect', () => {
     const diagnostics = make({
       worstHosts: [{ productId: 7, ifcType: 'IfcSlab', openings: 1, csgFailures: 1 }],
@@ -184,4 +260,52 @@ describe('the streaming `complete` event payload (buildGeometryWorkerCompleteMes
     expect(wh.bbox).toBeUndefined();
     expect(wh.triangleCount).toBeUndefined();
   });
+});
+
+it('#9268 preserves budget refusals through worker/batch merging', () => {
+  const refusal = { budget: 'walk mapped attempts', limit: 65536, reached: 65537,
+    productId: 25, productType: 'IfcFlowTerminal', GlobalId: 'test', sourceId: 22 };
+  const merged = mergeGeometryDiagnostics(make({ budgetRefusals: [refusal] }), make());
+  expect(merged?.budgetRefusals).toEqual([refusal]);
+  expect(merged?.totalUnsupportedItems).toBeUndefined();
+});
+
+it('issue 9268 merge caps budget detail while preserving the complete count', () => {
+  const refusal = { budget: 'logical mapped attempts', limit: 3, reached: 4,
+    sourceId: 8, productId: null, productType: null, GlobalId: null };
+  const merged = mergeGeometryDiagnostics(make({ totalBudgetRefusals: 40,
+    budgetRefusals: Array.from({ length: 16 }, () => refusal) }),
+  make({ budgetRefusals: [refusal] }));
+  expect(merged?.totalBudgetRefusals).toBe(41);
+  expect(merged?.budgetRefusals).toHaveLength(16);
+});
+
+it('issue 9268 merge keeps the same sixteen refusal details whichever worker finishes first', () => {
+  const refusal = (productId: number | null) => ({ budget: 'mapped attempts', limit: 3, reached: 4,
+    sourceId: 1000 + (productId ?? 0), productId, productType: 'IfcWall', GlobalId: null });
+  const low = make({ budgetRefusals: [refusal(null), ...Array.from({ length: 9 }, (_, i) => refusal(i + 1))] });
+  const high = make({ budgetRefusals: Array.from({ length: 10 }, (_, i) => refusal(20 - i)) });
+  const ids = (d: ReturnType<typeof mergeGeometryDiagnostics>) => d?.budgetRefusals?.map((r) => r.productId);
+  expect(ids(mergeGeometryDiagnostics(high, low))).toEqual(ids(mergeGeometryDiagnostics(low, high)));
+  expect(ids(mergeGeometryDiagnostics(high, low))).toEqual([null, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16]);
+});
+
+it('issue 9268 merge preserves counted zero budget refusals and absent fields', () => {
+  const counted = mergeGeometryDiagnostics(
+    make({ totalBudgetRefusals: 0, budgetRefusals: [] }),
+    make({ totalBudgetRefusals: 0, budgetRefusals: [] }),
+  );
+  expect(counted).toHaveProperty('totalBudgetRefusals', 0);
+  expect(counted).toHaveProperty('budgetRefusals', []);
+
+  // A scalar zero must also survive without a truthy detail array.
+  const scalarOnly = mergeGeometryDiagnostics(
+    make({ totalBudgetRefusals: 0 }), make({ totalBudgetRefusals: 0 }),
+  );
+  expect(scalarOnly).toHaveProperty('totalBudgetRefusals', 0);
+  expect(scalarOnly).toHaveProperty('budgetRefusals', []);
+
+  const absent = mergeGeometryDiagnostics(make(), make());
+  expect(absent).not.toHaveProperty('totalBudgetRefusals');
+  expect(absent).not.toHaveProperty('budgetRefusals');
 });

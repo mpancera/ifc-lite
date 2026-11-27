@@ -21,19 +21,20 @@
  * while the schema already had both. Hence the `--check` gate.
  *
  * Reads the BUILT sandbox bundle, not the TypeScript source, for the same
- * reason `generate-server-attr-indices.mjs` does: an absolute-path import of
+ * reason the retired server attr-index generator did: an absolute-path import of
  * `dist/index.js` runs on plain node with no loader and no tsconfig `paths`
  * rewriting in the middle of the import graph.
  *
- * Two things the schema names rather than spells out are EXTRACTED from their
- * defining sources here (see `derivedTypeLines` and DERIVED_TYPE_SOURCES):
- * the `BimClash.*` clash-engine types, and the sandbox `console`. Transcribing
- * either into this file would put a hand-maintained copy of another package's
+ * Types the schema names rather than spells out are EXTRACTED from their
+ * defining sources here (see `derivedTypeLines` and `BIM_DERIVED_TYPE_GROUPS`):
+ * the `BimClash.*` clash-engine types and `BimCost.*` / `BimSdk.*` SDK types.
+ * The sandbox `console` is likewise derived. Transcribing any of them would put a
+ * hand-maintained copy of another package's
  * types in the one script whose whole purpose is to stop such copies rotting
- * (#2422). Because both are derived, a change upstream turns the `--check`
+ * (#2422). Because they are derived, a change upstream turns the `--check`
  * gate red exactly as a schema change does.
  *
- * Modes (mirrors scripts/generate-server-attr-indices.mjs UX):
+ * Modes (the generator UX):
  *   node scripts/generate-bim-globals.mjs           # rewrite  (pnpm generate:bim-globals)
  *   node scripts/generate-bim-globals.mjs --check   # verify, diff + exit 1 if stale
  *
@@ -46,6 +47,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
+import { BIM_DERIVED_TYPE_GROUPS } from './lib/bim-derived-type-groups.mjs';
 
 const CHECK = process.argv.includes('--check');
 
@@ -90,26 +92,12 @@ if (!Array.isArray(SANDBOX_CONSOLE_LEVELS) || SANDBOX_CONSOLE_LEVELS.length === 
 // ungated drift surface, in a generator that exists because an ungated surface
 // rotted (#2418, #2422).
 //
-// Emitted inside `declare namespace BimClash` so that (a) cross-references
+// Emitted inside each group's `declare namespace` so that (a) cross-references
 // between the extracted declarations resolve verbatim, with no identifier
 // rewriting, and (b) exactly one name enters the ambient global scope —
-// `Clash`, `Vec3` and `AABB` at top level would collide with a script author's
-// own declarations.
+// names at top level cannot collide with a script author's own declarations.
 
 /** Sources searched for extracted declarations, in resolution order. */
-const DERIVED_TYPE_SOURCES = [
-  'packages/clash/src/types.ts',
-  'packages/clash/src/disciplines.ts',
-  'packages/spatial/src/aabb.ts',
-];
-
-/**
- * Roots of the extraction. Everything these reach, transitively, is emitted;
- * anything they reach that is NOT in DERIVED_TYPE_SOURCES is a hard error, so
- * a field added upstream can never be silently dropped from the declaration.
- */
-const DERIVED_TYPE_ROOTS = ['ClashResult', 'ClashGroup', 'ClashRule', 'ClashRulePreset'];
-
 /**
  * Type names that resolve without a declaration of ours: TypeScript keywords
  * and the `lib` globals the templates tsconfig loads (ES2022, no DOM).
@@ -121,28 +109,41 @@ const AMBIENT_TYPE_NAMES = new Set([
 ]);
 
 /**
- * Collect top-level `interface` / `type` declarations from the source files,
+ * Collect top-level types and string tuples used by typeof type aliases,
  * keyed by name. Later files do not override earlier ones — a duplicate name
  * across sources is ambiguous, so it is refused rather than silently resolved.
  */
-function collectDeclarations() {
+function collectDeclarations(sources) {
   const byName = new Map();
-  for (const rel of DERIVED_TYPE_SOURCES) {
+  for (const rel of sources) {
     const path = join(ROOT, rel);
     const text = readFileSync(path, 'utf-8');
     const sourceFile = ts.createSourceFile(path, text, ts.ScriptTarget.ES2022, true);
-    for (const statement of sourceFile.statements) {
-      if (!ts.isInterfaceDeclaration(statement) && !ts.isTypeAliasDeclaration(statement)) continue;
-      const name = statement.name.text;
+    const candidates = sourceFile.statements.flatMap(statement => {
+      if (ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)) {
+        return [{ name: statement.name.text, node: statement, sourceFile, source: rel }];
+      }
+      if (!ts.isVariableStatement(statement) || !(statement.declarationList.flags & ts.NodeFlags.Const)) return [];
+      return statement.declarationList.declarations.flatMap(node => {
+        const init = node.initializer;
+        if (!ts.isIdentifier(node.name) || !init || !ts.isAsExpression(init) ||
+            init.type.getText(sourceFile) !== 'const' || !ts.isArrayLiteralExpression(init.expression) ||
+            !init.expression.elements.every(ts.isStringLiteral)) return [];
+        const name = node.name.text;
+        return [{ name, node, sourceFile, source: rel, text: `const ${name}: readonly ${init.expression.getText(sourceFile)};` }];
+      });
+    });
+    for (const entry of candidates) {
+      const { name } = entry;
       const existing = byName.get(name);
       if (existing && existing.source !== rel) {
         console.error(
           `❌ Type '${name}' is declared in both ${existing.source} and ${rel}. ` +
-            'DERIVED_TYPE_SOURCES must resolve every name unambiguously.',
+            'BIM_DERIVED_TYPE_GROUPS must resolve every name unambiguously.',
         );
         process.exit(1);
       }
-      byName.set(name, { node: statement, sourceFile, source: rel });
+      byName.set(name, entry);
     }
   }
   return byName;
@@ -151,12 +152,15 @@ function collectDeclarations() {
 /** Every identifier used in a type position inside `node`. */
 function referencedTypeNames(node) {
   const names = new Set();
+  const typeParameters = new Set(node.typeParameters?.map(parameter => parameter.name.text));
   const visit = n => {
     if (ts.isTypeReferenceNode(n)) {
       // Only the leftmost identifier of a qualified name matters; the extracted
       // sources use none, but a `ns.Type` must not be read as `Type`.
       const root = ts.isQualifiedName(n.typeName) ? undefined : n.typeName.text;
-      if (root) names.add(root);
+      if (root && !typeParameters.has(root)) names.add(root);
+    } else if (ts.isTypeQueryNode(n) && ts.isIdentifier(n.exprName)) {
+      names.add(n.exprName.text);
     }
     ts.forEachChild(n, visit);
   };
@@ -172,6 +176,7 @@ function referencedTypeNames(node) {
  * LAST leading comment block, and only when it is JSDoc.
  */
 function declarationText(entry) {
+  if (entry.text) return entry.text;
   const { node, sourceFile } = entry;
   const full = sourceFile.getFullText();
   const body = node.getText(sourceFile);
@@ -188,11 +193,11 @@ function declarationText(entry) {
  * body. Roots come first, in declared order, then dependencies in discovery
  * order — deterministic, which the `--check` gate depends on.
  */
-function derivedTypeLines() {
-  const declarations = collectDeclarations();
+function derivedTypeGroupLines(group) {
+  const declarations = collectDeclarations(group.sources);
   const emitted = [];
   const seen = new Set();
-  const queue = [...DERIVED_TYPE_ROOTS];
+  const queue = [...group.roots];
 
   while (queue.length > 0) {
     const name = queue.shift();
@@ -202,26 +207,26 @@ function derivedTypeLines() {
     if (!entry) {
       console.error(
         `❌ Cannot extract type '${name}': it is referenced by the sandbox bim type surface ` +
-          `but declared in none of:\n${DERIVED_TYPE_SOURCES.map(s => `     ${s}`).join('\n')}\n` +
-          '   Add the file that declares it to DERIVED_TYPE_SOURCES in scripts/generate-bim-globals.mjs.',
+          `but declared in none of:\n${group.sources.map(s => `     ${s}`).join('\n')}\n` +
+          '   Add the file that declares it to this group\'s sources in scripts/lib/bim-derived-type-groups.mjs.',
       );
       process.exit(1);
     }
     emitted.push(entry);
-    for (const ref of referencedTypeNames(entry.node)) {
+    for (const ref of entry.text ? [] : referencedTypeNames(entry.node)) {
       if (AMBIENT_TYPE_NAMES.has(ref) || seen.has(ref)) continue;
       queue.push(ref);
     }
   }
 
   const lines = [
-    '// ── Clash engine types ──────────────────────────────────────────────────',
+    `// ── ${group.title} ${'─'.repeat(Math.max(1, 66 - group.title.length))}`,
     '//',
     '// Extracted by the generator from the sources below — these declarations are',
     '// the engine\'s own text, not a copy maintained in the generator:',
-    ...DERIVED_TYPE_SOURCES.map(source => `//   ${source}`),
+    ...group.sources.map(source => `//   ${source}`),
     '',
-    'declare namespace BimClash {',
+    `declare namespace ${group.namespace} {`,
   ];
   for (const entry of emitted) {
     for (const line of declarationText(entry).split('\n')) {
@@ -233,6 +238,12 @@ function derivedTypeLines() {
   lines.pop();
   lines.push('}');
   return lines;
+}
+
+function derivedTypeLines() {
+  return BIM_DERIVED_TYPE_GROUPS.flatMap((group, index) => [
+    ...(index === 0 ? [] : ['']), ...derivedTypeGroupLines(group),
+  ]);
 }
 
 /** Map an ArgType to a TypeScript type string */
@@ -402,21 +413,7 @@ const lines = [
   '  confidentiality?: string;',
   '}',
   '',
-  '/**',
-  ' * The related OBJECTS of an entity\'s structural relationships, never the',
-  ' * `IfcRel*` entities: `voids` holds the `IfcOpeningElement`s that void this',
-  ' * element, `fills` the `IfcOpeningElement` it fills, `groups` the `IfcZone` /',
-  ' * `IfcGroup` / `IfcSystem` it belongs to, `connections` the elements it is',
-  ' * joined to. The names are not EXPRESS names on purpose — IFC\'s own names',
-  ' * for these traversals are inverse attributes holding the `IfcRel*` entity,',
-  ' * which is not what these arrays contain (#2422).',
-  ' */',
-  'interface BimRelationships {',
-  '  voids: Array<{ id: number; name?: string; type: string }>;',
-  '  fills: Array<{ id: number; name?: string; type: string }>;',
-  '  groups: Array<{ id: number; name?: string }>;',
-  '  connections: Array<{ id: number; name?: string; type: string }>;',
-  '}',
+  'type BimRelationships = BimSdk.EntityRelationshipsData;',
   '',
   'interface BimModelInfo {',
   '  id: string;',
@@ -435,7 +432,7 @@ const lines = [
   '  hasTextContent: boolean;',
   '}',
   '',
-  ...derivedTypeLines(),
+  ...derivedTypeLines(), ...NAMESPACE_SCHEMAS.flatMap(ns => ns.ambientDeclarations ?? []),
   '',
   '// ── Sandbox globals ─────────────────────────────────────────────────────',
   '',

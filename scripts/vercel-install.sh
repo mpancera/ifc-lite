@@ -18,7 +18,7 @@
 # ~30-60 s; warm cache adds essentially nothing.
 set -euo pipefail
 
-# ── Prebuilt-WASM fast path (see scripts/README-vercel-cost.md §3c) ───────────
+# ── Prebuilt-WASM fast path ───────────────────────────────────────────────────
 #
 # The from-source bootstrap below re-clones emsdk and re-downloads ~270 MB of
 # wasm-binaries + the Rust toolchain on every deploy (the /vercel/cache copy
@@ -35,7 +35,17 @@ WASM_VERSION="$(node -p "require('./packages/wasm/package.json').version" 2>/dev
 WASM_TAG="@ifc-lite/wasm@${WASM_VERSION}"
 # Conservative superset: any Rust workspace change invalidates the fast path,
 # even one that doesn't reach the wasm-bindings crate. Correctness over savings.
-WASM_SRC_PATHS=(rust Cargo.lock Cargo.toml rust-toolchain.toml scripts/build-wasm.sh)
+# The list is scripts/wasm-build-inputs.txt, shared with
+# scripts/ci-wasm-prebuilt-eligible.sh and the CI WASM build cache key. An
+# unreadable, empty or invalid list leaves WASM_SRC_PATHS empty, which the guard below
+# treats as "cannot prove anything": build from source.
+# One parser for the list: `published-paths` prints nothing and exits non-zero
+# (naming the bad entry on stderr) when the list is missing or invalid, which
+# leaves the array empty.
+WASM_SRC_PATHS=()
+while IFS= read -r _line; do
+  WASM_SRC_PATHS+=("${_line}")
+done < <(node scripts/ci-wasm-cache.mjs published-paths || true)
 # Vercel's build checkout has NO usable `origin` remote (confirmed: `git fetch
 # origin` → "'origin' does not appear to be a git repository"). Fetch the tag
 # straight from the public GitHub URL instead — anonymous read needs no auth.
@@ -51,8 +61,52 @@ if [ -n "${WASM_VERSION:-}" ] && command -v git >/dev/null 2>&1; then
     git fetch --depth=1 "${WASM_REPO_URL}" "+refs/tags/${WASM_TAG}:refs/tags/${WASM_TAG}" 2>&1 \
       | sed 's/^/     git-fetch: /' || true
   fi
+  # Every pathspec must actually MATCH something at the tag before its "no diff"
+  # answer can be trusted (#3200). `git diff --quiet` exits 0 both for "nothing
+  # changed" and for "your pathspec matched nothing at either end", so a typo'd
+  # entry silently covers nothing AND moves the answer toward "reuse the
+  # prebuilt bundle". The list is scripts/wasm-build-inputs.txt, shared with
+  # scripts/ci-wasm-prebuilt-eligible.sh, and a typo there reaches both -- and
+  # THIS reader is the production half: a stale bundle here ships to a Vercel
+  # build, where the CI twin only costs runner minutes.
+  # EITHER end, matching the twin. A path DELETED since the tag still matches at
+  # the tag, and one ADDED since still matches at HEAD; only a name that exists
+  # at neither is a typo. Checking the tag alone (as this did) refuses on every
+  # newly added source path -- safe direction, wrong predicate, and it silently
+  # diverged from ci-wasm-prebuilt-eligible.sh, which the comment above claims
+  # it is kept in lock-step with. Two twins implementing one guard differently
+  # is how the next person syncing them has to rediscover which was meant.
+  _pathspecs_all_match() {
+    # Checked first: an empty array under `set -u` is an unbound-variable
+    # error on bash < 4.4, and an empty pathspec diffs the whole tree.
+    if [ "${#WASM_SRC_PATHS[@]}" -eq 0 ]; then
+      echo "🛠  scripts/wasm-build-inputs.txt is missing, empty or invalid: building from source."
+      return 1
+    fi
+    for _p in "${WASM_SRC_PATHS[@]}"; do
+      _at_tag="$(git ls-tree -r --name-only "refs/tags/${WASM_TAG}" -- "${_p}" 2>/dev/null | head -1 || true)"
+      _at_head="$(git ls-tree -r --name-only HEAD -- "${_p}" 2>/dev/null | head -1 || true)"
+      if [ -z "${_at_tag}" ] && [ -z "${_at_head}" ]; then
+        echo "🛠  WASM_SRC_PATHS entry '${_p}' matches no file at ${WASM_TAG} or at HEAD —"
+        echo "   it can only ever compare nothing, so a no-diff answer would under-report."
+        echo "   Building from source, and fix scripts/wasm-build-inputs.txt."
+        return 1
+      fi
+    done
+    return 0
+  }
+
+  # Evaluated BEFORE the branch so the refusal is not followed by the `else`
+  # arm's "Rust sources changed" line plus an empty changed-file list, which is
+  # what happened when this was inlined into the `elif`: the correct message was
+  # contradicted by a wrong one on the only path that matters.
+  _pathspecs_ok=1
+  _tag_present && { _pathspecs_all_match || _pathspecs_ok=0; }
+
   if ! _tag_present; then
     echo "🛠  Release tag ${WASM_TAG} not reachable in this clone — building WASM from source."
+  elif [ "${_pathspecs_ok}" = "0" ]; then
+    : # already explained by _pathspecs_all_match; fall through to from-source
   elif git diff --quiet "refs/tags/${WASM_TAG}" HEAD -- "${WASM_SRC_PATHS[@]}"; then
     echo "🅰  WASM source identical to ${WASM_TAG} — using prebuilt npm bundle,"
     echo "   skipping Rust toolchain + emsdk bootstrap + from-source compile."

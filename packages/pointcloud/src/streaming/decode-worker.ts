@@ -15,12 +15,13 @@
 
 /// <reference lib="webworker" />
 
-import type { StreamingPointSource } from './types.js';
+import type { PointSourceInfo, StreamingPointSource } from './types.js';
 import {
   chunkToWire,
   type WorkerRequest,
   type WorkerResponse,
 } from './protocol.js';
+import { normalizePointStride } from './stride.js';
 // Format-specific decoders are lazy-imported in `createSource` below. That
 // keeps the IIFE bundle this worker ships in (see scripts/build-worker-bundle.mjs)
 // small — only the format the consumer actually opens gets pulled into the
@@ -29,12 +30,18 @@ import {
 
 declare const self: DedicatedWorkerGlobalScope;
 
+type OpenRequest = Extract<WorkerRequest, { kind: 'open' }>;
+
 interface OpenSource {
   source: StreamingPointSource;
   abort: AbortController;
+  /** The original request, so a source without its own `reopen()` can be rebuilt. */
+  request: OpenRequest;
 }
 
 const sources = new Map<number, OpenSource>();
+/** Aborts for `open` requests that have not answered yet, by requestId (#8777). */
+const pendingOpens = new Map<number, AbortController>();
 let nextSourceId = 1;
 
 self.onmessage = (event: MessageEvent<WorkerRequest>) => {
@@ -42,6 +49,12 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
   switch (msg.kind) {
     case 'open':
       void handleOpen(msg);
+      return;
+    case 'reopen':
+      void handleReopen(msg);
+      return;
+    case 'abort-open':
+      pendingOpens.get(msg.targetRequestId)?.abort();
       return;
     case 'next':
       void handleNext(msg);
@@ -52,32 +65,108 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
     case 'abort':
       handleAbort(msg.sourceId);
       return;
+    case 'copc-open':
+    case 'copc-page':
+    case 'copc-node':
+    case 'copc-cancel':
+      void handleCopc(msg);
+      return;
   }
 };
 
-async function handleOpen(msg: Extract<WorkerRequest, { kind: 'open' }>): Promise<void> {
+/** COPC readers are closed by the same `close` message as stream sources. */
+let closeCopcSource: ((sourceId: number) => boolean) | undefined;
+
+async function handleCopc(
+  msg: Extract<WorkerRequest, { kind: 'copc-open' | 'copc-page' | 'copc-node' | 'copc-cancel' }>,
+): Promise<void> {
   try {
-    const source = await createSource(msg.format, msg.blob, {
-      label: msg.label,
-      downsample: { stride: Math.max(1, msg.stride | 0) },
-      originOffset: msg.originOffset,
-    });
-    const abort = new AbortController();
+    // Lazy like the format sources below: only COPC sessions load it.
+    const host = await import('../copc/copc-worker-host.js');
+    closeCopcSource = host.closeCopcSource;
+    await host.handleCopcRequest(msg, post, () => nextSourceId++);
+  } catch (err) {
+    if (msg.kind !== 'copc-cancel') post({ kind: 'error', requestId: msg.requestId, message: errMessage(err) });
+  }
+}
+
+async function handleOpen(msg: OpenRequest): Promise<void> {
+  // Hoisted so the catch below can release a source that was created
+  // (and possibly opened) but never made it into `sources` — see the
+  // comment at the `post()` call.
+  let opened: OpenSource | undefined;
+  // Registered before the first await, so an `abort-open` that follows this
+  // message always finds it, even mid-scan of a multi-GB file.
+  const abort = new AbortController();
+  pendingOpens.set(msg.requestId, abort);
+  try {
+    const source = await sourceFor(msg, normalizePointStride(msg.stride), msg.originOffset);
     const info = await source.open(abort.signal);
+    opened = { source, abort, request: msg };
     const sourceId = nextSourceId++;
-    sources.set(sourceId, { source, abort });
+    // Report success to the client BEFORE registering the source. If
+    // `post()` throws (e.g. a future `PointSourceInfo` field that isn't
+    // structured-cloneable), the client never learns `sourceId` and can
+    // therefore never send `close`/`abort` for it — so it must not be
+    // reachable through `sources` either, or the underlying file
+    // reader / native buffers would leak for the life of the worker.
+    // The catch below releases `source` in that case.
     post({
       kind: 'opened',
       requestId: msg.requestId,
       sourceId,
       info,
     });
+    sources.set(sourceId, opened);
+    opened = undefined; // ownership transferred to `sources`
   } catch (err) {
+    if (opened) {
+      try {
+        opened.abort.abort();
+        opened.source.close();
+      } catch (closeErr) {
+        console.warn('[decode-worker] cleanup after failed open() post failed:', errMessage(closeErr));
+      }
+    }
     post({
       kind: 'error',
       requestId: msg.requestId,
       message: errMessage(err),
     });
+  } finally {
+    pendingOpens.delete(msg.requestId);
+  }
+}
+
+/**
+ * Restart a source at a new stride and origin. A source with `reopen()` keeps
+ * what its `open()` learnt (PLY keeps its bounds scan); any other is rebuilt
+ * from the original request, as a close plus a fresh open would. On failure
+ * the source is released, and the client forgets its id.
+ */
+async function handleReopen(msg: Extract<WorkerRequest, { kind: 'reopen' }>): Promise<void> {
+  const open = sources.get(msg.sourceId);
+  if (!open) {
+    post({ kind: 'error', requestId: msg.requestId, message: `Unknown sourceId ${msg.sourceId}` });
+    return;
+  }
+  const stride = normalizePointStride(msg.stride);
+  try {
+    let info: PointSourceInfo;
+    if (open.source.reopen) {
+      info = await open.source.reopen({ stride, originOffset: msg.originOffset }, open.abort.signal);
+    } else {
+      open.source.close();
+      open.source = await sourceFor(open.request, stride, msg.originOffset);
+      info = await open.source.open(open.abort.signal);
+    }
+    // A `close` that arrived mid-reopen has already dropped this entry.
+    if (sources.get(msg.sourceId) !== open) throw new DOMException('Aborted', 'AbortError');
+    post({ kind: 'opened', requestId: msg.requestId, sourceId: msg.sourceId, info });
+  } catch (err) {
+    if (sources.get(msg.sourceId) === open) handleClose(msg.sourceId);
+    else open.source.close();
+    post({ kind: 'error', requestId: msg.requestId, message: errMessage(err) });
   }
 }
 
@@ -122,6 +211,7 @@ async function handleNext(msg: Extract<WorkerRequest, { kind: 'next' }>): Promis
 }
 
 function handleClose(sourceId: number): void {
+  if (closeCopcSource?.(sourceId)) return;
   const open = sources.get(sourceId);
   if (!open) return;
   try {
@@ -137,6 +227,15 @@ function handleAbort(sourceId: number): void {
   const open = sources.get(sourceId);
   if (!open) return;
   open.abort.abort();
+}
+
+/** The source an `open` request names, at the given stride and origin. */
+function sourceFor(
+  request: OpenRequest,
+  stride: number,
+  originOffset: readonly [number, number, number] | undefined,
+): Promise<StreamingPointSource> {
+  return createSource(request.format, request.blob, { label: request.label, downsample: { stride }, originOffset });
 }
 
 /**

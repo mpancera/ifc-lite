@@ -46,8 +46,8 @@ import {
   OVERLAY_BYTE_OFFSET,
   type IfcAttributeValue,
   type MutablePropertyView,
-  type NewEntity,
 } from '@ifc-lite/mutations';
+import { borrowedCreatedRows, registerCreatedRows, EMPTY_CREATED, type CreatedRows } from './effective-index-created-rows.js';
 import {
   getCompleteEntityIndex,
   type CompleteEntityIndex,
@@ -184,24 +184,24 @@ export function getEffectiveEntityIndex(
   const base = getCompleteEntityIndex(dataStore);
   const view = applyMutations ? (mutationView ?? null) : null;
 
-  const created = new Map<number, NewEntity>();
+  let created: CreatedRows = EMPTY_CREATED;
   if (view && typeof view.getNewEntities === 'function') {
-    for (const entity of view.getNewEntities()) created.set(entity.expressId, entity);
+    created = borrowedCreatedRows(view) ?? new Map(Array.from(view.readNewEntities?.() ?? view.getNewEntities(), entity => [entity.expressId, entity]));
   }
   const tombstones: ReadonlySet<number> =
     view && typeof view.getTombstones === 'function' ? view.getTombstones() : EMPTY_IDS;
   const retypes: ReadonlyMap<number, { newType: string }> =
     view && typeof view.getTypeMutations === 'function' ? view.getTypeMutations() : EMPTY_RETYPES;
-
   if (created.size === 0 && tombstones.size === 0 && retypes.size === 0) {
+    // @raw-entity-enumeration-ok canonical effective index uses source buckets only when no create/delete/retype changes exist
     return sourceOnly(base, dataStore.entityIndex.byType, view);
   }
+  // @raw-entity-enumeration-ok canonical overlay index copies these source buckets, then applies creates, tombstones and retypes
   return new OverlayIndex(base, dataStore.entityIndex.byType, view!, created, tombstones, retypes);
 }
 
 const EMPTY_IDS: ReadonlySet<number> = new Set<number>();
 const EMPTY_RETYPES: ReadonlyMap<number, { newType: string }> = new Map();
-
 /** Shared by {@link sourceOnly} and {@link OverlayIndex}'s `hasSourceMutation` —
  *  see that method's doc on `EffectiveEntityIndex` for why this needs to stay
  *  a cheap map-lookup-only check with no decode or parse. */
@@ -253,7 +253,7 @@ class OverlayIndex implements EffectiveEntityIndex {
   private readonly base: CompleteEntityIndex;
   private readonly sourceByType: Map<string, number[]>;
   private readonly view: MutablePropertyView;
-  private readonly created: Map<number, NewEntity>;
+  private readonly created: CreatedRows;
   private readonly tombstones: ReadonlySet<number>;
   private readonly retypes: ReadonlyMap<number, { newType: string }>;
   private cachedByType: Map<string, number[]> | null = null;
@@ -263,7 +263,7 @@ class OverlayIndex implements EffectiveEntityIndex {
     base: CompleteEntityIndex,
     sourceByType: Map<string, number[]>,
     view: MutablePropertyView,
-    created: Map<number, NewEntity>,
+    created: CreatedRows,
     tombstones: ReadonlySet<number>,
     retypes: ReadonlyMap<number, { newType: string }>,
   ) {
@@ -271,6 +271,7 @@ class OverlayIndex implements EffectiveEntityIndex {
     this.sourceByType = sourceByType;
     this.view = view;
     this.created = created;
+    registerCreatedRows(this, created);
     this.tombstones = tombstones;
     this.retypes = retypes;
   }
@@ -453,10 +454,10 @@ class OverlayIndex implements EffectiveEntityIndex {
 
   get byType(): Map<string, number[]> {
     if (this.cachedByType) return this.cachedByType;
-    // Shallow copy: the arrays are SHARED with the store until a key actually
-    // changes, and every key that changes is replaced with a fresh array. The
-    // store's own index is never mutated.
+    // Arrays stay SHARED with the store until a key changes; a changed key gets ONE fresh
+    // array (`owned`) that later appends grow: the store is never mutated, N appends are O(N).
     const out = new Map(this.sourceByType);
+    const owned = new Set<string>();
 
     const removeByType = new Map<string, Set<number>>();
     const markRemoved = (id: number): void => {
@@ -473,17 +474,15 @@ class OverlayIndex implements EffectiveEntityIndex {
     }
     for (const [type, ids] of removeByType) {
       const arr = out.get(type);
-      if (arr) out.set(type, arr.filter((id) => !ids.has(id)));
+      if (arr) { out.set(type, arr.filter((id) => !ids.has(id))); owned.add(type); }
     }
 
     const append = (type: string, id: number): void => {
       const arr = out.get(type);
-      out.set(type, arr ? [...arr, id] : [id]);
+      if (arr && owned.has(type)) arr.push(id);
+      else { out.set(type, arr ? [...arr, id] : [id]); owned.add(type); }
     };
-    for (const id of this.created.keys()) {
-      const type = this.typeOf(id);
-      if (type) append(type, id);
-    }
+    for (const id of this.created.keys()) { const type = this.typeOf(id); if (type) append(type, id); }
     for (const [id, retype] of this.retypes) {
       if (this.created.has(id) || this.tombstones.has(id) || !this.base.has(id)) continue;
       const target = retype.newType.toUpperCase();
@@ -548,7 +547,7 @@ function groupsFromAttributeValues(
  * the position it names, same precedence as the overlay-created branch: a
  * `getAttributeMutationsForEntity` override (resolved to a slot via
  * {@link getAttributeNamesAcrossSchemas}, cross-schema for the identical
- * reason `applyAttributeMutations` in `step-exporter.ts` is) wins, else a
+ * reason `applyAttributeMutations` in `step-attribute-mutations.ts` is) wins, else a
  * `getPositionalMutationsForEntity` override at that index, else the raw
  * text's own group stands.
  *

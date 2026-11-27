@@ -15,7 +15,8 @@
 
 use std::collections::HashMap;
 
-use ifc_lite_core::{EntityDecoder, EntityScanner};
+use ifc_lite_core::{keyword_eq, slot, EntityDecoder, EntityScanner};
+use ifc_lite_processing::data_model::type_assignments::TypeAssignments;
 
 /// Relationships resolved from one pass over the file.
 #[derive(Debug, Clone, Default)]
@@ -36,7 +37,8 @@ pub struct Relationships {
     ///
     /// One type defines many occurrences, so the map is keyed by occurrence: it
     /// answers "what is this?" for a product in hand, which is the direction a
-    /// consumer asks in.
+    /// consumer asks in. An occurrence typed twice takes the FIRST type in file
+    /// order, as the inheritance merge does (D42); it used to take the last.
     pub type_of: HashMap<u32, u32>,
 }
 
@@ -53,56 +55,54 @@ pub fn relationships(content: &[u8]) -> Relationships {
     // back without a `decode_by_id` to justify it.
     let mut decoder = EntityDecoder::new(content);
     let mut out = Relationships::default();
+    let mut types = TypeAssignments::new();
 
     let mut scanner = EntityScanner::new(content);
     while let Some((id, type_name, start, end)) = scanner.next_entity() {
-        match type_name {
-            "IFCPROJECT" => out.project = out.project.or(Some(id)),
+        if keyword_eq(type_name, "IFCPROJECT") {
+            out.project = out.project.or(Some(id));
+        } else if keyword_eq(type_name, "IFCRELAGGREGATES") {
             // IfcRelAggregates: RelatingObject(4), RelatedObjects(5, list)
-            "IFCRELAGGREGATES" => {
-                if let Ok(rel) = decoder.decode_at_with_id(id, start, end) {
-                    if let Some(parent) = rel.get(4).and_then(|a| a.as_entity_ref()) {
-                        if let Some(list) = rel.get(5).and_then(|a| a.as_list()) {
-                            for c in list {
-                                if let Some(cid) = c.as_entity_ref() {
-                                    out.spatial_children.entry(parent).or_default().push(cid);
-                                }
+            if let Ok(rel) = decoder.decode_at_with_id(id, start, end) {
+                if let Some(parent) = rel.ref_at(slot::IfcRelAggregates::RELATING_OBJECT) {
+                    if let Some(list) = rel.attr(slot::IfcRelAggregates::RELATED_OBJECTS).and_then(|a| a.as_list()) {
+                        for c in list {
+                            if let Some(cid) = c.as_entity_ref() {
+                                out.spatial_children.entry(parent).or_default().push(cid);
                             }
                         }
                     }
                 }
             }
+        } else if keyword_eq(type_name, "IFCRELCONTAINEDINSPATIALSTRUCTURE") {
             // IfcRelContainedInSpatialStructure: RelatedElements(4, list), RelatingStructure(5)
-            "IFCRELCONTAINEDINSPATIALSTRUCTURE" => {
-                if let Ok(rel) = decoder.decode_at_with_id(id, start, end) {
-                    if let Some(parent) = rel.get(5).and_then(|a| a.as_entity_ref()) {
-                        if let Some(list) = rel.get(4).and_then(|a| a.as_list()) {
-                            for c in list {
-                                if let Some(cid) = c.as_entity_ref() {
-                                    out.spatial_children.entry(parent).or_default().push(cid);
-                                }
+            if let Ok(rel) = decoder.decode_at_with_id(id, start, end) {
+                if let Some(parent) = rel.ref_at(slot::IfcRelContainedInSpatialStructure::RELATING_STRUCTURE) {
+                    if let Some(list) = rel.attr(slot::IfcRelContainedInSpatialStructure::RELATED_ELEMENTS).and_then(|a| a.as_list()) {
+                        for c in list {
+                            if let Some(cid) = c.as_entity_ref() {
+                                out.spatial_children.entry(parent).or_default().push(cid);
                             }
                         }
                     }
                 }
             }
+        } else if keyword_eq(type_name, "IFCRELDEFINESBYTYPE") {
             // IfcRelDefinesByType: RelatedObjects(4, list), RelatingType(5)
-            "IFCRELDEFINESBYTYPE" => {
-                if let Ok(rel) = decoder.decode_at_with_id(id, start, end) {
-                    if let Some(ty) = rel.get(5).and_then(|a| a.as_entity_ref()) {
-                        if let Some(list) = rel.get(4).and_then(|a| a.as_list()) {
-                            for o in list {
-                                if let Some(oid) = o.as_entity_ref() {
-                                    out.type_of.insert(oid, ty);
-                                }
+            if let Ok(rel) = decoder.decode_at_with_id(id, start, end) {
+                if let Some(ty) = rel.ref_at(slot::IfcRelDefinesByType::RELATING_TYPE) {
+                    if let Some(list) = rel.attr(slot::IfcRelDefinesByType::RELATED_OBJECTS).and_then(|a| a.as_list()) {
+                        for o in list {
+                            if let Some(oid) = o.as_entity_ref() {
+                                types.record(oid, ty);
                             }
                         }
                     }
                 }
             }
-            _ => {}
         }
     }
+    out.type_of = types.first_wins().iter().map(|(&object, &ty)| (object, ty)).collect();
     out
 }
 
@@ -149,6 +149,18 @@ END-ISO-10303-21;
         );
     }
 
+    /// EXPORT-DATA-3 (D42, #7783): an occurrence typed twice resolves to the
+    /// first `IfcRelDefinesByType` in file order, the type the inheritance
+    /// merge uses, not the last.
+    #[test]
+    fn an_occurrence_typed_twice_takes_the_first_type() {
+        let twice = String::from_utf8(FILE.to_vec()).unwrap().replace(
+            "#12=IFCRELDEFINESBYTYPE('d',$,$,$,(#3),#4);",
+            "#12=IFCRELDEFINESBYTYPE('d',$,$,$,(#3),#4);\n#13=IFCRELDEFINESBYTYPE('e',$,$,$,(#3),#5);\n#5=IFCWALLTYPE('u',$,'U',$,$,$,$,$,$,.STANDARD.);",
+        );
+        assert_eq!(relationships(twice.as_bytes()).type_of.get(&3), Some(&4));
+    }
+
     /// A file with no relationships is empty, not a failure. Plenty of real
     /// files carry only geometry.
     #[test]
@@ -186,5 +198,22 @@ END-ISO-10303-21;
             "the aggregation edge is independent of the broken containment"
         );
         assert_eq!(r.type_of.get(&3), Some(&4));
+    }
+
+    /// STEP keyword case is not significant and the scanner returns the
+    /// keyword as written; a `match` on uppercase literals used to see none
+    /// of these relationships in a lowercase-keyword file.
+    #[test]
+    fn lowercase_keywords_resolve_the_same_relationships() {
+        // The fixture's attributes are quoted strings, `$` and enums this
+        // function never reads, so lowercasing the whole buffer recases only
+        // what matters.
+        let lower = FILE.to_ascii_lowercase();
+        assert!(lower.windows(20).any(|w| w == b"#10=ifcrelaggregates"), "fixture was not recased");
+        let upper = relationships(FILE);
+        let recased = relationships(&lower);
+        assert_eq!(recased.project, upper.project);
+        assert_eq!(recased.spatial_children, upper.spatial_children);
+        assert_eq!(recased.type_of, upper.type_of);
     }
 }

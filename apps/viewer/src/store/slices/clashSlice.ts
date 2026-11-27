@@ -21,9 +21,8 @@ import type {
   ClashReviewStatus,
   ClashSortBy,
 } from '@ifc-lite/clash';
-import { CLASH_REVIEW_STATUSES, DEFAULT_CLASH_REVIEW_STATUS, groupClashes } from '@ifc-lite/clash';
+import { CLASH_REVIEW_STATUSES, DEFAULT_CLASH_REVIEW_STATUS } from '@ifc-lite/clash';
 import {
-  applyClashExclusions,
   exclusionRuleKey,
   type ClashExclusionRule,
 } from '@/lib/clash/exclusions';
@@ -50,32 +49,34 @@ import {
   loadReviews,
   loadSettings,
   saveExclusions,
+  presetsStoreIdentically,
   savePresets,
   saveReviews,
   saveSettings,
+  settingsAlreadyStored,
   validatePresetName,
   validateSelector,
   CLASH_BOUNDS,
   clampToBounds,
   DEFAULT_CLASH_SETTINGS,
+  storedPresetToPreset,
   type ClashPreset,
   type ClashGlobalSettings,
   type ClashSettingsGroupBy,
   type SaveResult,
 } from '@/lib/clash/persistence';
+import { deriveGroups } from './clash-result-projection';
 import { reportClashSettingsSaveFailure } from '@/lib/clash/settings-save-notice';
 
 export type ClashGroupBy = ClashSettingsGroupBy;
 export type { ClashPreset, ClashGlobalSettings, SaveResult };
 export type { ClashExclusionRule };
 
-/** Fields a user supplies when adding a custom rule (id/flags filled in here). */
-export type NewClashPreset = {
-  name: string;
+/** Fields a user supplies when adding a custom rule (id/flags filled in here).
+ *  Derived from `ClashPreset` so an optional side filter (#3902), or any later
+ *  addition, reaches `createClashPreset` without a second list to keep in step. */
+export type NewClashPreset = Omit<ClashPreset, 'id' | 'enabled' | 'builtin' | 'description'> & {
   description?: string;
-  severity: ClashPreset['severity'];
-  selectorA: string;
-  selectorB: string;
 };
 
 export interface ClashSlice {
@@ -110,7 +111,7 @@ export interface ClashSlice {
    */
   clashGroupsKind: 'derived' | 'manual' | null;
   clashRunning: boolean;
-  clashError: string | null;
+  clashError: string | null; /** See lib/clash/clash-error-kind.ts. */ clashErrorKind: 'unavailable' | 'unknown-target' | 'refused' | 'stale' | 'internal' | null;
   /**
    * Monotonic count of COMPLETED detection runs (all-clashes, matrix, preset,
    * duplicate scan). Bumped by `useClash` right after each successful
@@ -132,6 +133,7 @@ export interface ClashSlice {
   clashReportTouch: boolean;
   /** How the result list is organized (persisted). */
   clashGroupBy: ClashGroupBy;
+  clashSettingsSaveRefused: boolean;
   /** Result-list sort key - view state, kept in the store so it survives a
    *  panel switch instead of resetting to default each time. (#1464) */
   clashSortBy: ClashSortBy;
@@ -148,6 +150,7 @@ export interface ClashSlice {
    * presets); never wiped by `clearClash`. (#1468)
    */
   clashReviews: Map<string, ClashReview>;
+  clashReviewsSaveRefused: boolean;
   /** Which review statuses are shown in the panel list (view filter). (#1468) */
   clashStatusFilter: Set<ClashReviewStatus>;
   /**
@@ -182,9 +185,9 @@ export interface ClashSlice {
    * The focused clash's CONTACT geometry as a flat world-frame line-list (the
    * real shared-face polygon outlines / intersection lines). Preferred over the
    * AABB `clashOverlapBox` when present. `null` when no clash is focused or the
-   * contact could not be computed (then the box is used). (#1402)
+   * contact could not be computed (then the box is used). (#1402) Drawn in `clashOverlap` (#5490).
    */
-  clashContactLines: { vertices: number[]; color: [number, number, number, number] } | null;
+  clashContactLines: { vertices: number[] } | null;
   /**
    * Whether the focused clash's region box is drawn in the 3D view. On by
    * default (#1402): with the tight contact bounds (#1362 Bug B) the box marks
@@ -287,7 +290,7 @@ export interface ClashSlice {
   setClashGroups: (groups: ClashGroup[] | null) => void;
   bumpClashRunSeq: () => void;
   setClashRunning: (running: boolean) => void;
-  setClashError: (error: string | null) => void;
+  setClashError: (...args: [error: null] | [error: string, kind: NonNullable<ClashSlice['clashErrorKind']>]) => void;
   setClashProgress: (progress: ClashProgress | null) => void;
   setClashMode: (mode: ClashMode) => void;
   setClashTolerance: (tolerance: number) => void;
@@ -303,7 +306,7 @@ export interface ClashSlice {
   setClashSelectedId: (id: string | null) => void;
   setClashHighlightColors: (colors: Map<number, [number, number, number, number]> | null) => void;
   setClashOverlapBox: (box: { min: [number, number, number]; max: [number, number, number] } | null) => void;
-  setClashContactLines: (lines: { vertices: number[]; color: [number, number, number, number] } | null) => void;
+  setClashContactLines: (lines: { vertices: number[] } | null) => void;
   setShowClashRegionBox: (show: boolean) => void;
   /** `focusClash` kicked off the on-demand solid compute for the pair now focused. */
   setClashSolidComputing: () => void;
@@ -366,8 +369,12 @@ export interface ClashSlice {
   /**
    * Replace the entire clash config (presets + detection settings) and persist.
    * Used when activating a flavor/profile so each one carries its own rule-set.
+   *
+   * All-or-nothing: the two writes go to two independent localStorage keys, so
+   * a refused write (quota, or storage blocked entirely) is undone and nothing
+   * is committed to the store. Callers report `result.message`.
    */
-  applyClashFlavorConfig: (config: { presets: ClashPreset[]; settings: ClashGlobalSettings }) => void;
+  applyClashFlavorConfig: (config: { presets: ClashPreset[]; settings: ClashGlobalSettings }) => SaveResult;
   clearClash: () => void;
 }
 
@@ -425,7 +432,7 @@ const CLASH_FOCUS_RESET = {
 } as const satisfies Partial<ClashSlice>;
 
 /** Build the persisted settings blob from current slice state. */
-function snapshotSettings(s: ClashSlice): ClashGlobalSettings {
+export function snapshotSettings(s: ClashSlice): ClashGlobalSettings {
   return {
     mode: s.clashMode,
     tolerance: s.clashTolerance,
@@ -434,60 +441,6 @@ function snapshotSettings(s: ClashSlice): ClashGlobalSettings {
     clusterEpsilon: s.clashClusterEpsilon,
     reportTouch: s.clashReportTouch,
     groupBy: s.clashGroupBy,
-  };
-}
-
-/**
- * Everything derived from (raw result × exclusion rules): the filtered result,
- * its clusters, each rule's reach and the suppressed total — PLUS the single
- * gate that keeps this derivation from clobbering a `'manual'` grouping it did
- * not produce (`setClashGroups`, the duplicate scan's coincident-SET view).
- *
- * `clashResult` / `clashExclusionCounts` / `clashSuppressedCount` are always
- * recomputed from `raw` — exclusions must keep filtering a duplicate scan's
- * result too. Only the `clashGroups` field is gated: this is `@ifc-lite/clash`
- * grouping module (spatial clusters, no per-run identity), not a duplicate-
- * scan detector, and it must never overwrite a grouping some OTHER writer
- * produced unless it also owns a genuinely new raw result to derive from.
- *
- * `newRun` distinguishes the two situations that call this:
- * - `true` (only from `setClashResult`): `raw` just changed — a real
- *   detection/scan completed. Any prior manual override was for the
- *   PREVIOUS run's clashes, which no longer exist, so it is superseded
- *   unconditionally.
- * - `false` (`setClashClusterEpsilon`, `commitExclusions`): `raw` is
- *   UNCHANGED — nothing was re-run, only a setting changed. This derivation
- *   did not produce the current `'manual'` grouping (if any) and has no basis
- *   to replace it, so it leaves `clashGroups`/`clashGroupsKind` alone.
- *
- * This is the ONLY place `clashGroups` is computed from `clashRawResult` — a
- * future re-derivation site should route through here (not call
- * `groupClashes` directly) to inherit the guard for free.
- */
-function deriveGroups(
-  state: Pick<ClashSlice, 'clashGroups' | 'clashGroupsKind'>,
-  raw: ClashResult | null,
-  rules: readonly ClashExclusionRule[],
-  clusterEpsilon: number,
-  newRun: boolean,
-): Pick<ClashSlice, 'clashResult' | 'clashGroups' | 'clashGroupsKind' | 'clashExclusionCounts' | 'clashSuppressedCount'> {
-  const { result, counts, suppressed } = applyClashExclusions(raw, rules);
-  if (!newRun && state.clashGroupsKind === 'manual') {
-    return {
-      clashResult: result,
-      clashGroups: state.clashGroups,
-      clashGroupsKind: 'manual',
-      clashExclusionCounts: counts,
-      clashSuppressedCount: suppressed,
-    };
-  }
-  const clashGroups = result ? groupClashes(result, { by: 'cluster', epsilon: clusterEpsilon }) : null;
-  return {
-    clashResult: result,
-    clashGroups,
-    clashGroupsKind: clashGroups ? 'derived' : null,
-    clashExclusionCounts: counts,
-    clashSuppressedCount: suppressed,
   };
 }
 
@@ -515,6 +468,8 @@ export const createClashSlice: StateCreator<ClashSlice, [], [], ClashSlice> = (s
    */
   const persistSettings = () => {
     const result = saveSettings(snapshotSettings(get()));
+    const refused = !result.ok;
+    if (get().clashSettingsSaveRefused !== refused) set({ clashSettingsSaveRefused: refused });
     if (result.ok || settingsSaveFailureReported) return;
     settingsSaveFailureReported = true;
     reportClashSettingsSaveFailure(result.message);
@@ -542,7 +497,7 @@ export const createClashSlice: StateCreator<ClashSlice, [], [], ClashSlice> = (s
     clashGroups: null,
     clashGroupsKind: null,
     clashRunning: false,
-    clashError: null,
+    clashError: null, clashErrorKind: null,
     clashRunSeq: 0,
     clashProgress: null,
     clashMode: initial.mode,
@@ -552,6 +507,7 @@ export const createClashSlice: StateCreator<ClashSlice, [], [], ClashSlice> = (s
     clashClusterEpsilon: initial.clusterEpsilon,
     clashReportTouch: initial.reportTouch,
     clashGroupBy: initial.groupBy,
+    clashSettingsSaveRefused: false,
     clashSortBy: 'severity',
     clashHideTouching: false,
     // Ghost (X-Ray context) by default so clicking a clash immediately reveals
@@ -561,6 +517,7 @@ export const createClashSlice: StateCreator<ClashSlice, [], [], ClashSlice> = (s
     clashFocusMode: 'ghost',
     clashPresets: buildInitialPresets(),
     clashReviews: loadReviews(),
+    clashReviewsSaveRefused: false,
     clashStatusFilter: new Set(CLASH_REVIEW_STATUSES),
     clashExclusions: loadExclusions(),
     clashExclusionCounts: new Map<string, number>(),
@@ -594,7 +551,7 @@ export const createClashSlice: StateCreator<ClashSlice, [], [], ClashSlice> = (s
     setClashGroups: (clashGroups) => set({ clashGroups, clashGroupsKind: clashGroups ? 'manual' : null }),
     bumpClashRunSeq: () => set((s) => ({ clashRunSeq: s.clashRunSeq + 1 })),
     setClashRunning: (clashRunning) => set({ clashRunning }),
-    setClashError: (clashError) => set({ clashError }),
+    setClashError: (...args) => set({ clashError: args[0], clashErrorKind: args.length === 2 ? args[1] : null }),
     setClashProgress: (clashProgress) => set({ clashProgress }),
 
     setClashMode: (clashMode) => { set({ clashMode }); persistSettings(); },
@@ -725,16 +682,15 @@ export const createClashSlice: StateCreator<ClashSlice, [], [], ClashSlice> = (s
       if (!name || !selectorA || !selectorB) {
         return { ok: false, reason: 'serialize', message: 'Name and both selectors are required.' };
       }
-      const preset: ClashPreset = {
-        id: `custom-${crypto.randomUUID()}`,
-        name,
-        description: input.description?.trim() ?? '',
-        severity: input.severity,
-        selectorA,
-        selectorB,
-        enabled: true,
-        builtin: false,
-      };
+      // Built through the same projection every READ path uses, so a preset
+      // created here and read back serializes to identical bytes —
+      // `presetsStoreIdentically` compares those bytes, key order included.
+      const id = `custom-${crypto.randomUUID()}`;
+      const description = input.description?.trim() ?? '';
+      const preset = storedPresetToPreset(
+        { ...input, id, name, description, selectorA, selectorB, enabled: true, builtin: false },
+        false,
+      );
       const next = [...get().clashPresets, preset];
       const result = savePresets(next);
       if (result.ok) set({ clashPresets: next });
@@ -797,7 +753,7 @@ export const createClashSlice: StateCreator<ClashSlice, [], [], ClashSlice> = (s
       const result = saveReviews(map);
       // Reflect the edit optimistically even if persistence hit quota, so the UI
       // stays responsive; the SaveResult lets the caller surface the failure.
-      set({ clashReviews: map });
+      set({ clashReviews: map, clashReviewsSaveRefused: !result.ok });
       return result;
     },
 
@@ -837,6 +793,109 @@ export const createClashSlice: StateCreator<ClashSlice, [], [], ClashSlice> = (s
       }),
 
     applyClashFlavorConfig: ({ presets, settings }) => {
+      // Persist FIRST, commit only if both writes landed: a flavor whose config
+      // is shown as applied but was refused by storage silently reverts to the
+      // previous flavor's rules on the next reload.
+      //
+      // The two halves live under two independent localStorage keys and there is
+      // no transaction across them, so a half-landed apply (new rule set, old
+      // tolerances) is reachable. That state is not one the user can reason
+      // about or even see is wrong, so it is undone rather than committed.
+      // Presets go first because `savePresets` rejects an over-cap rule set
+      // before it touches storage, which makes the common failure a clean no-op.
+      const previousPresets = get().clashPresets;
+      const presetsResult = savePresets(presets);
+      // The same rule the settings write below and the rollback under it both
+      // apply, applied to the write that runs FIRST: a refused write that would
+      // have stored exactly what is stored already changed nothing, so it must
+      // not fail the apply. "Nothing written, nothing to undo" is a statement
+      // about the rollback, not a reason to abort — a flavor can carry the rule
+      // set that is already stored and differ only in its thresholds (the same
+      // pairing the rollback branch below names), and then the presets key
+      // needs no write at all and the settings write still has somewhere to go.
+      // Aborting here applies neither half and reports "clash rules were not
+      // saved" over storage holding exactly those rules.
+      //
+      // `presetsStoreIdentically` compares the payloads `savePresets` itself
+      // builds, so what is compared is what would have been written; it answers
+      // `false` for anything it cannot prove identical (an unserializable rule
+      // set included), which only ever costs a refusal that was already the old
+      // behaviour. Letting the refusal pass does not make the apply succeed on
+      // its own: everything below still gates on the settings write.
+      if (!presetsResult.ok && !presetsStoreIdentically(previousPresets, presets)) {
+        return presetsResult; // nothing written, nothing to undo
+      }
+
+      const settingsResult = saveSettings(settings);
+      // The same rule the rollback below applies to the presets write, applied
+      // to this one: a refused write that would have stored exactly what is
+      // stored already changed nothing, so it must not fail the apply. A flavor
+      // can carry the settings that are on disk and differ only in its rule set
+      // — flavors that share the thresholds and swap the rules around them —
+      // and then the settings key needs no write at all: the presets write
+      // above landed, and both keys already hold the flavor's config. Aborting
+      // here would roll that write back and report "clash settings were not
+      // saved" over storage holding exactly those settings.
+      //
+      // `settingsAlreadyStored` compares against the bytes `saveSettings`
+      // itself builds, so what is compared is what would have been written; it
+      // answers `false` for anything it cannot prove identical, which only ever
+      // costs a refusal that was already the old behaviour.
+      if (!settingsResult.ok && !settingsAlreadyStored(settings)) {
+        // Put the previous rule set back so storage matches the store we are
+        // about to leave untouched. This rewrites a payload that fit a moment
+        // ago, in place of the one that just replaced it, so it should land.
+        const undo = savePresets(previousPresets);
+        // A failed undo only strands something if the write it was undoing
+        // stored a different rule set than the one already stored. A flavor can
+        // carry the rule set that is already stored and differ only in its
+        // tolerances, and then the presets write stored the same rule set over
+        // itself: storage still holds the previous rule set beside the previous
+        // settings, which is exactly what the store holds, so this is an
+        // ordinary refused settings write.
+        // `presetsStoreIdentically` compares the payloads `savePresets` itself
+        // builds, not the arrays, because `presetsToStore` drops unmodified
+        // built-ins — two rule sets that differ as arrays can store the same.
+        if (!undo.ok && !presetsStoreIdentically(previousPresets, presets)) {
+          // The rollback failed too — realistic, since genuine quota exhaustion
+          // (as opposed to one blocked key) leaves the disk full for the next
+          // write as well. The store is still correct: nothing below this
+          // branch runs, so the in-memory flavor never moved. But storage now
+          // holds the NEW presets next to the OLD settings, a hybrid the user
+          // never chose, and that pair rehydrates as-is on the next reload.
+          //
+          // There is no third write to retry and no snapshot beyond the one
+          // that just failed to fall back to, so a bigger recovery mechanism
+          // (re-reading storage back into the store, or a latch that refuses
+          // further applies) would be reacting to a failure mode this rare —
+          // a full quota surviving two consecutive writes — with a permanent
+          // behavior change. What the caller (`ExtensionHostService`, see
+          // `host.ts`) already does with a failed `SaveResult` is console.warn
+          // it, matching every other refused write in this slice; enrich the
+          // message so that warning names the real severity instead of
+          // reading like an ordinary "settings not saved" refusal.
+          //
+          // `reason` carries the same distinction in machine-readable form.
+          // Passing `settingsResult.reason` through would report `'quota'` for
+          // both halves of this branch — genuine exhaustion is what fails a
+          // rollback in the first place — leaving "recovered, storage is
+          // consistent" and "stranded, storage is not" indistinguishable in
+          // the only field a caller can branch on.
+          console.warn(
+            '[clash] flavor apply: could not restore the previous rule set after a refused settings write — storage now holds the new rule set with the previous settings:',
+            undo.message,
+          );
+          return {
+            ok: false,
+            reason: 'rollback_failed',
+            message:
+              `${settingsResult.message} The previous rule set could also not be restored ` +
+              `(${undo.message}), so saved data may no longer match what is shown.`,
+          };
+        }
+        return settingsResult;
+      }
+
       const state = get();
       set({
         clashPresets: presets,
@@ -847,6 +906,7 @@ export const createClashSlice: StateCreator<ClashSlice, [], [], ClashSlice> = (s
         clashClusterEpsilon: settings.clusterEpsilon,
         clashReportTouch: settings.reportTouch,
         clashGroupBy: settings.groupBy,
+        clashSettingsSaveRefused: false,
         // Regroup existing derived results at the flavor's cluster radius in
         // the same commit (see resetClashSettings; `newRun: false` preserves
         // a manual duplicate-scan grouping). (#2535)
@@ -858,9 +918,7 @@ export const createClashSlice: StateCreator<ClashSlice, [], [], ClashSlice> = (s
           false,
         ),
       });
-      // Persist so the activated flavor's config becomes the working set on reload.
-      savePresets(presets);
-      saveSettings(settings);
+      return { ok: true };
     },
 
     clearClash: () =>
@@ -879,7 +937,7 @@ export const createClashSlice: StateCreator<ClashSlice, [], [], ClashSlice> = (s
         clashGroups: null,
         clashGroupsKind: null,
         clashRunning: false,
-        clashError: null,
+        clashError: null, clashErrorKind: null,
         clashProgress: null,
         clashSolidRequestSeq: s.clashSolidRequestSeq + 1,
       })),

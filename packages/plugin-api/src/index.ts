@@ -33,6 +33,12 @@ export type {
   SourceProject,
   SourceRevision,
   SourceTag,
+  UploadConflict,
+  UploadOptions,
+  UploadResult,
+  UploadTarget,
+  WriteBackMode,
 } from './types.js';
 
+export { readWithProgress } from './progress.js';
 export { PLUGIN_API_VERSION, matchesGlob, satisfiesCaretRange } from './version.js';

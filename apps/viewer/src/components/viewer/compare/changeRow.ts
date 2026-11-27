@@ -9,6 +9,7 @@
  */
 
 import type { CompareRef } from '@/lib/compare/buildFingerprints';
+import { drawableMatchRefs } from '@/lib/compare/drawableRefs';
 import { isRetiringMatch } from '@/lib/compare/contentMatches';
 import type { ChangeDetail } from '@/lib/compare/describeChange';
 import type {
@@ -19,18 +20,8 @@ import type {
   DiffState,
 } from '@ifc-lite/diff';
 
-/**
- * Cap rows RENDERED per group so a huge diff can't stall the DOM.
- *
- * Applies to the Added/Changed/Deleted buckets (`ComparePanel`) and, since
- * #1891, to the Matched / Needs review sections (`CompareMatchGroups`) - the
- * content pass is on by default and a from-scratch re-export can produce one
- * match per element, so that list is the one most likely to be enormous.
- *
- * Display-only in both places: the group counts and the section-header "select
- * all in 3D" action always cover the FULL set, and the overflow is reported as
- * "+N more not shown" so a subset is never shown silently.
- */
+/** Suggestions retain an explicit display cap. Change and Matched groups
+ * use AnalysisResultList to make every row reachable with bounded DOM work. */
 export const MAX_ROWS_PER_GROUP = 1000;
 
 /** One row in the compare results list. */
@@ -95,8 +86,8 @@ export function contentMatchRows(
     const sample = match.head[0] ?? match.base[0];
     if (!sample) return; // an empty match record carries nothing to show
     const refs = retiring
-      ? match.head.map((f) => f.ref)
-      : [...match.base.map((f) => f.ref), ...match.head.map((f) => f.ref)];
+      ? drawableMatchRefs(match)
+      : [...match.base, ...match.head].map((fingerprint) => fingerprint.ref);
     rows.push({
       key: `match:${index}`,
       kind: match.kind,
@@ -173,9 +164,16 @@ export function bcfTextFromChange(
   const typeLabel = row.ifcType.replace(/^Ifc/, '');
   const name = row.name || typeLabel;
   const title = `${typeLabel} "${name}" - ${changeLabel(row)}`;
-  const lines: string[] = [
+  // `null` marks a line to be OMITTED entirely (filtered out below); `''`
+  // is reserved for an intentional blank separator (e.g. before "Data
+  // changes:"). The two must not share a value - see the filter comment.
+  const lines: (string | null)[] = [
     `Detected in model comparison: ${changeLabel(row)}.`,
-    row.key.startsWith('missing:') ? '' : `GlobalId: ${row.key}`,
+    row.key.startsWith('missing:')
+      ? null
+      : row.key.startsWith('prop:')
+        ? `Key: ${row.key.slice('prop:'.length)}`
+        : `GlobalId: ${row.key}`,
   ];
   if (detail?.geometry) {
     if (detail.geometry.movedDistance > 0) lines.push(`Moved ${detail.geometry.movedDistance.toFixed(3)} m.`);
@@ -191,5 +189,8 @@ export function bcfTextFromChange(
     }
     if (detail.data.length > 20) lines.push(`- ... and ${detail.data.length - 20} more`);
   }
-  return { title, description: lines.filter((l, i) => l !== '' || i > 0).join('\n') };
+  // Only `null` lines (omitted rows, e.g. the missing-key GlobalId) are
+  // dropped here; a real `''` separator (see the "Data changes:" push
+  // above) survives so its blank line stays in the output.
+  return { title, description: lines.filter((l): l is string => l !== null).join('\n') };
 }

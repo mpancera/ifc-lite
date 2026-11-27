@@ -16,10 +16,6 @@ function userMessage(text: string) {
   return { role: 'user' as const, content: { type: 'text' as const, text } };
 }
 
-function systemMessage(text: string) {
-  return { role: 'system' as const, content: { type: 'text' as const, text } };
-}
-
 export const auditModel: Prompt = {
   name: 'audit_model',
   description: 'Run the model_audit tool and explain the top issues by impact, suggesting fixes.',
@@ -28,9 +24,9 @@ export const auditModel: Prompt = {
     return {
       description: 'Comprehensive model health check',
       messages: [
-        systemMessage('You are a senior BIM modeler reviewing IFC quality.'),
         userMessage(
           [
+            'You are a senior BIM modeler reviewing IFC quality.\n',
             'Run `model_audit` on the loaded model',
             args.model_id ? ` (model_id="${args.model_id}")` : '',
             '. For each ERROR-severity issue, explain in plain language: ',
@@ -62,7 +58,7 @@ export const findFireRatedDoors: Prompt = {
           `2. For each non-compliant door, call \`bcf_topic_create\` titled "Fire rating below ${minimum} on <DoorName>" with the GlobalId in the description.`,
           `3. Attach a viewpoint with the door selected via \`bcf_viewpoint_create\`.`,
           `4. Report a summary of how many doors fail and the top 5 by name.`,
-          `5. Offer to export the BCF via \`bcf_export\` to ./fire-rating-issues.bcfzip.`,
+          `5. Offer to export the BCF via \`bcf_export\` to ./fire-rating-topics.bcfzip.`,
         ].join('\n')),
       ],
     };
@@ -132,7 +128,7 @@ export const spaceProgramCheck: Prompt = {
 
 export const clashReview: Prompt = {
   name: 'clash_review',
-  description: 'Run the discipline clash matrix, group by trade, prioritize by severity.',
+  description: 'Run the discipline clash matrix, group by trade, and triage the closest clashes.',
   arguments: [
     { name: 'mode', description: 'Clash mode: hard (interpenetration) or clearance (gap).', required: false },
   ],
@@ -141,10 +137,12 @@ export const clashReview: Prompt = {
     return {
       description: 'Clash review',
       messages: [
-        systemMessage('You are a BIM coordination lead triaging clash results.'),
         userMessage([
+          'You are a BIM coordination lead triaging clash results.',
           `Run \`clash_matrix\` (mode="${mode}") on the model.`,
-          'Summarize the byRule and bySeverity breakdowns, then produce a top-20 priority list ordered by severity and |distance|.',
+          'Summarize the byRule and bySeverity breakdowns. Those are complete counts over every clash.',
+          'Then produce a top-20 list from `sampleClashes`, ordered by distance ascending: deepest penetration first in hard mode, tightest gap first in clearance mode.',
+          'Order it by distance, NOT by severity. `sampleClashes` is already selected and capped by distance, so a high-severity clash with a large distance may not be in it at all -- a severity-ranked list built from this sample would silently omit exactly the items it claims to rank. Use bySeverity for the severity picture and say so.',
           'For any discipline pair you want to drill into, follow up with `clash_check` using the two TYPE selectors (e.g. a="IfcDuct*|IfcPipe*", b="IfcWall*").',
           'Always state the display cap and how many clashes were not shown.',
         ].join('\n')),

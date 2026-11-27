@@ -15,23 +15,32 @@
 //! `point3f[]` and carry `origin` as a **double3 `xformOp:translate`** on each Mesh
 //! prim — so a georeferenced / national-grid model keeps full f64 placement precision
 //! with small (object-scale) f32 vertices, at any model extent. Element Xforms are pure
-//! identity grouping.
+//! identity grouping. The frame the pipeline baked in (its RTC offset and, for a
+//! site-local model, the site rotation) is restored ONCE, as a `matrix4d` on `/World`
+//! (`MeshFrame::world_matrix`, #7684), so the stage lands at the model's IFC world
+//! coordinates, where the GLB puts it, while every vertex stays small.
 //!
 //! Emission (`emit`) and lexical helpers (`fmt`) live in submodules; this file is the
-//! orchestration + the emittable-mesh gate.
+//! orchestration; the geometry pass and emittable-mesh gate are shared with the
+//! Rhino scene in `crate::scene_input`.
 
 mod emit;
 mod fmt;
 mod instance;
+mod material;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
 
-use ifc_lite_processing::{InstanceRecord, MeshData};
+use ifc_lite_processing::{process, InstanceRecord, MeshData};
 
+use crate::error::ExportError;
 use crate::ifc5::{project_name, spatial_children};
+use crate::scene_input::gather_with;
 use crate::model::{build_export_model, EntityRow};
 use emit::{emit_material, emit_prim, write_header, Ctx};
-use fmt::{color_key, Namer};
+use fmt::{fmt_matrix4d, Namer};
+use material::{Finishes, MaterialKey};
 
 /// Deepest spatial nesting the recursive emitter follows before it stops recursing
 /// (the subtree is then caught by the leftover / Unassigned pass). IFC spatial trees
@@ -41,6 +50,8 @@ const MAX_DEPTH: usize = 64;
 
 /// Options for USD (USDA) export.
 pub struct UsdOptions {
+    /// Opt into material-layer wall slicing; default false.
+    pub layer_slicing: bool,
     /// Written to `customLayerData.author` (a bare `author` layer metadatum is
     /// unregistered and would fail `usdchecker`).
     pub author: String,
@@ -52,40 +63,72 @@ pub struct UsdOptions {
 
 impl Default for UsdOptions {
     fn default() -> Self {
-        Self { author: "ifc-lite".to_string(), instancing: true }
+        Self {
+            layer_slicing: false,
+            author: "ifc-lite".to_string(),
+            instancing: true,
+        }
     }
 }
 
+/// Index occurrences and register their materials after the full meshes.
+fn index_instance_materials<'a>(
+    instances: &'a [InstanceRecord],
+    finishes: &Finishes,
+    materials: &mut BTreeMap<MaterialKey, [f32; 4]>,
+) -> HashMap<u32, (&'a InstanceRecord, MaterialKey)> {
+    instances
+        .iter()
+        .enumerate()
+        .map(|(index, rec)| {
+            let key = MaterialKey::new(rec.color, finishes.instances[index]);
+            materials.entry(key).or_insert(rec.color);
+            (rec.express_id, (rec, key))
+        })
+        .collect()
+}
+
 /// Export the model in `content` (raw IFC/STEP bytes) as a `.usda` (ASCII USD) string.
-pub fn export_usd(content: &[u8], opts: &UsdOptions) -> String {
+///
+/// Fail-closed like the GLB exporters: a model with no emittable mesh and no
+/// instance occurrence is [`ExportError::NoRenderGeometry`], not a stage of
+/// empty `Xform`s reported as success (#7695, EXPORT-GEOM-15). It is decided
+/// before the attribute and relationship passes, so a refusal costs one
+/// meshing pass.
+pub fn export_usd(content: &[u8], opts: &UsdOptions) -> Result<String, ExportError> {
     // Instancing-on when requested and every instance is safe; else the plain baked path.
-    let (result, use_instancing) = instance::gather(content, opts.instancing);
+    let (input, finishes) = gather_with(opts.instancing, opts.layer_slicing, None, |req| {
+        let mut finishes = Finishes::default();
+        let features = req.features.finishes(true);
+        let result = process(content, &req.features(features), &mut finishes);
+        (result, finishes)
+    });
+    let result = &input.result;
 
-    // Emittable meshes: mirror the glTF `mesh_visible` sanity gate (drop the instanced
-    // type-library class, require matched non-empty triangulated buffers) and add the
-    // USD-specific guards — all-finite coordinates and in-range indices — so a
-    // degenerate mesh can never emit non-finite `point3f`/`normal3f` (an usda parse
-    // error) or an out-of-range `faceVertexIndices` (an usdchecker error).
-    let visible: Vec<&MeshData> = result.meshes.iter().filter(|m| mesh_emittable(m)).collect();
-
+    // Emittable meshes (`scene_input::mesh_emittable`): the glTF `mesh_visible` sanity
+    // gate plus all-finite coordinates and in-range indices, so a degenerate mesh can
+    // never emit non-finite `point3f`/`normal3f` (an usda parse error) or an
+    // out-of-range `faceVertexIndices` (an usdchecker error).
     // Group full meshes by express id (an element may produce several submeshes), keeping a
     // first-appearance ORDER so the Unassigned bucket and output stay deterministic.
-    let mut meshes_by_id: HashMap<u32, Vec<&MeshData>> = HashMap::new();
+    let mut materials = BTreeMap::new();
+    let mut meshes_by_id: HashMap<u32, Vec<(&MeshData, MaterialKey)>> = HashMap::new();
     let mut mesh_order: Vec<u32> = Vec::new();
     {
         let mut seen: HashSet<u32> = HashSet::new();
-        for m in &visible {
+        for (index, m) in input.emittable_with_indices() {
             if seen.insert(m.express_id) {
                 mesh_order.push(m.express_id);
             }
-            meshes_by_id.entry(m.express_id).or_default().push(m);
+            let key = MaterialKey::new(m.color, finishes.meshes[index]);
+            materials.entry(key).or_insert(m.color);
+            meshes_by_id.entry(m.express_id).or_default().push((m, key));
         }
     }
 
     // De-baked instance occurrences (empty unless instancing is active + safe).
-    let instances: &[InstanceRecord] = if use_instancing { &result.instances } else { &[] };
-    let instances_by_id: HashMap<u32, &InstanceRecord> =
-        instances.iter().map(|r| (r.express_id, r)).collect();
+    let instances = input.instances();
+    let instances_by_id = index_instance_materials(instances, &finishes, &mut materials);
 
     // One prototype per referenced template (sorted); its origin composes each occurrence's
     // local→world transform. Same mesh backs the prototype geometry AND its origin.
@@ -97,7 +140,7 @@ pub fn export_usd(content: &[u8], opts: &UsdOptions) -> String {
             let tid = r.template_express_id;
             if seen.insert(tid) {
                 proto_ids.push(tid);
-                if let Some(m) = meshes_by_id.get(&tid).and_then(|v| v.first()) {
+                if let Some((m, _)) = meshes_by_id.get(&tid).and_then(|v| v.first()) {
                     template_origin.insert(tid, m.origin);
                 }
             }
@@ -116,6 +159,8 @@ pub fn export_usd(content: &[u8], opts: &UsdOptions) -> String {
             }
         }
     }
+
+    crate::error::require_render_geometry(all_ids.len())?;
 
     // Attribute rows (GlobalId / class / Name / psets / quantities), keyed by id.
     let model = build_export_model(content);
@@ -136,7 +181,7 @@ pub fn export_usd(content: &[u8], opts: &UsdOptions) -> String {
     }
     for id in &mesh_order {
         if !info.contains_key(id) {
-            if let Some(m) = meshes_by_id.get(id).and_then(|v| v.first()) {
+            if let Some((m, _)) = meshes_by_id.get(id).and_then(|v| v.first()) {
                 info.insert(*id, (m.name.clone().unwrap_or_default(), m.ifc_type.clone()));
             }
         }
@@ -145,18 +190,6 @@ pub fn export_usd(content: &[u8], opts: &UsdOptions) -> String {
         info.entry(r.express_id)
             .or_insert_with(|| (r.name.clone().unwrap_or_default(), r.ifc_type.clone()));
     }
-
-    // Materials: distinct rounded RGBA keys over meshes AND instance occurrences (each
-    // occurrence colour needs a `/World/Looks` prim or its `material:binding` dangles).
-    let mut mat_color: HashMap<(i32, i32, i32, i32), [f32; 4]> = HashMap::new();
-    for m in &visible {
-        mat_color.entry(color_key(m.color)).or_insert(m.color);
-    }
-    for r in instances {
-        mat_color.entry(color_key(r.color)).or_insert(r.color);
-    }
-    let mut mat_keys: Vec<(i32, i32, i32, i32)> = mat_color.keys().copied().collect();
-    mat_keys.sort_unstable();
 
     let ctx = Ctx {
         children: &children,
@@ -171,17 +204,26 @@ pub fn export_usd(content: &[u8], opts: &UsdOptions) -> String {
     let mut out = String::new();
     write_header(&mut out, opts, content);
 
-    // Root /World Xform (identity — per-mesh placement rides each Mesh's transform).
+    // Root /World Xform: the baked frame back to IFC world (per-mesh placement
+    // rides each Mesh's transform below it). Omitted for a raw-IFC model, which
+    // has nothing to restore.
     out.push_str("def Xform \"World\"\n{\n");
+    if result.frame.needs_shift() {
+        // Column-major, so each 4-chunk is a USD row (the image of one axis).
+        let m = result.frame.world_matrix();
+        let rows: [[f64; 4]; 4] = std::array::from_fn(|c| std::array::from_fn(|r| m[c * 4 + r]));
+        writeln!(out, "    matrix4d xformOp:transform = {}", fmt_matrix4d(&rows)).ok();
+        out.push_str("    uniform token[] xformOpOrder = [\"xformOp:transform\"]\n");
+    }
 
     // Materials under /World/Looks.
     let mut world_names = Namer::new();
     world_names.reserve("Looks");
     world_names.reserve("Prototypes");
-    if !mat_keys.is_empty() {
+    if !materials.is_empty() {
         out.push_str("\n    def Scope \"Looks\"\n    {\n");
-        for key in &mat_keys {
-            emit_material(&mut out, 2, *key, mat_color[key]);
+        for (key, color) in materials {
+            emit_material(&mut out, 2, key, color);
         }
         out.push_str("    }\n");
     }
@@ -190,7 +232,7 @@ pub fn export_usd(content: &[u8], opts: &UsdOptions) -> String {
     if !proto_ids.is_empty() {
         out.push_str("\n    def Scope \"Prototypes\"\n    {\n");
         for tid in &proto_ids {
-            if let Some(m) = meshes_by_id.get(tid).and_then(|v| v.first()) {
+            if let Some((m, _)) = meshes_by_id.get(tid).and_then(|v| v.first()) {
                 instance::emit_prototype(&mut out, 2, &instance::proto_name(*tid), m);
             }
         }
@@ -230,38 +272,7 @@ pub fn export_usd(content: &[u8], opts: &UsdOptions) -> String {
     }
 
     out.push_str("}\n");
-    out
-}
-
-/// Emittable-mesh gate: the glTF `mesh_visible` geometry sanity (no instanced
-/// type-library duplicates, matched non-empty triangulated buffers) PLUS the
-/// USD-specific guards that keep the stage parseable/checkable: all-finite
-/// coordinates, a finite per-mesh origin, and every index within the vertex range.
-pub(super) fn mesh_emittable(m: &MeshData) -> bool {
-    if m.geometry_class == 2 {
-        return false;
-    }
-    // Triangulated: index buffer is whole triangles (so faceVertexCounts of all-3s
-    // sums to the index count — else usdchecker rejects the mesh).
-    if m.indices.len() < 3 || !m.indices.len().is_multiple_of(3) {
-        return false;
-    }
-    if m.positions.len() < 9 || !m.positions.len().is_multiple_of(3) {
-        return false;
-    }
-    if m.normals.len() != m.positions.len() {
-        return false;
-    }
-    if !m.positions.iter().all(|v| v.is_finite()) || !m.normals.iter().all(|v| v.is_finite()) {
-        return false;
-    }
-    // The per-mesh origin becomes a double3 translate; a non-finite one would
-    // silently mislocate the mesh (fmt maps it to 0), so gate it out.
-    if !m.origin.iter().all(|v| v.is_finite()) {
-        return false;
-    }
-    let vcount = (m.positions.len() / 3) as u32;
-    m.indices.iter().all(|&i| i < vcount)
+    Ok(out)
 }
 
 #[cfg(test)]

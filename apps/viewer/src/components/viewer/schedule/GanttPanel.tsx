@@ -14,31 +14,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { extractScheduleOnDemand } from '@ifc-lite/parser';
+import { createEffectiveRecordOverlay } from '@ifc-lite/sdk';
+import { getMutationViewForModel } from '@/sdk/adapters/mutation-view';
 import { useViewerStore } from '@/store';
 import { resolveScheduleSourceModelId } from '@/store/slices/schedule-edit-helpers';
 import { useIfc } from '@/hooks/useIfc';
-import { toast } from '@/components/ui/toast';
 import { Button } from '@/components/ui/button';
+import { useTranslation } from '@/i18n';
 import { GanttToolbar } from './GanttToolbar';
 import { GanttTaskTree } from './GanttTaskTree';
 import { GanttTimeline } from './GanttTimeline';
 import { GanttEmptyState } from './GanttEmptyState';
+import { GanttWorkPlanSummary } from './GanttWorkPlanSummary';
 import { GenerateScheduleDialog } from './GenerateScheduleDialog';
-import { flattenTaskTree } from './schedule-utils';
+import { flattenTaskTree, shouldApplyExtractedSchedule } from './schedule-utils';
 import { canGenerateScheduleFrom, resolveActiveDataStore } from './generate-schedule';
 import { useConstructionSequence } from './useConstructionSequence';
 import { useScheduleFileImport } from './useScheduleFileImport';
 import { useGanttSelection3DHighlight } from './useGanttSelection3DHighlight';
-import { useOverlayCompositor } from './useOverlayCompositor';
-
-interface GanttPanelProps {
-  onClose?: () => void;
-}
 
 const LEFT_PANE_WIDTH = 320;
 
-export function GanttPanel({ onClose }: GanttPanelProps) {
+export function GanttPanel() {
+  const { t } = useTranslation();
   const { ifcDataStore, models, loading, activeModelId } = useIfc();
+  const mutationVersion = useViewerStore(s => s.mutationVersion);
 
   // Resolve the active model once; shared by extraction + canGenerate.
   const activeStore = useMemo(
@@ -80,16 +80,26 @@ export function GanttPanel({ onClose }: GanttPanelProps) {
 
   /** Last schedule-extraction error message (surfaced in the empty state). */
   const [extractionError, setExtractionError] = useState<string | null>(null);
+  const [pendingSourceSchedule, setPendingSourceSchedule] = useState(false);
 
   // Extract schedule data whenever the resolved data store changes.
   useEffect(() => {
+    setPendingSourceSchedule(false);
     if (!activeStore) {
       if (scheduleData) setScheduleData(null);
       setExtractionError(null);
       return;
     }
+    const modelId = [...models].find(([, model]) => model.ifcDataStore === activeStore)?.[0]
+      ?? resolveScheduleSourceModelId(models, activeModelId, '__legacy__');
+    const state = useViewerStore.getState();
+    const hasPendingSchedule = !!state.scheduleData
+      && (state.scheduleIsEdited || state.scheduleData.tasks.some(t => !t.expressId || t.expressId <= 0));
+    const keepPending = hasPendingSchedule && state.scheduleSourceModelId === modelId;
     try {
-      const extraction = extractScheduleOnDemand(activeStore);
+      const view = getMutationViewForModel(useViewerStore, modelId);
+      const extraction = extractScheduleOnDemand(activeStore, view
+        ? { overlay: createEffectiveRecordOverlay(view, activeStore) } : undefined);
 
       // CRITICAL guard: do NOT overwrite an in-memory user-edited /
       // generated schedule with null just because the underlying
@@ -102,10 +112,12 @@ export function GanttPanel({ onClose }: GanttPanelProps) {
       // an exported IFC with no task entities and an empty Gantt on
       // re-import. Only replace when the extraction actually has data,
       // or when we've previously had no schedule in memory.
-      const s = useViewerStore.getState();
-      const hasPendingSchedule = !!s.scheduleData && s.scheduleData.tasks.length > 0
-        && (s.scheduleIsEdited || s.scheduleData.tasks.some(t => !t.expressId || t.expressId <= 0));
-      if (extraction.hasSchedule) {
+      if (keepPending) {
+        setPendingSourceSchedule(extraction.hasSchedule);
+        setExtractionError(null);
+        return;
+      }
+      if (shouldApplyExtractedSchedule(extraction, hasPendingSchedule)) {
         // New extraction wins — this is the "fresh file with a real
         // schedule" case. Any generated tail in memory is replaced;
         // that's intentional because we can't reconcile it with a
@@ -119,21 +131,18 @@ export function GanttPanel({ onClose }: GanttPanelProps) {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.warn('[GanttPanel] Failed to extract schedule', err);
-      setScheduleData(null);
+      if (keepPending) setPendingSourceSchedule(true);
+      else setScheduleData(null);
       setExtractionError(message);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeStore]);
-
-  // Single compositor — reads the overlay-layer registry and writes the
-  // composite into the renderer's legacy hiddenEntities / pendingColorUpdates
-  // channels. Must be mounted BEFORE any layer owner in the render tree so
-  // its first reconcile can observe their initial contributions.
-  useOverlayCompositor();
+  }, [activeStore, activeModelId, models, mutationVersion]);
 
   // Drive the 3D viewport's hidden-entity set from the playback clock.
-  // Registers the 'animation' overlay layer; the compositor above does
-  // the actual write.
+  // Registers the 'animation' overlay layer; the single compositor mounted
+  // by `ViewerLayout` (`useOverlayCompositor`) does the actual write, so a
+  // layer registered by any panel — docked, floating or popped out — is
+  // composited by exactly one writer.
   useConstructionSequence();
 
   // Highlight the current Gantt selection's products in 3D. Selection-only
@@ -145,6 +154,16 @@ export function GanttPanel({ onClose }: GanttPanelProps) {
     () => flattenTaskTree(scheduleData, expandedTaskGlobalIds, activeWorkScheduleId || undefined),
     [scheduleData, expandedTaskGlobalIds, activeWorkScheduleId],
   );
+
+  // Calendar globalId -> name, for the per-row calendar badge. Only
+  // calendars with a name make it in; an unnamed one has nothing to show.
+  const calendarNamesByGlobalId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const cal of scheduleData?.workCalendars ?? []) {
+      if (cal.name) map.set(cal.globalId, cal.name);
+    }
+    return map;
+  }, [scheduleData]);
 
   // Shared scroll position between task list and timeline (so rows line up).
   const [scrollTop, setScrollTop] = useState(0);
@@ -210,6 +229,13 @@ export function GanttPanel({ onClose }: GanttPanelProps) {
   };
 
   const showEmpty = !scheduleData || !scheduleRange || rows.length === 0;
+  const hasWorkPlans = scheduleData?.workSchedules.some(item => item.kind === 'WorkPlan') ?? false;
+  const selectedScheduleEmpty = Boolean(
+    scheduleData
+    && scheduleData.tasks.length > 0
+    && activeWorkScheduleId
+    && rows.length === 0,
+  );
 
   // Keyboard shortcuts for schedule undo/redo — active only while the
   // Gantt panel (or a descendant) has focus, so the shortcut doesn't
@@ -238,6 +264,7 @@ export function GanttPanel({ onClose }: GanttPanelProps) {
       className="h-full w-full flex flex-col overflow-hidden bg-background outline-none"
       tabIndex={-1}
       onKeyDown={onPanelKeyDown}
+      data-own-history=""
     >
       <input
         ref={importFileInputRef}
@@ -248,13 +275,22 @@ export function GanttPanel({ onClose }: GanttPanelProps) {
       />
 
       <GanttToolbar
-        onClose={onClose}
         onOpenGenerate={() => setGenerateOpen(true)}
         onOpenImport={() => importFileInputRef.current?.click()}
         canGenerate={canGenerate}
       />
 
+      {scheduleData && (
+        <GanttWorkPlanSummary workSchedules={scheduleData.workSchedules} />
+      )}
+
       <GenerateScheduleDialog open={generateOpen} onOpenChange={setGenerateOpen} />
+
+      {pendingSourceSchedule && scheduleData && (
+        <output className="block px-3 py-2 border-b text-xs text-muted-foreground">
+          {t('schedule.panel.pendingSourceSchedule')}
+        </output>
+      )}
 
       {pendingImport && (
         <div
@@ -266,13 +302,13 @@ export function GanttPanel({ onClose }: GanttPanelProps) {
           className="px-3 py-2 bg-destructive/5 border-b flex items-center gap-2 text-xs"
         >
           <span className="text-muted-foreground">
-            Importing &quot;{pendingImport.fileName}&quot; will replace the current schedule and its undo history.
+            {t('schedule.panel.importReplaceWarning', { fileName: pendingImport.fileName })}
           </span>
           <Button variant="destructive" size="sm" onClick={confirmPendingImport} className="h-5 px-2 text-xs">
-            Replace
+            {t('schedule.panel.replace')}
           </Button>
           <Button variant="ghost" size="sm" onClick={cancelPendingImport} className="h-5 px-2 text-xs">
-            Cancel
+            {t('schedule.panel.cancel')}
           </Button>
         </div>
       )}
@@ -283,9 +319,10 @@ export function GanttPanel({ onClose }: GanttPanelProps) {
           hasModel={!!ifcDataStore || models.size > 0}
           canGenerate={canGenerate}
           extractionError={extractionError}
+          hasWorkPlans={hasWorkPlans}
+          selectedScheduleEmpty={selectedScheduleEmpty}
           onGenerate={() => setGenerateOpen(true)}
           onImport={() => importFileInputRef.current?.click()}
-          onClose={onClose}
         />
       ) : (
         <div className="flex-1 min-h-0 flex">
@@ -315,6 +352,7 @@ export function GanttPanel({ onClose }: GanttPanelProps) {
                 if (newIdx >= 0) store.moveTask(sourceGid, newIdx);
               }}
               onHover={setHoveredTaskGlobalId}
+              calendarNamesByGlobalId={calendarNamesByGlobalId}
               scrollTop={scrollTop}
               onScroll={setScrollTop}
             />

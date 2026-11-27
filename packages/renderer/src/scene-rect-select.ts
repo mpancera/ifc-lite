@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import { entityClip } from './section-exclusions.js';
 /**
  * CPU rectangle selection against bounding-box data.
  *
@@ -57,6 +58,17 @@ export interface ScreenRect {
 }
 
 /**
+ * Camera-relative projection inputs.  The GPU mesh/pick paths use the same
+ * translation-free projection at national-grid coordinates; the released
+ * geometry CPU fallback must not multiply a world-f32 matrix by 5,000 km box
+ * corners and silently select the wrong element.
+ */
+export interface RectangleRteFrame {
+    /** f64 camera origin, subtracted from every AABB corner before projection. */
+    cameraWorld: readonly [number, number, number];
+}
+
+/**
  * Every entity whose bounding box projects onto the given screen rect.
  *
  * @param boundingBoxes  World-space AABB per expressId
@@ -78,6 +90,7 @@ export function selectBoundingBoxesInRect(
     hiddenIds?: Set<number>,
     isolatedIds?: Set<number> | null,
     clip?: PickClipState | null,
+    rte?: RectangleRteFrame | null,
 ): Set<number> {
     const hits = new Set<number>();
     // A zero-sized canvas would divide the whole scene onto one texel.
@@ -102,14 +115,17 @@ export function selectBoundingBoxesInRect(
     for (const [expressId, bbox] of boundingBoxes) {
         if (hiddenIds?.has(expressId)) continue;
         if (isolatedIds !== null && isolatedIds !== undefined && !isolatedIds.has(expressId)) continue;
-        if (hasClip && boxFullyClipped(clip, bbox)) continue;
+        if (hasClip && boxFullyClipped(entityClip(clip, expressId), bbox)) continue;
 
         let allInside = true;
 
         for (let corner = 0; corner < 8; corner++) {
-            const x = (corner & 1) ? bbox.max.x : bbox.min.x;
-            const y = (corner & 2) ? bbox.max.y : bbox.min.y;
-            const z = (corner & 4) ? bbox.max.z : bbox.min.z;
+            // Keep the subtraction in JS f64. `viewProj` is deliberately the
+            // camera-translation-free RTE matrix when `rte` is present, so the
+            // following f32 coefficients only ever multiply metre-scale values.
+            const x = ((corner & 1) ? bbox.max.x : bbox.min.x) - (rte?.cameraWorld[0] ?? 0);
+            const y = ((corner & 2) ? bbox.max.y : bbox.min.y) - (rte?.cameraWorld[1] ?? 0);
+            const z = ((corner & 4) ? bbox.max.z : bbox.min.z) - (rte?.cameraWorld[2] ?? 0);
 
             // Column-major mat4 * vec4, matching what the pick shader does with
             // the same matrix: `uniforms.viewProj * vec4<f32>(position, 1.0)`.

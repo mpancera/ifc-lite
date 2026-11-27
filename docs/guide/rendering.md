@@ -42,6 +42,20 @@ flowchart TB
 
 Key rendering features include section planes for model slicing, snap detection for precision interaction, GPU picking for object selection, and measurement tools for calculating distances and angles between geometry points. For generating 2D plans and elevations from 3D models, see the [2D Drawing Guide](drawing-2d.md).
 
+## Inspecting swept-disk source geometry
+
+Select a product containing `IfcSweptDiskSolid` geometry, then open **Properties → Quantities → Derived source geometry** or **Measure → Source**. Each solid shows its source solid and directrix IDs, mapped path, effective radius, optional inner radius, complete or unsupported status, and whether a CSG operation modified the source. Complete records show analytic total and per-segment centreline lengths, plus each arc's bend magnitude and signed sweep. Click an unmodified segment row to isolate it in the centreline overlay; click it again to clear the highlight.
+
+These lengths come from the authored directrix in metres, with the viewer's display-unit preference applied. They are separate from authored IFC attributes and `IfcElementQuantity` values. A source modified by CSG may differ from the visible mesh, and an unsupported description cannot provide a derived length. The readout does not infer fabrication quantities or a bar count.
+
+## Inspecting authored extrusion profiles
+
+Select a product containing `IfcExtrudedAreaSolid` geometry and open **Properties → Quantities → Authored extrusion sources**. Each occurrence identifies its solid, mapped path, depth, extrusion direction, profile type and profile ID. Expand a profile loop to inspect its exact line and arc segments, perimeter and signed area. Expand **Source placement** to inspect the profile, solid and world transform translations and axes. Lengths and areas are converted from IFC file units to SI for display; world translation is absolute IFC Z-up metres, before the viewer's render-origin shift. A CSG-modified occurrence is marked because its authored profile can differ from the visible result. Unsupported profiles are reported without reconstructing a profile from the mesh. The section stays hidden for products with no extrusion source.
+
+With the centreline overlay enabled, the Measure tool can snap to its authored line and signed arc segments. The snap point is evaluated on the source curve in the displayed model frame, including federation alignment and model placement; the drawn line approximation does not determine it. Segment snapping stops when the overlay is off, the product is hidden or isolated away, or a CSG-modified source cannot describe the visible solid. `SnapTarget.metadata.sourceCurve` identifies the source model, product, solid, directrix, mapped path, occurrence and segment, and carries the exact source length and normalized parameter. Mesh and scan snaps remain available at the same cursor.
+
+For renderer integrations, `Renderer.setSourceSnapCurves(curves)` replaces the opt-in list used by magnetic picking. Each `SourceSnapCurve` supplies a global picking ID, authored source identity, kind (`line` or `arc`), exact length, and `pointAt(t)` evaluator in displayed Y-up world metres; signed arcs also supply `sweepAngle`. Set `affineDisplayFrame: false` when the evaluator includes a nonlinear cross-CRS reprojection, so clip handling checks the evaluated point instead of assuming linear or circular clip roots. An extremely narrow clipped span after nonlinear reprojection may have no candidate; the picker never returns a clipped point. Pass `[]` when the source overlay is hidden or its selection changes.
+
 ## Basic Setup
 
 ```typescript
@@ -67,6 +81,116 @@ function animate() {
 }
 animate();
 ```
+
+The viewer renders navigation frames at CSS resolution and restores HiDPI
+sharpness when movement settles. This reduces fill work on dense displays;
+CPU-bound scenes may see little improvement. The renderer's persistent
+`setMaxPixelRatio(ratio)` preference remains the upper bound. Pass
+`maxPixelRatio: 1` to `render()` for a single reduced-resolution frame; omit
+it for subsequent full-quality or capture frames. Invalid frame caps are
+ignored, and a frame cap cannot raise the configured maximum.
+
+`renderer.renderWithResult(options)` shares `render()`'s implementation and
+returns `true` only when that call submits a new frame without a contained
+synchronous failure. It returns `false` when the device, viewport or context
+is unavailable, or rendering fails. The existing `render()` API still returns
+void. Submission is synchronous; it does not establish GPU completion,
+asynchronous validation or image quality.
+
+Viewer captures share the normal frame's appearance and clipping options,
+and render at the configured settled resolution. The capture owns its camera
+and drawing buffer through GPU completion, presentation, and image readback;
+the navigation loop resumes afterward. Rendering another frame during those
+asynchronous waits can replace the image being exported, even at DPR1.
+Captures reject a refused render before waiting for completion or reading the
+canvas, so an earlier frame cannot stand in for the requested capture.
+
+### Mesh-only pages: `@ifc-lite/renderer/core`
+
+`@ifc-lite/renderer/core` exports the same `Renderer` and the same surface
+without point-cloud rendering and BIM ↔ scan deviation. Import from it when a
+page never loads a point cloud, and the bundler leaves out the point splat
+pipeline and its shader, the per-asset spatial index, the point picker,
+eye-dome lighting and the deviation compute pipeline:
+
+```typescript
+import { Renderer } from '@ifc-lite/renderer/core';
+
+const canvas = document.getElementById('viewer') as HTMLCanvasElement;
+const renderer = new Renderer(canvas);
+await renderer.init();
+```
+
+On a renderer from this entry, `setPointClouds`, `addPointClouds`,
+`beginPointCloudStream`, `computeDeviations`, `readDeviationAssetStats` and
+`readDeviationDistances` throw an error that names `@ifc-lite/renderer`;
+`getPointCloudAssetCount()` and `getPointCloudPointCount()` return 0. The
+`PointCloudRenderer`, `PointRenderPipeline` and deviation-statistics exports
+are only on the package root. Importing `@ifc-lite/renderer` anywhere in the
+same program installs point-cloud support for every `Renderer`, including
+ones built from the core entry.
+
+An inline cloud's optional f64 `origin` must be three finite coordinates in
+float32 range. `setPointClouds` and `addPointClouds` skip a cloud whose origin
+is not, with a warning, and it does not count toward picking (`setPointClouds`
+also skips a cloud with no points, a streamed scan's descriptor);
+`PointCloudRenderer.addAsset` throws for it. `isRenderablePointCloud(asset)`, from the
+package root, says whether a cloud renders (it has points and a renderable origin),
+for code that counts the clouds that will.
+
+## Appearance triangle mapping
+
+`expandAppearanceCorners(mesh, sourceIndices, cornerUvs, targetIndices, targetCornerNormals, targetVertexCount)` binds
+canonical authored UVs to a mesh or streamed fragment. It validates the source
+topology against `mesh.appearanceSource`, preserves exact triangle positions, installs canonical target corner normals in renderer Y-up,
+and expands welded vertices when individual corners need different UVs. The
+returned mesh records the target canonical topology for a subsequent edit.
+The canonical target vertex count bounds index references; retained unused vertices
+mean that triangle-corner count is not a valid vertex-pool bound.
+Missing or stale provenance throws; matching array lengths alone are insufficient.
+
+`equivalentAppearanceGeometry(before, after)` checks exact triangle-corner
+equivalence, including compressed-to-expanded undo/redo. Its default also checks
+normal equality; `{ allowNormalChanges: true }` permits canonical shading changes
+while still requiring exact positions and corner order. Validate the current
+history state with the strict default before applying such a transition. Both functions consume
+canonical planner data; they do not calculate IFC mapping rules. Callers retain
+ownership of the input arrays and must treat shared geometry/provenance arrays
+as immutable. Expansion allocates one vertex per triangle corner and is an
+explicit authoring operation, outside ordinary model loading.
+
+## Reversible appearance previews
+
+After model streaming and GPU uploads finish, call
+`renderer.getAppearancePreview()` to obtain the scene's owned preview API.
+`begin({ expressId, modelIndex })` claims one renderer entity and returns a
+token. Resolve federation IDs before calling it. The model index is checked
+against every part so another model cannot be edited through the token.
+
+`update(token, parts)` takes every original mesh part in order. It preserves
+exact triangle positions/normals and ownership; corner expansion through
+`expandAppearanceCorners` may represent the same triangles with UV seams.
+New bitmap content requires a new texture identity. Input geometry, image and
+UV arrays are borrowed immutable data. Textured and ordinary untextured parts
+are supported, including owners sharing a flat GPU batch. Instanced geometry,
+per-vertex mixed-owner data, released CPU geometry and unfinished uploads are
+explicitly rejected.
+
+Replacement GPU resources are staged before replacing the current preview.
+Original resources remain owned by the token until `cancel(token)` restores
+them or `commit(token)` keeps the result and releases the originals. A cancelled
+or scene-invalidated issued token can be cancelled again safely; updates and
+commits with stale/foreign tokens fail. Model removal and scene teardown release
+hidden originals as well as active previews.
+
+For a multi-object command, `prepareCommit(tokens)` validates the entire group
+and returns an idempotent commit function. Changing any prepared draft fences
+that commit before it consumes an owner. The caller must coordinate this with
+its IFC/entity transaction and image leases; the renderer does not publish IFC
+changes or manage application history. Returned `AppearanceChange` records hold
+frozen CPU mesh wrappers for before/after history, never GPU handles. Retain
+the images and arrays as long as history needs them, and request a render after
+the application publishes the completed command.
 
 ## Camera Controls
 
@@ -115,6 +239,8 @@ await camera.animateTo(
 camera.orbit(deltaX, deltaY);   // Rotate around target
 camera.pan(deltaX, deltaY);     // Move camera sideways
 camera.zoom(delta);             // Zoom in/out
+// Zoom in toward the surface under the cursor, stopping short of it (#5393):
+// camera.zoom(delta, false, x, y, w, h, false, renderer.raycastScene(x, y)?.intersection.point);
 ```
 
 ## Section Planes
@@ -172,6 +298,40 @@ sectionPlane.showOutlines = true;  // polygon outlines on the cut surfaces
 sectionPlane.normal = [0.3, 0.9, 0.1];
 sectionPlane.distance = 12.5;
 ```
+
+### Several Cutting Planes
+
+`sectionPlane` stays the primary plane: it owns the preview quad, the cut cap and the cardinal slider range. Up to seven more planes go in `extraSectionPlanes` (`MAX_EXTRA_CLIP_PLANES`; any beyond that are ignored). Each is resolved by the same code as the primary one (slider range against the model bounds, building rotation, explicit normal and distance), and a fragment is kept only where **every** enabled plane keeps it. Meshes, instanced occurrences, point clouds, shadows, GPU picking and CPU raycasting all clip against the same list, so a pick can never land on geometry another plane removed. A plane with `enabled: false` clips nothing.
+
+```typescript
+renderer.render({
+  sectionPlane: { axis: 'down', position: 40, enabled: true, flipped: false },
+  extraSectionPlanes: [
+    // `id` keys the plane's cap (see below).
+    { id: 'wing', axis: 'side', position: 25, enabled: true, flipped: true },
+    { id: 'face', axis: 'front', position: 0, enabled: true, normal: [0.6, 0, 0.8], distance: 4 },
+  ],
+});
+
+// Each plane's world-space frame (anchor and rectangle) as the last frame resolved it,
+// for labels and drag handles drawn outside the canvas.
+const frames = renderer.getSectionPlaneFrames();
+```
+
+The set can change from frame to frame (seven planes, then two, then none) without re-creating anything: the planes travel in each mesh's uniform, and a mesh drawn with no extra plane takes the same path it took before the option existed.
+
+A plane's cap comes from the cut polygons you upload for it: `renderer.uploadSection2DOverlay(polygons, lines, axis, position, range, flipped, customPlane, 'wing')`, and `renderer.clearSection2DOverlay('wing')` or `renderer.clearSection2DExtraOverlays(['face'])` to release caps. A cap is clipped by every other plane, never by its own. `sectionPlane.showGizmo = false` hides only the primary plane's preview quad.
+
+To keep chosen entities whole, pass `sectionExcludedIds`. The set uses the same full scene IDs as `hiddenIds` (federated global IDs in the viewer), and exempts those entities from both the primary and every extra section plane. Flat, colour-batched, textured and instanced meshes, their shadows, GPU picking, CPU raycasting and selection outlines agree. Hidden/isolation filtering and `clipBox` still apply. Point clouds have no IFC entity IDs and keep their existing clipping behavior.
+
+```typescript
+renderer.render({
+  sectionPlane: { axis: 'down', position: 50, enabled: true },
+  sectionExcludedIds: new Set([101, 202]),
+});
+```
+
+Omit the set or pass an empty set to restore clipping. In-place set edits take effect on the next render; picking uses a snapshot of that frame. Already-uploaded cap polygons and their outlines are filtered by `expressId`, including extra-plane caps. Standalone cap lines need `ownerId` to identify the excluded entity; unowned lines remain visible. Pass the same set in `SectionPlaneConfig.sectionExcludedIds` when generating drawings with `SectionCutter`, `cutMeshesStreaming` or `GPUSectionCutter`, so excluded entities generate no cut segments or polygons in the first place. Recompute standalone drawings after changing the set.
 
 ### Section Plane Visualization
 
@@ -266,7 +426,7 @@ canvas.addEventListener('mousemove', (e) => {
       snapToVertices: true,
       snapToEdges: true,
       snapToFaces: true,
-      snapRadius: 0.1,           // 10cm world units
+      snapRadius: 0.1,           // deprecated: ignored, screenSnapRadius is what is read
       screenSnapRadius: 20       // 20 pixels
     }
   });
@@ -300,7 +460,7 @@ canvas.addEventListener('mousemove', (e) => {
     snapOptions: {
       snapToVertices: true,
       snapToEdges: true,
-      snapRadius: 0.1,
+      snapRadius: 0.1,          // deprecated: ignored
       screenSnapRadius: 20
     }
   });
@@ -331,6 +491,119 @@ canvas.addEventListener('mousemove', (e) => {
   }
 });
 ```
+
+
+### Snapping on released geometry
+
+`raycastScene` and `raycastSceneMagnetic` test CPU mesh pieces. A host that
+releases them after GPU upload (to fit a very large model) can still measure and
+snap. It reads the pieces under the pointer back from its own storage, places
+them in the current model frame, and hands them over before the raycast:
+
+```typescript
+import type { MeshData } from '@ifc-lite/geometry';
+
+declare const pieces: MeshData[];            // read back from the host's own storage
+declare const x: number, y: number;          // canvas CSS pixels under the pointer
+const edgeLock = { edge: null, meshExpressId: null, lockStrength: 0 };
+
+const placed = pieces.map((mesh) => renderer.getScene().placeAppearanceSource!(mesh));
+renderer.setReadbackRaycastMeshes(placed, { x, y }); // tested beside resident pieces, for this ray only
+const result = renderer.raycastSceneMagnetic(x, y, edgeLock, {
+  snapOptions: { snapToVertices: true, snapToEdges: true, snapToFaces: true },
+});
+renderer.setReadbackRaycastMeshes(null);     // clear when the tool moves on
+console.log(result.snapTarget?.type);
+```
+
+The pieces follow the same hide/isolate and section-clip rules as resident ones.
+The renderer does not copy them, so the host keeps them alive while they are set.
+
+Pass the canvas point they were prepared for, `setReadbackRaycastMeshes(placed, { x, y })`.
+Then they answer only that ray under the current view, because a neighbourhood
+is not the whole scene. Check `readbackRaycastCovers(x, y)` before a raycast at a
+new point, and prepare again when it is false. Instanced occurrences read back as
+decoded shards are expanded with `materializeShardOccurrences(shard, modelIndex, keyPrefix)`,
+the same preparation an upload uses, then placed like flat pieces.
+
+### Rebuilding a released scene
+
+When the scene must be rebuilt (a content reload: realign, rebase, collaboration),
+a host that released CPU geometry cannot upload the arrays again. It first removes
+the old flat geometry with `scene.clearFlatGeometry()` (not `clear()`, which also
+destroys the instanced templates the rebuild keeps), then streams the arrays back
+from its own storage, one bounded batch at a time. A replay that rejects (a read
+failed) has already rolled back, so the host retries it like a non-complete one,
+if that reload is still current:
+
+```typescript
+import { replayReleasedGeometry } from '@ifc-lite/renderer';
+import type { MeshData } from '@ifc-lite/geometry';
+
+declare const storedSlices: string[];                            // the host's own stored batch keys
+declare function readBack(slice: string): Promise<MeshData[]>;  // reads one stored batch back
+declare const token: number, latest: () => number;               // the host's reload generation
+declare function retryLater(): void;
+
+async function* batches() {
+  for (const slice of storedSlices) yield await readBack(slice); // model-local, as stored
+}
+renderer.getScene().clearFlatGeometry(); // the old flat draw goes first; instanced templates stay
+try {
+  const result = await replayReleasedGeometry(renderer, batches(), { isCurrent: () => token === latest() });
+  if (result.status !== 'complete' && token === latest()) retryLater(); // cancelled or unavailable
+} catch {
+  if (token === latest()) retryLater(); // a read failed: the replay rolled back before rethrowing
+}
+```
+
+Each batch is uploaded through the ephemeral streaming path (GPU fragments only,
+no CPU pieces); the scene's bucket lookup still references each batch's meshes
+until the pass finalizes. The scene keeps per-entity
+bounds, so picking and framing still work, and it ends in the released state it
+started from. Replays of one scene run one at a time, each in its own pass:
+starting a newer replay does not supersede an earlier one by itself. The host
+makes the earlier replay's `isCurrent` return `false` when it starts the newer
+one; an earlier replay without `isCurrent` runs on and can still complete. A
+replay is all or nothing. Its entity bounds reach the scene only when it
+completes. One that errors, is cancelled, is superseded (its `isCurrent` turned false), fails to
+finalize or is interrupted by a device loss removes the fragments it uploaded
+and drops its bounds before returning, so replaying again never draws a batch
+twice. Picking and framing see a replay's bounds once it completes.
+
+### Device recovery of a released scene
+
+`recoverDevice()` restores an ordinary scene from its CPU pieces. A released
+scene has none, so it is refused with `cpu-geometry-released` unless the host
+registers a rebuild that puts the geometry back from its own storage:
+
+```typescript
+import { replayReleasedGeometry } from '@ifc-lite/renderer';
+import type { DecodedInstancedShard, MeshData } from '@ifc-lite/geometry';
+
+declare function storedFlatBatches(): AsyncIterable<MeshData[]>;            // the host's stored flat meshes
+declare function storedInstancedShards(): AsyncIterable<DecodedInstancedShard>; // and its stored instanced shards
+declare function modelIndexOf(shard: DecodedInstancedShard): number;          // the model each shard belongs to
+
+renderer.setReleasedSceneRebuild(async ({ device, pipeline, scene, instancedModelIndices, isCurrent, requestRender }) => {
+  const flat = await replayReleasedGeometry(
+    { getScene: () => scene, getGPUDevice: () => (isCurrent() ? device : null), getPipeline: () => pipeline, requestRender },
+    storedFlatBatches(), { isCurrent });
+  if (flat.status !== 'complete') return false;
+  for await (const shard of storedInstancedShards()) {
+    if (!instancedModelIndices.has(modelIndexOf(shard))) continue; // only templates the scene held
+    if (!isCurrent()) return false;
+    scene.addInstancedShard(device, shard, modelIndexOf(shard));
+  }
+  return true; // readiness is published only now
+});
+```
+
+The rebuild runs against the replacement device before the renderer reports
+ready. Model placements are kept; flat and instanced GPU state is reset first.
+Return `false` (or let `isCurrent()` go false) and the renderer stays lost with
+`scene-restore-failed`, so the host's recovery may retry. Pass `null` to refuse
+released scenes again.
 
 ### Magnetic Snap Configuration
 
@@ -410,6 +683,85 @@ canvas.addEventListener('click', async (e) => {
 });
 ```
 
+### Which representation item was picked
+
+`PickResult.expressId` names the product that was clicked. `PickResult.geometryItemId`
+names the `IfcRepresentationItem` that particular surface was built from, so a host can
+drill from one pane of a curtain wall down to its own entity in the IFC source instead of
+stopping at the wall. It is the same value under the same name as `MeshData.geometryItemId`
+from `@ifc-lite/geometry`, and it is reported on every pick route: the GPU pick pass over
+hydrated per-piece meshes (small models), the GPU pick pass over whole colour batches
+that models past the pick-mesh budget take, and the CPU raycast fallback.
+
+On the batch route the GPU reads only the entity from the vertex lane, so the renderer
+raycasts that one entity's retained CPU pieces along the same texel-centre ray to name
+the model and item. If that narrow raycast misses (a silhouette texel the f32 CPU test
+rounds the other way), the item is reported only when all of the entity's pieces agree on
+it. The hit point is the GPU's own: depth unprojected under the camera-relative frame the
+pass rasterised in.
+
+```typescript
+canvas.addEventListener('click', async (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const hit = await renderer.pick(e.clientX - rect.left, e.clientY - rect.top);
+  if (!hit) return;
+
+  console.log(`Product #${hit.expressId} ${store.entities.getTypeName(hit.expressId)}`);
+
+  if (hit.geometryItemId === undefined) {
+    // No item identity available for this hit. Not the same as "this product
+    // has no representation item" - see below.
+    return;
+  }
+
+  // Drill to the item's own STEP line in the original file. `entityIndex.byId`
+  // indexes every entity the file declares, representation items included; the
+  // entity table behind `store.entities` only carries products and relations,
+  // so it cannot resolve an item id.
+  const ref = store.entityIndex.byId.get(hit.geometryItemId);
+  if (ref) {
+    console.log(`Item #${ref.expressId} is a ${ref.type}`);
+    const stepLine = store.source.decodeUtf8(ref.byteOffset, ref.byteOffset + ref.byteLength);
+    console.log(stepLine); // #4711=IFCEXTRUDEDAREASOLID(...);
+  }
+});
+```
+
+`EntityRef` carries the byte range along with the type. When you hold the index as its
+concrete `CompactEntityIndex`, `getByteRange(id)` returns `{ byteOffset, byteLength }`
+on its own, without building an `EntityRef`. Its `maxExpressId` getter reads the
+highest indexed ID in constant time and returns `0` for an empty index.
+
+#### When `geometryItemId` is absent
+
+The key is left off the result, never written as `0`. A real id of `0` cannot happen
+because STEP express ids start at `#1`, so `hit.geometryItemId === undefined` is the only
+"no answer" state and it never collides with a valid id.
+
+Absent means **no item identity is available for this hit**, not that the product has no
+representation item. It is absent when:
+
+- the element fell back to the single merged mesh path, where one mesh stands for the
+  whole product;
+- the geometry came through the cached `IfcMappedItem` path, where a representation map's
+  items really are merged into one piece;
+- the hit landed on a colour-merged batch, which holds many entities at once, so whatever
+  item id the batch carries belongs to none of them individually.
+
+Every case in that list is geometry whose item identity was merged away before the pick
+ran. GPU-instanced occurrences are **not** in it: they carry their own item id, because
+the instanced wire format was extended to hold one. See
+[Item ids on instanced occurrences](./geometry.md#item-ids-on-instanced-occurrences) for
+that path, including how to tell a shard that declares no ids from a piece that has none.
+
+The list is the set of merge cases known today, not a closed set. Treat the check as the
+contract: read `geometryItemId` and handle `undefined`, rather than
+deciding up front which geometry can answer.
+
+Rectangle select stays product-level. `Renderer.pickRect` resolves to a `Set<number>` of
+express ids, which has no room for a per-item answer. Drill down with a single click on
+the piece you want.
+
 ### Multi-Selection
 
 ```typescript
@@ -433,7 +785,56 @@ selectedIds = new Set([id1, id2, id3]);
 renderer.render({ selectedIds });
 ```
 
+The renderer keeps the highlight of an unchanged selection between frames, and
+past 500 highlight copies it merges them in retained hydration order. Draw
+cost follows compatible model/origin runs rather than a copy per piece. A large
+selection draws a few merged meshes on top of the model (one per run of
+selected pieces that share a model and frame origin, more for a selection that
+spans models, origins, 2^24 id pages or more than one GPU buffer, and for
+entities merged on their own), and those meshes hold a second copy of the selected
+geometry in GPU memory, about 28 bytes per vertex and 4 per index. The pool retains
+per-piece hydration insertion order when selections grow, shrink, hide or
+isolate elements. It never regroups non-adjacent frame runs to save draws:
+that changes the last highlighted surface through glazing. Model boundaries
+retain their own mesh ownership. A selection alternating
+between origins or models can require one draw per piece, the same cost as
+highlighting every piece with its own mesh; there is no hard 500-run draw cap.
+Textured pieces reuse their existing vertex and index buffers for selection.
+They still need one highlight draw per selected piece, plus the outline-mask
+draws, but selection creates no copied textured geometry. Their uniform blocks
+share pooled buffers. The untextured highlight remains after transparent
+geometry, so glass and transparent texture texels keep the same selection
+appearance. Visibility changes filter borrowed draws while retaining selected
+GPU resources. Removal, replacement and GPU-resource retirement invalidate
+borrowed draws before the next frame uses them. Releasing CPU geometry preserves
+existing highlights while their GPU sources remain live. Mixed flat and textured
+selections retain hydration order; a flat pool never crosses a textured draw.
+
+The Set is compared by content on every frame, with one lookup per id and no
+allocation, so a new Set, a Set that grew or shrank and any edit made in place
+are seen on the next frame. The exception is a frame rendered with
+`isInteracting`: it re-reads up to 32,768 ids and continues on the next one,
+so swapping ids in place at the same count in a larger Set is seen within a
+few interactive frames. Passing a new Set avoids that.
+
 ### Raycasting
+
+Scene raycasts and magnetic snapping include regular, batched, textured and
+instanced geometry. A textured surface in front of another object participates
+in nearest-surface selection, with the same hidden/isolation filters and retained
+local origins. CPU raycasts intersect triangles; texture alpha does not cut holes
+in the picking surface. `Renderer.raycastScene()` also uses the active section
+plane and crop box; when a front triangle is clipped, the ray continues to the
+nearest visible triangle behind it.
+
+Custom `RaycastEngine` scene adapters can optionally implement
+`getTexturedMeshes()` returning owners with `expressId` and optional `modelIndex`;
+`getMeshDataPieces` supplies their retained geometry. Existing adapters without
+that capability keep their regular/batched/instanced behavior. This does not add
+texture GPU handles to the `Renderer.getScene()` interface. An adapter that drops
+CPU pieces without bumping `getPickGeometryRevision()` can also implement
+`onHostEviction(listener)`; the raycast index then releases them at once, as it
+does for `Scene`'s host-budget eviction.
 
 ```typescript
 // Full raycast with intersection details
@@ -447,8 +848,17 @@ if (result) {
   console.log(`Distance: ${intersection.distance}`);
   console.log(`Entity: #${intersection.expressId}`);
   console.log(`Triangle: ${intersection.triangleIndex}`);
+  console.log(`Federation model: ${intersection.modelIndex}`);
+  console.log(`Representation item: ${intersection.geometryItemId}`);
+  console.log(`Evaluated-surface triangle: ${intersection.sourceTriangleIndex}`);
 }
 ```
+
+`triangleIndex` is local to the rendered mesh piece. Use
+`sourceTriangleIndex` for persisted face masks: it follows
+`MeshData.appearanceSource.cornerIndices` through streaming fragments, UV seam
+expansion and textured/retained mask partitions. The key is absent when that
+mapping or the representation-item identity cannot be proved.
 
 ## Visibility Control
 
@@ -484,26 +894,37 @@ renderer.render({
 });
 ```
 
+A colour batch holds many entities. When only some of them are hidden or
+isolated away, the batch is still drawn whole from its own GPU buffers, and
+each fragment looks its entity up in a GPU table of the hidden and isolated
+ids, which the colour, shadow and pick passes share. No subset of the batch is
+rebuilt from CPU geometry, so a visibility change uploads one small id table
+instead of new vertex buffers. `hiddenIds` and `isolatedIds` keep the
+semantics above: hiding wins, an empty isolation set hides everything, and
+`null` isolates nothing. X-Ray (`transparencyOverrides`, `ghostExceptIds`) and
+lens colour promotion can still split a batch into per-alpha subsets; those
+subsets hold only visible entities.
+
 ### Basket Isolation (Viewer App)
 
 The viewer app provides a **basket** — an incremental isolation set that lets you build up a working set of entities interactively. Unlike simple isolation which replaces the set each time, the basket supports add/remove operations:
 
 | Operation | Keyboard | Toolbar | Context Menu | Description |
 |-----------|----------|---------|--------------|-------------|
-| **Set** | `I` | `=` button | Set as Basket (=) | Replace basket with current selection |
-| **Add** | `+` | `+` button | Add to Basket (+) | Add current selection to basket |
+| **Isolate** | `I` | Isolate button | Isolate selection | Replace basket with current selection and isolate it |
+| **Set** | — | Set button | Set as Basket | Replace basket with current selection |
+| **Add** | `=` or `+` | `+` button | Add to Basket | Add current selection to basket |
 | **Remove** | `-` | `-` button | Remove from Basket (-) | Remove current selection from basket |
-| **Clear** | `Esc` | — | — | Clear basket and all filters |
-| **Show All** | `A` | Eye icon | Show All | Clear hidden/isolated state |
+| **Show All** | `A` | Eye icon | Show All | Clear every filter; see below |
 
 **Workflow example:**
 
 1. Click a wall, press `I` — basket now contains just that wall (everything else hidden)
-2. Cmd+Click two doors to multi-select them, press `+` — doors are added to the basket
-3. Click a window, press `+` — window added too
+2. Cmd+Click two doors to multi-select them, press `=` or `+` — doors are added to the basket
+3. Click a window, press `=` or `+` — window added too
 4. Click the wall, press `-` — wall removed from basket, only doors and window remain
 
-The toolbar `=` button shows a badge with the current basket count when active. Multi-select (Cmd/Ctrl+Click) works with all basket operations — select multiple entities first, then press `+` or `-` to add/remove them all at once.
+The toolbar Set button shows a badge with the current basket count when active. Multi-select (Cmd/Ctrl+Click) works with all basket operations — select multiple entities first, then press `=` / `+` or `-` to add/remove them all at once.
 
 **Additional visibility shortcuts:**
 
@@ -511,8 +932,29 @@ The toolbar `=` button shows a badge with the current basket count when active. 
 |----------|--------|
 | `Del` / `Backspace` | Hide selected entity |
 | `Space` | Hide selected entity (viewport-focused only) |
-| `A` | Show all (reset hidden + isolation) |
-| `Esc` | Reset all (clear selection, basket, isolation, tools) |
+| `A` | Show all (see below for what it clears and what it keeps) |
+| `Esc` | One step per press: cancel the gesture in progress, else leave the tool, else clear the selection. Never changes visibility |
+
+**What Show All clears.** Show All, the `A` key and the context menu's Show all use one visibility-reason table (`apps/viewer/src/lib/visibility/visibility-reasons.ts`). Home changes the camera pose and fit while leaving visibility intact. At 1 model and at N models alike, Show All clears:
+
+- manual hides outside the active lens's hide set;
+- isolation (and leaves the basket view);
+- X-ray ghosting;
+- the Class filter;
+- the storey filter and Solo mode;
+- Exploded mode (levels return to Stacked);
+- hidden federated models.
+
+It deliberately **keeps** four settings that are preferences rather than filters on this view:
+
+- the active lens, with its colours and its hides;
+- the class-type toggles (Spaces, Openings, Site, …), which are remembered between sessions;
+- the Model/Types view mode;
+- classes an embedding page hid.
+
+If you manually hid an element before the active lens also hid it, the element
+stays manually hidden when you turn the lens off. Show All keeps that overlap
+with the lens without transferring ownership of your hide to the lens.
 
 ## Render Options
 
@@ -522,7 +964,8 @@ interface RenderOptions {
   clearColor?: [number, number, number, number];
 
   // Performance
-  enableDepthTest?: boolean;
+  maxPixelRatio?: number;           // This frame only, bounded by the configured cap
+  enableDepthTest?: boolean;        // deprecated: declared but never read
   enableFrustumCulling?: boolean;
   spatialIndex?: SpatialIndex;
 
@@ -707,6 +1150,13 @@ The renderer uses a Bounding Volume Hierarchy for fast raycasting:
 
 // Clear BVH cache when geometry changes significantly
 renderer.invalidateBVHCache();
+
+// True when the flat index is warm; instances may still materialize per ray
+const raycastReady = renderer.isRaycastCacheWarm();
+
+// Moving or rotating meshes in place keeps every piece's identity, so the BVH
+// and snap caches cannot see it: clear them after the edit.
+renderer.getScene().translateMeshesForEntities(new Map([[expressId, [1, 0, 0]]]));
 renderer.clearCaches();
 ```
 
@@ -754,6 +1204,77 @@ occurrences; the renderer mirrors `selectedIds`, `hiddenIds`, and
 `isolatedIds` onto the instanced pass automatically. Instancing is
 primary-model only: disable it (`enableInstancing: false` on the
 `GeometryProcessor`) for federated multi-model loads.
+
+Consumers that cache the IDs from `SceneContents.getInstancedEntityIds()` can
+read `getInstancedEntityRevision?.()` when `onGeometryChange` fires. Model
+translation and rotation leave the membership revision stable. Uploads,
+removals, and occurrence suppression can change it.
+
+## Annotation Overlays
+
+IFC annotation content — dimension lines, leaders, room labels, grid axes and their
+bubbles — is uploaded separately from meshed geometry, as world-space lines, texts
+and filled regions.
+
+```typescript
+import type { SymbolicTextInput, SymbolicFillInput } from '@ifc-lite/renderer';
+
+const labels: SymbolicTextInput[] = [
+  {
+    worldPos: [12, 3, 4],
+    dirX: 1,
+    dirZ: 0,
+    height: 0.25,
+    content: 'A',
+    alignment: 'center',
+  },
+];
+
+renderer.uploadAnnotationTexts3D(labels);
+```
+
+Each upload REPLACES the whole array, so pass everything that should be visible;
+an empty array clears the channel.
+
+### Keeping content out of the camera framing
+
+By default every uploaded text and fill grows the model's bounding box, so a
+camera fit or a "zoom to extents" will frame it. That is right for annotations,
+which are often the only content a drawing-like file has. It is wrong for
+reference content that deliberately reaches past the building — a grid bubble
+sits beyond the end of its axis, so framing on it pushes the model off screen.
+
+Set `definesExtent: false` to draw an item without letting the scene bounds grow
+to it:
+
+```typescript
+import type { SymbolicFillInput } from '@ifc-lite/renderer';
+
+const gridBubble: SymbolicFillInput = {
+  points: new Float32Array([0, 0, 1, 0, 1, 1]),
+  holesOffsets: new Uint32Array(0),
+  worldY: 3,
+  color: [0.2, 0.2, 0.2, 1],
+  // Drawn, but the camera will not frame on it.
+  definesExtent: false,
+};
+
+renderer.uploadAnnotationFills3D([gridBubble]);
+```
+
+The field is optional and defaults to `true`, so existing callers keep the
+behaviour they had. It is set per item rather than per call because an upload
+replaces the whole array — one call cannot carry both a framing annotation and a
+non-framing grid bubble otherwise.
+
+The equivalent for 3D line overlays is keyed by channel rather than per item:
+`setLineOverlay('annotation', …)` grows the bounds and `setLineOverlay('grid', …)`
+does not. The `centreline` channel is also non-framing: it is intended for a
+selected element's analytic directrix, and clearing it with
+`setLineOverlay('centreline', null)` leaves the other line channels alone.
+The centreline drawing remains visible as x-ray context through section and
+crop cuts. Magnetic snapping to its exact source curve still follows the active
+pick clipping, so a clipped-out part of that drawing is not a snap target.
 
 ## Complete Example
 
@@ -859,3 +1380,220 @@ async function createViewer() {
 - [Server Guide](server.md) - Server-based rendering
 - [2D Drawing Guide](drawing-2d.md) - Generate 2D plans and elevations
 - [API Reference](../api/typescript.md) - Complete API docs
+
+Preview cancellation rejoins only partitions of the same original flat batch,
+after every related draft closes. Committed textured owners remain separate;
+undoing them can rejoin their original cohort. Restoration respects original
+vertex/index allocation bounds and current colors. If replacement allocation
+fails, split batches remain drawable and the renderer reports a warning.
+Cohort metadata is cleared when its entities or scene are removed.
+
+## Model workspace translations
+
+`Renderer.setModelTranslation(modelIndex, [x, y, z])` sets an absolute manual
+translation in **renderer Y-up metres**. It applies to flat, textured, instanced
+and embedded pointcloud geometry assigned that model index, including later
+uploads. Pass `[0, 0, 0]` to reset. Keep each loaded model's index stable until
+it is removed; do not compact indices while its geometry remains on the GPU.
+`renderer.getScene().getModelTranslation(modelIndex)` reads the current offset
+in the same Y-up metre frame. It defaults to zero before a placement is set.
+The scene retains occurrence records and bounds after releasing CPU vertices,
+so whole-model movement remains available in GPU-resident mode.
+
+`Renderer.setModelRotation(modelIndex, angle, [px, py, pz])` turns a model's
+GPU-instanced occurrences about the vertical (+Y) axis through the render-frame
+pivot `(px, pz)` (`py` is unused — the axis is always vertical); `angle === 0`
+clears it. It is the instanced-geometry counterpart to `setModelTranslation`
+and composes with it (rotate about the pivot, then translate). It does not
+touch flat, authored, batched or point-cloud geometry — an instanced-only
+model's flat pieces, if any, must be rotated separately (e.g. by the caller's
+own bake).
+
+For a separately streamed scan, call
+`Renderer.setPointCloudTranslation(handle, [x, y, z])`. Its manual translation
+composes after the matrix passed to `setPointCloudTransform`, which accepts
+`Float64Array` as well as `Float32Array`. Pass coarse alignment matrices in
+float64 so cancellation with a manual correction happens before GPU rounding.
+`getPointCloudTransform(handle)` returns the final draw matrix for CPU spatial
+consumers. `getModelPlacementBounds(modelIndex, handle?)` returns placed bounds
+for framing a model and its streamed scan.
+
+These APIs move workspace geometry; they do not rewrite source IFC placements
+or point records. The web viewer supplies transactions, undo, persistence and
+engineering Z-up inputs on top of them. See [Repositioning models and
+pointclouds](federation.md#repositioning-models-and-pointclouds).
+
+
+## Registered raster references
+
+`renderer.getReferenceImages()` manages image and PDF-page rasters in a separate string-ID namespace. `set({ id, bitmap, corners, visible, locked, opacity }, signal?)` uploads a raster and resolves after GPU validation. Corners are renderer Y-up coordinates, ordered top-left, top-right, bottom-right, bottom-left. The viewer derives them from immutable engineering Z-up metre registration using its existing federation offset; an RTC-only rebase preserves the registration, while an incompatible map frame reports a mismatch.
+
+Keep the bitmap's inventory lease until `set` settles. The renderer owns uploaded texture and buffer resources, and never closes the caller's bitmap. Replacement retains the previous valid image until upload succeeds. `remove(id)` and `clear()` invalidate pending publication and release resources; device loss and renderer destruction do the same. Draft controllers should remove only their own IDs, rather than clearing registered references.
+
+`await references.pick(x, y, options)` uses canvas-relative CSS pixels and the same visibility options as IFC picking. It returns `{ referenceId, point, distance }` separately from IFC selection. Hidden, locked and zero-opacity references do not select. The existing scene picker supplies occlusion depth; its CPU fallback uses the picked owner's precise raycast and conservatively refuses a reference when depth cannot be recovered. Picking uses the rectangular page footprint, including transparent pixels. References depth-test against IFC geometry without writing IFC object IDs or changing BIM bounds. Overlapping translucent planes use back-to-front ordering; intersecting translucent planes retain ordinary alpha-sorting limitations.
+
+This is a visual registration API. It does not create `IfcAnnotation`, persist image bytes, or promise arbitrary CRS reprojection. Application metadata/history and IFC authoring own those operations independently.
+
+### Creating an authored owner atomically
+
+`renderer.prepareAuthoredOwner(parts)` uploads all canonical `MeshData` parts for one
+new IFC owner, including separate colours and optional retained textures, while keeping it outside the visible scene and picking index. The owner
+must not already exist, and every part must have the same object and model identity.
+`prepareTexturedOwner(mesh)` remains the single textured-part convenience entry point.
+Keep the borrowed mesh buffers immutable until disposal. Clear/rebuild or placement
+changes invalidate an outstanding preparation. Call the returned `commit()` after the matching IFC
+transaction is ready, then publish the model/history state in the same synchronous
+turn. Always call `dispose()` in `finally`; it releases an uncommitted upload and
+leaves a committed scene owner intact. Keep the source image retained through the
+owner's model and undo history lifetimes. This API inserts native-produced geometry;
+it does not construct IFC entities or synthesize geometry from a reference image.
+
+### Glazing and sun shadows
+
+The World view and WebGPU renderer use `DEFAULT_MIN_CAST_ALPHA` from
+`@ifc-lite/renderer` as the authored material opacity floor for sun-shadow
+casting. Geometry below this floor receives shadows without blocking direct
+sunlight. Opaque window frames and walls still cast; X-Ray ghost styling does
+not change a material’s shadow-casting classification.
+
+### Gaussian preparation and readiness
+
+`Renderer.getGaussianReadiness()` reports `initializing`, `blocked`, `lost`, or
+`disposed`, with the renderer's lifetime generation. A ready IFC renderer still
+reports Gaussian `blocked`, listing its release blockers in `reasons` and what the
+internal adapter implements in `capabilities`. There is no `ready` state: exact
+mixed transparency, scalable global ordering and the qualified native-viewer
+contract are outstanding. No flag, decode or successful upload changes that. The
+capability `nearest-glass-split` means splats compose exactly with one transparent
+layer; `exact-mixed-transparency` stays in `reasons` because splats between two
+transparent layers, and splats in X-ray, remain approximate. The reasons describe
+what the adapter does not prove; since the 2026-11-03 release decision they are
+disclosed limitations, not launch gates.
+`upstream` is `missing` once the backend has loaded and found that the installed
+upstream renderer cannot order reverse-Z depth, normally on the first valid
+`add()`. Before that check it is `unknown`.
+
+`normalizeGaussianAttributes({ count, shDegree, columns })` converts upstream
+PLY-space float32 columns to source-local render arrays. It exponentiates
+`scale_0..2`, applies the sigmoid to `opacity`, normalizes WXYZ `rot_0..3`, and
+converts `f_dc_0..2` to unclamped float RGBA radiance. The alpha channel is one;
+opacity remains separate. Non-DC `f_rest_*` columns are repacked from PLY
+channel-major order to row-major, basis-major RGB triplets. Missing, non-finite,
+degenerate, or non-representable covariance data throws. No coordinate flip,
+reconstruction scale, placement, or RTC translation is inferred.
+
+Normalization allocates independent CPU arrays and borrows the raw inputs without
+mutation or detachment. Successful normalization is not render readiness.
+
+### Internal Gaussian adapter (unqualified)
+
+`Renderer.gaussianSplats` is an internal adapter for qualification work, not a
+public feature. Every call to `add()` must pass
+`{ qualification: 'internal-unqualified' }`; it never changes readiness.
+
+<!-- docs-check: skip -->
+```ts
+const handle = await renderer.gaussianSplats.add(
+  { attributes, placement: { matrix }, modelIndex },
+  { qualification: 'internal-unqualified', signal },
+);
+// After a successful add() the renderer owns `attributes` and reads them again on
+// setPlacement(): keep them unchanged during add() and do not touch them afterwards.
+renderer.gaussianSplats.setVisible(handle, false);
+await renderer.gaussianSplats.setPlacement(handle, { matrix: next });
+renderer.gaussianSplats.remove(handle);
+```
+
+- **Rendering.** Upstream luma.gl `SplatRenderer` draws on the renderer's own
+  `GPUDevice` inside its frame: one extra pass after the main pass loads the
+  colour target, tests the shared reverse-Z depth read-only and performs the MSAA
+  resolve. There is no second canvas or device. The adapter never destroys the
+  device, command encoder or attachments it borrows.
+- **Composition with transparent IFC (nearest-glass split).** When a frame draws
+  splats and transparent IFC (glass, X-Ray ghosts, translucent overrides), the main
+  pass holds back every draw from its first transparent one to its end (transparent
+  IFC, the selection highlight, then points, reference images and overlays), recorded
+  as issued. After the main pass:
+  1. the held transparent draws replay depth-only (same vertex stage and depth
+     nudge, same fragment discards, no colour) into P1, the nearest transparent
+     depth per sample (far where there is none);
+  2. splats whose depth is at or behind P1 draw, testing opaque depth as before;
+  3. the held draws replay exactly as recorded, in their established order;
+  4. splats in front of P1 draw and the MSAA resolve runs.
+
+  Each splat sample is drawn exactly once: both splat passes compare the same
+  depth with the same P1 value, with complementary tests. The result is exact
+  where a sample has at most one transparent layer in front of opaque geometry, and
+  for splats behind or in front of every layer. Splats lying between two
+  transparent layers are drawn before all of them (approximate). Frames without
+  transparent IFC keep the single splat pass, unchanged, and frames without visible
+  splats record nothing extra. Perspective and orthographic views, 1x and 4x MSAA,
+  batched, instanced, individual, quantized and X-Ray ghost draws, and section
+  clipping all take part.
+
+  `getStats().compositionReport` describes the last splat frame: `composition` is
+  `nearest-glass-split`, `no-transparent`, or `over-transparent-approximate` with a
+  `fallback` (`single-pass-mode`, `pipelines-compiling` while the depth-only
+  variants compile, `unsupported-draw`, `upstream-interval-missing`, `split-failed`
+  after a split failure). A failing frame reports `composition: 'split-failed'` and
+  may be incomplete: already recorded draws cannot be retracted, so no further splat
+  pass is attempted. A redraw requests a clean single pass; this stays sticky until
+  device recovery or a renderer rebuild (`GaussianGlassComposer.release()`), or a new
+  device. Changing composition mode does not reset the failure.
+  `transparentLayers` is `multiple` when an occlusion query found a sample with two
+  or more transparent surfaces in front of opaque geometry: a closed glass solid
+  counts as two, and X-Ray ghosts report `multiple` almost always. It describes only
+  the frame that issued the query: `unknown` until that frame's own result reads back
+  (the report then updates without another frame), and a later frame starts `unknown`
+  again. Only zero versus non-zero is portable, so no sample count is reported.
+  `setCompositionMode('single-pass')` keeps the single pass over transparent IFC.
+
+  Rules in split frames: the selection highlight still draws over transparent IFC,
+  so it also covers splats behind the nearest transparent layer on the highlighted
+  surface (`highlightOverSplats`). Points, reference images and overlays keep their
+  place after transparent IFC, so the IFC look never depends on splats; they draw after
+  the splats behind the nearest layer, covering those where they lie behind them, and
+  before the splats in front of it (`laterOverBehindSplats`). Only transparent IFC
+  meshes define P1: translucent overlays and reference images draw over behind-glass
+  splats, while front-glass splats draw over them.
+  The split costs a depth32float target at the drawing-buffer size and sample count
+  (about 33 MB at 1920x1080 with 4x MSAA), two depth-only replays of the transparent
+  draws, one more transparent-pass load/store and two splat draws over one sort.
+- **Ordering.** All assets are packed into one upstream source, so upstream sorts
+  and draws them globally without a draw-run limit. Equal depths draw the earlier
+  added asset first, then source row order. The CPU sort runs per camera change.
+- **Placement.** `matrix` is a column-major 4×4 (translation at indices 12–14,
+  like the renderer's other matrices) mapping source-local coordinates to renderer
+  world space (Y-up metres) before the model's translation. Only similarity transforms are
+  accepted; reflections, shear and non-uniform scale are rejected. Covariances and
+  spherical-harmonic bands 1–3 are rotated with the placement. `placement.matrix`
+  is required; pass an explicit identity matrix for raw source coordinates. Nothing
+  is inferred: no axis flip, units, metric scale or alignment.
+- **Bounds.** `getBounds()` returns Gaussian centres in world space, for framing
+  only. It ignores Gaussian extent; never use it for geometry or measurement, and
+  frame an explicit Fit All with it. Gaussian centres never enter
+  `Renderer.getModelBounds()`, so hidden or removed captures cannot widen fits that
+  read it; the current visible centres only widen the camera's orthographic depth
+  range and, while a section or clip plane is active, its slider range. Section
+  rendering never writes that transient union back into model or camera scene
+  bounds, and preserves annotation extents.
+- **Lifecycle.** Handles are validated by identity and ids are never reused.
+  `getState()` reports `resident` only after upload on the current device;
+  during a device loss and recovery assets are `pending`, and a failed re-upload
+  reports `failed` with `reload-required`.
+- **Limitations (internal demo semantics).** Splats between two transparent layers
+  are approximate (see above). Section planes, extra planes
+  and the clip box keep or remove whole Gaussians by centre; footprints are not
+  cut and no caps are drawn. Splats write no depth or object ids: they are not
+  pickable, picks pass through them, and post-effects that read depth or ids
+  (edges, ambient occlusion, outlines) see only IFC and point geometry and are
+  drawn over splats.
+
+The workspace applies luma.gl #3619 (`depthConvention`) to `@luma.gl/splats@9.4.2`
+through `patches/@luma.gl__splats@9.4.2.patch` until an upstream release includes it.
+The same patch adds an opt-in depth-interval hook (a proposal for upstream): a
+renderer built with `depthIntervalSamples` writes only the samples whose depth
+compares to a bound depth texture as requested (`greater`, or its complement
+`less-equal`). The split reaches it only through `GaussianBackendScene.encode(…,
+interval)`, so another backend (for example a GPU-sorting one) can implement the
+same hook.

@@ -2,12 +2,23 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use super::super::broadphase::Aabb;
 use super::super::interner::Vid;
-use super::super::predicates::{orient2d_any, orient3d};
+use super::super::predicates::orient2d_any;
 use super::super::rational::point_of;
 use super::super::{DropAxis, ImplicitPoint, Sign};
+use super::coincident::coincident_planes;
+use super::ray_parity::{exact_seg_hits_tri, operand_extent, point_inside, ray_dir, sound_far};
 use super::{Arrangement, BoolOp, Tri};
 use num_traits::ToPrimitive;
+#[path = "closed_source.rs"]
+mod closed_source;
+use closed_source::strict_closed;
+#[path = "finite_patch.rs"]
+mod finite_patch;
+#[path = "classify_ray_bvh.rs"]
+mod ray_bvh;
+use finite_patch::AdjacentFaces;
 
 // --- winding classification + boolean extraction --------------------------
 
@@ -23,59 +34,6 @@ fn e(p: [f64; 3]) -> ImplicitPoint {
     ImplicitPoint::Explicit(p)
 }
 
-/// EXACT segment–triangle intersection via `orient3d` (no epsilon): the segment
-/// `q1→q2` crosses triangle `t` iff its endpoints straddle `t`'s plane AND the
-/// line passes the same side of all three edges. A grazing hit (`orient3d == 0`)
-/// is rejected — the fixed generic ray direction makes those vanishingly rare.
-fn exact_seg_hits_tri(q1: [f64; 3], q2: [f64; 3], t: &Tri) -> bool {
-    let s1 = orient3d(&e(t[0]), &e(t[1]), &e(t[2]), &e(q1));
-    let s2 = orient3d(&e(t[0]), &e(t[1]), &e(t[2]), &e(q2));
-    if s1 == Sign::Zero || s2 == Sign::Zero || s1 == s2 {
-        return false;
-    }
-    let ea = orient3d(&e(q1), &e(q2), &e(t[0]), &e(t[1]));
-    let eb = orient3d(&e(q1), &e(q2), &e(t[1]), &e(t[2]));
-    let ec = orient3d(&e(q1), &e(q2), &e(t[2]), &e(t[0]));
-    ea != Sign::Zero && ea == eb && eb == ec
-}
-
-/// Ray-cast "far" distance: just past the operand's actual extent. Critically NOT
-/// a huge constant (1e7) — that blows the orient3d float-filter error bound so
-/// EVERY predicate escalates to BigRational (≈5000× slower). Sized to the operand,
-/// the float filter resolves the common case and only true grazing escalates.
-pub(super) fn operand_extent(tris: &[Tri]) -> f64 {
-    let mut hi = 1.0f64;
-    for t in tris {
-        for v in t {
-            for &c in v {
-                hi = hi.max(c.abs());
-            }
-        }
-    }
-    2.0 * hi + 1.0
-}
-
-/// The fixed generic ray direction for parity casts. No two components
-/// near-equal and no pairwise ratio near a simple architectural slope (1:1
-/// roofs, axis planes). The previous direction had x≈y and dz/dx≈1 — nearly
-/// PARALLEL to 45° roof slopes/ridge edges, so a roof-clipped wall's ray grazed
-/// the roof and edge-crossings (rejected, not counted) miscounted parity → the
-/// sub-ridge gable triangle was wrongly judged inside the cutter and removed
-/// (the "missing wall" over-clip). Shared by [`point_inside`] and the
-/// per-component AABB ray prefilter so they can never disagree.
-fn ray_dir() -> [f64; 3] {
-    [0.301_511_3, 0.557_328_1, 0.773_890_1]
-}
-
-/// Is point `p` inside the closed mesh `tris`? Exact ray-cast parity to a far
-/// point (`far_l` past the extent) along a fixed generic direction; each crossing
-/// tested by the exact predicate above.
-pub(super) fn point_inside(p: [f64; 3], tris: &[Tri], far_l: f64) -> bool {
-    let dir = ray_dir();
-    let far = [p[0] + dir[0] * far_l, p[1] + dir[1] * far_l, p[2] + dir[2] * far_l];
-    tris.iter().filter(|t| exact_seg_hits_tri(p, far, t)).count() % 2 == 1
-}
-
 /// BVH-accelerated [`point_inside`]: the `bvh` (built over `tris`) prunes the ray
 /// to the triangles whose AABB it may cross, and the EXACT crossing test runs only
 /// on those. The BVH candidate set is a conservative superset of the exact hits,
@@ -89,8 +47,13 @@ fn point_inside_bvh(
     far_l: f64,
     scratch: &mut Vec<u32>,
 ) -> bool {
-    let dir = ray_dir();
-    let far = [p[0] + dir[0] * far_l, p[1] + dir[1] * far_l, p[2] + dir[2] * far_l];
+    // Same far-endpoint soundness guarantee as `point_inside`, taken from the
+    // BVH's root AABB (the unpadded bound over every triangle) rather than an
+    // O(N) rescan.
+    let Some(bb) = bvh.root_aabb() else {
+        return false; // empty tree, no crossings to count
+    };
+    let far = sound_far(p, ray_dir(), far_l, bb);
     scratch.clear();
     bvh.ray_candidates(p, far, scratch);
     scratch
@@ -131,8 +94,12 @@ pub(super) fn sub_f64(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
+#[cfg(test)]
 fn centroid(arr: &Arrangement, tri: [Vid; 3]) -> [f64; 3] {
-    let c = [to_f64_pt(arr, tri[0]), to_f64_pt(arr, tri[1]), to_f64_pt(arr, tri[2])];
+    centroid_of_points(tri.map(|v| to_f64_pt(arr, v)))
+}
+
+fn centroid_of_points(c: [[f64; 3]; 3]) -> [f64; 3] {
     [
         (c[0][0] + c[1][0] + c[2][0]) / 3.0,
         (c[0][1] + c[1][1] + c[2][1]) / 3.0,
@@ -140,8 +107,7 @@ fn centroid(arr: &Arrangement, tri: [Vid; 3]) -> [f64; 3] {
     ]
 }
 
-fn tri_normal(arr: &Arrangement, tri: [Vid; 3]) -> [f64; 3] {
-    let (a, b, c) = (to_f64_pt(arr, tri[0]), to_f64_pt(arr, tri[1]), to_f64_pt(arr, tri[2]));
+fn tri_normal([a, b, c]: [[f64; 3]; 3]) -> [f64; 3] {
     cross3(sub_f64(b, a), sub_f64(c, a))
 }
 
@@ -156,118 +122,10 @@ fn drop_axis_of(n: [f64; 3]) -> DropAxis {
     }
 }
 
-/// If point `c` lies exactly on a triangle of `others` (coplanar AND inside it),
-/// return that triangle's f64 normal — i.e. detect that a sub-triangle whose
-/// centroid is `c` sits on a coplanar SHARED face of the other operand.
-/// Exact in-plane containment: with `n` the un-normalised face normal of `t`, is
-/// `c` strictly inside `t`'s outline projected onto the dropped axis? Shared by the
-/// exact and near coplanar-surface tests; false for a degenerate projected `t`.
-fn point_in_tri_proj(c: [f64; 3], t: &Tri, n: [f64; 3]) -> bool {
-    let axis = drop_axis_of(n);
-    let w0 = orient2d_any(&e(t[0]), &e(t[1]), &e(t[2]), axis);
-    if w0 == Sign::Zero {
-        return false; // degenerate t in projection
-    }
-    let inside = |u: [f64; 3], v: [f64; 3]| orient2d_any(&e(u), &e(v), &e(c), axis) != w0.flip();
-    inside(t[0], t[1]) && inside(t[1], t[2]) && inside(t[2], t[0])
-}
-
-/// Per-triangle exact coincident-face test (see [`on_surface_normal`]).
-fn on_surface_tri(c: [f64; 3], t: &Tri) -> Option<[f64; 3]> {
-    if orient3d(&e(t[0]), &e(t[1]), &e(t[2]), &e(c)) != Sign::Zero {
-        return None; // c not on t's plane
-    }
-    let n = cross3(sub_f64(t[1], t[0]), sub_f64(t[2], t[0]));
-    point_in_tri_proj(c, t, n).then_some(n)
-}
-
-/// Per-triangle near-coplanar-flush test (see [`near_on_surface_normal`]); the
-/// plane-gap tolerance is resolved from `band` against THIS triangle's own
-/// normal, so an operand offset along an axis this face does not face cannot
-/// widen it.
-fn near_on_surface_tri(c: [f64; 3], t: &Tri, band: &NearBand) -> Option<[f64; 3]> {
-    let n = cross3(sub_f64(t[1], t[0]), sub_f64(t[2], t[0]));
-    let nn = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
-    if nn <= 0.0 || !nn.is_finite() {
-        return None; // degenerate t
-    }
-    let d = dot3(sub_f64(c, t[0]), n); // perp_dist · |n|, as `scaled_band2` is
-    if d * d > band.scaled_band2(n, nn) {
-        return None; // c not within the snap band of t's plane
-    }
-    point_in_tri_proj(c, t, n).then_some(n)
-}
-
-fn on_surface_normal(c: [f64; 3], others: &[Tri]) -> Option<[f64; 3]> {
-    others.iter().find_map(|t| on_surface_tri(c, t))
-}
-
-/// Canonical near-coplanar band (see [`near_on_surface_normal`]): the
-/// `SNAP_GRID` scatter envelope plus the operands' per-axis extents projected
-/// onto the plane under test, defined once in `near_band`.
+#[path = "classify_surface.rs"]
+mod surface;
+use surface::{surface_normal_near_a, near_on_surface_normal, BoundaryCentroid, on_surface_normal};
 use super::super::near_band::{NearBand, near_band_from_extent};
-
-/// The NEAR-coplanar analogue of [`on_surface_normal`], used ONLY for a
-/// sub-triangle whose parent face had a near-coplanar overlap with the other
-/// operand (`coplanar_a/b[i]` set). Returns the covering `other` face's f64 normal
-/// when `c` sits within the snap-scatter band of that face's plane AND projects
-/// strictly inside it.
-///
-/// WHY this exists — the flush-cap defect (#1007 host #1112 openings #2150/#2154):
-/// real IFC is f32, so an opening cap authored EXACTLY flush with a TILTED roof
-/// surface is NOT exactly coplanar after `mesh_bridge`'s per-axis snap — each
-/// operand scatters up to `SNAP_GRID·√3` off the shared tilted plane. The exact
-/// [`on_surface_normal`] needs `orient3d == 0` (centroid bit-exactly on the other
-/// face's plane), so it MISSES the flush cap; the sub-triangle then falls to the
-/// fragile `solid_side` probe (regime 2) or the on-boundary centroid ray-cast
-/// (regime 3), both undefined at a µm-flush interface ⇒ the inside-footprint host
-/// sub-triangle is wrongly KEPT and bridges the opening.
-///
-/// DETERMINISM: the only inexactness vs. [`on_surface_normal`] is the perpendicular
-/// plane-gap admitted (the `band` test); the in-plane containment still uses the
-/// EXACT `orient2d_any`. `band` is an absolute power-of-two multiple of `SNAP_GRID`
-/// (≈ the 2-operand scatter envelope) widened only for far-from-origin operands
-/// (coarser f32 import) — and only along the axes the tested face's normal weighs,
-/// since [`NearBand`] projects the per-axis extents onto that normal: a 10 km X
-/// offset leaves a Z-normal face at the floor instead of opening it to ~2.4 mm and
-/// welding separate surfaces (`csg/world_frame_tests.rs`). Always THREE orders
-/// below the smallest real feature edge (~0.2 m), so a distinct parallel face
-/// can never be within it. All FMA-free f64 over input coords ⇒ byte-identical
-/// native==wasm. GATED on the near-coplanar-parent flag, so a transversal cut
-/// (every pinned box−box manifest face) never reaches it.
-fn near_on_surface_normal(c: [f64; 3], others: &[Tri]) -> Option<[f64; 3]> {
-    let mut band = NearBand::default();
-    band.observe_point(&c);
-    band.observe_tris(others);
-    others.iter().find_map(|t| near_on_surface_tri(c, t, &band))
-}
-
-/// BVH-accelerated equivalent of `on_surface_normal(c, a).is_some() ||
-/// near_on_surface_normal(c, a).is_some()` — does ANY triangle of `a` carry `c` on
-/// its face (exactly or within the snap band)? `a_band` carries `a`'s per-axis
-/// coordinate extents (hoisted once per arrangement, since only `c` varies per
-/// call). The query radius is [`NearBand::radius`], the isotropic UPPER bound
-/// over every plane normal — never the max-over-axes scalar, which is NOT such
-/// a bound and could drop a candidate the per-triangle test would accept — so
-/// candidates stay a superset and the exact per-triangle predicates decide; the
-/// result is `any`, so it is candidate-order independent and byte-identical to
-/// the linear scan.
-fn c_on_or_near_a(
-    c: [f64; 3],
-    a: &[Tri],
-    bvh: &super::super::broadphase::Bvh,
-    a_band: &NearBand,
-    scratch: &mut Vec<u32>,
-) -> bool {
-    let mut band = *a_band;
-    band.observe_point(&c);
-    scratch.clear();
-    bvh.point_candidates(c, band.radius(), scratch);
-    scratch.iter().any(|&i| {
-        let t = &a[i as usize];
-        on_surface_tri(c, t).is_some() || near_on_surface_tri(c, t, &band).is_some()
-    })
-}
 
 /// Is the OTHER operand's solid present just off `c` along `±dir`?
 ///
@@ -283,7 +141,10 @@ fn c_on_or_near_a(
 /// implicit points, no BigRational escalation, const float error bounds) — so the
 /// keep/drop verdict is byte-identical native==wasm, exactly like the existing
 /// on-plane centroid classification.
-fn solid_side(c: [f64; 3], dir: [f64; 3], other: &[Tri], far_l: f64) -> (bool, bool) {
+///
+/// `other_aabb` is `other`'s box (see [`point_inside`]), hoisted once by the
+/// caller rather than rescanned for each of the two probes below.
+fn solid_side(c: [f64; 3], dir: [f64; 3], other: &[Tri], far_l: f64, other_aabb: Aabb) -> (bool, bool) {
     // Unit-normalise `dir` so the step magnitude is plane-independent, then step a
     // small fraction of the operand extent off the plane — far enough that the
     // float predicate resolves the probe vs. the plane, near enough that no other
@@ -298,7 +159,20 @@ fn solid_side(c: [f64; 3], dir: [f64; 3], other: &[Tri], far_l: f64) -> (bool, b
     let u = [dir[0] / len * step, dir[1] / len * step, dir[2] / len * step];
     let p_plus = [c[0] + u[0], c[1] + u[1], c[2] + u[2]];
     let p_minus = [c[0] - u[0], c[1] - u[1], c[2] - u[2]];
-    (point_inside(p_plus, other, far_l), point_inside(p_minus, other, far_l))
+    (
+        point_inside(p_plus, other, far_l, other_aabb),
+        point_inside(p_minus, other, far_l, other_aabb),
+    )
+}
+
+/// Opposite near faces can bound a real overlapping sliver. If the exact
+/// arranged centroid is off the other boundary, DIFFERENCE uses solid occupancy
+/// symmetrically; the shared-normal table applies to actual boundary points.
+/// Co-oriented near faces retain their flush-cap policy (#1007, #7292).
+fn opposed_difference_uses_volume(
+    op: BoolOp, own: [f64; 3], other: [f64; 3], only_opposed: bool, on_boundary: impl FnOnce() -> bool,
+) -> bool {
+    matches!(op, BoolOp::Difference) && dot3(own, other) < 0.0 && only_opposed && !on_boundary()
 }
 
 /// The B operand as PAIRWISE-DISJOINT closed components (disjoint-cutter
@@ -317,6 +191,11 @@ pub(super) struct BComponents<'a> {
     /// Per-component ray-cast far length (`operand_extent`), exactly as the
     /// binary path computes it for its single operand.
     exts: Vec<f64>,
+    closed: std::cell::OnceCell<bool>,
+    adjacency: Vec<std::cell::OnceCell<AdjacentFaces>>,
+    /// Per-component ray BVH for [`Self::inside`], built on first use, with the
+    /// largest coordinate magnitude its pad covers (see [`Self::inside`]).
+    ray_bvhs: Vec<std::cell::OnceCell<(super::super::broadphase::Bvh, f64)>>,
 }
 
 impl<'a> BComponents<'a> {
@@ -354,13 +233,23 @@ impl<'a> BComponents<'a> {
                 (lo, hi)
             })
             .collect();
-        Self { comps, aabbs, exts }
+        Self { comps, aabbs, exts, closed: std::cell::OnceCell::new(), adjacency: (0..comps.len()).map(|_| std::cell::OnceCell::new()).collect(),
+            ray_bvhs: (0..comps.len()).map(|_| std::cell::OnceCell::new()).collect() }
     }
 
     /// Conservative "could the parity segment from `p` hit component `k`?" —
     /// a slab test of `[p, p + dir·ext_k]` against the inflated AABB. Sound:
     /// the component's triangles lie inside the (un-inflated) AABB, so a
     /// segment that misses the inflated AABB has parity 0 there.
+    ///
+    /// NOTE this tests the UNEXTENDED endpoint, while the parity cast it gates
+    /// may be lengthened by [`sound_far`]. That is still sound, but only via
+    /// [`sound_far`]'s early return, so the dependency is stated here rather
+    /// than left to be re-derived: a rejection here means the short segment
+    /// missed the INFLATED box, hence the default endpoint is outside the
+    /// UN-inflated box, hence `sound_far` returns it unchanged and the segment
+    /// actually cast is the one this tested. Extending against a padded box
+    /// instead of the unpadded one would break this and silently under-count.
     fn ray_may_hit(&self, k: usize, p: [f64; 3]) -> bool {
         let dir = ray_dir();
         let far_l = self.exts[k];
@@ -395,33 +284,79 @@ impl<'a> BComponents<'a> {
     /// Is `p` inside the union of the components? (Pairwise-disjoint closed
     /// solids ⇒ inside exactly one ⇒ a per-component exact ray parity, each
     /// prefiltered by its AABB.)
+    ///
+    /// Passes the already-inflated `self.aabbs[k]` rather than rescanning `comp`.
+    /// It contains `comp`'s triangles, so the verdict is unchanged — not merely
+    /// faster: escalation counts and the boolean manifest are unaffected.
     fn inside(&self, p: [f64; 3]) -> bool {
-        self.comps
-            .iter()
-            .enumerate()
-            .any(|(k, comp)| self.ray_may_hit(k, p) && point_inside(p, comp, self.exts[k]))
+        self.comps.iter().enumerate().any(|(k, comp)| {
+            self.ray_may_hit(k, p) && self.component_inside(k, comp, p)
+        })
     }
 
     /// Regime-1 coincident-face probe across the components: the EXACT
     /// [`on_surface_normal`] on every AABB-near component first, then the
     /// snap-band [`near_on_surface_normal`] analogue (same priority order as
     /// the binary path). Disjointness makes at most one component eligible.
-    fn surface_normal(&self, c: [f64; 3]) -> Option<[f64; 3]> {
+    fn surface_normal(&self, c: [f64; 3], n_own: [f64; 3], own: &Tri, own_exact: [&ImplicitPoint; 3], bands: &[NearBand]) -> Option<[f64; 3]> {
         for (k, comp) in self.comps.iter().enumerate() {
             if self.point_in_aabb(k, c) {
-                if let Some(n) = on_surface_normal(c, comp) {
+                if let Some(n) = on_surface_normal(c, n_own, comp) {
                     return Some(n);
                 }
             }
         }
         for (k, comp) in self.comps.iter().enumerate() {
-            if self.point_in_aabb(k, c) {
-                if let Some(n) = near_on_surface_normal(c, comp) {
+            if self.point_in_surface_aabb(k, c, &bands[k]) {
+                if let Some(n) = near_on_surface_normal(c, n_own, own, own_exact, comp, &bands[k], &self.adjacency[k]) {
                     return Some(n);
                 }
             }
         }
         None
+    }
+
+    fn all_closed(&self) -> bool {
+        *self.closed.get_or_init(|| self.comps.iter().all(|c| strict_closed(c)))
+    }
+
+    fn only_opposed(&self, c: [f64; 3], n_own: [f64; 3], own: &Tri, own_exact: [&ImplicitPoint; 3], bands: &[NearBand]) -> bool {
+        self.comps.iter().enumerate().all(|(k, comp)| !self.point_in_surface_aabb(k, c, &bands[k])
+            || !surface::has_nonopposed_surface(c, n_own, own, own_exact, comp, &bands[k], &self.adjacency[k]))
+    }
+
+    /// Surface lookup alone needs the paired context's finite-projection pad.
+    /// Leave existing parity/ray boxes and their callers untouched.
+    fn point_in_surface_aabb(&self, k: usize, p: [f64; 3], band: &NearBand) -> bool {
+        let pad = 2.0 * band.radius();
+        let (lo, hi) = &self.aabbs[k];
+        (0..3).all(|i| p[i] >= (lo[i] - pad).next_down()
+            && p[i] <= (hi[i] + pad).next_up())
+    }
+
+    fn on_boundary(&self, arr: &Arrangement, tri: [Vid; 3]) -> bool {
+        let Some(centroid) = BoundaryCentroid::new(arr, tri) else { return false };
+        for comp in self.comps {
+            if super::super::budget::tripped() { return false; }
+            if centroid.on_surface(comp) { return true; }
+        }
+        false
+    }
+
+    /// Regime 2 on a coplanar parent: a shared interface without a coincident
+    /// face uses the same side-occupancy table as `on_interface_keep`.
+    fn interface_keep(&self, arr: &Arrangement, tri: [Vid; 3], c: [f64; 3],
+        n_own: [f64; 3], op: BoolOp) -> Option<bool> {
+        if !self.on_boundary(arr, tri) { return None; }
+        let (op_plus, op_minus) = self.solid_side(c, n_own);
+        if op_plus == op_minus {
+            return None; // strictly in/out — the plain ray-cast decides
+        }
+        Some(match op {
+            BoolOp::Union => !op_plus,
+            BoolOp::Intersection => op_minus,
+            BoolOp::Difference => !op_minus,
+        })
     }
 
     /// Multi-component [`solid_side`]: probe an infinitesimal step to each side
@@ -447,8 +382,9 @@ impl<'a> BComponents<'a> {
 /// (regime 1 already handled that), so the on-plane centroid ray-cast is undefined.
 ///
 /// Applies ONLY when the other solid's boundary actually passes through `c` —
-/// detected by [`solid_side`] reporting DIFFERENT inside/outside verdicts on the
-/// two sides of the face (`op_plus != op_minus`). That is exactly the degenerate
+/// verified at the exact centroid of the original interner points before
+/// [`solid_side`] tests the two sides of the face (`op_plus != op_minus`).
+/// That is exactly the degenerate
 /// case the plain ray-cast can't resolve (the #960 seam end-region: the other
 /// solid abuts via a NON-coplanar face, so its solid is present on one side of
 /// this coplanar sub-triangle but it has no coincident face there). When the two
@@ -465,13 +401,17 @@ impl<'a> BComponents<'a> {
 fn on_interface_keep(
     arr: &Arrangement,
     tri: [Vid; 3],
-    c: [f64; 3],
+    centroid_normal: ([f64; 3], [f64; 3]),
     other: &[Tri],
     ext_other: f64,
+    other_aabb: Aabb,
     op: BoolOp,
 ) -> Option<bool> {
-    let n = tri_normal(arr, tri);
-    let (op_plus, op_minus) = solid_side(c, n, other, ext_other);
+    if !BoundaryCentroid::new(arr, tri).is_some_and(|c| c.on_surface(other)) {
+        return None;
+    }
+    let (c, n) = centroid_normal;
+    let (op_plus, op_minus) = solid_side(c, n, other, ext_other, other_aabb);
     if op_plus == op_minus {
         // `c` is strictly inside/outside the other solid — NOT on its boundary;
         // the plain centroid ray-cast is well-defined, so defer to it. This is the
@@ -512,68 +452,84 @@ fn on_interface_keep(
 /// interface shares the unordered vertex set but has OPPOSITE winding, so it never
 /// collides; both its copies are dissolved by regime 2.)
 pub(super) fn boolean_vids(arr: &Arrangement, a: &[Tri], b: &[Tri], op: BoolOp) -> Vec<[Vid; 3]> {
-    boolean_vids_components(arr, a, &BComponents::new(&[b]), op)
+    boolean_vids_components(arr, a, &BComponents::new(&[b]), op).0
 }
 
 /// [`boolean_vids`] with the B operand as pairwise-disjoint closed components
 /// (see [`BComponents`]). For a single component this is verdict-identical to
 /// the historical binary classifier — the AABB gates are pure prefilters — so
 /// the pinned boolean manifest is unperturbed.
+///
+/// Returns `(tris, changed)`. `changed == false` means no A sub-triangle was
+/// dropped and no B sub-triangle kept: the result is operand A re-tessellated
+/// along the arrangement, bounding the same solid.
 pub(super) fn boolean_vids_components(
     arr: &Arrangement,
     a: &[Tri],
     bc: &BComponents,
     op: BoolOp,
-) -> Vec<[Vid; 3]> {
+) -> (Vec<[Vid; 3]>, bool) {
     use std::collections::HashSet;
     let ext_a = operand_extent(a);
+    let a_closed = std::cell::OnceCell::new();
+    let a_adjacency = std::cell::OnceCell::new();
     // One BVH over operand A, reused for every B-face inside/outside ray-cast AND
     // coincident/near-surface probe below (the dominant O(|tris_b|·|a|) scans on
     // boolean-heavy meshes). `a_band` (hoisted) feeds the near-surface band.
     let bvh_a = super::super::broadphase::Bvh::build(a);
-    let a_band = NearBand::from_tris(a);
+    // Reuse the box the BVH build already computed, rather than rescanning `a` per
+    // coplanar-parent B triangle. `unwrap_or` matters only for an empty `a`, where
+    // the box is never read.
+    let a_aabb = bvh_a.root_aabb().unwrap_or(([0.0; 3], [0.0; 3]));
     let mut scratch: Vec<u32> = Vec::new();
     let dedup = matches!(op, BoolOp::Union | BoolOp::Intersection);
     let mut a_kept: HashSet<[Vid; 3]> = HashSet::new();
     let mut out = Vec::new();
     for (i, &tri) in arr.tris_a.iter().enumerate() {
-        let c = centroid(arr, tri);
+        if super::super::budget::tripped() { return (Vec::new(), true); }
+        let own_pts = tri.map(|v| to_f64_pt(arr, v));
+        let c = centroid_of_points(own_pts);
+        let n_own = tri_normal(own_pts);
         let cop_parent = arr.coplanar_a.get(i).copied().unwrap_or(false);
         let keep;
         // regime 1: coincident shared face → classify by normal agreement. Tried
         // EXACT first, then the snap-band-flush analogue (`near_on_surface_normal`)
         // which catches a face left a few µm off a TILTED shared plane by per-axis
         // import snapping (the #1007 flush roof-opening cap). The near test is
-        // ungated (like the exact one) because a coincident-shared-face DROP/keep is
-        // unconditionally correct, and its centroid-inside + µm-perp requirements
-        // never match a transversal cut face (every pinned box−box manifest face).
-        if let Some(n_other) = bc.surface_normal(c) {
-            let co_oriented = dot3(tri_normal(arr, tri), n_other) > 0.0;
-            keep = match op {
+        // ungated on the parent flag (like the exact one) because a coincident-
+        // shared-face DROP/keep is unconditionally correct.
+        //
+        // Both tests LOCATE the candidate face from the CENTROID; whether the
+        // sub-triangle actually LIES ON it is `coincident_planes` (#4439): its own
+        // plane must be near-parallel to the face. Without that, a sub-triangle
+        // that merely hugs the intersection LINE of two transversal faces — a
+        // needle inside a thin notch (#4439), or one that retriangulation left
+        // degenerate onto the line (#3353's `sweep_261`) — sat within the band of
+        // the other operand's plane and was decided by the sign of a dot product
+        // that a perpendicular or near-collinear pair does not pin down,
+        // overriding a ray-cast that already had it right. The per-triangle
+        // regime table and the measured parent-level fix shapes (all rejected
+        // for regressing 20+ golden census hosts) are in
+        // `issue_3353_vid_census_tests.rs`.
+        let own_exact = tri.map(|v| arr.interner.get(v));
+        if let Some(n_other) = bc.surface_normal(c, n_own, &own_pts, own_exact, &arr.bands) {
+            let co_oriented = dot3(n_own, n_other) > 0.0;
+            let use_volume = opposed_difference_uses_volume(op, n_own, n_other,
+                matches!(op, BoolOp::Difference) && dot3(n_own, n_other) < 0.0 && bc.only_opposed(c, n_own, &own_pts, own_exact, &arr.bands)
+                    && *a_closed.get_or_init(|| strict_closed(a)) && bc.all_closed(),
+                || bc.on_boundary(arr, tri));
+            if super::super::budget::tripped() { return (Vec::new(), true); }
+            keep = if use_volume { !bc.inside(c) } else { match op {
                 BoolOp::Union | BoolOp::Intersection => co_oriented,
                 BoolOp::Difference => !co_oriented,
-            };
+            }};
         } else if let Some(k) = cop_parent
-            .then(|| {
-                // regime 2 (only on coplanar-overlap parents): shared interface
-                // plane, no coincident face → solid-side probe (see
-                // `on_interface_keep` for the keep table rationale).
-                let n = tri_normal(arr, tri);
-                let (op_plus, op_minus) = bc.solid_side(c, n);
-                if op_plus == op_minus {
-                    return None; // strictly in/out — the plain ray-cast decides
-                }
-                Some(match op {
-                    BoolOp::Union => !op_plus,
-                    BoolOp::Intersection => op_minus,
-                    BoolOp::Difference => !op_minus,
-                })
-            })
-            .flatten()
+            .then(|| bc.interface_keep(arr, tri, c, n_own, op)).flatten()
         {
             keep = k;
         } else {
             // regime 3: strictly off-plane → centroid ray-cast (original)
+            if super::super::budget::tripped() { return (Vec::new(), true); }
             let inside_b = bc.inside(c);
             keep = match op {
                 BoolOp::Intersection => inside_b,
@@ -587,12 +543,16 @@ pub(super) fn boolean_vids_components(
             out.push(tri);
         }
     }
+    let a_kept_count = out.len();
     for (i, &tri) in arr.tris_b.iter().enumerate() {
+        if super::super::budget::tripped() { return (Vec::new(), true); }
         // dedup a true co-oriented duplicate of a kept A face (keep the A-copy)
         if dedup && a_kept.contains(&rotate_min_first(tri)) {
             continue;
         }
-        let c = centroid(arr, tri);
+        let own_pts = tri.map(|v| to_f64_pt(arr, v));
+        let c = centroid_of_points(own_pts);
+        let n_own = tri_normal(own_pts);
         let cop_parent = arr.coplanar_b.get(i).copied().unwrap_or(false);
         // A coincident-shared B face is dropped (the A-copy is the kept one). Tried
         // EXACT first, then the snap-band-flush analogue — ungated, because a B cap
@@ -600,11 +560,22 @@ pub(super) fn boolean_vids_components(
         // own (the host imposes none on it) so `coplanar_b` is unset for it, yet it
         // is still a coincident shared face that must drop (the #1007 flush roof cap
         // — without the near drop here it survives and bridges the opening).
-        if c_on_or_near_a(c, a, &bvh_a, &a_band, &mut scratch) {
-            continue; // coplanar-shared B-copy: dropped (the A-copy is the kept one)
-        }
-        if cop_parent {
-            if let Some(keep) = on_interface_keep(arr, tri, c, a, ext_a, op) {
+        let own_exact = tri.map(|v| arr.interner.get(v));
+        let use_volume = if let Some((n_other, only_opposed)) = surface_normal_near_a(
+            c, n_own, &own_pts, own_exact, a, &bvh_a, &arr.bands[arr.component_b[i]], &mut scratch, &a_adjacency,
+        ) {
+            let use_volume = opposed_difference_uses_volume(op, n_own, n_other,
+                only_opposed && matches!(op, BoolOp::Difference) && dot3(n_own, n_other) < 0.0
+                    && *a_closed.get_or_init(|| strict_closed(a)) && bc.all_closed(), ||
+                BoundaryCentroid::new(arr, tri).is_some_and(|centroid| centroid.on_surface(a)));
+            if super::super::budget::tripped() { return (Vec::new(), true); }
+            if !use_volume {
+                continue; // actual shared B-copy: the A-copy owns this boundary
+            }
+            true
+        } else { false };
+        if cop_parent && !use_volume {
+            if let Some(keep) = on_interface_keep(arr, tri, (c, n_own), a, ext_a, a_aabb, op) {
                 // regime 2 for B (coplanar-overlap parent only).
                 if keep {
                     let flip = matches!(op, BoolOp::Difference);
@@ -613,6 +584,7 @@ pub(super) fn boolean_vids_components(
                 continue;
             }
         }
+        if super::super::budget::tripped() { return (Vec::new(), true); }
         let inside_a = point_inside_bvh(c, a, &bvh_a, ext_a, &mut scratch);
         let (keep, flip) = match op {
             BoolOp::Difference => (inside_a, true),
@@ -623,7 +595,8 @@ pub(super) fn boolean_vids_components(
             out.push(if flip { [tri[0], tri[2], tri[1]] } else { tri });
         }
     }
-    out
+    let changed = a_kept_count != arr.tris_a.len() || out.len() != a_kept_count;
+    (out, changed)
 }
 
 #[inline]
@@ -631,3 +604,14 @@ pub(super) fn rotate_min_first(t: [Vid; 3]) -> [Vid; 3] {
     let i = (0..3).min_by_key(|&k| t[k]).unwrap();
     [t[i], t[(i + 1) % 3], t[(i + 2) % 3]]
 }
+
+#[cfg(test)]
+#[path = "classify_tests.rs"]
+mod classify_tests;
+#[cfg(test)]
+#[path = "classify_bvh_tests.rs"]
+mod classify_bvh_tests;
+
+#[cfg(test)]
+#[path = "issue_3353_vid_census_tests.rs"]
+mod issue_3353_vid_census_tests;

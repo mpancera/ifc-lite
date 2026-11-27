@@ -14,10 +14,7 @@
 
 import type { Clash, ClashReviewStatus } from './types.js';
 import { DEFAULT_CLASH_REVIEW_STATUS } from './types.js';
-
-/** A space never occurs inside an IfcGUID / prim path or a rule id, so it is a
- *  safe field separator for the composite key, matching `clashId`'s own scheme. */
-const SEP = ' ';
+import { clashElementIdentity, clashPairId } from './object-identity.js';
 
 /**
  * A durable, model-independent key for a clash's review state.
@@ -27,12 +24,12 @@ const SEP = ' ';
  * keys (IfcGUID / USD prim path), order-independent. So a review re-attaches to
  * the "same" clash after a page reload, a re-run, or a model revision: the
  * Navisworks "status carries across versions" behaviour the plan calls for.
+ * A repeated key within one model is ambiguous: that endpoint's ref participates
+ * instead, so a decision never leaks to another source object. Renumbering those
+ * refs requires fresh review rather than guessing which repeated key was meant.
  */
 export function clashReviewKey(clash: Pick<Clash, 'rule' | 'a' | 'b'>): string {
-  const ka = clash.a.key;
-  const kb = clash.b.key;
-  const [lo, hi] = ka <= kb ? [ka, kb] : [kb, ka];
-  return `${clash.rule}${SEP}${lo}${SEP}${hi}`;
+  return clashPairId(clash.rule, clashElementIdentity(clash.a), clashElementIdentity(clash.b));
 }
 
 /** Ranked least-to-most resolved so aggregation can pick the least-resolved. */
@@ -42,12 +39,13 @@ const REVIEW_RANK: Record<ClashReviewStatus, number> = { open: 0, resolved: 1, a
  * Collapse many clash review statuses to one: the LEAST-resolved wins. A BCF
  * topic that bundles several clashes is only "done" once every member is; a
  * single still-open member keeps the whole topic open. An empty set (no members,
- * or none reviewed) is `open`.
+ * or none reviewed) is `open`. Unknown labels are treated as unreviewed.
  */
 export function aggregateReviewStatus(statuses: Iterable<ClashReviewStatus>): ClashReviewStatus {
   let worst: ClashReviewStatus | null = null;
-  for (const s of statuses) {
-    if (worst === null || REVIEW_RANK[s] < REVIEW_RANK[worst]) worst = s;
+  for (const value of statuses) {
+    const status = Object.hasOwn(REVIEW_RANK, value) ? value : DEFAULT_CLASH_REVIEW_STATUS;
+    if (worst === null || REVIEW_RANK[status] < REVIEW_RANK[worst]) worst = status;
   }
   return worst ?? DEFAULT_CLASH_REVIEW_STATUS;
 }

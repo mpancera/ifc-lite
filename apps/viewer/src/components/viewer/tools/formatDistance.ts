@@ -5,6 +5,7 @@
 import { QuantityType } from '@ifc-lite/data';
 import { ProjectUnits } from '@ifc-lite/parser';
 import { resolveQuantityDisplay, formatConverted } from '@/lib/units/display';
+import { signedByPrintedValue } from './signedByPrintedValue';
 
 // Constructed once rather than per call: every measure-tool distance readout
 // (including the live-drag SVG labels, which reformat on every pointer-move
@@ -68,7 +69,7 @@ function formatDistanceMagnitude(meters: number, overrides: Record<string, strin
 
 /**
  * Format a signed X/Y/Z LENGTH-DELTA triple honoring the LENGTHUNIT display
- * override, e.g. `X 3.2808  Y 6.5617  Z 9.8425`.
+ * override, e.g. `ΔX +3.2808  ΔY +6.5617  ΔZ -9.8425`.
  *
  * This is for a triple that IS a distance — the Measure tool's
  * relative-reference offset (dx/dy/dz from a user-set datum), the same kind
@@ -78,7 +79,20 @@ function formatDistanceMagnitude(meters: number, overrides: Record<string, strin
  * point positions in a file's own coordinate system or a projected CRS, and
  * are deliberately out of #2199's scope.
  *
- * Deep review on #2538: before this, the "Rel. ref" row converted only its
+ * The `Δ` prefix and the explicit `+` are the #2737 §3 acceptance criterion —
+ * *a relative coordinate is visually distinct from an absolute one* — carried
+ * in the VALUE rather than only in the row label beside it. The viewer names
+ * four kinds of coordinate (model-local, project/anchor, render-frame world
+ * and georeferenced), every one of which prints as `X … Y … Z …`; a fifth kind
+ * that printed the same way would be told apart only by the label cell, and a
+ * label cell is exactly what a narrow panel, a copied line or a screenshot
+ * crop loses. `ΔX +2.500` cannot be misread as a position no matter where it
+ * is quoted.
+ *
+ * A zero axis gets no sign: an offset of nothing has no direction, and `+0.000`
+ * claims one.
+ *
+ * Deep review on #2538: before this, the relative row converted only its
  * trailing distance hint, leaving the triple beside it in unlabelled metres —
  * a `ft` override made the row read e.g. `X 1.000 Y 2.000 Z 3.000  12.2758
  * ft`, mixing units in one line. All three axes share one override, so the
@@ -89,6 +103,29 @@ export function formatSignedTriple(
   p: { x: number; y: number; z: number },
   overrides: Record<string, string> = {},
 ): string {
-  const axis = (n: number) => formatDistanceMagnitude(n, overrides);
-  return `X ${axis(p.x)}  Y ${axis(p.y)}  Z ${axis(p.z)}`;
+  const format = (meters: number) => formatDistanceMagnitude(meters, overrides);
+  const axis = (n: number) => signedByPrintedValue(n, format, true);
+  return `ΔX ${axis(p.x)}  ΔY ${axis(p.y)}  ΔZ ${axis(p.z)}`;
+}
+
+/**
+ * Format the Split tool's live "distance / length" hover readout, honoring
+ * the LENGTHUNIT display override (#1573) the same way every other
+ * measure-tool readout in this panel does.
+ *
+ * `SplitOverlay`'s guide-line label used to hardcode `${distance.toFixed(2)}
+ * / ${length.toFixed(2)} m` — the exact shape #2199's maintainer note (see
+ * this module's docstring) already found and fixed once for
+ * `formatDistance` itself: a user with a `ft` LENGTHUNIT override sees every
+ * other panel (Measure, Lists, Properties) convert, but the Split tool's
+ * live preview kept reporting raw, unconverted metres regardless. Both
+ * numbers share ONE unit (per {@link formatSignedTriple}'s convention), so
+ * only `length` prints the symbol.
+ */
+export function formatSplitHoverLabel(
+  distance: number,
+  length: number,
+  overrides: Record<string, string> = {},
+): string {
+  return `${formatDistanceMagnitude(distance, overrides)} / ${formatDistance(length, overrides)}`;
 }

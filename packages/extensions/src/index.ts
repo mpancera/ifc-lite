@@ -32,6 +32,7 @@ export type {
   DockSlot,
   ExporterContribution,
   ExtensionManifest,
+  FlowGraphContribution,
   IdsValidatorContribution,
   KeybindingContribution,
   LensContribution,
@@ -65,6 +66,9 @@ export { migrateManifest, CURRENT_MANIFEST_VERSION } from './migrations/index.js
 
 // ---------- Capability
 export * from './capability/index.js';
+
+// ---------- Authority (layer charters, 12-authority.md)
+export * from './authority/index.js';
 
 // ---------- When
 export * from './when/index.js';

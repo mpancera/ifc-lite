@@ -1,5 +1,338 @@
 # @ifc-lite/sandbox
 
+## 3.1.0
+
+### Minor Changes
+
+- [#11344](https://github.com/LTplus-AG/ifc-lite/pull/11344) [`3b7d64c`](https://github.com/LTplus-AG/ifc-lite/commit/3b7d64c04a9aecdc3ef7aa2b4481b3486b731980) Thanks [@louistrue](https://github.com/louistrue)! - Add `bim.ui` to sandboxed scripts so they can present computed IFC data as A2UI v1.0 result surfaces. Sandbox and SDK callers receive the optional message batches in `ScriptResult.surfaces` and can disable the namespace with the `ui` permission.
+
+### Patch Changes
+
+- [#11332](https://github.com/LTplus-AG/ifc-lite/pull/11332) [`5027560`](https://github.com/LTplus-AG/ifc-lite/commit/50275600faef3de250131acb2741bd1707421807) Thanks [@louistrue](https://github.com/louistrue)! - The esbuild.wasm CDN fallback warning logs the resolver error's message instead of the raw error object.
+- Updated dependencies [[`3b7d64c`](https://github.com/LTplus-AG/ifc-lite/commit/3b7d64c04a9aecdc3ef7aa2b4481b3486b731980), [`3b7d64c`](https://github.com/LTplus-AG/ifc-lite/commit/3b7d64c04a9aecdc3ef7aa2b4481b3486b731980), [`3b7d64c`](https://github.com/LTplus-AG/ifc-lite/commit/3b7d64c04a9aecdc3ef7aa2b4481b3486b731980)]:
+  - @ifc-lite/a2ui@0.2.0
+  - @ifc-lite/sdk@10.2.0
+
+## 3.0.0
+
+### Major Changes
+
+- [#9430](https://github.com/LTplus-AG/ifc-lite/pull/9430) [`d136dfb`](https://github.com/LTplus-AG/ifc-lite/commit/d136dfb006619f6c5ad0d0a04abef6bfba66e7ec) Thanks [@louistrue](https://github.com/louistrue)! - Include model-qualified matched objects in rule coverage so object quality gates count federated models without conflating equal GlobalIds.
+  
+  Keep clash findings for distinct objects whose exporter repeated a GlobalId, while preserving self-pair suppression for geometry parts sharing the same source object reference.
+  
+  Breaking change: clash IDs involving repeated GlobalIds now include entity references to distinguish those objects. Comparisons against runs saved with the previous IDs may report resolved and added findings; establish a new baseline after upgrading. Ordinary identifiers retain their previous IDs; reserved-prefix and whitespace-containing keys, model IDs and rule IDs are escaped to prevent collisions.
+  
+  Tag and escape ambiguous identities so literal keys cannot collide with reference-qualified keys. Repeated-key endpoints carry `keyAmbiguous`; review decisions and element-pair exclusions distinguish their entity references, and portable analysis runs preserve and validate that marker. Decisions for ambiguous objects require renewal if their references are renumbered. `clashElementIdentity` exposes the same decision key to integrations.
+  
+  The SDK review adapter uses these keys for finding lineages and revision comparison. SDK consumers must also establish a new clash baseline after upgrading; the SDK release is major for this behavior change.
+  
+  CLI JSON, MCP clash rows, and sandbox `bim.clash` results also expose the changed IDs. Their releases carry the same compatibility migration (major for sandbox; minor for the pre-1.0 CLI and MCP packages). Re-establish baselines and stored ID-based references after upgrading these integrations.
+  
+  The viewer also declares a major release: saved element-pair exclusions whose keys require escaping (reserved prefix or whitespace) must be renewed using the new identity encoding. Existing repeated-key exclusions likewise require renewed review to avoid transferring decisions between distinct objects.
+
+### Minor Changes
+
+- [#9409](https://github.com/LTplus-AG/ifc-lite/pull/9409) [`449a837`](https://github.com/LTplus-AG/ifc-lite/commit/449a837b9846c5a978493d6f6297955f59607236) Thanks [@louistrue](https://github.com/louistrue)! - Add planar mirror with hosted cuts and door handedness, classification creation and assignment, SDK store methods, and MCP tools.
+
+- [#9356](https://github.com/LTplus-AG/ifc-lite/pull/9356) [`646946f`](https://github.com/LTplus-AG/ifc-lite/commit/646946f3c1594bf126c29ee2c59d24759304daf5) Thanks [@louistrue](https://github.com/louistrue)! - Roofs by footprint ([#9296](https://github.com/LTplus-AG/ifc-lite/issues/9296)). `addRoofToStore` and `bim.store.addRoof` take `EdgeSlopes` (radians, one per footprint edge; 0 is a gable end) and `Overhang` (metres) on the rectangle and polygon forms. A hip, gable, mono-pitch, L-, T- or U-shaped roof is built from a weighted straight skeleton of the footprint: one `IfcRoof` with a plumb-cut solid per plane and its `HIP_ROOF`, `GABLE_ROOF`, `SHED_ROOF` or `FREEFORM` type. Each sloped edge is a pivot line at the base height. Footprints that are neither convex nor rectilinear are refused with a reason, as are slopes over 85° and overhangs that cross the eaves. The definition is recorded as `IfcLite_RoofFootprint`, and the planes report `Qto_RoofBaseQuantities`. New: `editFootprintRoofInStore` (`bim.store.editRoof`) changes one edge's slope, all slopes, the overhang or the thickness and rebuilds the planes as one atomic, undoable edit. The flat rectangle and polygon forms are unchanged.
+  
+  Angles are radians. Values above π/2 receive a degree-conversion hint; smaller numbers intended as degrees cannot be distinguished from radians.
+
+- [#9121](https://github.com/LTplus-AG/ifc-lite/pull/9121) [`baf4bdd`](https://github.com/LTplus-AG/ifc-lite/commit/baf4bdd632727134c1b694bdee8f9e8d2e3b0d2f) Thanks [@louistrue](https://github.com/louistrue)! - Storey authoring from the CLI and scripts ([#9025](https://github.com/LTplus-AG/ifc-lite/issues/9025), follow-up to [#9013](https://github.com/LTplus-AG/ifc-lite/issues/9013)). `ifc-lite storey <file> list|add|rename|edit|delete` lists storeys, adds them with the neighbours' naming and spacing, re-levels them (`--elevation` or `--floor-height`), and deletes them (`--move-to` or `--delete-contents`), with `--dry-run` and `--json`. It runs the same `bim.store` path as the viewer and MCP, so geometry follows storeys and every refusal is reported before anything is written. `bim.store.suggestStorey` exposes the neighbour-based defaults, and MCP `storey_add` now uses it. Scripts in the viewer's sandbox get the storey methods, typed in the generated `bim` globals, and the assistant's store method list includes them.
+
+### Patch Changes
+
+- [#9406](https://github.com/LTplus-AG/ifc-lite/pull/9406) [`206e3f5`](https://github.com/LTplus-AG/ifc-lite/commit/206e3f5dcc2aac68e8a4641312bb6debcb2d294b) Thanks [@louistrue](https://github.com/louistrue)! - Join coincident wall-chain endpoints automatically, carry grid-bound products when their grid moves, and enable native edge alignment in the headless CLI.
+  
+  Keep implicit wall joins best-effort: refused joins leave the wall added and report notices on the returned SDK entity reference. Explicit joins still refuse atomically.
+  
+  Share finite schema-name snapshots while indexing wall endpoints and reading a wall, and reuse the creation anchor for implicit joins to reduce cold overhead when no walls join.
+  
+  Discover implicit wall joins through a session endpoint index rather than rereading every wall for each addition. Commit index additions with their owning SDK/viewer transaction and invalidate on other model edits.
+  
+  When sliding a joined wall, extend or trim neighbours on their existing axes instead of rotating them. Recompute end cuts against the moved face; refuse parallel, non-finite, collapsed or reversed intersections atomically with an explanatory error. Rotations retain their existing corner carry.
+  
+  Maintain wall endpoints during public raw creation so the first ordinary wall addition does not rescan a raw-authored session. Incomplete geometry and intervening edits invalidate the cache.
+- Updated dependencies [[`a6a6331`](https://github.com/LTplus-AG/ifc-lite/commit/a6a63314fa4c5da2696e394c727e57dee461ba66), [`449a837`](https://github.com/LTplus-AG/ifc-lite/commit/449a837b9846c5a978493d6f6297955f59607236), [`206e3f5`](https://github.com/LTplus-AG/ifc-lite/commit/206e3f5dcc2aac68e8a4641312bb6debcb2d294b), [`63a0246`](https://github.com/LTplus-AG/ifc-lite/commit/63a0246ffaebf32c0a5f26a158f0214a87c3b5bc), [`e1b78b6`](https://github.com/LTplus-AG/ifc-lite/commit/e1b78b6a4d1eb2aa85a09eefcf26f103f287cb32), [`b085c65`](https://github.com/LTplus-AG/ifc-lite/commit/b085c65b50c4355e5d0db202f4f486f5703b48c9), [`94dc7b6`](https://github.com/LTplus-AG/ifc-lite/commit/94dc7b6920513087abc48e573884ec9e02c523a4), [`6a109eb`](https://github.com/LTplus-AG/ifc-lite/commit/6a109eb861a66aafec75b544320e64f2ad246167), [`23c730d`](https://github.com/LTplus-AG/ifc-lite/commit/23c730d90bc545dc9c5bfe083bceaf63d56eafe7), [`22777ff`](https://github.com/LTplus-AG/ifc-lite/commit/22777ff1da1b15770b42f890d0e1abb587e5a62d), [`5558939`](https://github.com/LTplus-AG/ifc-lite/commit/55589392fb1f67b89f79283996668eebcb867bb3), [`ee3786b`](https://github.com/LTplus-AG/ifc-lite/commit/ee3786b45a038e2ad727879eb47bb13aad1022b2), [`9a8ef4c`](https://github.com/LTplus-AG/ifc-lite/commit/9a8ef4c2412c926c16beaae7b2b8be387bd25cc6), [`cd4af81`](https://github.com/LTplus-AG/ifc-lite/commit/cd4af8155f5b42ed8e4710d3c0846a2b7326c252), [`646946f`](https://github.com/LTplus-AG/ifc-lite/commit/646946f3c1594bf126c29ee2c59d24759304daf5), [`d8fbc55`](https://github.com/LTplus-AG/ifc-lite/commit/d8fbc550f6d8030ba61663d058fe02063291801a), [`99e0b87`](https://github.com/LTplus-AG/ifc-lite/commit/99e0b874ac286aa0c9b4f9a27aa2adea32e6465c), [`baf4bdd`](https://github.com/LTplus-AG/ifc-lite/commit/baf4bdd632727134c1b694bdee8f9e8d2e3b0d2f), [`d136dfb`](https://github.com/LTplus-AG/ifc-lite/commit/d136dfb006619f6c5ad0d0a04abef6bfba66e7ec), [`e885a5e`](https://github.com/LTplus-AG/ifc-lite/commit/e885a5e05e4f72048077c0f47245bd8b02627c26), [`3a08e6c`](https://github.com/LTplus-AG/ifc-lite/commit/3a08e6c2ee182a6e45741e7d1773a2e4bdc5b986), [`4877fa5`](https://github.com/LTplus-AG/ifc-lite/commit/4877fa5116e999450190c8bc6ac6b8d0514d17bd), [`a6654c0`](https://github.com/LTplus-AG/ifc-lite/commit/a6654c05850e2a46a12de659aa2b4c581b0d88f7), [`b64ba30`](https://github.com/LTplus-AG/ifc-lite/commit/b64ba30c3382bf91c8db11ab3883614f576b8fd0), [`7b15e6b`](https://github.com/LTplus-AG/ifc-lite/commit/7b15e6b08b4529e2ebf422748fb6ba36d47cd196)]:
+  - @ifc-lite/sdk@10.0.0
+
+## 2.12.1
+
+### Patch Changes
+
+- Updated dependencies [[`af23dac`](https://github.com/LTplus-AG/ifc-lite/commit/af23dac7f84b3bdcc2a179359521600406e07c4e)]:
+  - @ifc-lite/extensions@0.12.0
+
+## 2.12.0
+
+### Minor Changes
+
+- [#7476](https://github.com/LTplus-AG/ifc-lite/pull/7476) [`0eeb6cb`](https://github.com/LTplus-AG/ifc-lite/commit/0eeb6cb8e6c752ba33e249820fc1f776493fc515) Thanks [@louistrue](https://github.com/louistrue)! - Expose network-denial dispatch provenance so durable BCF hosts distinguish preflight refusal from a redirect received after a possible committed write.
+
+### Patch Changes
+
+- Updated dependencies [[`d656e9a`](https://github.com/LTplus-AG/ifc-lite/commit/d656e9ab00d4d89e04846aa4b44ef9ccaea6a44b)]:
+  - @ifc-lite/sdk@9.2.0
+
+## 2.11.0
+
+### Minor Changes
+
+- [#6761](https://github.com/LTplus-AG/ifc-lite/pull/6761) [`b2a5fb2`](https://github.com/LTplus-AG/ifc-lite/commit/b2a5fb2b97290bb39d2d36be81dd416c15c6a849) Thanks [@louistrue](https://github.com/louistrue)! - Expose native mesh alignment through one shared atomic planner for viewer, SDK, sandbox and MCP.
+
+- [#6645](https://github.com/LTplus-AG/ifc-lite/pull/6645) [`09745f0`](https://github.com/LTplus-AG/ifc-lite/commit/09745f0f3bb99ac07802ae061f13df92e865683f) Thanks [@louistrue](https://github.com/louistrue)! - Add shared semantic datasets, profile validation, read-only SPARQL providers, portable workspaces and model revision identity strategies. Expose the canonical capability-gated network implementation through a lightweight sandbox/network entry point.
+
+- [#6786](https://github.com/LTplus-AG/ifc-lite/pull/6786) [`f04a972`](https://github.com/LTplus-AG/ifc-lite/commit/f04a97289d3130a1d7dc9df056c8b9c5b6d25791) Thanks [@louistrue](https://github.com/louistrue)! - Support explicit authorization for exact literal loopback HTTP origins in shared networking and semantic providers, CLI queries and fixed relay upstreams. Preserve HTTPS defaults, exact host grants, redirect denial and request limits. The viewer local grant is ephemeral and cancels pending retrievals when revoked; portable local endpoint settings never restore authority.
+
+- [#7345](https://github.com/LTplus-AG/ifc-lite/pull/7345) [`fe3070c`](https://github.com/LTplus-AG/ifc-lite/commit/fe3070cfb18853dd857554615160806a607dbae2) Thanks [@louistrue](https://github.com/louistrue)! - Add source- and Root-pinned generic IfcGroup creation, complete membership
+  replacement, and safe removal through one canonical native graph owner. SDK,
+  CLI and sandbox hosts share the same lifecycle; the viewer records one Undo.
+
+- [#6801](https://github.com/LTplus-AG/ifc-lite/pull/6801) [`1bb0fe3`](https://github.com/LTplus-AG/ifc-lite/commit/1bb0fe34c8fc46acef6e51f3792f274e1e5be1b9) Thanks [@louistrue](https://github.com/louistrue)! - Read tasks' output products from `IfcRelAssignsToProduct` ([#6749](https://github.com/LTplus-AG/ifc-lite/issues/6749)). buildingSMART's construction-scheduling examples link each `IfcTask` to the product it builds this way: the task goes in `RelatedObjects` and the product in `RelatingProduct`. Before this change only `IfcRelAssignsToProcess` inputs were read, so these schedules reached the Gantt with no products. Each task now has `outputProductExpressIds` / `outputProductGlobalIds`, kept separate from the input lists. `taskProductExpressIds` / `taskProductGlobalIds` return inputs and outputs together. The 4D animation, Gantt ↔ 3D selection, the Properties schedule card, charts and product unassign all use both lists. Edited exports write outputs back as `IfcRelAssignsToProduct` and remove the original relation. Cost items assigned to the same product are kept. In sandbox scripts, outputs appear as `OutputProductExpressIds` / `OutputProductGlobalIds`.
+
+### Patch Changes
+
+- [#6760](https://github.com/LTplus-AG/ifc-lite/pull/6760) [`b92dd05`](https://github.com/LTplus-AG/ifc-lite/commit/b92dd05495094a47c4a68eb1137a3a1906fc65cc) Thanks [@louistrue](https://github.com/louistrue)! - Accept canonical parameterized column, beam and member profiles through the sandbox store bridge.
+
+- [#6676](https://github.com/LTplus-AG/ifc-lite/pull/6676) [`29e1088`](https://github.com/LTplus-AG/ifc-lite/commit/29e1088dda6777f7086bd122208ce7bda8db1d89) Thanks [@louistrue](https://github.com/louistrue)! - Expose canonical parameterised column, beam and member sections and column RefDirection in SDK types; preserve rectangular interfaces and existing runtime validation.
+- Updated dependencies [[`3f681d9`](https://github.com/LTplus-AG/ifc-lite/commit/3f681d952dc2bae1dc715210354cf2705b1edac0), [`b4899b0`](https://github.com/LTplus-AG/ifc-lite/commit/b4899b017f037ad629ee2b8a5fa34cdf56e8af72), [`06c45b2`](https://github.com/LTplus-AG/ifc-lite/commit/06c45b21a478f62c5ea8c89a0a8dd0c09fc43e69), [`b2a5fb2`](https://github.com/LTplus-AG/ifc-lite/commit/b2a5fb2b97290bb39d2d36be81dd416c15c6a849), [`7d33d8c`](https://github.com/LTplus-AG/ifc-lite/commit/7d33d8cd6917c6a0df5d1b3e6aca741e554c8ba7), [`0e2f612`](https://github.com/LTplus-AG/ifc-lite/commit/0e2f612fe205f08ab10314abd95f0319dba2cba5), [`6d2d083`](https://github.com/LTplus-AG/ifc-lite/commit/6d2d083b82317cafe12046d38684bc33a8d3b502), [`09745f0`](https://github.com/LTplus-AG/ifc-lite/commit/09745f0f3bb99ac07802ae061f13df92e865683f), [`29e1088`](https://github.com/LTplus-AG/ifc-lite/commit/29e1088dda6777f7086bd122208ce7bda8db1d89), [`1dacd47`](https://github.com/LTplus-AG/ifc-lite/commit/1dacd47008744f1f9de48ab20aa4d871c4572ee7), [`2e2f65a`](https://github.com/LTplus-AG/ifc-lite/commit/2e2f65a66e1375ef6cc52b8a310526de1a36e1a0), [`1dacd47`](https://github.com/LTplus-AG/ifc-lite/commit/1dacd47008744f1f9de48ab20aa4d871c4572ee7), [`8a0a03a`](https://github.com/LTplus-AG/ifc-lite/commit/8a0a03a4f9e4ca9cfae457493f0eb50268052ecb), [`73070c2`](https://github.com/LTplus-AG/ifc-lite/commit/73070c2d67c2a0507e6bc5492c090f2df3736881), [`73070c2`](https://github.com/LTplus-AG/ifc-lite/commit/73070c2d67c2a0507e6bc5492c090f2df3736881), [`2e2f65a`](https://github.com/LTplus-AG/ifc-lite/commit/2e2f65a66e1375ef6cc52b8a310526de1a36e1a0), [`fe3070c`](https://github.com/LTplus-AG/ifc-lite/commit/fe3070cfb18853dd857554615160806a607dbae2), [`1bb0fe3`](https://github.com/LTplus-AG/ifc-lite/commit/1bb0fe34c8fc46acef6e51f3792f274e1e5be1b9), [`525cfba`](https://github.com/LTplus-AG/ifc-lite/commit/525cfba75d3e124d3dae51134cb43a87c258a8d9)]:
+  - @ifc-lite/sdk@9.1.0
+  - @ifc-lite/extensions@0.11.0
+
+## 2.10.0
+
+### Minor Changes
+
+- [#6541](https://github.com/LTplus-AG/ifc-lite/pull/6541) [`93098dc`](https://github.com/LTplus-AG/ifc-lite/commit/93098dcb7f4125326db5d602977c5b3f9e9083cb) Thanks [@louistrue](https://github.com/louistrue)! - Expose canonical atomic wall joins through SDK, sandbox and MCP. Protect hosted cuts at joined end faces and use shared compound recording to restore complete earlier overlay graphs in one undo.
+  
+  The SDK backend contract now requires `StoreBackendMethods.joinWalls`. Third-party backends must implement this method when upgrading.
+  
+  `joinWallsInStore` now refuses unreadable hosted opening geometry and cuts that would extend beyond either joined end face. These calls previously succeeded, so callers must handle the expanded runtime error contract when upgrading `@ifc-lite/create`.
+
+### Patch Changes
+
+- Updated dependencies [[`e8ced94`](https://github.com/LTplus-AG/ifc-lite/commit/e8ced940d5cd6c9789f1221c5aeb7cdae883da3b), [`93098dc`](https://github.com/LTplus-AG/ifc-lite/commit/93098dcb7f4125326db5d602977c5b3f9e9083cb)]:
+  - @ifc-lite/sdk@9.0.0
+
+## 2.9.0
+
+### Minor Changes
+
+- [#6237](https://github.com/LTplus-AG/ifc-lite/pull/6237) [`632d6f1`](https://github.com/LTplus-AG/ifc-lite/commit/632d6f1195453b76cc29c4ca3a0f1a7e743bd653) Thanks [@louistrue](https://github.com/louistrue)! - Author openings and wall-hosted doors and windows into a loaded model. `@ifc-lite/create` adds `addOpeningToStore` (an `IfcOpeningElement` plus `IfcRelVoidsElement` cut into an existing `IfcWall` or `IfcSlab`, relative to the host's placement, with the cut depth taken from the host's Body thickness by default), `addHostedDoorToStore` and `addHostedWindowToStore` (the opening plus an `IfcDoor` or `IfcWindow` placed in it and linked by `IfcRelFillsElement`), and `resolveHostAnchor`, which reads the host's placement, storey and body bounds from the file and the mutation overlay. Scripts reach them as `bim.store.addOpening`, `bim.store.addHostedDoor` and `bim.store.addHostedWindow` in the SDK, the CLI, the viewer and the sandbox. MCP throws for these, as it does for the other builders. The exported file meshes with the void cut into the host wall.
+
+- [#6243](https://github.com/LTplus-AG/ifc-lite/pull/6243) [`fe7f513`](https://github.com/LTplus-AG/ifc-lite/commit/fe7f5130cb1d1d84a694b98f11b734d9ed74e28e) Thanks [@louistrue](https://github.com/louistrue)! - Author type objects and materials into a loaded model.
+  
+  `@ifc-lite/create` adds:
+  - `addElementTypeToStore`: any `IfcElementType` subtype, with its attribute layout and enumeration values read from the model's schema, so IFC2X3, IFC4 and IFC4X3 each get a valid record.
+  - `assignTypeInStore`: `IfcRelDefinesByType`. It extends the type's relationship and moves an occurrence off a previous type.
+  - `addMaterialToStore`, `addMaterialLayerSetToStore` and `addMaterialLayerSetUsageToStore`: layer thicknesses and offsets are given in metres and converted to the model's length unit.
+  - `assignMaterialInStore`: `IfcRelAssociatesMaterial`. It replaces an object's previous association.
+  - `resolveAuthoringAnchor`, `readRelatedLists`, `liveEntityType` and `liveEntityConforms` (whether a live entity is of a schema class or SELECT).
+  
+  Scripts reach them as `bim.store.addElementType`, `assignType`, `addMaterial`, `addMaterialLayerSet`, `addMaterialLayerSetUsage` and `assignMaterial`. A wall given a layer set usage this way exports, parses back with its layers, and meshes as one slice per layer.
+
+### Patch Changes
+
+- Updated dependencies [[`bffa875`](https://github.com/LTplus-AG/ifc-lite/commit/bffa875a07ed2b4e3e61e12bc25966278f346d6a), [`632d6f1`](https://github.com/LTplus-AG/ifc-lite/commit/632d6f1195453b76cc29c4ca3a0f1a7e743bd653), [`fe7f513`](https://github.com/LTplus-AG/ifc-lite/commit/fe7f5130cb1d1d84a694b98f11b734d9ed74e28e), [`b8b8c8f`](https://github.com/LTplus-AG/ifc-lite/commit/b8b8c8fd231df458c1a1af411c98c6d8ee316b77), [`c94feac`](https://github.com/LTplus-AG/ifc-lite/commit/c94feacf6684a27b99876cc48f1e569bc98d09d2)]:
+  - @ifc-lite/sdk@8.0.0
+  - @ifc-lite/extensions@0.10.1
+
+## 2.8.0
+
+### Minor Changes
+
+- [#5935](https://github.com/LTplus-AG/ifc-lite/pull/5935) [`dff671e`](https://github.com/LTplus-AG/ifc-lite/commit/dff671efe29d9bbc4a1f455fc6b0526d85fb461b) Thanks [@louistrue](https://github.com/louistrue)! - Add OpenCDE Documents API flow nodes and `model.openFromSource` ([#5634](https://github.com/LTplus-AG/ifc-lite/issues/5634), [#5167](https://github.com/LTplus-AG/ifc-lite/issues/5167) phase 3.4).
+  
+  `@ifc-lite/flow-nodes` gains `documents.queryVersions` (polls `POST /document-versions` with the previous ETag; outputs a versions table, the new ETag and `changed`, which is `false` on a 304), `documents.download` (downloads a version's file as base64 with its name, size and content type) and `model.openFromSource` (opens downloaded bytes as a model through the new optional `FlowHost.openModel`, gated by the `openModel` backend feature). Every Documents API request goes through `coreNetworkRequest` with the graph's `network.fetch:<host>` grants; the bearer token param takes `{{secret:NAME}}`. `model.select` and `model.byType` gain an optional `modelId` input, so a read can be wired to run after, and on, an opened model.
+  
+  `@ifc-lite/sandbox`: `coreNetworkRequest` accepts `responseType: 'bytes'` and then returns the capped body as `NetworkResponse.bytes`, unmangled by a text decode. A new `allowNotModified: true` option returns a 304 Not Modified as a response; without it a 304 is still refused like every other 3xx, so existing `http.request` and `bim.network.fetch` behaviour is unchanged.
+  
+  `ifc-lite flow run` (`@ifc-lite/cli`) and MCP's `run_flow` (`@ifc-lite/mcp`) implement `openModel` with their own loaders: the opened model becomes the one the rest of the run (and the CLI's `--out`) works on, and MCP registers it for later tool calls. The viewer loads it through `addModel`, the same path as a dropped file.
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ifc-lite/sdk@7.1.3
+
+## 2.7.0
+
+### Minor Changes
+
+- [#5446](https://github.com/LTplus-AG/ifc-lite/pull/5446) [`e40213f`](https://github.com/LTplus-AG/ifc-lite/commit/e40213f0806bf40fcbd1a93bce68fb7ad791bcef) Thanks [@louistrue](https://github.com/louistrue)! - Add outbound network requests and environment secrets to flow graphs ([#5167](https://github.com/LTplus-AG/ifc-lite/issues/5167) phases 3.3/3.5), deny-by-default throughout.
+  
+  `@ifc-lite/extensions` gains a `secret` capability scope: `secret.read:<NAME>` grants a graph read access to one named env var, with a strict exact-match target (`[A-Z][A-Z0-9_]*`, no glob, no universal wildcard) — the one capability target grammar stricter than the general pattern grammar.
+  
+  `@ifc-lite/sandbox` gains `bim.network.fetch`, gated by a new `network` permission (off by default) plus an exact-host allow-list re-checked on every call against the running graph's actual `network.fetch:<host>` grants. Requests are restricted to `https:`, matched against `new URL(url).hostname` (never the raw URL string, so userinfo/suffix spoofing is rejected by construction), refuse every redirect, cap the response body mid-stream, enforce a combined timeout/abort signal, and strip `Host`/`Cookie`/hop-by-hop headers. The core request logic (`network-request.ts`) is the single implementation shared by the sandbox bridge and the new `HttpRequest` flow node.
+  
+  `@ifc-lite/flow-nodes` gains the `http.request` node and a `secrets.ts` module: a node param may reference `{{secret:NAME}}`, validated against the graph's declared `secret.read:<NAME>` capabilities and the real environment BEFORE a run starts (an undeclared or unset reference is a validation error, never a silently empty string), then substituted into a throwaway copy of the document. Every resolved secret at least 6 characters long is redacted (`<secret:NAME>`) from run logs, node outputs, and errors — applied at the outer boundary, so a secret that comes back inside a fetched response body is still caught.
+  
+  Secrets resolve from `process.env` ONLY in `ifc-lite flow run` (`@ifc-lite/cli`) and MCP's `run_flow` (`@ifc-lite/mcp`), which now also redact their `--json`/tool-result output. The viewer's `HostFeatures.secrets` stays always-empty (the browser has no `process.env`), so a graph referencing a secret is reported `unavailable` before it runs, not mid-run; `HostFeatures.network` is `true` there too, so `http.request` runs subject to the browser's own CORS enforcement, surfacing a blocked cross-origin request as an explicit CORS-likely error rather than a silent empty result.
+  
+  `@ifc-lite/flow` now owns the `{{secret:NAME}}` grammar (`referencedSecrets`, `replaceSecretRefs`), and `checkAvailability` reports a node whose params reference a secret the host lacks as `unavailable`, so `flow validate` no longer calls such a graph runnable.
+
+- [#5928](https://github.com/LTplus-AG/ifc-lite/pull/5928) [`4c7bd47`](https://github.com/LTplus-AG/ifc-lite/commit/4c7bd47e5e8c9bf62d88af6260cc6384a77e0cdf) Thanks [@louistrue](https://github.com/louistrue)! - A Script node that calls `bim.network.fetch` is no longer served a stale memoised result on a rerun ([#5634](https://github.com/LTplus-AG/ifc-lite/issues/5634)). `NodeRunContext` gains an optional `markVolatile()`: a node calls it when a run's result came from outside the graph, and the scheduler then does not memoise that run. `script.run` / `script.list` call it only when the evaluation actually sent a request, so a script that never touches the network stays memoised. The sandbox's `SandboxConfig.network` accepts a `transport`, and the Script node now routes `bim.network.fetch` through the host's `networkTransport`, as `HttpRequest` already did.
+
+### Patch Changes
+
+- Updated dependencies [[`e40213f`](https://github.com/LTplus-AG/ifc-lite/commit/e40213f0806bf40fcbd1a93bce68fb7ad791bcef), [`a3dfacb`](https://github.com/LTplus-AG/ifc-lite/commit/a3dfacb2862d1db09267ebe52707193630c35ff7)]:
+  - @ifc-lite/extensions@0.10.0
+  - @ifc-lite/sdk@7.1.2
+
+## 2.6.1
+
+### Patch Changes
+
+- Updated dependencies [[`0eafae1`](https://github.com/LTplus-AG/ifc-lite/commit/0eafae1cb19e70828815c658a6ee3c14f9c4c8a8), [`0eafae1`](https://github.com/LTplus-AG/ifc-lite/commit/0eafae1cb19e70828815c658a6ee3c14f9c4c8a8), [`b0d489e`](https://github.com/LTplus-AG/ifc-lite/commit/b0d489ea7270b84c1d373b5e340fc09ba0c798e6)]:
+  - @ifc-lite/sdk@7.0.0
+
+## 2.6.0
+
+### Minor Changes
+
+- [#5017](https://github.com/LTplus-AG/ifc-lite/pull/5017) [`55d4354`](https://github.com/LTplus-AG/ifc-lite/commit/55d43541c7dfce6006d391a5034169ea54014d5f) Thanks [@louistrue](https://github.com/louistrue)! - Expose the loaded-model `bim.store` cost-authoring methods to sandbox scripts and generated BIM globals.
+
+### Patch Changes
+
+- [#5016](https://github.com/LTplus-AG/ifc-lite/pull/5016) [`0100a54`](https://github.com/LTplus-AG/ifc-lite/commit/0100a544d0446d2f19b5f76f37d6dc45d31da837) Thanks [@louistrue](https://github.com/louistrue)! - Add the loaded-model cost-authoring foundation: mutation-aware cost reads, effective created-record export, schema-consistent cost builders, relationship assignment, reference-safe removal, and StoreEditor entity-type/schema lookup.
+- Updated dependencies [[`d38af5a`](https://github.com/LTplus-AG/ifc-lite/commit/d38af5afd36f12329fe6f33bf905d28fca65ba43), [`0100a54`](https://github.com/LTplus-AG/ifc-lite/commit/0100a544d0446d2f19b5f76f37d6dc45d31da837), [`55d4354`](https://github.com/LTplus-AG/ifc-lite/commit/55d43541c7dfce6006d391a5034169ea54014d5f)]:
+  - @ifc-lite/sdk@6.4.0
+
+## 2.5.0
+
+### Minor Changes
+
+- [#4867](https://github.com/LTplus-AG/ifc-lite/pull/4867) [`e43c455`](https://github.com/LTplus-AG/ifc-lite/commit/e43c455711d4070b530436413db948fedcc34053) Thanks [@louistrue](https://github.com/louistrue)! - Expose the canonical IFC 5D cost read model and decimal evaluation through
+  `bim.cost`, CLI/headless and MCP backends, MCP tools, viewer-local SDK calls,
+  remote capability reporting, and the sandbox bridge.
+  
+  Bound public cost-evaluation precision to 1 through 10,000 significant digits
+  so caller-controlled division cannot request impractical decimal output.
+
+- [#4876](https://github.com/LTplus-AG/ifc-lite/pull/4876) [`8733dc9`](https://github.com/LTplus-AG/ifc-lite/commit/8733dc9cb391344606b9bc59beb00a6f9d1de135) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Author IFC 5D cost data from scratch. `IfcCreator` gains exact-name methods for
+  `IfcCostSchedule`, `IfcCostItem`, `IfcCostValue`, the `IfcMonetaryUnit` /
+  `IfcSIUnit` / `IfcMeasureWithUnit` a rate is quoted in, standalone
+  `IfcPhysicalSimpleQuantity` values, and the nesting / schedule / product / task
+  relationships that bind them, all backed by one shared builder
+  (`ifc-creator-cost.ts`) and exposed through `bim.create.*`. A new
+  `ProjectParams.Currency` writes the project `IfcMonetaryUnit`.
+  
+  Written to be read back by the cost read model added in [#4863](https://github.com/LTplus-AG/ifc-lite/issues/4863): values that carry
+  a literal amount are serialized as named SELECT branches
+  (`IFCMONETARYMEASURE(1234.56)`), never as bare numbers, while
+  `IfcQuantityArea.AreaValue` and its siblings stay bare because they are defined
+  types rather than SELECTs. `UnitBasis` is preserved as the real per-quantity
+  divisor it is, a shared measure entity is written once and referenced, and a
+  value derived from `Components` is not normalised into a literal (or the
+  reverse).
+  
+  Absent stays absent. There is no default currency — a model authored without one
+  reads back with none rather than a guess — and an omitted list attribute is
+  written as absent while an EMPTY array is refused, because the two are different
+  answers. Cost authoring is refused explicitly under IFC2X3, where the entities
+  have a different attribute layout, rather than silently writing nothing.
+  
+  A fractional `IfcQuantityCount` value is refused rather than silently rounded:
+  `IfcQuantityCount.CountValue` is stored as an unparsed string on read, so a
+  rounded count would round-trip altered with no trace of the change.
+
+### Patch Changes
+
+- Updated dependencies [[`35c0517`](https://github.com/LTplus-AG/ifc-lite/commit/35c0517d9779297704979131f451a4ae704bf744), [`e43c455`](https://github.com/LTplus-AG/ifc-lite/commit/e43c455711d4070b530436413db948fedcc34053)]:
+  - @ifc-lite/sdk@6.2.0
+
+## 2.4.0
+
+### Minor Changes
+
+- [#4835](https://github.com/LTplus-AG/ifc-lite/pull/4835) [`863a60e`](https://github.com/LTplus-AG/ifc-lite/commit/863a60ea70034cb8b5c2ebd27e7153a312556c6c) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Add IfcWorkCalendar / IfcWorkTime / IfcRecurrencePattern support to the 4D scheduling pipeline: calendars and their working / exception times are now extracted, round-tripped losslessly on export, and readable from `bim.schedule.data()`. `IfcCreator.addIfcWorkCalendar` (plus the `assignCalendarToTasks` alias) authors them, exposed through `bim.create.*`. Calendars are surfaced read-only — deriving working-day-aware task dates from a recurrence pattern is not implemented.
+
+### Patch Changes
+
+- [#4822](https://github.com/LTplus-AG/ifc-lite/pull/4822) [`a46657b`](https://github.com/LTplus-AG/ifc-lite/commit/a46657b63fc2848c3fc2b26359fdf511662b6368) Thanks [@louistrue](https://github.com/louistrue)! - Keep an explicit empty entity list distinct from an omitted list when resetting viewer colors, so a zero-match reset is a no-op instead of clearing every override.
+- Updated dependencies [[`a46657b`](https://github.com/LTplus-AG/ifc-lite/commit/a46657b63fc2848c3fc2b26359fdf511662b6368), [`863a60e`](https://github.com/LTplus-AG/ifc-lite/commit/863a60ea70034cb8b5c2ebd27e7153a312556c6c)]:
+  - @ifc-lite/sdk@6.1.0
+
+## 2.3.1
+
+### Patch Changes
+
+- [#4748](https://github.com/LTplus-AG/ifc-lite/pull/4748) [`36fa88e`](https://github.com/LTplus-AG/ifc-lite/commit/36fa88e8862416ac6a9f493135c6fdfca793d0eb) Thanks [@louistrue](https://github.com/louistrue)! - `bim.export.ifc()` no longer exports the whole model when an isolation filter matched nothing. The ref list carried two meanings on one argument: a non-empty array isolated to those entities, and an empty array meant "no filter, export everything". A caller whose filter matched zero entities passed the empty array and got every entity back, reported as success. That is the same null-vs-empty collapse [#4364](https://github.com/LTplus-AG/ifc-lite/issues/4364)/[#4386](https://github.com/LTplus-AG/ifc-lite/issues/4386) removed from the GLB and OBJ bindings and [#4659](https://github.com/LTplus-AG/ifc-lite/issues/4659) from the JSON-LD and STEP ones, and it is why every in-repo caller had to carry its own zero-match guard to stay safe. The viewer's MCP playground `export_ifc` had none, so `global_ids` that matched nothing staged the entire model as a download and described it as the requested subset.
+  
+  `refs` is now optional: omit it (or pass `undefined`/`null`) for "no isolation filter", and pass an array for an active one. An active filter that matched nothing is refused with an error instead of widened back to a whole-model export. The check lives in `ExportNamespace.ifc`, the one point every surface (CLI, MCP, playground, sandboxed scripts, viewer) reaches a STEP export through, and the absence travels down with the call: a backend now receives `undefined` for "no filter" and never an empty array. The viewer's export adapter, which needs a model id and so refuses an empty ref list, uses that to export the active model whole; the sandbox bridge keeps an omitted `entities` argument omitted rather than turning it into `[]` (`bim.export.csv()` still answers an empty list, unchanged).
+  
+  **Migration:** replace `bim.export.ifc([], options)` with `bim.export.ifc(undefined, options)` (or `bim.export.ifc()`), which is the same whole-model export. A call site that builds `refs` from a query keeps passing the array and now gets an error rather than the whole model when the query matched nothing. A custom `BimBackend` sees `undefined` where it used to see `[]` for an unfiltered export.
+- Updated dependencies [[`7b34e97`](https://github.com/LTplus-AG/ifc-lite/commit/7b34e97f2abdc49be3eef78031d52d1107622544), [`36fa88e`](https://github.com/LTplus-AG/ifc-lite/commit/36fa88e8862416ac6a9f493135c6fdfca793d0eb)]:
+  - @ifc-lite/sdk@6.0.0
+
+## 2.3.0
+
+### Minor Changes
+
+- [#4677](https://github.com/LTplus-AG/ifc-lite/pull/4677) [`4db9471`](https://github.com/LTplus-AG/ifc-lite/commit/4db9471098a42ed948c4920cce1cb71a99d60d6a) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Added `bim.structural` — a read-only query surface over the structural analysis data `extractStructuralOnDemand` already parses (analysis models, members, connections, actions/reactions, load groups, result groups). `bim.structural.data()` returns the full extraction plus `loadsTruncated`; `analysisModels()`, `members()`, `connections()`, `activities()`, `loadGroups()` and `resultGroups()` are convenience accessors over the same collections. Every consumer of `data()` — the SDK namespace, the sandbox script bridge, and both headless backends (CLI, MCP) plus the viewer's local backend — forwards `loadsTruncated` unchanged rather than defaulting it away, so a caller reading an applied load's configuration can tell a genuinely small load tree from one a reader bound (nesting depth, node budget, or a cycle guard) cut short.
+  
+  This is layer 3 of [#4206](https://github.com/LTplus-AG/ifc-lite/issues/4206)'s six-layer structural analysis stack (semantic extraction, the read model, this query surface). A properties-card / panel UI, geometry, and a write/round-trip serializer remain out of scope for this change.
+
+### Patch Changes
+
+- Updated dependencies [[`4db9471`](https://github.com/LTplus-AG/ifc-lite/commit/4db9471098a42ed948c4920cce1cb71a99d60d6a)]:
+  - @ifc-lite/sdk@5.1.0
+
+## 2.2.4
+
+### Patch Changes
+
+- Updated dependencies [[`9a271dc`](https://github.com/LTplus-AG/ifc-lite/commit/9a271dcb19dff2f9bca72fc3505ce5a71b3e800b), [`4c9a88d`](https://github.com/LTplus-AG/ifc-lite/commit/4c9a88d80b9ba9631be97050d896b5f5834d3628), [`4c9a88d`](https://github.com/LTplus-AG/ifc-lite/commit/4c9a88d80b9ba9631be97050d896b5f5834d3628)]:
+  - @ifc-lite/sdk@5.0.0
+
+## 2.2.3
+
+### Patch Changes
+
+- [#4097](https://github.com/LTplus-AG/ifc-lite/pull/4097) [`f48b803`](https://github.com/LTplus-AG/ifc-lite/commit/f48b803ee82824710b315cb768f8b02b658fa101) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Finish renaming the BCF "issues" language to "topics" across the app, docs, and package-facing text. Per the BCF-XML specification, `Topic` is the container element and `Issue` is only one `TopicType` value among several (Request, Comment, Error, Warning, Info); the previous patch fixed the BCF panel's own title, heading, empty-state copy, and topic-title placeholder, and left the rest of the product inconsistent.
+  
+  Remaining app-visible surfaces now fixed: the Analyze ribbon's "BCF issues" toggle button (a fourth site, alongside the command palette, main toolbar, and workspace-panel controls fixed previously), the compare panel's "Create BCF issue" affordance and "Issue for" header, the auto-created BCF project's default name (`<model>_Issues` → `<model>_Topics`, matching the BCF panel's own default), the landing-page hero animation's "Issue" step label, the MCP playground's BCF category blurb and example export path, and BCF-related copy across three in-app tours (`bcf`, `compare`, `clash`) — tour titles/descriptions plus five step titles/bodies.
+  
+  Docs updated to match: `docs/index.md`, `README.md`, `docs/guide/quickstart.md`, `docs/guide/bcf.md`, `docs/api/typescript.md`, and the CLI guide/reference's `bcf` examples (`--out topic.bcf`, `bcf list topics.bcf`), which also renamed the example filenames for consistency — they are illustrative only; the CLI has no default BCF filename.
+  
+  Also reworded now-inconsistent internal comments and JSDoc in the touched files, `@ifc-lite/bcf`'s package README and `createTopic` doc comment, `@ifc-lite/bcf-api`'s README, `@ifc-lite/sdk`'s `bim.bcf` namespace docs, `@ifc-lite/mcp`'s `bcf` tool docblock and fire-rating prompt template, and `@ifc-lite/sandbox`'s clash-to-BCF tool description — all comment/doc-only, no behavior change beyond the CLI's `bcf create` usage-message example (`--title "Issue"` → `--title "Missing door"`, matching the `--help` listing).
+  
+  Left deliberately unchanged: `bcfHelpers.tsx`'s `TOPIC_TYPES` list and every other real `TopicType` spec value (including the MCP `bcf` tool's `type` default and the sandbox playground's `topicType` default, both `'Issue'`), `ClashPanel`'s unrelated clash-detection "issues", GitHub issue-number references, and `registry.ts`'s `id: 'bcf'` panel key.
+- Updated dependencies [[`f48b803`](https://github.com/LTplus-AG/ifc-lite/commit/f48b803ee82824710b315cb768f8b02b658fa101)]:
+  - @ifc-lite/sdk@4.0.2
+
+## 2.2.2
+
+### Patch Changes
+
+- [#3472](https://github.com/LTplus-AG/ifc-lite/pull/3472) [`c4fb369`](https://github.com/LTplus-AG/ifc-lite/commit/c4fb36908b350829e73217851c07d9a2e6de74fb) Thanks [@BIMvoice](https://github.com/BIMvoice)! - `bim.query.entity(modelId, expressId)` built its `EntityRef` inline from the raw arguments, with type casts and no runtime check, instead of going through the shared `toRef()` helper that every other method in `bim.query` uses. A call that omitted an argument — `bim.query.entity('m1')` — therefore reached `sdk.entity()` with `expressId: undefined` instead of being rejected first.
+  
+  `entity()` now builds its ref via `toRef()` and returns `null` when the ref is unusable, matching the rest of `bim.query`. A script that passes a real `(modelId, expressId)` pair is unaffected, and so is a wrong-typed one: the bridge coerces argument 0 with `getString` and argument 1 with `getNumber` before the handler runs, so `bim.query.entity(42, '7')` arrived — and still arrives — as `('42', 7)`.
+
+- [#3855](https://github.com/LTplus-AG/ifc-lite/pull/3855) [`182215a`](https://github.com/LTplus-AG/ifc-lite/commit/182215a835c4beac6a776bcb4eb1d019cab9063e) Thanks [@louistrue](https://github.com/louistrue)! - Corrected the code samples on each package's npm landing page: the README fences are now typechecked against the package's real exports, so the snippets import what they call, declare the values they read, and no longer show removed options or renamed methods. Patch-bumping every package whose README changed so the corrections actually reach npmjs.com.
+
+- [#3496](https://github.com/LTplus-AG/ifc-lite/pull/3496) [`8b975fe`](https://github.com/LTplus-AG/ifc-lite/commit/8b975fec2769ba8f1787075ecb7785bb3bc06ac0) Thanks [@BIMvoice](https://github.com/BIMvoice)! - `bim.viewer.resetColors()` in sandbox scripts always reset every color override in the model. The SDK method it wraps (`resetColors(refs?: EntityRef[])`) already supports resetting only the given entities' colors, but the sandbox schema declared `resetColors` with zero parameters, so a script had no way to pass any — the capability was unreachable from user scripts, the editor's completions, and the LLM system prompt. `resetColors` now takes an optional `entities` argument and forwards it; calling it with no arguments still resets everything.
+
+- [#3471](https://github.com/LTplus-AG/ifc-lite/pull/3471) [`cd6f54f`](https://github.com/LTplus-AG/ifc-lite/commit/cd6f54f48e0c3d9013d13f1b9a95d495287b3b45) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix `toRef()` accepting a `NaN`, `Infinity`, negative, or fractional `expressId`.
+  
+  The bridge boundary shared by `bim.mutate`, `bim.store`, and `bim.query` checked `typeof ref.expressId === 'number'` but not that the number was a finite positive integer. `bridge-store.ts`'s `requireStoreyId` already enforced `Number.isInteger(id) && id > 0` for storey ids; `toRef` is now held to the same standard, since every call site trusts a non-null result as naming a real entity.
+  
+  Concretely, this closes a silent-failure path: a script that computes an express id from parsed data (a CSV join is the documented use case) and passes a `NaN` or fractional value into `bim.mutate.setProperty`/`setAttribute`/`deleteProperty` used to record the mutation under a key no real entity has and no export path ever emits, with no exception — the script reported success while the edit went nowhere. `toRef` now returns `null` for these shapes. Of the 22 call sites, 5 throw `Error` on a `null` ref (the three in `bridge-mutate.ts` and the two in `bridge-store.ts`, e.g. `bim.mutate.setProperty: invalid entity reference`), so on those the behaviour changes from silent no-op to a thrown error. The other 17, all the read paths in `bridge-query.ts`, return an empty result on a `null` ref (`[]`, `null`, or an empty relationship object), so a bad express id there stops reaching the SDK and reads as "no data" instead.
+  
+  This is an observable behaviour change: a script that was previously computing a bad express id and "succeeding" (the mutation was simply lost) will now throw from `bim.mutate`/`bim.store` instead, and get an empty result back from `bim.query`. A script that only ever passes valid express ids is unaffected.
+- Updated dependencies [[`f98e601`](https://github.com/LTplus-AG/ifc-lite/commit/f98e601e5efc749088949665e41efd44f1b889c4), [`586fa29`](https://github.com/LTplus-AG/ifc-lite/commit/586fa292b69cdb3ba6e45764b4ff742b2fa7b9a9), [`c1390f3`](https://github.com/LTplus-AG/ifc-lite/commit/c1390f38e32f7a345a4f2651b8a3b6d849e56af6)]:
+  - @ifc-lite/sdk@4.0.0
+
+## 2.2.1
+
+### Patch Changes
+
+- [#2992](https://github.com/LTplus-AG/ifc-lite/pull/2992) [`409520e`](https://github.com/LTplus-AG/ifc-lite/commit/409520ee2e940866b126c3433cc10d0fe110d645) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix `bim.export.ifc()` (and any other `returns: 'value'` bridge method) handing a sandboxed script `{ "0": …, "1": … }` instead of a real array when the SDK returns a `Uint8Array`.
+  
+  `marshalValue` walked non-array objects with `Object.entries`, and a typed array's own enumerable properties are its indices — so the marshalled value had no `.length`, failed `Array.isArray()`, and was not iterable. `sdk.export.ifc()` returns `Uint8Array` chunks once STEP output exceeds V8's string-length limit, so this only showed up on large exports: a script that worked fine against a small model silently got junk on a large one. `marshalValue` now detects any `ArrayBuffer`-backed view and converts it with `Array.from()` before marshalling, the same fix already applied to the sandbox's other value-marshalling path. `DataView` (no index keys to begin with) and `BigInt64Array` / `BigUint64Array` (bigint elements have no representation here and would marshal to an array of `null`s indistinguishable from real data) are excluded and keep their previous object shape, and a view whose `ArrayBuffer` has been detached — what transferring it to a worker leaves behind — degrades to `{}` instead of throwing out of the whole `bim.*` call.
+- Updated dependencies [[`7ff31ba`](https://github.com/LTplus-AG/ifc-lite/commit/7ff31ba854671a9ca3ebbf30b15e928e1b52a8b9), [`8ba612f`](https://github.com/LTplus-AG/ifc-lite/commit/8ba612f90d3bb0ad41f756d6fdef6b3250e8d330), [`75867a7`](https://github.com/LTplus-AG/ifc-lite/commit/75867a7e6ebf51b2da47cab14242bcd71787ba3b), [`4a8fe77`](https://github.com/LTplus-AG/ifc-lite/commit/4a8fe77707127d251702610490f53430610e4ef7), [`945c4d7`](https://github.com/LTplus-AG/ifc-lite/commit/945c4d7a773614dd664feb9490e13372782a543b), [`75867a7`](https://github.com/LTplus-AG/ifc-lite/commit/75867a7e6ebf51b2da47cab14242bcd71787ba3b)]:
+  - @ifc-lite/sdk@3.0.0
+
 ## 2.2.0
 
 ### Minor Changes

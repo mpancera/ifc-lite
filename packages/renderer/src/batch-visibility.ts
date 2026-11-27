@@ -1,0 +1,104 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/**
+ * How a colour batch stands under hide/isolate, shared by the colour and
+ * shadow passes so both draw the same thing (#2670, #10264 S2).
+ *
+ * - `'none'`: every entry is hidden; the batch is not drawn and does not cast.
+ * - `'all'`: no filter, or every entry visible; drawn from its own buffers.
+ * - a {@link PartlyVisibleBatch}: drawn whole from its own buffers with the
+ *   per-fragment test against the GPU visibility table
+ *   (`entity-visibility-table.ts`). No sub-batch is cut from the CPU copy of
+ *   the geometry, so this keeps working once that copy is released.
+ *
+ * Classification reads every entity the batch draws: its primary entries and
+ * the secondary vertex-lane ids of colour-merged pieces (`batchEntities`,
+ * #10653), so a hidden secondary forces the per-fragment test and a visible
+ * secondary keeps an otherwise hidden batch drawn, with or without CPU pieces.
+ */
+
+import { isEntityVisible } from './entity-visibility.js';
+import { batchEntityIdAnchor } from './entity-color-table.js';
+import { batchEntities, batchEntryStamp } from './batch-entities.js';
+import type { BatchedMesh } from './types.js';
+import type { AlphaBatchLike } from './xray-alpha.js';
+
+/**
+ * The visible part of a partly hidden batch. Stable for one visibility epoch,
+ * so X-Ray's per-object caches resolve its fade once, over the visible
+ * entries only, as they would for a sub-batch of them.
+ */
+export interface PartlyVisibleBatch extends AlphaBatchLike {
+  readonly visibleIds: Set<number>;
+}
+
+export type BatchVisibility = 'none' | 'all' | PartlyVisibleBatch;
+
+export { batchEntities } from './batch-entities.js'; // for renderer.ts, inside its line budget
+
+export function classifyBatch(
+  batch: Pick<BatchedMesh, 'expressIds' | 'laneIds' | 'color'>,
+  hiddenIds: ReadonlySet<number> | null | undefined,
+  isolatedIds: ReadonlySet<number> | null | undefined,
+): BatchVisibility {
+  if ((hiddenIds == null || hiddenIds.size === 0) && isolatedIds == null) return 'all';
+  const visibleIds = new Set<number>();
+  let visibleEntries = 0;
+  const entities = batchEntities(batch);
+  for (const id of entities) {
+    if (isEntityVisible(id, hiddenIds, isolatedIds)) { visibleIds.add(id); visibleEntries++; }
+  }
+  if (visibleIds.size === 0) return 'none';
+  if (visibleEntries === entities.length) return 'all';
+  return { expressIds: [...visibleIds], color: batch.color, visibleIds };
+}
+
+/**
+ * Whether a partly hidden batch can be drawn whole with the GPU test: the
+ * table holds this frame's sets, and the batch has a lane anchor to resolve
+ * full ids (its entries lie in one 2^24 page, true of every scene batch).
+ * Otherwise the batch must be left out, never drawn with its hidden entities.
+ */
+export function canFilterOnGpu(batch: Pick<BatchedMesh, 'expressIds' | 'laneIds'>, tableReady: boolean): boolean {
+  return tableReady && batchEntityIdAnchor(batch) !== null;
+}
+
+/**
+ * Per-batch classification cached for one visibility epoch: the O(entries)
+ * scan runs once per hide/isolate change, not per frame. A WeakMap, so
+ * residency churn while one epoch holds does not pin dead batch objects.
+ */
+export class BatchVisibilityCache {
+  private epoch = -1;
+  private cache = new WeakMap<BatchedMesh, BatchVisibility>();
+  /**
+   * Entry stamp each verdict was computed for (`batchEntryStamp`). A compact page (compact-store.ts) is
+   * one batch object that keeps growing while a model streams, and loses a mesh when it is retired, so a
+   * page judged "all visible" must be judged again once its ids change: a mesh hidden by id that arrived
+   * after the visible meshes of its cell would otherwise be drawn (a type-library mesh, on a host whose
+   * batch order put it last), even when another mesh left the page in the same flush.
+   */
+  private sizes = new WeakMap<BatchedMesh, number>();
+
+  classify(
+    batch: BatchedMesh,
+    epoch: number,
+    hiddenIds: ReadonlySet<number> | null | undefined,
+    isolatedIds: ReadonlySet<number> | null | undefined,
+  ): BatchVisibility {
+    if (epoch !== this.epoch) {
+      this.cache = new WeakMap();
+      this.sizes = new WeakMap();
+      this.epoch = epoch;
+    }
+    let vis = this.cache.get(batch);
+    if (vis === undefined || this.sizes.get(batch) !== batchEntryStamp(batch)) {
+      vis = classifyBatch(batch, hiddenIds, isolatedIds);
+      this.cache.set(batch, vis);
+      this.sizes.set(batch, batchEntryStamp(batch));
+    }
+    return vis;
+  }
+}

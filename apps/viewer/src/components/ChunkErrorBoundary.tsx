@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import { reportCorrelation } from '@/lib/error-reports/correlation';
+import { offerErrorReport } from '@/lib/error-reports/context';
 /**
  * Error boundary for `React.lazy` chunk roots.
  *
@@ -23,8 +25,12 @@
 
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { RefreshCw } from 'lucide-react';
+import { useTranslation, type TranslationKey } from '@/i18n';
 import { posthog } from '@/lib/analytics';
-import { isChunkLoadError } from '@/lib/chunk-version-skew';
+import { reloadKeepingOpenModels } from '@/lib/reload-resume';
+import { isStaleDeploymentError } from '@/lib/stale-deployment';
+import { captureUnavailableChunk, ChunkBoundaryContext } from '@/lib/lazy-chunk';
+import { isChunkLoadError } from '@/lib/chunk-load-error';
 
 /**
  * Which surface the fallback paints on.
@@ -41,11 +47,53 @@ type ChunkErrorTone = 'panel' | 'night';
 /** McpLanding's `PAPER` / `PAPER_DIM`, kept in sync by eye: this is one message. */
 const NIGHT_TONE = { fg: '#ede4d3', dim: '#9c9486' } as const;
 
+const CHUNK_LABEL_KEYS = {
+  'BCF panel': 'bcf.panel.title',
+  'Validation panel': 'validationPanel.title',
+  'Lens panel': 'lensPanel.title',
+  'Gantt panel': 'workspacePanels.bottom.gantt',
+  'Lists panel': 'lists.panel.title',
+  'Extensions panel': 'extensionsFlavors.extensionsPanel.heading',
+  'Command palette': 'commandPalette.ariaLabel',
+  'Bulk Property Editor': 'bulkPropertyEditor.title',
+  'Data Connector': 'dataConnector.dialogTitle',
+  'Compare models': 'comparePanel.panel.title',
+  'Clash panel': 'clashPanel.title',
+  'Linked records panel': 'semantic.title',
+  'Appearance panel': 'viewerShell.chunkLabel.appearancePanel',
+  'Charts panel': 'viewerShell.chunkLabel.chartsPanel',
+  'Assistant panel': 'assistant.title',
+  'Point cloud panel': 'pointCloudPanel.title',
+  'Load report panel': 'loadReportPanel.title',
+  'Review panel': 'reviewWorkspace.title',
+  'IDS Studio panel': 'idsStudio.title',
+  'Script panel': 'scriptPanel.header.defaultTitle',
+  'Flow panel': 'viewerShell.chunkLabel.flowPanel',
+  'Drawing panel': 'viewerShell.chunkLabel.drawingPanel',
+  'Document panel': 'viewerShell.chunkLabel.documentPanel',
+  'Presentation panel': 'viewerShell.chunkLabel.presentationPanel',
+  'InfluxDB 2': 'influx.title',
+  'Layers panel': 'viewerShell.chunkLabel.layersPanel',
+  'MCP page': 'viewerShell.chunkLabel.mcpPage',
+  'MCP playground': 'viewerShell.chunkLabel.mcpPlayground',
+  'RTE GPU witness': 'viewerShell.chunkLabel.rteGpuWitness',
+  'Saved runs': 'compareAnalysis.reconcile.savedTitle',
+  'Material layers': 'modelInspector.layers.title',
+  'Storey manager': 'storeyManager.title',
+  'Structural Analysis card': 'properties.structural.heading',
+  'Structural derivation': 'commandPalette.tool.deriveStructural.label',
+  "What's New tab": 'keyboardShortcuts.tabs.whatsNew',
+} as const satisfies Record<string, TranslationKey>;
+
+type ChunkLabel = keyof typeof CHUNK_LABEL_KEYS;
+
 interface ChunkErrorBoundaryProps {
   /** What failed, in the user's words: "Layers panel", "MCP playground". */
-  label: string;
+  label: ChunkLabel;
   tone?: ChunkErrorTone;
   children: ReactNode;
+  /** Keep an overlay failure inside its dismissible overlay instead of panel flow. */
+  renderFallback?: (fallback: ReactNode) => ReactNode;
 }
 
 interface ChunkErrorBoundaryState {
@@ -68,13 +116,17 @@ export class ChunkErrorBoundary extends Component<
     // filing a component crash under the chunk-skew context would mis-group a
     // real bug with an auto-recovered one, and the render path below would tell
     // the user their tab was out of date when it was not.
-    const chunk = isChunkLoadError(error);
+    const chunk = isStaleDeploymentError(error);
     console.error(`[chunk-boundary] "${this.props.label}" failed`, error, info);
     // Reported explicitly so it lands as HANDLED rather than as an uncaught
     // error-level exception. When a skew reload is in flight the before_send
     // gate in lib/chunk-version-skew.ts drops this as collateral; when no reload
     // is coming, it is a real dead end and worth hearing about.
-    posthog.captureException(error, {
+    if (isChunkLoadError(error)) {
+      captureUnavailableChunk(error, this.props.label);
+      return;
+    }
+    const captured = posthog.captureException(error, {
       context: chunk ? 'lazy_chunk_boundary' : 'lazy_subtree_boundary',
       // `lazy_chunk`, not `chunk_label`: the analytics scrub deletes any key
       // with a `label` word (free text is where model names leak), so the
@@ -83,49 +135,80 @@ export class ChunkErrorBoundary extends Component<
       // string from the call sites in this repo, not user data.
       lazy_chunk: this.props.label,
     });
+    if (!chunk) offerErrorReport({ errorCode: 'component_render_error', correlation: reportCorrelation(captured) });
   }
 
   render(): ReactNode {
     const { error } = this.state;
-    if (!error) return this.props.children;
-    const night = this.props.tone === 'night';
-    const chunk = isChunkLoadError(error);
-    return (
-      <div
-        // The fallback swaps in asynchronously, so without this a screen reader
-        // user gets no notification that the view they asked for is not coming.
-        role="alert"
-        className="flex h-full min-h-[160px] w-full flex-col items-center justify-center gap-2 px-4 text-center"
-        style={night ? { background: '#0a0a0c' } : undefined}
-      >
-        <span
-          className={night ? 'text-xs' : 'text-xs text-muted-foreground'}
-          style={night ? { color: NIGHT_TONE.fg } : undefined}
-        >
-          {chunk ? `${this.props.label} could not be loaded` : `${this.props.label} stopped working`}
-        </span>
-        <span
-          className={night ? 'max-w-[280px] text-[11px]' : 'max-w-[280px] text-[11px] text-muted-foreground/70'}
-          style={night ? { color: NIGHT_TONE.dim } : undefined}
-        >
-          {chunk
-            ? 'This usually means the app was updated while your tab was open.'
-            : 'An unexpected error stopped it from rendering.'}
-        </span>
-        <button
-          type="button"
-          onClick={() => window.location.reload()}
-          className={
-            night
-              ? 'mt-1 inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] transition-opacity hover:opacity-80'
-              : 'mt-1 inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] transition-colors hover:bg-accent'
-          }
-          style={night ? { borderColor: NIGHT_TONE.dim, color: NIGHT_TONE.fg } : undefined}
-        >
-          <RefreshCw className="h-3 w-3" aria-hidden />
-          Reload
-        </button>
-      </div>
+    if (!error) {
+      return <ChunkBoundaryContext.Provider value>{this.props.children}</ChunkBoundaryContext.Provider>;
+    }
+    const fallback = (
+      <ChunkErrorFallback
+        label={this.props.label}
+        tone={this.props.tone}
+        chunk={isStaleDeploymentError(error)}
+      />
     );
+    return this.props.renderFallback ? this.props.renderFallback(fallback) : fallback;
   }
+}
+
+/**
+ * The fallback UI as its own function component: `ChunkErrorBoundary`
+ * itself must stay a class (React only recognizes class components as
+ * error boundaries), but hooks — `useTranslation` here — only work in
+ * function components.
+ */
+function ChunkErrorFallback({
+  label,
+  tone,
+  chunk,
+}: {
+  label: ChunkLabel;
+  tone: ChunkErrorTone | undefined;
+  chunk: boolean;
+}): ReactNode {
+  const { t } = useTranslation();
+  const night = tone === 'night';
+  const translatedLabel = t(CHUNK_LABEL_KEYS[label]);
+  return (
+    <div
+      // The fallback swaps in asynchronously, so without this a screen reader
+      // user gets no notification that the view they asked for is not coming.
+      role="alert"
+      className="flex h-full min-h-[160px] w-full flex-col items-center justify-center gap-2 px-4 text-center"
+      style={night ? { background: '#0a0a0c' } : undefined}
+    >
+      <span
+        className={night ? 'text-xs' : 'text-xs text-muted-foreground'}
+        style={night ? { color: NIGHT_TONE.fg } : undefined}
+      >
+        {chunk ? t('viewerShell.chunkError.loadFailed', { label: translatedLabel }) : t('viewerShell.chunkError.crashed', { label: translatedLabel })}
+      </span>
+      <span
+        className={night ? 'max-w-[280px] text-2xs' : 'max-w-[280px] text-2xs text-muted-foreground'}
+        style={night ? { color: NIGHT_TONE.dim } : undefined}
+      >
+        {chunk
+          ? t('viewerShell.chunkError.loadFailedDetail')
+          : t('viewerShell.chunkError.crashedDetail')}
+      </span>
+      <button
+        type="button"
+        // A stale chunk keeps the open models across the reload; a crash does
+        // not, so reopening cannot replay whatever crashed.
+        onClick={() => (chunk ? reloadKeepingOpenModels('user') : window.location.reload())}
+        className={
+          night
+            ? 'mt-1 inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-2xs transition-opacity hover:opacity-80'
+            : 'mt-1 inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-2xs transition-colors hover:bg-accent'
+        }
+        style={night ? { borderColor: NIGHT_TONE.dim, color: NIGHT_TONE.fg } : undefined}
+      >
+        <RefreshCw className="h-3 w-3" aria-hidden />
+        {t('viewerShell.chunkError.reload')}
+      </button>
+    </div>
+  );
 }

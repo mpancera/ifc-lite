@@ -5,9 +5,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import {
+  CAP_FILL_VERTEX_FLOATS,
   buildCapFillGeometry,
   buildDrawingOutlineVertices,
+  capHighlightKey,
   createSectionLift,
+  recolorCapVertices,
   transform2Dto3D,
   type CutPolygon2D,
   type DrawingLine2D,
@@ -21,7 +24,7 @@ import {
  * changed without a single test going red.
  */
 
-const FLOATS_PER_VERTEX = 7; // x,y,z,r,g,b,a
+const FLOATS_PER_VERTEX = CAP_FILL_VERTEX_FLOATS; // x,y,z,r,g,b,a + per-polygon hatch (#8753)
 
 function poly(
   outer: Array<[number, number]>,
@@ -162,6 +165,23 @@ describe('buildCapFillGeometry', () => {
       assert.strictEqual(geom.vertices[i * FLOATS_PER_VERTEX + 1], 12, 'every vertex on the plane');
     }
     assert.ok(Math.abs(triangulatedArea(geom.vertices, geom.indices) - 4) < 1e-5);
+  });
+
+  it('issue #5049 narrows only anchor-local cap and outline residuals at 5,000 km', () => {
+    const anchor: [number, number, number] = [5_000_000.255, -2_000_000.125, 12];
+    const lift = createSectionLift('front', 0, false, {
+      origin: anchor,
+      tangent: [1, 0, 0],
+      bitangent: [0, 1, 0],
+    });
+    const polygon = poly([[0.01, 0.02], [0.03, 0.02], [0.01, 0.04]]);
+    const cap = buildCapFillGeometry([polygon], lift, anchor);
+    const outline = buildDrawingOutlineVertices([polygon], [], lift, anchor);
+    assert.ok(cap && outline);
+    const capOffsets = Array.from(cap.vertices.filter((_, i) => i % FLOATS_PER_VERTEX < 3));
+    assert.ok(capOffsets.some(value => Math.abs(value - 0.01) < 1e-7), 'fill retains x centimetre residual');
+    assert.ok(capOffsets.some(value => Math.abs(value - 0.02) < 1e-7), 'fill retains in-plane y residual');
+    assert.ok(Array.from(outline).some(value => Math.abs(value - 0.03) < 1e-7), 'outline retains its in-plane residual');
   });
 
   it('tags colourless polygons with the sentinel alpha -1 so the shader uses the cap style', () => {
@@ -325,5 +345,65 @@ describe('buildDrawingOutlineVertices', () => {
     // not apply the fill path's 3-point minimum.
     assert.ok(out);
     assert.strictEqual(out.length, 2 * 6);
+  });
+});
+
+describe('cap highlight recolouring (#7950)', () => {
+  const lift = createSectionLift('front', 0);
+  const tri = (id: number, dx: number): CutPolygon2D => ({
+    ...poly([[dx, 0], [dx + 1, 0], [dx, 1]], [], [0.5, 0.5, 0.5, 1]),
+    expressId: id,
+  });
+
+  it('records one vertex slice per polygon, keyed by its element', () => {
+    const fill = buildCapFillGeometry([tri(7, 0), tri(9, 5)], lift);
+    assert.ok(fill);
+    assert.deepStrictEqual(fill.ranges.map((r) => r.expressId), [7, 9]);
+    assert.strictEqual(fill.ranges[0].vertexStart, 0);
+    assert.strictEqual(fill.ranges[1].vertexStart, fill.ranges[0].vertexCount);
+    assert.strictEqual(
+      fill.ranges.reduce((n, r) => n + r.vertexCount, 0) * FLOATS_PER_VERTEX,
+      fill.vertices.length,
+    );
+  });
+
+  it('paints only the highlighted element and leaves the source buffer untouched', () => {
+    const fill = buildCapFillGeometry([tri(7, 0), tri(9, 5)], lift)!;
+    const before = Array.from(fill.vertices);
+    const out = recolorCapVertices(fill.vertices, fill.ranges, new Map([['*:9', [0.1, 0.2, 0.3, 1] as const]]));
+    assert.ok(out);
+    assert.deepStrictEqual(Array.from(fill.vertices), before, 'source is never mutated');
+    const colorOf = (buf: Float32Array, vertex: number) =>
+      Array.from(buf.slice(vertex * FLOATS_PER_VERTEX + 3, vertex * FLOATS_PER_VERTEX + 7)).map((v) => Math.round(v * 10) / 10);
+    assert.deepStrictEqual(colorOf(out, 0), [0.5, 0.5, 0.5, 1], 'element 7 keeps its colour');
+    assert.deepStrictEqual(colorOf(out, fill.ranges[1].vertexStart), [0.1, 0.2, 0.3, 1], 'element 9 is highlighted');
+    // geometry is untouched
+    assert.deepStrictEqual(Array.from(out.slice(0, 3)), Array.from(fill.vertices.slice(0, 3)));
+  });
+
+  it('returns null when nothing in the cap is highlighted', () => {
+    const fill = buildCapFillGeometry([tri(7, 0)], lift)!;
+    assert.strictEqual(recolorCapVertices(fill.vertices, fill.ranges, null), null);
+    assert.strictEqual(recolorCapVertices(fill.vertices, fill.ranges, new Map()), null);
+    assert.strictEqual(recolorCapVertices(fill.vertices, fill.ranges, new Map([['*:99', [1, 0, 0, 1] as const]])), null);
+  });
+
+  it('highlights a polygon that had no colour (uniform-fill sentinel) too', () => {
+    const plain: CutPolygon2D = { ...poly([[0, 0], [1, 0], [0, 1]]), expressId: 4 };
+    const fill = buildCapFillGeometry([plain], lift)!;
+    assert.strictEqual(fill.vertices[6], -1, 'sentinel alpha before highlight');
+    const out = recolorCapVertices(fill.vertices, fill.ranges, new Map([['*:4', [0.3, 0.6, 1, 1] as const]]))!;
+    assert.strictEqual(out[6], 1, 'alpha now selects the vertex colour in the shader');
+  });
+
+  it('scopes a highlight to its model when both models share an express id', () => {
+    const a = { ...tri(7, 0), modelIndex: 0 };
+    const b = { ...tri(7, 5), modelIndex: 1 };
+    const fill = buildCapFillGeometry([a, b], lift)!;
+    const out = recolorCapVertices(fill.vertices, fill.ranges, new Map([[capHighlightKey(1, 7), [1, 0, 0, 1] as const]]))!;
+    assert.strictEqual(out[3], 0.5, 'model 0 keeps its colour');
+    assert.strictEqual(out[fill.ranges[1].vertexStart * FLOATS_PER_VERTEX + 3], 1, 'model 1 is highlighted');
+    const any = recolorCapVertices(fill.vertices, fill.ranges, new Map([[capHighlightKey(undefined, 7), [0, 1, 0, 1] as const]]))!;
+    assert.strictEqual(any[4], 1, 'an unscoped entry matches the id in every model');
   });
 });

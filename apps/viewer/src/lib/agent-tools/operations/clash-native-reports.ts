@@ -1,0 +1,270 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+import { ToolExecutionError } from '@ifc-lite/mcp/browser';
+import { useViewerStore } from '@/store';
+import { viewerOperation } from './contract';
+import { assertToolActive } from '../cancellation';
+import type { ToolHost } from '../types';
+import type { SavedClashReport } from '@/lib/clash/saved-report-schema';
+import { evictOldest, retainCandidate } from './host-handles';
+import { pageInput, type PageInput } from './result-limit';
+import { libraryPage } from './library-page';
+import { assertRevision, revisionInput, stateRevision } from './state-revision';
+import { internal, invalidInput, stale, unavailable, parseJsonInput } from './refusals';
+const outputSchema = {
+  type: 'object',
+  properties: { native_json: { type: 'string' } },
+  required: ['native_json'],
+  additionalProperties: false,
+};
+const out = (value: unknown) => ({ native_json: JSON.stringify(value ?? null) });
+const meta = (id: string, description: string, write = false) => ({
+  id,
+  owner: 'clash',
+  description,
+  effects: write ? (['configuration'] as const) : (['read'] as const),
+  capability: write ? ('commands-and-edits' as const) : ('read' as const),
+  implementation: 'native-store' as const,
+  outputSchema,
+});
+interface DeleteCandidate {
+  report: SavedClashReport;
+  signature: string;
+  action: ReturnType<typeof useViewerStore.getState>['deleteSavedClashReport'];
+}
+const hosts = new WeakMap<ToolHost, Map<string, DeleteCandidate>>();
+function owned(host: ToolHost) {
+  let map = hosts.get(host);
+  if (!map) {
+    map = new Map();
+    hosts.set(host, map);
+  }
+  return map;
+}
+/** Every live and durable dependency, refusing a preview that could not read them all: a reference it
+ * cannot see would be broken by the deletion. */
+async function dependencies(id: string) {
+  const [{ loadDocuments }, { reportChartDependencies }] = await Promise.all([
+    import('@/lib/document/persistence'),
+    import('@/lib/reports/chart-dependencies'),
+  ]);
+  const entries = await loadDocuments().catch(error => {
+    console.warn('[Clash reports] Documents read failed:', error);
+    throw internal('Saved Documents could not be read. Restore that storage, then prepare again.', { dependency: 'documents' });
+  });
+  const preview = reportChartDependencies(useViewerStore.getState(), { kind: 'clash', id }, { entries, phase: 'ready' });
+  // Opening the library is a configuration effect of its own, so a read does not do it here.
+  if (preview.documentPhase === 'loading') throw unavailable('The Documents library is not open yet. Run document.initialize, then prepare again.');
+  // Invalid single dashboards (omittedDashboards) and recovered documents stay in the preview for the agent to
+  // weigh, as the panel shows them; only storage that could not be read at all hides every reference in it.
+  if (preview.documentPhase === 'unavailable' || preview.dashboardsUnavailable)
+    throw internal('Saved dashboards or Documents could not be read, so their references to this report are unknown. Restore that storage, then prepare again.', { dependency: preview.dashboardsUnavailable ? 'dashboards' : 'documents' });
+  return preview;
+}
+export const clashReportOperations = [
+  viewerOperation<PageInput>(
+    meta(
+      'clash.reports.read',
+      'Inspect durable native clash reports, immutable evidence and persistence diagnostics, one page at a time: pass next_offset as offset with the page_revision of the previous page until next_offset is null; a list that changed in between is refused, so read again from 0. expected_reports is the whole library revision. storage summarizes the whole library (phase, recovered, entry_count, counts by save state) and maps the ids on this page to their save states; save states of removed entries page after the entries. Saved results never install historical runtime IDs into the current scene.',
+    ),
+    pageInput,
+    async (i, c) => {
+      await useViewerStore.getState().initializeSavedClashReports();
+      assertToolActive(c);
+      const s = useViewerStore.getState();
+      const expected_reports = stateRevision(s.savedClashReports);
+      const { entries: reports, page, storage } = libraryPage(s.savedClashReports, s.savedClashReportsStorage, i, { expected_reports });
+      return out({ reports, ...page, storage, expected_reports });
+    },
+  ),
+  viewerOperation<{ name: string; run_seq: number }>(
+    meta(
+      'clash.reports.save',
+      'Capture native current report evidence, review annotations, model identities, stale limits and frozen quality thresholds into the durable saved-report library.',
+      true,
+    ),
+    {
+      type: 'object',
+      properties: { name: { type: 'string', minLength: 1, maxLength: 200 }, run_seq: { type: 'integer', minimum: 0 } },
+      required: ['name', 'run_seq'],
+      additionalProperties: false,
+    },
+    async (i, c) => {
+      const [{ snapshotClashReport }, { useQualityGatePreferences }] = await Promise.all([
+        import('@/lib/clash/saved-report'),
+        import('@/lib/clash/quality-gate-preferences'),
+      ]);
+      assertToolActive(c);
+      const s = useViewerStore.getState();
+      if (s.clashRunSeq !== i.run_seq) throw stale('Clash run changed.');
+      const report = snapshotClashReport(s, i.name, new Date(), useQualityGatePreferences.getState().config);
+      if (!report) throw unavailable('No native clash result to save.');
+      if (!(await c.commitAsync(() => useViewerStore.getState().saveClashReport(report))))
+        throw internal('Native report save failed.');
+      return out({ id: report.id });
+    },
+  ),
+  viewerOperation<{
+    action: 'rename' | 'import' | 'restore' | 'retry';
+    id: string;
+    name: string;
+    report_json: string;
+    expected_reports: string;
+  }>(
+    meta(
+      'clash.reports.write',
+      'Rename/import/restore/retry native saved reports through authoritative codecs and immutable-evidence collision checks. Does not reconstruct a live run from historical model IDs.',
+      true,
+    ),
+    {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['rename', 'import', 'restore', 'retry'] },
+        id: { type: 'string', maxLength: 200 },
+        name: { type: 'string', maxLength: 200 },
+        report_json: { type: 'string', maxLength: 10000000 },
+        expected_reports: revisionInput,
+      },
+      required: ['action', 'id', 'name', 'report_json', 'expected_reports'],
+      additionalProperties: false,
+    },
+    async (i, c) => {
+      const { isSavedClashReport } = await import('@/lib/clash/saved-report-schema');
+      let report: SavedClashReport | undefined;
+      if (i.action === 'import') {
+        const raw: unknown = parseJsonInput(i.report_json, 'report_json');
+        if (!isSavedClashReport(raw)) throw invalidInput('invalid-value', 'Invalid canonical native clash report.');
+        report = raw;
+      }
+      if (i.action === 'rename' && !i.name.trim()) throw invalidInput('invalid-value', 'A saved clash report needs a name.');
+      assertToolActive(c);
+      const ok = await c.commitAsync(async () => {
+        const s = useViewerStore.getState();
+        if (i.action === 'rename' && !s.savedClashReports.some(row => row.id === i.id))
+          throw invalidInput('unknown-target', 'Unknown saved clash report.');
+        assertRevision(s.savedClashReports, i.expected_reports, 'Saved reports changed.');
+        if (i.action === 'restore') return s.restoreSavedClashReports();
+        if (i.action === 'retry') return s.retrySaveClashReports();
+        if (report) {
+          const result = await s.saveClashReportResult(report);
+          if (result === 'conflict') throw invalidInput('conflict', 'Another saved clash report holds this ID with different evidence.');
+          if (result === 'invalid') throw invalidInput('invalid-value', 'Invalid canonical native clash report.');
+          if (result === 'storage') throw internal('Native report import could not be saved.');
+          return true;
+        }
+        return s.renameSavedClashReport(i.id, i.name);
+      });
+      if (!ok) throw internal('Native report storage refused. Inspect the report library save status.');
+      return out({ completed: i.action });
+    },
+  ),
+  viewerOperation<{ id: string }>(
+    meta(
+      'clash.reports.delete.prepare',
+      'Read exact native saved-report deletion dependencies across live/durable dashboards and Documents. Returns an immutable host-owned candidate; load failures refuse the preview.',
+    ),
+    {
+      type: 'object',
+      properties: { id: { type: 'string', minLength: 1, maxLength: 200 } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+    async (i, c) => {
+      const preview = await dependencies(i.id);
+      assertToolActive(c);
+      const s = useViewerStore.getState(),
+        report = s.savedClashReports.find((row) => row.id === i.id);
+      if (!report) throw invalidInput('unknown-target', 'Unknown saved report.');
+      evictOldest(owned(c.host), 32);
+      const token = crypto.randomUUID();
+      retainCandidate(c, owned(c.host), token, { report, signature: preview.signature, action: s.deleteSavedClashReport });
+      return out({ token, preview });
+    },
+  ),
+  viewerOperation<{ token: string }>(
+    meta(
+      'clash.reports.delete.apply',
+      'Delete the exact reviewed native report using its guarded content writer. Rechecks live and durable dependency signature immediately before native persistence; report replacement or changed dependencies refuse rather than bypass the preview.',
+      true,
+    ),
+    {
+      type: 'object',
+      properties: { token: { type: 'string', minLength: 1, maxLength: 100 } },
+      required: ['token'],
+      additionalProperties: false,
+    },
+    async (i, c) => {
+      const candidate = owned(c.host).get(i.token);
+      if (!candidate) throw invalidInput('unknown-target', 'Unknown deletion candidate.');
+      const preview = await dependencies(candidate.report.id);
+      assertToolActive(c);
+      const s = useViewerStore.getState();
+      if (
+        s.savedClashReports.find((row) => row.id === candidate.report.id) !== candidate.report ||
+        s.deleteSavedClashReport !== candidate.action ||
+        preview.signature !== candidate.signature
+      )
+        throw stale('Deletion target or dependencies changed. Preview again.');
+      let staged = false;
+      let guardFailure: ToolExecutionError | undefined;
+      // The library also runs this on a later storage retry, after this call has ended or lost its grant.
+      // Refusing then (not throwing) lets the library restore the report instead of leaving it hidden.
+      const guard = async () => {
+        let latest: Awaited<ReturnType<typeof dependencies>>;
+        try {
+          latest = await dependencies(candidate.report.id);
+          assertToolActive(c);
+        } catch (error) {
+          guardFailure = error instanceof ToolExecutionError ? error : internal('Native report deletion guard failed.');
+          console.warn('[Clash reports] Deletion guard refused:', error);
+          return false;
+        }
+        const now = useViewerStore.getState();
+        if (
+          now.deleteSavedClashReport !== candidate.action ||
+          latest.signature !== candidate.signature ||
+          (staged
+            ? now.savedClashReports.some((row) => row.id === candidate.report.id)
+            : now.savedClashReports.find((row) => row.id === candidate.report.id) !== candidate.report)
+        ) {
+          guardFailure = stale('Deletion target or dependencies changed. Preview again.');
+          return false;
+        }
+        staged = true;
+        return true;
+      };
+      if (!(await c.commitAsync(() => candidate.action(candidate.report.id, guard))))
+        throw guardFailure ?? internal('Native report deletion failed.');
+      owned(c.host).delete(i.token);
+      return out({ deleted: candidate.report.id });
+    },
+  ),
+  viewerOperation<{ id: string }>(
+    meta(
+      'clash.reports.document',
+      'Create the native frozen quality-gate Document from an exact saved clash report through the same native builder and durable Document writer. Requires the browser Canvas2D ring renderer used by the UI.',
+      true,
+    ),
+    {
+      type: 'object',
+      properties: { id: { type: 'string', minLength: 1, maxLength: 200 } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+    async (i, c) => {
+      const [{ qualityGateDocument }, { captureTranslation }] = await Promise.all([
+        import('@/lib/document/clash-quality-report'),
+        import('@/i18n/registry'),
+      ]);
+      const s = useViewerStore.getState(),
+        report = s.savedClashReports.find((row) => row.id === i.id);
+      if (!report) throw invalidInput('unknown-target', 'Unknown saved clash report.');
+      const document = qualityGateDocument(report, captureTranslation());
+      assertToolActive(c);
+      if (!(await c.commitAsync(() => useViewerStore.getState().upsertDocument(document))))
+        throw internal('Native Document write failed.');
+      return out({ document_id: document.id });
+    },
+  ),
+];

@@ -22,6 +22,7 @@ import type { IfcDataStore } from '@ifc-lite/parser';
 import type { AuthScope } from './auth/scope.js';
 import type { HeadlessLikeBackend } from './headless-backend.js';
 import type { ViewerManager } from './viewer-manager.js';
+import type { ToolCatalogEntry } from './tool-catalog.js';
 
 export interface LoadedModel {
   id: string;
@@ -31,6 +32,22 @@ export interface LoadedModel {
   /** Concrete backend, retained so mutation tools can reach the editor without reflection. */
   backend: HeadlessLikeBackend;
   filePath?: string;
+  /**
+   * `sourceModelIdentity(name, postUnwrapBytes)` — the same string the viewer
+   * stores as `FederatedModel.sourceFingerprint`, so a `.rules.json` rule set
+   * whose `targets.modelFingerprints` were authored in the viewer resolves to
+   * this model in `check_rules` too (#5138). Absent when the model did not come
+   * from a file this process read (it then matches no fingerprint target).
+   */
+  sourceFingerprint?: string;
+  /**
+   * The parser's `scan:` diagnostics for this model: records the scan dropped
+   * (an unterminated or unescaped string, #3695/#7541) or skipped (#3395).
+   * Absent when every record the file declares was read. Answers about a model
+   * that has them describe less than the file holds, so `model_load` returns
+   * them to the caller (#7610).
+   */
+  scanWarnings?: readonly string[];
   loadedAt: number;
 }
 
@@ -47,10 +64,25 @@ export interface ModelRegistry {
   add(model: LoadedModel): void;
   remove(id: string): boolean;
   count(): number;
+  /** Called after every add or remove. Returns the unsubscribe. Optional for custom registries. */
+  onChange?(listener: () => void): () => void;
 }
 
 export class InMemoryModelRegistry implements ModelRegistry {
   private models = new Map<string, LoadedModel>();
+  private listeners = new Set<() => void>();
+
+  onChange(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  /** The change is already committed: a failing listener is reported, never thrown at the add/remove caller. */
+  private changed(): void {
+    for (const listener of this.listeners) {
+      try { listener(); } catch (err) { console.error('[ifc-lite-mcp] model registry listener failed:', err); }
+    }
+  }
 
   list(): LoadedModel[] {
     return Array.from(this.models.values());
@@ -70,11 +102,18 @@ export class InMemoryModelRegistry implements ModelRegistry {
   }
 
   add(model: LoadedModel): void {
+    const previous = this.models.get(model.id);
+    if (previous && previous !== model) previous.backend.dispose();
     this.models.set(model.id, model);
+    model.backend.setPeerScopes(() => this.list().filter(peer => peer !== model).map(peer => ({ dataStore: peer.store, view: peer.backend.getMutationView() })));
+    this.changed();
   }
 
   remove(id: string): boolean {
-    return this.models.delete(id);
+    this.models.get(id)?.backend.dispose();
+    const removed = this.models.delete(id);
+    if (removed) this.changed();
+    return removed;
   }
 
   count(): number {
@@ -115,6 +154,8 @@ export interface SessionIdentity {
 export interface ToolContext {
   registry: ModelRegistry;
   scope: AuthScope;
+  /** Live authorization for operations that await source materialization. */
+  currentScope?: () => AuthScope;
   progress: ProgressReporter;
   log: Logger;
   /** Honoured by long-running tools; aborts when client cancels. */
@@ -125,6 +166,8 @@ export interface ToolContext {
   session?: SessionIdentity;
   /** Optional: present when the server has a managed in-process viewer. */
   viewer?: ViewerManager;
+  /** The tools this caller may see, for the server manifest. Set by the server on resource reads. */
+  toolCatalog?: () => ToolCatalogEntry[];
 }
 
 export interface ServerConfig {

@@ -47,13 +47,16 @@ function element(key: string): ClashElement {
 }
 
 // happy-dom performs no layout, so every element measures 0×0 and the panel's
-// row virtualizer (which reads `offsetWidth`/`offsetHeight`, see
-// @tanstack/virtual-core `getRect`) computes an empty window — no section
-// header would render no matter what the panel does. Give every element a
-// fixed size so the virtual list actually materializes rows. Scoped to this
-// test file's process (node:test runs each file in its own child process).
+// row virtualizer (which reads the scroll element's `clientWidth`/`clientHeight`
+// from virtual-core 3.19, `offset*` before, see `getRect`, and each row's
+// `offsetHeight`) computes an empty window — no section header would render no
+// matter what the panel does. Give every element a fixed size so the virtual
+// list actually materializes rows. Scoped to this test file's process
+// (node:test runs each file in its own child process).
 Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { get: () => 800, configurable: true });
 Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { get: () => 600, configurable: true });
+Object.defineProperty(HTMLElement.prototype, 'clientWidth', { get: () => 800, configurable: true });
+Object.defineProperty(HTMLElement.prototype, 'clientHeight', { get: () => 600, configurable: true });
 
 let root: Root | null = null;
 let container: HTMLElement | null = null;
@@ -139,7 +142,7 @@ describe('ClashPanel — duplicate scan sections (#2530)', () => {
 });
 
 describe('ClashPanel - Pairs/Issues toggle vs duplicate scans (#2535)', () => {
-  it('hides the toggle and proximity wording during a duplicate scan', async () => {
+  it('offers Pairs/Groups but hides proximity Issues during a duplicate scan', async () => {
     // Proximity grouping does not apply to a duplicate scan: its grouping is
     // coincident SETS. Offering "Issues" (with the "within Xm" tooltip) there
     // presents a control whose wording describes a different mechanism.
@@ -154,8 +157,12 @@ describe('ClashPanel - Pairs/Issues toggle vs duplicate scans (#2535)', () => {
     // latter feeds the happy-dom element into the assertion diff, whose deep
     // inspection of the DOM graph exhausts the heap before the test can fail.
     assert.ok(buttonByText('Issues') === null, 'no Issues toggle during a duplicate scan');
-    assert.ok(buttonByText('Pairs') === null, 'no Pairs toggle during a duplicate scan');
+    assert.ok(buttonByText('Pairs'), 'duplicate pairs remain directly accessible');
+    const groupsButton = buttonByText('Groups');
+    assert.ok(groupsButton, 'manual groups remain accessible for duplicate results');
+    await act(async () => groupsButton.click());
     const text = container!.textContent ?? '';
+    assert.ok(text.includes('User-defined groups'), 'the Groups control switches to manual groups');
     assert.ok(!text.includes('Grouped by proximity'), 'no proximity wording during a duplicate scan');
     assert.ok(!/\bissues?\b/i.test(text), `no issue-count wording during a duplicate scan; got: ${text.slice(0, 400)}`);
   });

@@ -7,11 +7,10 @@
 //! Handles IfcAdvancedBrep and IfcAdvancedBrepWithVoids.
 //! Delegates per-face processing to shared advanced_face module.
 
-use crate::{Error, Mesh, Result, TessellationQuality};
+use crate::{Mesh, Result, TessellationQuality};
 use ifc_lite_core::{DecodedEntity, EntityDecoder, IfcSchema, IfcType};
 
 use crate::router::GeometryProcessor;
-use super::advanced_face::{parse_rational_weights, process_advanced_face, process_bspline_face};
 
 /// AdvancedBrep processor
 /// Handles IfcAdvancedBrep and IfcAdvancedBrepWithVoids - NURBS/B-spline surfaces
@@ -24,7 +23,27 @@ impl AdvancedBrepProcessor {
     }
 }
 
+impl AdvancedBrepProcessor {
+    /// Mesh the Brep; `rtc_file_units` is removed from every face in f64
+    /// before f32 narrowing (#5698).
+    fn process_rebased(
+        entity: &DecodedEntity,
+        decoder: &mut EntityDecoder,
+        quality: TessellationQuality,
+        rtc_file_units: Option<(f64, f64, f64)>,
+    ) -> Result<Mesh> {
+        super::advanced_plan::lower_brep(entity, decoder, quality, rtc_file_units)?.evaluate()
+    }
+}
+
 impl GeometryProcessor for AdvancedBrepProcessor {
+    fn lower_owned(&self, entity: &DecodedEntity, decoder: &mut EntityDecoder,
+        quality: crate::TessellationQuality, rtc_file_units: Option<(f64, f64, f64)>)
+        -> Option<crate::Result<crate::program::OwnedConstructor>> {
+        use crate::program::constructor::Constructor;
+        Some(super::advanced_plan::lower_brep(entity, decoder, quality, rtc_file_units).map(|plan| crate::program::OwnedConstructor::new(Constructor::AdvancedBrep(plan))))
+    }
+
     fn process(
         &self,
         entity: &DecodedEntity,
@@ -32,87 +51,18 @@ impl GeometryProcessor for AdvancedBrepProcessor {
         _schema: &IfcSchema,
         quality: TessellationQuality,
     ) -> Result<Mesh> {
-        // IfcAdvancedBrep attributes:
-        // 0: Outer (IfcClosedShell)
+        Self::process_rebased(entity, decoder, quality, None)
+    }
 
-        // Get the outer shell
-        let shell_attr = entity
-            .get(0)
-            .ok_or_else(|| Error::geometry("AdvancedBrep missing Outer shell".to_string()))?;
-
-        let shell = decoder
-            .resolve_ref(shell_attr)?
-            .ok_or_else(|| Error::geometry("Failed to resolve Outer shell".to_string()))?;
-
-        // Get faces from the shell (IfcClosedShell.CfsFaces)
-        let faces_attr = shell
-            .get(0)
-            .ok_or_else(|| Error::geometry("ClosedShell missing CfsFaces".to_string()))?;
-
-        let faces = faces_attr
-            .as_list()
-            .ok_or_else(|| Error::geometry("Expected face list".to_string()))?;
-
-        let mut all_positions = Vec::new();
-        let mut all_indices = Vec::new();
-
-        #[cfg(any(feature = "debug_geometry", feature = "observability"))]
-        let mut empty_faces: Vec<(u32, String)> = Vec::new();
-
-        for face_ref in faces {
-            if let Some(face_id) = face_ref.as_entity_ref() {
-                let face = decoder.decode_by_id(face_id)?;
-
-                // Delegate to shared advanced face processing
-                let (positions, indices) = process_advanced_face(&face, decoder, quality)?;
-
-                if !positions.is_empty() {
-                    // Merge into combined mesh
-                    let base_idx = (all_positions.len() / 3) as u32;
-                    all_positions.extend(positions);
-                    for idx in indices {
-                        all_indices.push(base_idx + idx);
-                    }
-                } else {
-                    #[cfg(any(feature = "debug_geometry", feature = "observability"))]
-                    {
-                        let surface_kind = face
-                            .get(1)
-                            .and_then(|a| decoder.resolve_ref(a).ok().flatten())
-                            .map(|s| s.ifc_type.as_str().to_string())
-                            .unwrap_or_else(|| "<unknown>".to_string());
-                        empty_faces.push((face_id, surface_kind));
-                    }
-                }
-            }
-        }
-
-        // Geometry loss on an advanced brep (faces that meshed to nothing) is
-        // a genuine anomaly: warn-level under observability. The legacy
-        // stderr line stays gated behind debug_geometry as before.
-        #[cfg(any(feature = "debug_geometry", feature = "observability"))]
-        if !empty_faces.is_empty() {
-            crate::diag::diag_warn!(
-                { entity_id = entity.id, empty_faces = empty_faces.len(),
-                  faces = ?empty_faces, "advanced_brep: entity produced empty faces" }
-                else {
-                    #[cfg(feature = "debug_geometry")]
-                    eprintln!(
-                        "[ifc-lite][advanced_brep] entity #{} produced {} empty face(s): {:?}",
-                        entity.id,
-                        empty_faces.len(),
-                        empty_faces
-                    );
-                }
-            );
-        }
-
-        Ok(Mesh {
-            positions: all_positions,
-            normals: Vec::new(),
-            indices: all_indices,
-            rtc_applied: false, 
-            origin: [0.0; 3],        instance_meta: None, local_bounds: None, local_to_world: None })
+    fn process_in_rtc_frame(
+        &self,
+        entity: &DecodedEntity,
+        decoder: &mut EntityDecoder,
+        _schema: &IfcSchema,
+        quality: TessellationQuality,
+        rtc_file_units: (f64, f64, f64),
+    ) -> Option<Result<Mesh>> {
+        Some(Self::process_rebased(entity, decoder, quality, Some(rtc_file_units)))
     }
 
     fn supported_types(&self) -> Vec<IfcType> {
@@ -137,6 +87,18 @@ impl BSplineSurfaceProcessor {
     pub fn new() -> Self {
         Self
     }
+
+    /// Mesh the surface; `rtc_file_units` shifts the control net in f64
+    /// before f32 narrowing (#5698).
+    fn process_rebased(
+        entity: &DecodedEntity,
+        decoder: &mut EntityDecoder,
+        quality: TessellationQuality,
+        rtc_file_units: Option<(f64, f64, f64)>,
+    ) -> Result<Mesh> {
+        super::advanced_plan::lower_bspline_surface(entity, decoder, quality, rtc_file_units)?
+            .evaluate()
+    }
 }
 
 impl Default for BSplineSurfaceProcessor {
@@ -146,6 +108,13 @@ impl Default for BSplineSurfaceProcessor {
 }
 
 impl GeometryProcessor for BSplineSurfaceProcessor {
+    fn lower_owned(&self, entity: &DecodedEntity, decoder: &mut EntityDecoder,
+        quality: crate::TessellationQuality, rtc_file_units: Option<(f64, f64, f64)>)
+        -> Option<crate::Result<crate::program::OwnedConstructor>> {
+        use crate::program::constructor::Constructor;
+        Some(super::advanced_plan::lower_bspline_surface(entity, decoder, quality, rtc_file_units).map(|plan| crate::program::OwnedConstructor::new(Constructor::BSplineSurface(plan))))
+    }
+
     fn process(
         &self,
         entity: &DecodedEntity,
@@ -153,21 +122,18 @@ impl GeometryProcessor for BSplineSurfaceProcessor {
         _schema: &IfcSchema,
         quality: TessellationQuality,
     ) -> Result<Mesh> {
-        let weights = if entity.ifc_type == IfcType::IfcRationalBSplineSurfaceWithKnots {
-            parse_rational_weights(entity)
-        } else {
-            None
-        };
+        Self::process_rebased(entity, decoder, quality, None)
+    }
 
-        let (positions, indices) =
-            process_bspline_face(entity, decoder, weights.as_deref(), quality)?;
-
-        Ok(Mesh {
-            positions,
-            normals: Vec::new(),
-            indices,
-            rtc_applied: false, 
-            origin: [0.0; 3],        instance_meta: None, local_bounds: None, local_to_world: None })
+    fn process_in_rtc_frame(
+        &self,
+        entity: &DecodedEntity,
+        decoder: &mut EntityDecoder,
+        _schema: &IfcSchema,
+        quality: TessellationQuality,
+        rtc_file_units: (f64, f64, f64),
+    ) -> Option<Result<Mesh>> {
+        Some(Self::process_rebased(entity, decoder, quality, Some(rtc_file_units)))
     }
 
     fn supported_types(&self) -> Vec<IfcType> {

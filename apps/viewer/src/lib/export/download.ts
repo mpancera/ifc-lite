@@ -19,10 +19,24 @@
 import { emitFileDownloaded } from '@/lib/tours/events';
 
 export interface SanitizeFilenameOptions {
-  /** Returned (and used as the base) when sanitising yields an empty string. Default `'file'`. */
+  /** Base to sanitize and fit when the supplied name yields an empty string. Default `'file'`. */
   fallback?: string;
-  /** Maximum length of the returned name. Default 60. */
+  /** Maximum length of the returned name. Default 60. NaN selects the fallback. */
   maxLength?: number;
+  /** Set to false when sanitizing a file extension. */
+  reservedStem?: boolean;
+}
+
+const WINDOWS_RESERVED_STEM = /^(?:con|prn|aux|nul|com[1-9\u00B9\u00B2\u00B3]|lpt[1-9\u00B9\u00B2\u00B3])(?: *\.|$)/i;
+
+function fitFilename(name: string, limit: number): string {
+  return name
+    .replace(/\s+/g, ' ')
+    .replace(/[^\p{L}\p{N}._ -]+/gu, '-')
+    .replace(/^[\s.-]+|[\s.-]+$/g, '')
+    .slice(0, limit)
+    .replace(/[\uD800-\uDBFF]$/, '') // Drop a surrogate pair split by slice().
+    .replace(/[\s.-]+$/, '');
 }
 
 /**
@@ -35,22 +49,29 @@ export interface SanitizeFilenameOptions {
  *
  * Pass only the stem — append the extension yourself (`${sanitizeFilename(x)}.csv`).
  *
- * Note: underscores are kept anywhere (including the ends — only space/dot/hyphen
- * are trimmed off the ends). `fallback` is returned verbatim when the result is
- * empty, so pass a clean token like `'list'` / `'model'`.
+ * Leading and trailing underscores are kept. The fallback uses the same
+ * sanitization and length limit as the supplied name.
  */
 export function sanitizeFilename(name: string, options: SanitizeFilenameOptions = {}): string {
   const fallback = options.fallback ?? 'file';
-  const maxLength = options.maxLength ?? 60;
-  const cleaned = (name || fallback)
-    .replace(/\s+/g, ' ') // collapse all whitespace (tabs, newlines, runs) to one space
-    // Keep letters (any case/script), digits, dot, underscore, space and hyphen;
-    // replace anything else (path separators, reserved chars, controls) with '-'.
-    .replace(/[^\p{L}\p{N}._ -]+/gu, '-')
-    .replace(/^[\s.-]+|[\s.-]+$/g, '') // trim leading/trailing space, dot or hyphen
-    .slice(0, maxLength)
-    .replace(/[\s.-]+$/, ''); // re-trim in case slice() left a trailing separator
-  return cleaned || fallback;
+  const invalidLength = Number.isNaN(options.maxLength);
+  const maxLength = invalidLength ? 60 : Math.max(0, options.maxLength ?? 60);
+  const source = invalidLength ? fallback : name;
+  const sliced = fitFilename(source, maxLength) || fitFilename(fallback, maxLength) || '_'.slice(0, maxLength);
+  // Windows refuses `CON`, `NUL`, `COM1`... as a file stem whatever the extension
+  // (`CON.pdf` too), so a model named for one gets a leading underscore. The
+  // prefix counts against `maxLength`: re-fit one character shorter first. An
+  // extension is not a stem, so callers sanitising one pass `reservedStem: false`.
+  if (options.reservedStem !== false && WINDOWS_RESERVED_STEM.test(sliced)) {
+    return `_${fitFilename(sliced, maxLength - 1)}`;
+  }
+  return sliced;
+}
+
+/** A source File name participates in persisted fingerprints. Apply device-name
+ * escaping at export time so opening a model preserves its existing identity. */
+export function sanitizeModelFilename(name: string, fallback = 'model.ifc'): string {
+  return sanitizeFilename(name, { fallback, reservedStem: false });
 }
 
 /** No real file extension is longer than this; caps a pathological input. */
@@ -66,9 +87,14 @@ export function normalizeExtension(extension: string): string {
  * `model`, `a.b.ifczip` -> `a.b`), leaving a dotless name unchanged. Use before
  * {@link buildExportFilename} so the source extension is not carried into the
  * exported name — the canonical replacement for a hand-rolled `/\.[^.]+$/`.
+ *
+ * A copy suffix after the extension survives (`model.ifc (2)` -> `model (2)`):
+ * a room recipient's second copy of one file is named that way (#4444), and
+ * stripping the suffix with the extension made both copies download under one
+ * name.
  */
 export function stripExtension(name: string): string {
-  return name.replace(/\.[^./\\]+$/, '');
+  return name.replace(/\.[^./\\]+?( \(\d+\))?$/, '$1');
 }
 
 /**
@@ -98,10 +124,54 @@ export function buildExportFilename(
   // Reserve at least 1 char for the stem: cap the extension's own budget
   // below maxLength so stemBudget below is never zero-or-negative.
   const extBudget = Math.min(EXTENSION_MAX_LENGTH, Math.max(1, maxLength - 1));
-  const sanitizedExt = `.${sanitizeFilename(ext.slice(1), { fallback: 'dat', maxLength: extBudget })}`;
+  const sanitizedExt = `.${sanitizeFilename(ext.slice(1), { fallback: 'dat', maxLength: extBudget, reservedStem: false })}`;
   const stemBudget = Math.max(1, maxLength - sanitizedExt.length);
   const stem = sanitizeFilename(baseName, { maxLength: stemBudget });
   return `${stem}${sanitizedExt}`;
+}
+
+/**
+ * BCF 2.1/3.0 use .bcf in Solibri's filename-based importer (#6459).
+ * A byte-identical .bcfzip can silently import zero topics there, including
+ * Solibri's own archive. This changes the suggested name, never ZIP contents.
+ * Keep the policy here with the shared filename sanitizer and length budget.
+ */
+export function bcfExportFilename(baseName: string): string {
+  return buildExportFilename(baseName.replace(/\.bcf(?:zip)?$/i, ''), 'bcf');
+}
+
+/**
+ * The download filename for anything exported FROM a model: the model's name
+ * without its source extension, plus an optional `suffix`, as `ext`
+ * (`Haus.ifc` + `_visible` + `glb` -> `Haus_visible.glb`). Every model export
+ * names its file through this, so the same model in the same format comes out
+ * under the same name whichever surface started it (#5833).
+ *
+ * `suffix` is a code constant (`_visible`, `_merged`, `_entities`), never user
+ * text. The stem is truncated before the suffix is appended, so a long model
+ * name loses its tail rather than the suffix that says what the file is.
+ */
+export function modelExportFilename(modelName: string, extension: string, suffix = ''): string {
+  const maxLength = 60;
+  const extReserve = Math.min(EXTENSION_MAX_LENGTH, normalizeExtension(extension).length - 1) + 1;
+  const stem = sanitizeFilename(stripExtension(modelName), {
+    fallback: 'model',
+    maxLength: Math.max(1, maxLength - extReserve - suffix.length),
+  });
+  return buildExportFilename(`${stem}${suffix}`, extension, maxLength);
+}
+
+/**
+ * The model name an export of "the model on screen" is filed under: the ACTIVE
+ * model's, since that is the one the one-click exports read (`ifcDataStore`
+ * follows `setActiveModel`). A legacy single-model session has no `models`
+ * entry, so this is `''` and {@link modelExportFilename} falls back to `model`.
+ */
+export function activeModelName(state: {
+  activeModelId: string | null;
+  models: ReadonlyMap<string, { name: string }>;
+}): string {
+  return (state.activeModelId ? state.models.get(state.activeModelId)?.name : undefined) ?? '';
 }
 
 /** True when we can actually trigger a download (browser context). */
@@ -160,4 +230,24 @@ export function downloadFile(
 export function downloadDataUrl(dataUrl: string, filename: string): void {
   if (!canDownload()) return;
   clickDownloadAnchor(dataUrl, filename);
+}
+
+/**
+ * Decode a `data:...;base64,...` URL into raw bytes — the other half of an
+ * export that has to EMBED what a canvas produced (a BCF viewpoint snapshot)
+ * rather than hand it to the browser. Undefined for anything that is not a
+ * decodable data URL, so a failed capture drops the image instead of the
+ * export.
+ */
+export function dataUrlToBytes(dataUrl: string): Uint8Array<ArrayBuffer> | undefined {
+  const comma = dataUrl.indexOf(',');
+  if (comma < 0) return undefined;
+  try {
+    const binary = atob(dataUrl.slice(comma + 1));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  } catch {
+    return undefined;
+  }
 }

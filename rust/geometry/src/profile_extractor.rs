@@ -9,21 +9,30 @@
 //!
 //! # Coverage
 //! - `IfcExtrudedAreaSolid` with any profile type (rectangle, circle, arbitrary)
-//! - `IfcMappedItem` — recurses into representation maps with composed transforms
-//! - Full element placement chain (IfcLocalPlacement hierarchy)
-//! - Direct and nested representations
+//! - `IfcMappedItem` — mapped levels with composed transforms
+//! - The representations, mapped-item walk and bounds the mesh path uses
+//!   ([`RepresentationWalk`] with `Select::Meshed`), and its element placement,
+//!   mapping transforms and unit scale (`GeometryRouter`), so a drawing and the
+//!   3D model agree on which solids exist and where (PROC-2, #7690; C2-X1)
 //!
 //! # Coordinate system
 //! All output is in WebGL Y-up space (IFC Z-up converted: new_y = old_z, new_z = -old_y).
 //! Lengths are in metres (unit scale applied).
 
+use crate::profile_skip::SkippedProfile;
 use crate::profiles::ProfileProcessor;
-use crate::{Error, Point3, Result, TessellationQuality, Vector3};
-use ifc_lite_core::{
-    build_entity_index, AttributeValue, DecodedEntity, EntityDecoder, EntityScanner, IfcSchema,
-    IfcType,
+use crate::representation::{
+    NestedMaps, RepresentationWalk, Select, WalkCtx, WalkVisitor, MAX_WALK_LEVELS,
 };
-use nalgebra::Matrix4;
+use crate::router::GeometryRouter;
+use ifc_lite_core::{
+    build_entity_index, DecodedEntity, EntityDecoder, EntityScanner, IfcSchema, IfcType,
+    MAX_MAPPED_ITEM_DEPTH,
+};
+
+mod sink;
+mod solid;
+use sink::{Placement, ProfileSink};
 
 /// Whether `t` should be picked up by the constant-profile 2D drawing
 /// extractor.
@@ -64,7 +73,12 @@ pub struct ExtractedProfile {
     pub hole_points: Vec<f32>,
     /// 4 × 4 column-major transform **in WebGL Y-up world space**.
     /// `M * [x_2d, y_2d, 0, 1]ᵀ` → world position.
-    pub transform: [f32; 16],
+    ///
+    /// f64, because the translation is the element's absolute world position:
+    /// at national-grid magnitude (LV95, ~2.6e6 m) an f32 step is 0.25 m, which
+    /// moved two spaces authored 4.1 m apart to 4.25 m in the HBJSON/DFJSON
+    /// rebase and broke their adjacency (EXPORT-DATA-6, #7684 / #7690).
+    pub transform: [f64; 16],
     /// Extrusion direction in WebGL Y-up world space (unit vector).
     pub extrusion_dir: [f32; 3],
     /// Extrusion depth in metres.
@@ -77,681 +91,184 @@ pub struct ExtractedProfile {
 // PUBLIC ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Extract profiles for every building element in `content`.
-///
-/// Extracts `IfcExtrudedAreaSolid` representations, including those nested
-/// inside `IfcMappedItem` chains (up to 3 levels deep).
-/// Returns an empty `Vec` for models with no such elements.
-pub fn extract_profiles<T>(content: &T, model_index: u32) -> Vec<ExtractedProfile>
-where
-    T: AsRef<[u8]> + ?Sized,
-{
+/// Extract `IfcExtrudedAreaSolid` profiles (incl. nested `IfcMappedItem`) for every element in `content`. Drops are silent — see [`extract_profiles_with_diagnostics`].
+pub fn extract_profiles<T: AsRef<[u8]> + ?Sized>(content: &T, model_index: u32) -> Vec<ExtractedProfile> {
+    extract_profiles_with_diagnostics(content, model_index).0
+}
+/// Same as [`extract_profiles`], plus every [`SkippedProfile`] (default features — unlike `diag_debug!`).
+/// A terminal execution stop ends the scan and retains completed profiles. This
+/// tuple has no result-level typed stop: an `execution-stop:` reason is attached
+/// only to a known affected product. WASM currently exposes only skipped IDs;
+/// neither interface promises that a partial drawing is complete.
+pub fn extract_profiles_with_diagnostics<T: AsRef<[u8]> + ?Sized>(content: &T, model_index: u32) -> (Vec<ExtractedProfile>, Vec<SkippedProfile>) {
+    extract_profiles_with_budget(content, model_index, MAX_WALK_LEVELS)
+}
+
+pub(crate) fn extract_profiles_with_budget<T: AsRef<[u8]> + ?Sized>(
+    content: &T,
+    model_index: u32,
+    allowance: u32,
+) -> (Vec<ExtractedProfile>, Vec<SkippedProfile>) {
+    // The public tuple has no result-level typed terminal. Before an affected
+    // product is known, preserve the sticky stop without fabricating an ID.
+    if crate::resource::check_current().is_err() {
+        return (Vec::new(), Vec::new());
+    }
     let content = content.as_ref();
     let entity_index = build_entity_index(content);
     let mut decoder = EntityDecoder::with_index(content, entity_index);
 
-    // Detect unit scale (same approach as GeometryRouter::with_units)
-    let unit_scale = detect_unit_scale(content, &mut decoder);
+    // The mesh path's unit scale, placement walk and mapping transforms, so a
+    // drawing can never place an element where the 3D model does not: this file
+    // used to carry its own placement walk, which missed IfcLinearPlacement and
+    // IfcGridPlacement (PROC-2, #7690).
+    let router = GeometryRouter::with_units(content, &mut decoder);
+    if crate::resource::check_current().is_err() {
+        return (Vec::new(), Vec::new());
+    }
+    if router.length_unit_refused() {
+        return (Vec::new(), Vec::new()); // a refused length unit extracts nothing (#7678)
+    }
+    let profile_processor = ProfileProcessor::new(IfcSchema::new());
+    // What the mesh path renders (`Select::Meshed`: the effective
+    // RepresentationType, the #4699 mapped-duplicate exclusion), bounded the way
+    // the mesh path bounds it: the shared depth cap, the path-scoped visited set
+    // and the fan-out budget (C2-X1, D36). The extractor used to select on the
+    // RepresentationIdentifier and cap mapped chains at a private depth of 3.
+    let walk = RepresentationWalk {
+        select: Select::Meshed,
+        nested: NestedMaps::Expand {
+            max_depth: MAX_MAPPED_ITEM_DEPTH,
+            max_levels: MAX_WALK_LEVELS,
+        },
+    };
 
-    let schema = IfcSchema::new();
-    let profile_processor = ProfileProcessor::new(schema);
-
-    let mut results = Vec::new();
+    let (mut results, mut skipped) = (Vec::new(), Vec::new());
     let mut scanner = EntityScanner::new(content);
 
-    while let Some((id, type_name, start, end)) = scanner.next_entity() {
+    loop {
+        if crate::resource::check_current().is_err() {
+            break;
+        }
+        let Some((id, type_name, start, end)) = scanner.next_entity() else {
+            break;
+        };
         if !ifc_lite_core::has_geometry_by_name(type_name) {
             continue;
         }
-
-        let entity = match decoder.decode_at_with_id(id, start, end) {
-            Ok(e) => e,
-            Err(_) => continue,
+        let Ok(entity) = decoder.decode_at_with_id(id, start, end) else {
+            continue;
         };
 
         // Issue #979: feature elements (IfcOpeningElement and the rest of the
-        // void/feature family) are boolean subtraction/addition operands, not
-        // building structure — they must never emit a construction-projection
-        // profile. `is_subtype_of` walks the supertype chain, so this single
-        // check covers Opening / Voiding / Earthworks / Projection / Surface
-        // features without touching IfcDoor/IfcWindow (which descend from
-        // IfcBuiltElement, not IfcFeatureElement).
-        if entity.ifc_type.is_subtype_of(IfcType::IfcFeatureElement) {
+        // void/feature family) are boolean operands, not building structure —
+        // they must never emit a construction-projection profile, and walking
+        // the supertype chain covers the whole family in one check. Resolve
+        // from `type_name`, not `entity.ifc_type`: only the legacy-aware
+        // resolver preserves exact variants. Before support, bare `from_str` produced
+        // `Unknown` and `IFCOPENINGSTANDARDCASE` emitted a profile (#3172).
+        let resolved_type = ifc_lite_core::ifc_type_from_keyword(type_name);
+        if resolved_type.is_subtype_of(IfcType::IfcFeatureElement) {
             continue;
         }
 
-        // ObjectPlacement (attr 5) → element world transform (IFC Z-up, native units)
-        let element_transform = get_placement_transform(entity.get(5), &mut decoder);
-
-        // Scale the translation part from file units to metres
-        let elem_tf = scale_translation(element_transform, unit_scale);
-
-        // Representation (attr 6) → IfcProductDefinitionShape
-        let repr_attr = match entity.get(6) {
-            Some(a) if !a.is_null() => a,
-            _ => continue,
-        };
-        let repr = match decoder.resolve_ref(repr_attr) {
-            Ok(Some(r)) => r,
-            _ => continue,
-        };
-
-        // IfcProductDefinitionShape → Representations (attr 2)
-        let reprs_attr = match repr.get(2) {
-            Some(a) => a,
-            None => continue,
-        };
-        let representations = match decoder.resolve_ref_list(reprs_attr) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-
-        let ifc_type_name = entity.ifc_type.name().to_string();
-
-        for shape_rep in representations {
-            if shape_rep.ifc_type != IfcType::IfcShapeRepresentation {
-                continue;
-            }
-
-            // Accept Body and SweptSolid representations
-            let rep_id = shape_rep.get(1).and_then(|a| a.as_string()).unwrap_or("");
-            if rep_id != "Body" && rep_id != "SweptSolid" {
-                continue;
-            }
-
-            // Items (attr 3)
-            let items_attr = match shape_rep.get(3) {
-                Some(a) => a,
-                None => continue,
-            };
-            let items = match decoder.resolve_ref_list(items_attr) {
-                Ok(i) => i,
-                Err(_) => continue,
-            };
-
-            for item in &items {
-                if is_extruded_area_solid(item.ifc_type) {
-                    match extract_extruded_solid(
-                        id,
-                        &ifc_type_name,
-                        item,
-                        &elem_tf,
-                        unit_scale,
-                        &profile_processor,
-                        &mut decoder,
-                        model_index,
-                    ) {
-                        Ok(entry) => results.push(entry),
-                        Err(_e) => {
-                            crate::diag::diag_debug!(
-                                { element_id = id, ifc_type = %ifc_type_name, error = %_e,
-                                  "profile_extractor: skipping element" }
-                                else {
-                                    #[cfg(feature = "debug_geometry")]
-                                    eprintln!("[profile_extractor] Skipping #{id} ({ifc_type_name}): {_e}");
-                                }
-                            );
-                        }
-                    }
-                } else if item.ifc_type == IfcType::IfcMappedItem {
-                    extract_mapped_item_profiles(
-                        id,
-                        &ifc_type_name,
-                        item,
-                        &elem_tf,
-                        unit_scale,
-                        &profile_processor,
-                        &mut decoder,
-                        model_index,
-                        0,
-                        &mut results,
-                    );
-                }
-            }
-        }
-    }
-
-    results
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// PRIVATE: MAPPED ITEM EXTRACTION
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Maximum recursion depth for nested IfcMappedItem chains.
-const MAX_MAPPED_DEPTH: usize = 3;
-
-/// Recursively extract profiles from an IfcMappedItem.
-///
-/// IfcMappedItem structure:
-///   attr 0: MappingSource → IfcRepresentationMap
-///     attr 0: MappingOrigin (IfcAxis2Placement) — local coordinate system of shared geometry
-///     attr 1: MappedRepresentation (IfcRepresentation) → items to extract from
-///   attr 1: MappingTarget → IfcCartesianTransformationOperator3D (instance transform)
-///
-/// The composed transform is: `elem_transform * mapping_target`.
-/// Each solid's own Position is applied inside `extract_extruded_solid`.
-fn extract_mapped_item_profiles(
-    element_id: u32,
-    ifc_type: &str,
-    mapped_item: &DecodedEntity,
-    elem_transform: &Matrix4<f64>,
-    unit_scale: f64,
-    profile_processor: &ProfileProcessor,
-    decoder: &mut EntityDecoder,
-    model_index: u32,
-    depth: usize,
-    results: &mut Vec<ExtractedProfile>,
-) {
-    if depth > MAX_MAPPED_DEPTH {
-        crate::diag::diag_debug!(
-            { element_id, ifc_type = %ifc_type, max_depth = MAX_MAPPED_DEPTH,
-              "profile_extractor: max mapped item depth exceeded" }
-            else {
-                #[cfg(feature = "debug_geometry")]
-                eprintln!("[profile_extractor] #{element_id} ({ifc_type}): max mapped item depth exceeded");
-            }
-        );
-        return;
-    }
-
-    // Attr 0: MappingSource → IfcRepresentationMap
-    let source = match mapped_item
-        .get(0)
-        .and_then(|a| if a.is_null() { None } else { Some(a) })
-        .and_then(|a| decoder.resolve_ref(a).ok().flatten())
-    {
-        Some(s) => s,
-        None => return,
-    };
-
-    // Attr 1: MappingTarget → IfcCartesianTransformationOperator3D.
-    // A PRESENT but unparseable target/origin abandons this mapped item instead of
-    // falling back to the identity: the mesh path propagates that failure and skips
-    // the item, so silently drawing the profile in an un-transformed frame would put
-    // the drawing somewhere the model isn't. Absent/null stays the identity.
-    let target_tf = match resolve_present_ref(mapped_item.get(1), decoder) {
-        Err(()) => return,
-        Ok(resolved) => match resolved {
-            Some(e) => match parse_cartesian_transformation_operator(&e, decoder) {
-                Ok(m) => m,
-                Err(_) => return,
-            },
-            None => Matrix4::identity(),
-        },
-    };
-
-    // Attr 0 of the RepresentationMap: MappingOrigin, the placement of the mapped
-    // items INSIDE the map. It composes innermost (`MappingTarget · MappingOrigin`),
-    // exactly as the mesh path now does — dropping it put every 2D profile of a
-    // non-identity-origin map at the wrong spot. #1985
-    // A map carrying a 2D representation writes an IfcAxis2Placement2D here, which
-    // the mesh path also honours — handling only the 3D form would leave exactly
-    // the plan/footprint maps this extractor exists for unfixed.
-    let origin_tf = match resolve_present_ref(source.get(0), decoder) {
-        Err(()) => return,
-        Ok(Some(e)) => {
-            let parsed = match e.ifc_type {
-                IfcType::IfcAxis2Placement3D => parse_axis2_placement_3d(&e, decoder).ok(),
-                IfcType::IfcAxis2Placement2D => parse_axis2_placement_2d(&e, decoder).ok(),
-                _ => None,
-            };
-            let Some(m) = parsed else { return };
-            m
-        }
-        Ok(None) => Matrix4::identity(),
-    };
-
-    // Scale the composed transform's translation from file units to metres
-    let scaled_target = scale_translation(target_tf * origin_tf, unit_scale);
-    let composed = elem_transform * scaled_target;
-
-    // MappedRepresentation (attr 1 of RepresentationMap) → items
-    let mapped_rep = match source
-        .get(1)
-        .and_then(|a| if a.is_null() { None } else { Some(a) })
-        .and_then(|a| decoder.resolve_ref(a).ok().flatten())
-    {
-        Some(r) => r,
-        None => return,
-    };
-
-    let items = match mapped_rep
-        .get(3)
-        .and_then(|a| decoder.resolve_ref_list(a).ok())
-    {
-        Some(i) => i,
-        None => return,
-    };
-
-    for sub_item in &items {
-        if is_extruded_area_solid(sub_item.ifc_type) {
-            match extract_extruded_solid(
-                element_id,
-                ifc_type,
-                sub_item,
-                &composed,
-                unit_scale,
-                profile_processor,
-                decoder,
-                model_index,
-            ) {
-                Ok(entry) => results.push(entry),
-                Err(_e) => {
-                    crate::diag::diag_debug!(
-                        { element_id, ifc_type = %ifc_type, error = %_e,
-                          "profile_extractor: skipping mapped item solid" }
-                        else {
-                            #[cfg(feature = "debug_geometry")]
-                            eprintln!("[profile_extractor] #{element_id} ({ifc_type}) mapped: {_e}");
-                        }
-                    );
-                }
-            }
-        } else if sub_item.ifc_type == IfcType::IfcMappedItem {
-            extract_mapped_item_profiles(
-                element_id,
-                ifc_type,
-                sub_item,
-                &composed,
-                unit_scale,
-                profile_processor,
-                decoder,
-                model_index,
-                depth + 1,
-                results,
-            );
-        }
-    }
-}
-
-/// Parse an `IfcCartesianTransformationOperator` (2D or 3D, uniform or not).
-///
-/// Delegates to the router's parser so the 2D drawing profiles and the 3D mesh
-/// can never disagree about the same `MappingTarget`. This file used to carry a
-/// private copy, which had drifted: it ignored the non-uniform per-axis scales,
-/// the 2D attribute layout, and `Axis2`. #1985
-fn parse_cartesian_transformation_operator(
-    entity: &DecodedEntity,
-    decoder: &mut EntityDecoder,
-) -> Result<Matrix4<f64>> {
-    crate::router::transforms::operator::parse_transformation_operator(entity, decoder)
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// PRIVATE: SOLID EXTRACTION
-// ═══════════════════════════════════════════════════════════════════════════
-
-fn extract_extruded_solid(
-    element_id: u32,
-    ifc_type: &str,
-    solid: &DecodedEntity,
-    elem_transform: &Matrix4<f64>,
-    unit_scale: f64,
-    profile_processor: &ProfileProcessor,
-    decoder: &mut EntityDecoder,
-    model_index: u32,
-) -> Result<ExtractedProfile> {
-    // SweptArea (attr 0)
-    let profile_attr = solid
-        .get(0)
-        .ok_or_else(|| Error::geometry("ExtrudedAreaSolid missing SweptArea"))?;
-    let profile_entity = decoder
-        .resolve_ref(profile_attr)?
-        .ok_or_else(|| Error::geometry("Failed to resolve SweptArea"))?;
-    // Profile extraction feeds 2D drawing projection, not the tessellation-quality
-    // render path; sample at the historical default.
-    let profile =
-        profile_processor.process(&profile_entity, decoder, TessellationQuality::Medium)?;
-
-    if profile.outer.is_empty() {
-        return Err(Error::geometry("empty profile"));
-    }
-
-    // Position (attr 1) → solid local transform in IFC native units
-    let solid_transform = if let Some(pos_attr) = solid.get(1) {
-        if !pos_attr.is_null() {
-            if let Some(pos_ent) = decoder.resolve_ref(pos_attr)? {
-                if pos_ent.ifc_type == IfcType::IfcAxis2Placement3D {
-                    let mut t = parse_axis2_placement_3d(&pos_ent, decoder)?;
-                    // Scale translation from file units to metres
-                    t[(0, 3)] *= unit_scale;
-                    t[(1, 3)] *= unit_scale;
-                    t[(2, 3)] *= unit_scale;
-                    t
-                } else {
-                    Matrix4::identity()
-                }
-            } else {
-                Matrix4::identity()
-            }
-        } else {
-            Matrix4::identity()
-        }
-    } else {
-        Matrix4::identity()
-    };
-
-    // ExtrudedDirection (attr 2) in local solid space
-    let local_dir = parse_extrusion_direction(solid, decoder);
-
-    // Depth (attr 3) — required per IFC spec but default to 1.0 for robustness
-    // with malformed files (logged under debug_geometry feature)
-    let raw_depth = solid.get(3).and_then(|v| v.as_float());
-    #[cfg(any(feature = "debug_geometry", feature = "observability"))]
-    if raw_depth.is_none() {
-        crate::diag::diag_debug!(
-            { element_id, ifc_type = %ifc_type,
-              "profile_extractor: missing Depth, defaulting to 1.0" }
-            else {
-                #[cfg(feature = "debug_geometry")]
-                eprintln!(
-                    "[profile_extractor] #{element_id} ({ifc_type}): missing Depth, defaulting to 1.0"
-                );
-            }
-        );
-    }
-    let depth = raw_depth.unwrap_or(1.0) * unit_scale;
-
-    // Combined transform: elem_placement * solid_position  (IFC Z-up, metres)
-    let combined_ifc = elem_transform * solid_transform;
-
-    // Convert combined transform to WebGL Y-up column-major [f32; 16]
-    let transform = convert_ifc_to_webgl(&combined_ifc);
-
-    // Transform local extrusion direction to world IFC space (rotation only, no translation)
-    let world_dir_ifc = combined_ifc.transform_vector(&local_dir);
-
-    // Convert world direction to WebGL Y-up
-    let extrusion_dir = [
-        world_dir_ifc.x as f32,
-        world_dir_ifc.z as f32,  // WebGL Y = IFC Z
-        -world_dir_ifc.y as f32, // WebGL Z = -IFC Y
-    ];
-
-    // Scale profile 2D points from file units to metres
-    let outer_points: Vec<f32> = profile
-        .outer
-        .iter()
-        .flat_map(|p| [(p.x * unit_scale) as f32, (p.y * unit_scale) as f32])
-        .collect();
-
-    let hole_counts: Vec<u32> = profile.holes.iter().map(|h| h.len() as u32).collect();
-    let hole_points: Vec<f32> = profile
-        .holes
-        .iter()
-        .flat_map(|h| {
-            h.iter()
-                .flat_map(|p| [(p.x * unit_scale) as f32, (p.y * unit_scale) as f32])
-        })
-        .collect();
-
-    Ok(ExtractedProfile {
-        express_id: element_id,
-        ifc_type: ifc_type.to_string(),
-        outer_points,
-        hole_counts,
-        hole_points,
-        transform,
-        extrusion_dir,
-        extrusion_depth: depth as f32,
-        model_index,
-    })
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// PRIVATE: PLACEMENT TRAVERSAL
-// Duplicated from router/transforms.rs (pub(super) there) to avoid coupling.
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Resolve an element's ObjectPlacement attribute to a world Matrix4 in IFC Z-up space.
-fn get_placement_transform(
-    placement_attr: Option<&AttributeValue>,
-    decoder: &mut EntityDecoder,
-) -> Matrix4<f64> {
-    let attr = match placement_attr {
-        Some(a) if !a.is_null() => a,
-        _ => return Matrix4::identity(),
-    };
-    match decoder.resolve_ref(attr) {
-        Ok(Some(p)) => get_placement_recursive(&p, decoder, 0),
-        _ => Matrix4::identity(),
-    }
-}
-
-const MAX_PLACEMENT_DEPTH: usize = 100;
-
-fn get_placement_recursive(
-    placement: &DecodedEntity,
-    decoder: &mut EntityDecoder,
-    depth: usize,
-) -> Matrix4<f64> {
-    if depth > MAX_PLACEMENT_DEPTH || placement.ifc_type != IfcType::IfcLocalPlacement {
-        return Matrix4::identity();
-    }
-
-    // PlacementRelTo (attr 0) → parent transform
-    let parent_tf = if let Some(parent_attr) = placement.get(0) {
-        if !parent_attr.is_null() {
-            match decoder.resolve_ref(parent_attr) {
-                Ok(Some(parent)) => get_placement_recursive(&parent, decoder, depth + 1),
-                _ => Matrix4::identity(),
-            }
-        } else {
-            Matrix4::identity()
-        }
-    } else {
-        Matrix4::identity()
-    };
-
-    // RelativePlacement (attr 1) → local axis placement
-    let local_tf = if let Some(rel_attr) = placement.get(1) {
-        if !rel_attr.is_null() {
-            match decoder.resolve_ref(rel_attr) {
-                Ok(Some(rel)) if rel.ifc_type == IfcType::IfcAxis2Placement3D => {
-                    parse_axis2_placement_3d(&rel, decoder).unwrap_or(Matrix4::identity())
-                }
-                _ => Matrix4::identity(),
-            }
-        } else {
-            Matrix4::identity()
-        }
-    } else {
-        Matrix4::identity()
-    };
-
-    parent_tf * local_tf
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// PRIVATE: IFC ENTITY PARSERS
-// Duplicated from processors/helpers.rs (pub(super) there).
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Parse IfcAxis2Placement3D → Matrix4<f64> in IFC Z-up space (native units).
-/// Resolve an OPTIONAL entity reference, distinguishing the three cases a mapped
-/// item's `MappingTarget` / `MappingOrigin` can be in: absent or explicitly null
-/// (`Ok(None)` — the identity is correct), resolvable (`Ok(Some)`), or PRESENT
-/// but dangling / unreadable (`Err` — the caller must abandon the item, because
-/// the mesh path errors out on it too and silently substituting the identity
-/// would draw the profile in an un-transformed frame). #1985
-fn resolve_present_ref(
-    attr: Option<&AttributeValue>,
-    decoder: &mut EntityDecoder,
-) -> std::result::Result<Option<DecodedEntity>, ()> {
-    match attr {
-        None => Ok(None),
-        Some(a) if a.is_null() => Ok(None),
-        Some(a) => match decoder.resolve_ref(a) {
-            Ok(Some(e)) => Ok(Some(e)),
-            _ => Err(()),
-        },
-    }
-}
-
-/// Parse `IfcAxis2Placement2D` into a 4x4 acting in the XY plane. Delegates to
-/// the router's definition so the 2D drawing path and the mesh path cannot
-/// drift on a 2D `MappingOrigin`. #1985
-fn parse_axis2_placement_2d(
-    placement: &DecodedEntity,
-    decoder: &mut EntityDecoder,
-) -> Result<Matrix4<f64>> {
-    crate::router::transforms::mapped::axis2_placement_2d_matrix(placement, decoder)
-}
-
-fn parse_axis2_placement_3d(
-    placement: &DecodedEntity,
-    decoder: &mut EntityDecoder,
-) -> Result<Matrix4<f64>> {
-    // Location (attr 0)
-    let location =
-        parse_cartesian_point(placement, decoder, 0).unwrap_or(Point3::new(0.0, 0.0, 0.0));
-
-    // Axis/Z direction (attr 1)
-    let z_axis = if let Some(a) = placement.get(1) {
-        if !a.is_null() {
-            decoder
-                .resolve_ref(a)?
-                .map(|e| parse_direction_entity(&e))
-                .transpose()?
-                .unwrap_or(Vector3::new(0.0, 0.0, 1.0))
-        } else {
-            Vector3::new(0.0, 0.0, 1.0)
-        }
-    } else {
-        Vector3::new(0.0, 0.0, 1.0)
-    };
-
-    // RefDirection/X (attr 2)
-    let x_axis_raw = if let Some(a) = placement.get(2) {
-        if !a.is_null() {
-            decoder
-                .resolve_ref(a)?
-                .map(|e| parse_direction_entity(&e))
-                .transpose()?
-                .unwrap_or(Vector3::new(1.0, 0.0, 0.0))
-        } else {
-            Vector3::new(1.0, 0.0, 0.0)
-        }
-    } else {
-        Vector3::new(1.0, 0.0, 0.0)
-    };
-
-    // Orthonormalize + assemble via the shared builder (canonical Gram–Schmidt
-    // with the degenerate-axis fallback baked in).
-    Ok(crate::transform::build_axis2_matrix(location, z_axis, x_axis_raw))
-}
-
-/// Parse IfcCartesianPoint from a parent entity at the given attribute index.
-fn parse_cartesian_point(
-    parent: &DecodedEntity,
-    decoder: &mut EntityDecoder,
-    attr_index: usize,
-) -> Result<Point3<f64>> {
-    let pt_attr = parent
-        .get(attr_index)
-        .ok_or_else(|| Error::geometry("Missing cartesian point attr"))?;
-
-    if pt_attr.is_null() {
-        return Ok(Point3::new(0.0, 0.0, 0.0));
-    }
-
-    let pt_entity = decoder
-        .resolve_ref(pt_attr)?
-        .ok_or_else(|| Error::geometry("Failed to resolve IfcCartesianPoint"))?;
-
-    let coords = pt_entity
-        .get(0)
-        .and_then(|a| a.as_list())
-        .ok_or_else(|| Error::geometry("IfcCartesianPoint missing coordinates"))?;
-
-    let x = coords.first().and_then(|v| v.as_float()).unwrap_or(0.0);
-    let y = coords.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
-    let z = coords.get(2).and_then(|v| v.as_float()).unwrap_or(0.0);
-
-    Ok(Point3::new(x, y, z))
-}
-
-/// Parse IfcDirection entity to a Vector3.
-fn parse_direction_entity(entity: &DecodedEntity) -> Result<Vector3<f64>> {
-    let ratios = entity
-        .get(0)
-        .and_then(|a| a.as_list())
-        .ok_or_else(|| Error::geometry("IfcDirection missing ratios"))?;
-
-    let x = ratios.first().and_then(|v| v.as_float()).unwrap_or(0.0);
-    let y = ratios.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
-    let z = ratios.get(2).and_then(|v| v.as_float()).unwrap_or(1.0);
-
-    Ok(Vector3::new(x, y, z).normalize())
-}
-
-/// Parse IfcExtrudedAreaSolid ExtrudedDirection (attr 2) to a local Vector3.
-fn parse_extrusion_direction(solid: &DecodedEntity, decoder: &mut EntityDecoder) -> Vector3<f64> {
-    let default = Vector3::new(0.0, 0.0, 1.0);
-    let dir_attr = match solid.get(2) {
-        Some(a) if !a.is_null() => a,
-        _ => return default,
-    };
-    let dir_ent = match decoder.resolve_ref(dir_attr) {
-        Ok(Some(e)) => e,
-        _ => return default,
-    };
-    let ratios = match dir_ent.get(0).and_then(|a| a.as_list()) {
-        Some(r) => r,
-        None => return default,
-    };
-    let x = ratios.first().and_then(|v| v.as_float()).unwrap_or(0.0);
-    let y = ratios.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
-    let z = ratios.get(2).and_then(|v| v.as_float()).unwrap_or(1.0);
-    let v = Vector3::new(x, y, z);
-    let len = v.norm();
-    if len > 1e-10 {
-        v / len
-    } else {
-        default
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// PRIVATE: COORDINATE CONVERSION & UTILITIES
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Scale only the translation column of a matrix (rows 0-2 of column 3).
-fn scale_translation(mut m: Matrix4<f64>, scale: f64) -> Matrix4<f64> {
-    if scale != 1.0 {
-        m[(0, 3)] *= scale;
-        m[(1, 3)] *= scale;
-        m[(2, 3)] *= scale;
-    }
-    m
-}
-
-/// Convert an IFC Z-up Matrix4 to WebGL Y-up column-major [f32; 16].
-///
-/// Conversion: new_y = old_z, new_z = -old_y (swap Y/Z, negate new Z).
-/// Applied row-wise: row 0 stays, row 1 ← row 2, row 2 ← −row 1.
-fn convert_ifc_to_webgl(m: &Matrix4<f64>) -> [f32; 16] {
-    let mut result = [0.0f32; 16];
-    for col in 0..4 {
-        result[col * 4] = m[(0, col)] as f32; // X row: unchanged
-        result[col * 4 + 1] = m[(2, col)] as f32; // Y row: was Z
-        result[col * 4 + 2] = -m[(1, col)] as f32; // Z row: was -Y
-        result[col * 4 + 3] = m[(3, col)] as f32; // homogeneous
-    }
-    result
-}
-
-/// Detect the IFC length unit scale factor from IFCPROJECT.
-fn detect_unit_scale(content: &[u8], decoder: &mut EntityDecoder) -> f64 {
-    let mut scanner = EntityScanner::new(content);
-    while let Some((id, type_name, _, _)) = scanner.next_entity() {
-        if type_name == "IFCPROJECT" {
-            if let Ok(scale) = ifc_lite_core::extract_length_unit_scale(decoder, id) {
-                return scale;
-            }
+        // Fallible only privately: a terminal ends the entire scan, retaining
+        // already completed profiles and the original resource terminal.
+        if let Err(error) = extract_product(
+            &router,
+            &profile_processor,
+            &walk,
+            &entity,
+            resolved_type.name(),
+            model_index,
+            allowance,
+            &mut decoder,
+            &mut results,
+            &mut skipped,
+        ) {
+            record_execution_stop(error, &entity, resolved_type.name(), &mut skipped);
             break;
         }
     }
-    1.0
+
+    (results, skipped)
 }
+
+/// The scan knows the affected product here. Preserve a sticky resource stop
+/// and distinguish this terminal from content failures in the existing tuple.
+fn record_execution_stop(
+    error: crate::Error,
+    entity: &DecodedEntity,
+    ifc_type: &str,
+    skipped: &mut Vec<SkippedProfile>,
+) {
+    let error = match crate::resource::check_current() {
+        Err(stop) => crate::Error::ProgramStopped(stop),
+        Ok(()) => match error {
+            crate::Error::ProgramStopped(stop) => {
+                crate::Error::ProgramStopped(crate::resource::stop(stop))
+            }
+            error => error, // execution-owner rejection also terminates the scan
+        },
+    };
+    skipped.push(SkippedProfile {
+        express_id: entity.id,
+        ifc_type: ifc_type.to_string(),
+        reason: format!("execution-stop: {error}"),
+    });
+}
+
+#[allow(clippy::too_many_arguments)] // one private product extraction context
+fn extract_product(
+    router: &GeometryRouter,
+    profile_processor: &ProfileProcessor,
+    walk: &RepresentationWalk,
+    entity: &DecodedEntity,
+    ifc_type: &str,
+    model_index: u32,
+    allowance: u32,
+    decoder: &mut EntityDecoder,
+    results: &mut Vec<ExtractedProfile>,
+    skipped: &mut Vec<SkippedProfile>,
+) -> crate::Result<()> {
+    let plan =
+        crate::representation::product_budget::admit_product(entity, decoder, allowance, router);
+    plan.validate(router, decoder)?;
+    let mut sink = ProfileSink {
+        router,
+        profile_processor,
+        element: entity,
+        ifc_type,
+        model_index,
+        placement: Placement::Unresolved,
+        frames: Vec::new(),
+        results,
+        skipped,
+        terminal: None,
+    };
+    // A later ShapeError deliberately keeps earlier drawing profiles. Strict
+    // mesh consumers instead call plan.strict() before any rendering.
+    for (rep, items) in &plan.representations {
+        for item in items {
+            plan.validate(router, decoder)?;
+            walk.items_of(rep, std::slice::from_ref(item), decoder, &mut sink);
+            sink.finish()?;
+        }
+    }
+    plan.validate(router, decoder)?;
+    if let Some((item, why)) = plan.refusal.map(|failure| *failure) {
+        sink.refused(
+            &item,
+            why,
+            &WalkCtx {
+                element: Some(entity),
+                shape_rep: None,
+                path: &[],
+            },
+        );
+    }
+    sink.finish()
+}
+
+#[cfg(test)]
+mod execution_tests;

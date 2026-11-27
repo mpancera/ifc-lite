@@ -63,7 +63,7 @@
 
 import { EntityExtractor, type IfcDataStore } from '@ifc-lite/parser';
 import { stableHash } from '@ifc-lite/diff';
-import type { IfcAttributeValue, IfcEntity } from '@ifc-lite/data';
+import { firstProjAxis, walkPlacementChain, type IfcAttributeValue, type IfcEntity } from '@ifc-lite/data';
 import { asExpressIdRef } from '../placement-core.js';
 
 /**
@@ -99,32 +99,18 @@ const TRANSLATION_SIGNIFICANT_DIGITS = 12;
 /** Snap grid for basis (rotation) entries, which are direction cosines. */
 const BASIS_GRID = 1e-9;
 
-/**
- * How many `PlacementRelTo` links to follow before giving up.
- *
- * A real spatial chain is a handful of links deep. The limit is not there for
- * depth, it is there for CYCLES: a malformed or hand-edited file can point a
- * placement at itself, and this cap is the only thing standing between that
- * file and an unbounded walk inside the compare pass. Hitting it abstains
- * (returns `undefined`) rather than returning a partial product, because a
- * partially-composed transform is a wrong answer that looks like a right one —
- * and abstaining is also the right answer for a genuinely 64-deep chain, which
- * no real model has.
- */
-const MAX_CHAIN_DEPTH = 64;
-
 /** One extractor per store, reused across every node read: the extractor is a
  *  stateless reader over `store.source`, and a placement pass touches thousands
  *  of chain nodes — allocating one per read multiplied garbage for nothing.
  *  Keyed weakly by the store so an unloaded model releases its extractor. */
 const extractorByStore = new WeakMap<IfcDataStore, EntityExtractor>();
-
 /** One decoded entity — its STEP type name and attribute list — or `null`
  *  when it is not in this store. The type comes off the SOURCE (the extractor
  *  re-reads the STEP record), not `store.entities.getTypeName`: the entity
  *  table only carries rooted/relevant entities and answers 'Unknown' for the
  *  resource-level placement chain this module spends its whole life in. */
 function entityOf(store: IfcDataStore, expressId: number): IfcEntity | null {
+  // @raw-entity-enumeration-ok Compare passes an effectiveCompareStore snapshot; source placement refs and bytes already include live edits.
   const ref = store.entityIndex.byId.get(expressId) ?? store.deferredEntityIndex?.get(expressId);
   if (!ref) return null;
   let extractor = extractorByStore.get(store);
@@ -240,19 +226,14 @@ function axisPlacementMatrix(
   const refDirection = triple(store, asRef(type === 'IFCAXIS2PLACEMENT3D' ? attrs[2] : attrs[1]));
 
   const z = (axis && normalize(axis)) ?? [0, 0, 1];
-  // EXPRESS `IfcFirstProjAxis` with a NIL argument: project global X — for
-  // EVERY Axis that is not parallel to it (zero cross product, i.e. no
-  // component off the X axis at all) — and only then fall back to global Y.
-  // Not a nearness heuristic: for an Axis of (0.95, 0.31, 0) the standard
-  // still projects [1,0,0], and a threshold that switches early diverges from
-  // every writer that spells the default explicitly. One edge is decided
-  // rather than derived: for the ANTI-parallel axis [-1,0,0] the standard's
-  // own projection degenerates (it literal-compares against [1,0,0] only), so
-  // the derivation is indeterminate there — this code takes the global-Y seed
-  // for both ±X, which both revisions compute identically, so no diff can
-  // arise from the choice.
-  const seed = (refDirection && normalize(refDirection))
-    ?? (z[1] === 0 && z[2] === 0 ? ([0, 1, 0] as const) : ([1, 0, 0] as const));
+  // An absent RefDirection takes the renderer's fill, `firstProjAxis`: world
+  // X projected onto the plane normal to Axis, as EXPRESS `IfcFirstProjAxis`
+  // does. Next to the X axis, where that projection vanishes, it matches
+  // `build_axis2_matrix` rather than a local choice, so an Axis of exactly -X
+  // gets (0,-1,0), not world Y (#5922). A fill that differed from the
+  // renderer's would turn this frame 180 degrees about the Axis relative to
+  // the one the viewer draws.
+  const seed = (refDirection && normalize(refDirection)) ?? firstProjAxis(z);
   const dot = seed[0] * z[0] + seed[1] * z[1] + seed[2] * z[2];
   const x = normalize([seed[0] - z[0] * dot, seed[1] - z[1] * dot, seed[2] - z[2] * dot]);
   // A RefDirection parallel to Axis leaves nothing to orthogonalise. The file
@@ -311,7 +292,7 @@ export function composeWorldPlacement(
   // IfcProduct attribute 5 is ObjectPlacement.
   const placementId = asRef(attributesOf(store, localId)?.[5]);
   if (placementId === undefined) return undefined;
-  return composeChain(store, placementId, 0, cache) ?? undefined;
+  return composeChain(store, placementId, cache) ?? undefined;
 }
 
 /**
@@ -327,60 +308,55 @@ export function composeWorldPlacement(
 export type PlacementComposeCache = Map<number, WorldPlacement | null>;
 
 /** Compose one placement's world transform, memoized per placement id.
- *  `null` is the CACHEABLE abstention — a property of the placement itself.
- *  `undefined` is the depth-capped abstention, which is a property of where
- *  the walk STARTED (a node reached at depth 63 from one product may compose
- *  fine at depth 2 from another), so it is neither cached for this node nor
- *  allowed to cache an abstention onto the nodes below it. */
+ *  `null` is the CACHEABLE abstention — a property of the placement itself
+ *  (an unreadable link, a non-`IfcLocalPlacement` ancestor, or a cycle).
+ *
+ *  The chain is walked by the shared `walkPlacementChain` (#7791, D27): a
+ *  visited set and NO depth cap, so the answer is a pure function of the
+ *  placement and never of which product warmed the memo first. The walk stops
+ *  at the first memoized ancestor, and the links below it compose iteratively,
+ *  top down. */
 function composeChain(
   store: IfcDataStore,
   placementId: number,
-  depth: number,
   cache: PlacementComposeCache | undefined,
-): WorldPlacement | null | undefined {
-  // The depth cap is the whole cycle guard: a self-referential chain simply
-  // exhausts it and abstains, and a `seen` set alongside it would be a second
-  // spelling of one answer that no test could tell apart from this one.
-  // Checked BEFORE the memo, so a walk that exceeds the cap abstains no
-  // matter what other products already composed: honouring a cache hit here
-  // would make a >64-deep chain's answer depend on the enumeration order that
-  // happened to warm the cache — the iterative walk this replaced was
-  // deterministic, and this must be too.
-  if (depth >= MAX_CHAIN_DEPTH) return undefined;
-  const cached = cache?.get(placementId);
-  if (cached !== undefined) return cached;
-  const abstain = (): null => {
-    cache?.set(placementId, null);
-    return null;
-  };
-  const entity = entityOf(store, placementId);
-  if (!entity) return abstain();
-  // Compose ONLY what is positively an `IfcLocalPlacement`. The other
-  // concrete placement kinds carry positions this walk cannot reconstruct —
-  // `IfcGridPlacement` by grid intersection, `IfcLinearPlacement` (IFC4x3)
-  // by distance along an alignment curve — and reading either's attributes
-  // as [PlacementRelTo, RelativePlacement] would compose a wrong-but-
-  // plausible transform: for the linear case, one that reads an element
-  // moved along its alignment as stationary, on the very infrastructure
-  // models this module was measured against. A whitelist also covers
-  // whatever placement kind a future schema adds, unseen.
-  if (entity.type.toUpperCase() !== 'IFCLOCALPLACEMENT') return abstain();
-  // IfcLocalPlacement: [0] = PlacementRelTo, [1] = RelativePlacement.
-  const attrs = entity.attributes;
-  const local = axisPlacementMatrix(store, asRef(attrs[1]));
-  if (!local) return abstain();
-  const parentId = asRef(attrs[0]);
-  if (parentId === undefined) {
-    cache?.set(placementId, local);
-    return local;
+): WorldPlacement | null {
+  const walked = walkPlacementChain(
+    placementId,
+    (id) => {
+      const entity = entityOf(store, id);
+      return entity && entity.type.toUpperCase() === 'IFCLOCALPLACEMENT' ? asRef(entity.attributes[0]) : undefined;
+    },
+    { stopAt: (id) => cache?.has(id) === true },
+  );
+  const stopped = walked.end === 'stopped';
+  // A cycle has no world placement for any link on or leading into it.
+  const links = stopped ? walked.ids.slice(0, -1) : walked.ids;
+  let world: WorldPlacement | null | undefined = stopped ? cache!.get(walked.ids[walked.ids.length - 1]!) : undefined;
+  if (walked.end === 'cycle') world = null;
+  for (let i = links.length - 1; i >= 0; i--) {
+    const id = links[i]!;
+    if (world !== null) {
+      // Compose ONLY what is positively an `IfcLocalPlacement`. The other
+      // concrete placement kinds carry positions this walk cannot reconstruct —
+      // `IfcGridPlacement` by grid intersection, `IfcLinearPlacement` (IFC4x3)
+      // by distance along an alignment curve — and reading either's attributes
+      // as [PlacementRelTo, RelativePlacement] would compose a wrong-but-
+      // plausible transform: for the linear case, one that reads an element
+      // moved along its alignment as stationary, on the very infrastructure
+      // models this module was measured against. A whitelist also covers
+      // whatever placement kind a future schema adds, unseen.
+      const entity = entityOf(store, id);
+      // IfcLocalPlacement: [0] = PlacementRelTo, [1] = RelativePlacement.
+      const local =
+        entity && entity.type.toUpperCase() === 'IFCLOCALPLACEMENT'
+          ? axisPlacementMatrix(store, asRef(entity.attributes[1]))
+          : undefined;
+      world = !local ? null : world === undefined ? local : multiply(world, local);
+    }
+    cache?.set(id, world ?? null);
   }
-  const parent = composeChain(store, parentId, depth + 1, cache);
-  // A depth-capped parent poisons nothing: propagate the uncacheable form.
-  if (parent === undefined) return undefined;
-  if (parent === null) return abstain();
-  const world = multiply(parent, local);
-  cache?.set(placementId, world);
-  return world;
+  return world ?? null;
 }
 
 /** Snap to a grid, normalising `-0` to `0` so two equal placements cannot

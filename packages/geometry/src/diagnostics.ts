@@ -19,9 +19,23 @@
 export interface GeometryDiagnostics {
   /**
    * Contract version handshake (mirrors Rust
-   * `GEOMETRY_DIAGNOSTICS_SCHEMA_VERSION`, currently 1). Bumped on field
-   * renames/removals or count-semantics changes; additive optional fields do
-   * not bump. `0`/absent means a pre-versioned producer.
+   * `GEOMETRY_DIAGNOSTICS_SCHEMA_VERSION`, currently 6). Bumped on field
+   * renames/removals and count-semantics changes; also on an additive field
+   * whose absence a consumer must tell apart from a real zero. A purely
+   * additive optional field that no consumer gates on does not bump.
+   *
+   * - 2: removed the permanently dead `guardSaved` signal.
+   * - 3: added `totalUnsupportedItems` / `unsupportedItemsByType`.
+   * - 4: unsupported counts also include unmeshable openings.
+   * - 5: work-budget refusals carry budget, demand and product/source identity
+   *   separately from unsupported items.
+   * - 6: `silentNoOps` measures area and volume instead of triangle counts.
+   *
+   * REQUIRED, not optional: the Rust field is a plain `u32` serialized
+   * unconditionally, so every producer since #1514 writes the key. A value of
+   * `0` is what Rust's `#[serde(default)]` yields when it READS a payload
+   * written before #1514, and is the only "pre-versioned producer" signal a
+   * consumer sees.
    */
   schemaVersion: number;
   /** Total CSG boolean failures (un-cut openings, emptied hosts, kernel fallbacks). */
@@ -40,11 +54,11 @@ export interface GeometryDiagnostics {
   /** Failure counts by stable reason label, sorted desc by count. */
   failuresByReason: Array<{ reason: string; count: number }>;
   /**
-   * Hosts where rectangular cutters ran, the triangle count was unchanged, and NO
-   * failure was recorded (cut attempted, geometry not modified) - the highest-
-   * signal "looks wrong but did not error" indicator. Hosts that failed are
-   * excluded (they are loud failures counted in totalCsgFailures, not silent).
-   * Batch-summed upper bound.
+   * Hosts where rectangular cutters ran without a recorded failure and left
+   * area and volume within 0.1% of the original (schema 6 onward). Older
+   * payloads compared triangle counts. Batch-summed upper bound over the
+   * contributing batches. When mixed versions are folded, only measured
+   * batches contribute to a schema 6 count.
    */
   silentNoOps: number;
   /** rect_fast fast-path engagement (perf observability). */
@@ -59,6 +73,13 @@ export interface GeometryDiagnostics {
     /** Optional: absent on payloads produced before this counter existed (#1649). */
     deferTooManyOpenings?: number;
   };
+  /**
+   * Content-hash references the geometry pass refused because they exceeded
+   * `u32::MAX` (#3421 / #3752). Nonzero means some instancing was skipped, not
+   * that geometry is wrong. Optional: absent on payloads from producers
+   * predating the counter.
+   */
+  oversizedRefDrops?: number;
   /** Bounded top-N worst-failing hosts (opt-in per-product detail). */
   worstHosts: Array<{
     productId: number;
@@ -73,10 +94,83 @@ export interface GeometryDiagnostics {
      *  subtraction ran, otherwise the pre-cut count). */
     triangleCount?: number;
   }>;
+  /**
+   * Representation items dropped from the output: no processor is registered
+   * for the IFC type, or the registered processor errored (degenerate/failed
+   * geometry). Excludes elements with no Body representation at all — those
+   * are correctly absent from the 3D view and never counted here. Absent on
+   * a payload produced before this counter existed (schemaVersion < 3).
+   *
+   * From schemaVersion 4 it also counts an opening that cut nothing because
+   * its id did not decode (reason `IfcFeatureElementSubtraction`) or its own
+   * body failed or meshed empty (reason: the opening's type, e.g.
+   * `IfcOpeningElement`), once per opening per router (ROUTER-37, #8385).
+   *
+   * A lower bound on instances: a drop inside a `RepresentationMap` source is
+   * counted once per walking router, not once per `IfcMappedItem` occurrence
+   * that reuses the cached source. That is once model-wide on the wasm batch
+   * path, which uses one router; the native pool builds a router per element,
+   * and a source whose items ALL drop is never published to the shared cache
+   * (it meshes to nothing), so there it contributes once per owning element.
+   * Read it as "these types were dropped", never as a count of affected
+   * elements or of distinct sources.
+   */
+  totalUnsupportedItems?: number;
+  /** `totalUnsupportedItems` broken down by IFC type, sorted desc by count. */
+  unsupportedItemsByType?: Array<{ reason: string; count: number }>;
+  /** Complete safety-policy refusal count (v5); details are capped at sixteen. */
+  totalBudgetRefusals?: number;
+  budgetRefusals?: Array<{
+    budget: string;
+    limit: number;
+    reached: number;
+    sourceId: number;
+    productId: number | null;
+    productType: string | null;
+    GlobalId: string | null;
+  }>;
+}
+
+type BudgetRefusalDetail = NonNullable<GeometryDiagnostics['budgetRefusals']>[number];
+
+/** null sorts first, as Rust orders `None` before `Some`. */
+const cmpNullable = <T extends number | string>(x: T | null, y: T | null): number =>
+  x === y ? 0 : x === null ? -1 : y === null ? 1 : x < y ? -1 : 1;
+
+/**
+ * The key the native pool keeps refusal details by (processing's
+ * `keep_budget_details`), so a merge keeps the same sixteen whichever worker
+ * finishes first, and the same ones as a native load.
+ */
+function compareBudgetRefusals(x: BudgetRefusalDetail, y: BudgetRefusalDetail): number {
+  return cmpNullable(x.productId, y.productId) || cmpNullable(x.sourceId, y.sourceId)
+    || cmpNullable(x.budget, y.budget) || cmpNullable(x.limit, y.limit) || cmpNullable(x.reached, y.reached)
+    || cmpNullable(x.productType, y.productType) || cmpNullable(x.GlobalId, y.GlobalId);
 }
 
 /** Cap on the merged worst-hosts detail list (matches the Rust WORST_HOSTS_LIMIT). */
 const WORST_HOSTS_LIMIT = 16;
+
+/** One reason/type and how many times it was seen. */
+type ReasonCount = { reason: string; count: number };
+
+/**
+ * Sum two reason-keyed lists by key, count-desc then reason-asc. The tie-break
+ * is load-bearing, not cosmetic: without it equal counts come out in Map
+ * insertion order, so the same model could render a different string on two
+ * runs. Shared by `failuresByReason` and `unsupportedItemsByType` so the two
+ * cannot order themselves differently. Agrees with the Rust `summarize` for the
+ * ASCII `Ifc*` type names and reason labels that actually reach here; the two
+ * are not identical orderings in general, since Rust ties break on byte order
+ * and `localeCompare` does not.
+ */
+function mergeReasonCounts(a: readonly ReasonCount[], b: readonly ReasonCount[]): ReasonCount[] {
+  const byKey = new Map<string, number>();
+  for (const r of [...a, ...b]) byKey.set(r.reason, (byKey.get(r.reason) ?? 0) + r.count);
+  return [...byKey.entries()]
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((x, y) => y.count - x.count || x.reason.localeCompare(y.reason));
+}
 
 /**
  * Merge two GeometryDiagnostics (per-batch -> per-load, or per-worker ->
@@ -91,14 +185,14 @@ export function mergeGeometryDiagnostics(
   if (!a) return b ?? null;
   if (!b) return a;
 
-  const schemaVersion = Math.max(a.schemaVersion ?? 0, b.schemaVersion ?? 0);
+  const aVersion = a.schemaVersion ?? 0;
+  const bVersion = b.schemaVersion ?? 0;
+  const schemaVersion = Math.max(aVersion, bVersion);
+  const measuredCutSchema = 6;
+  const silentNoOps = (schemaVersion < measuredCutSchema || aVersion >= measuredCutSchema ? a.silentNoOps : 0)
+    + (schemaVersion < measuredCutSchema || bVersion >= measuredCutSchema ? b.silentNoOps : 0);
 
-  const reasons = new Map<string, number>();
-  for (const r of a.failuresByReason) reasons.set(r.reason, (reasons.get(r.reason) ?? 0) + r.count);
-  for (const r of b.failuresByReason) reasons.set(r.reason, (reasons.get(r.reason) ?? 0) + r.count);
-  const failuresByReason = [...reasons.entries()]
-    .map(([reason, count]) => ({ reason, count }))
-    .sort((x, y) => y.count - x.count || x.reason.localeCompare(y.reason));
+  const failuresByReason = mergeReasonCounts(a.failuresByReason, b.failuresByReason);
 
   // Fold by productId first (a host whose geometry spans batches/workers can
   // appear in both operands' lists) before re-ranking and capping, mirroring the
@@ -124,6 +218,27 @@ export function mergeGeometryDiagnostics(
     .sort((x, y) => y.csgFailures - x.csgFailures || x.productId - y.productId)
     .slice(0, WORST_HOSTS_LIMIT);
 
+  // Whether EITHER operand actually carried the counter. Folding an absent field
+  // to 0 here would hand back `totalUnsupportedItems: 0` on a payload still
+  // labelled `schemaVersion: 2` — "we counted, and nothing was dropped" built out
+  // of "this producer never counted". That is the precise confusion the v3 bump
+  // exists to prevent, so absence has to survive the merge: the fields are
+  // omitted unless at least one side supplied one.
+  const countedUnsupported =
+    a.totalUnsupportedItems !== undefined ||
+    b.totalUnsupportedItems !== undefined ||
+    a.unsupportedItemsByType !== undefined ||
+    b.unsupportedItemsByType !== undefined;
+  const unsupportedFields = countedUnsupported
+    ? {
+        totalUnsupportedItems: (a.totalUnsupportedItems ?? 0) + (b.totalUnsupportedItems ?? 0),
+        unsupportedItemsByType: mergeReasonCounts(
+          a.unsupportedItemsByType ?? [],
+          b.unsupportedItemsByType ?? [],
+        ),
+      }
+    : {};
+
   return {
     schemaVersion,
     totalCsgFailures: a.totalCsgFailures + b.totalCsgFailures,
@@ -136,7 +251,7 @@ export function mergeGeometryDiagnostics(
       total: a.classification.total + b.classification.total,
     },
     failuresByReason,
-    silentNoOps: a.silentNoOps + b.silentNoOps,
+    silentNoOps,
     rectFast: {
       fired: a.rectFast.fired + b.rectFast.fired,
       openingsCut: a.rectFast.openingsCut + b.rectFast.openingsCut,
@@ -147,7 +262,17 @@ export function mergeGeometryDiagnostics(
       deferNoOpenings: a.rectFast.deferNoOpenings + b.rectFast.deferNoOpenings,
       deferTooManyOpenings: (a.rectFast.deferTooManyOpenings ?? 0) + (b.rectFast.deferTooManyOpenings ?? 0),
     },
+    oversizedRefDrops: (a.oversizedRefDrops ?? 0) + (b.oversizedRefDrops ?? 0),
     worstHosts,
+    ...unsupportedFields,
+    ...(a.totalBudgetRefusals !== undefined || b.totalBudgetRefusals !== undefined
+      || a.budgetRefusals !== undefined || b.budgetRefusals !== undefined
+      ? {
+        totalBudgetRefusals: (a.totalBudgetRefusals ?? a.budgetRefusals?.length ?? 0)
+          + (b.totalBudgetRefusals ?? b.budgetRefusals?.length ?? 0),
+        budgetRefusals: [...(a.budgetRefusals ?? []), ...(b.budgetRefusals ?? [])].sort(compareBudgetRefusals).slice(0, 16),
+      }
+      : {}),
   };
 }
 

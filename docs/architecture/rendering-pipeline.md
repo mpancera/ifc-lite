@@ -192,6 +192,40 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
 The instanced variant (`vs_instanced`) reads the model matrix, entityId, color, and flags per occurrence from the instance buffer instead.
 
+### Orthographic geometric visibility (#6729)
+
+Orthographic frames first replay the actual opaque draw submissions into an
+unbiased `depth32float` attachment at the scene's MSAA sample count. The
+`OpaqueVisibilityPass` intercepts those submissions, so full and partial
+batches, instances, individual meshes and textured draws share the existing
+visibility decisions and exact GPU buffers. The derived depth fragment invokes
+the original fragment eligibility, preserving clipping and texture cutouts.
+Perspective frames return the original render pass directly.
+
+Colour and visible selection/hover masks compare their unbiased geometric depth
+with the matching prepass sample before applying the existing coplanar depth
+rank. This prevents hash rank from pulling a farther opaque face through a
+nearer one. The deliberate hidden-selection silhouette remains independent.
+Both prepass storage and acceptance use the same sample-interpolated depth;
+mixing that value with fixed-function MSAA depth does not reliably compare the
+same raster position on all backends.
+
+Acceptance permits four float32 ULPs for numerical coincidence, independent of
+entity rank. This is a numerical tie interval, not a physical clearance promise
+for every positive separation: sufficiently close surfaces at extreme depth
+ranges can still tie. The paired ray/plane witness requires correct ownership
+at 1/4/30mm separation over 5.2m, 40m and 1km depth ranges, both draw orders,
+five orbit angles, all mesh vertex families and MSAA 1/4. Existing coplanar and
+clip-plane viewer tests cover the ranking and clipping contracts separately.
+
+The extra depth attachment and opaque replay cost apply to orthographic frames.
+GPU timing reports the additional `opaque-visibility` pass separately. The depth
+attachment is released when switching back to perspective. Colour/depth variants
+use asynchronous pipeline validation; an orthographic frame that needs a pending
+variant is discarded before submission and requested again when validation
+finishes. Failed variants reach renderer diagnostics, never an unconstrained
+colour-pipeline fallback.
+
 ### Fragment Shader
 
 ```wgsl
@@ -397,6 +431,20 @@ function unprojectPickSample(viewProj, pickX, pickY, width, height, depth) {
 
 The decoded ID is a **global ID**; the application resolves it back to `{ modelId, expressId }` via the federation registry (see [Federation](federation.md)). A BVH-based CPU raycaster (`bvh.ts`, `raycast-engine.ts`) complements GPU picking for snapping and measurement.
 
+### Pick routes
+
+`PickingManager` chooses one of three routes per pick (click, hover and rectangle select alike):
+
+| Route | When | What the pick pass draws |
+|---|---|---|
+| Per-piece meshes | the visible pieces missing a pick mesh fit `MAX_PICK_MESH_CREATION` (500) | one GPU mesh per visible piece, hydrated from the CPU copy |
+| Colour batches | over that budget, or CPU geometry released (#10264 S1) | the scene's own batch and textured vertex buffers, whole |
+| CPU raycast | neither GPU route can answer for every drawable | nothing; triangles (or boxes for a marquee) on the CPU |
+
+The batch route (`lane-pick-pass.ts`, `pick-lane-route.ts`) reads the entity from the per-vertex lane the colour pass already uses: the low 24 bits under the batch's anchor, like section exclusions. Flat (28-byte), textured (36-byte) and quantized (12-byte) layouts each have a pipeline variant. Because a batch is drawn whole, hide/isolate is a fragment test against the shared sorted id table (`entity-visibility-table.ts`, see [Batching Strategy](#batching-strategy)); section planes, extra planes, crop boxes and section exclusions discard as in the flat pick pass. Instanced occurrences, point splats and non-hydrated individual meshes share the same pass and depth target. A single click draws only the batches whose bounds the texel-centre line meets, scissored to that texel.
+
+The route never answers partially. It falls back to the CPU raycast when batches are pending a rebuild or being finalized, a batch the ray meets is evicted from the GPU, a batch's ids span more than one 2^24 page or exceed the 30-bit sample, the instanced pick pipeline is missing while instanced occurrences exist, or the backend rejected the batch pipelines. An edit landing while the readback is in flight voids the pick.
+
 ## Section Planes
 
 ### Clipping Implementation
@@ -513,6 +561,10 @@ flowchart TB
 ```
 
 Meshes sharing a color are merged into one `BatchedMesh` (one vertex/index buffer, one draw call), reducing N per-mesh draws to roughly 100-500 batches. Per-entity state (selection, hide, ghost) still works inside a batch because the entity ID travels per vertex. A color group whose geometry would exceed the GPU's `maxBufferSize` is split into overflow buckets automatically.
+
+Hide and isolate inside a batch (#10264 S2). `batch-visibility.ts` classifies each batch once per visibility change: fully hidden batches are skipped, fully visible ones draw as before, and a partly hidden one draws whole from its own buffers with `MESH_FLAG_ENTITY_VISIBILITY` set in its mesh uniform. The fragment resolves the full entity id from the vertex lane under the batch's anchor and discards it when `entityVisible` says so. The table (`entity-visibility-table.ts`) is one sorted id image per device, bound at group 3 binding 1 beside the section exclusions, so `fs_main` and everything derived from it (ghost, the orthographic visibility replay), the shadow pass's fragment stage and the batch pick pass read the same rule as `isEntityVisible`. The renderer uploads it only when the visibility epoch moves. A partly hidden batch that cannot be tested (the table exceeds the device's storage binding limit, or its ids span two 2^24 pages so no lane anchor exists) is left out and counted as not resident; it is never drawn with its hidden entities. Only colour splits still cut sub-batches from CPU pieces: X-Ray alpha and lens promotion, each restricted to the visible ids, and only while the batch can be partitioned; otherwise the batch draws whole under the test at the lowest alpha of its visible entities. Opaque partly hidden draws use the discard pipeline instead of the discard-free twin.
+
+Selection and hover highlight from the batches (#10264 S3). A colour batch holding a selected entity is drawn again at the end of the colour pass, whole, from its own buffers, through the selection pipeline (no depth write, `greater-equal`); `MESH_FLAG_HIGHLIGHTED_ENTITIES` makes the fragment keep only the entities of a second sorted id table, the visible selection (`entity-highlight-table.ts`, group 3 binding 2). The same draws, with the same uniforms, feed the selection outline masks. The hover outline draws the batches holding the hovered entity into the hover mask with `MESH_FLAG_ONE_ENTITY`, keeping only the entity named in `flags.w`, so following the pointer never rewrites a shared table. The batch's vertices are the ones the colour pass drew, so the highlight is coincident with them; quantized batches use a quantized selection pipeline and their dequantization uniforms. `batch-highlight.ts` draws an entity this way only when every batch holding it can: GPU resident, with a lane anchor, and with a highlight pipeline for its layout, and not when another federated model's entry shares its id in a batch while the selection is scoped to one model. Such entities, an item filter (`selectedItemId`, which the lane cannot carry) while the CPU pieces are in memory, and every entity while the table cannot be held yet keep the per-entity copies built from CPU pieces (`selection-hydration.ts`), so no entity is highlighted in part. Textured pieces keep borrowing their own buffers, and instanced occurrences keep their per-instance selected flag.
 
 ### Instancing
 

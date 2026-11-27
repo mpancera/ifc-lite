@@ -6,8 +6,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { GeometryDiagnostics } from '@ifc-lite/geometry';
-import { buildModelLoadedGeometryProps } from './modelLoadedGeometryProps.js';
+import type { GeometryDiagnostics, StallPhaseHandle } from '@ifc-lite/geometry';
+import { buildModelLoadedGeometryProps, geometryProcessingStallPhase, reportOmittedTypeRecords, reportRefusedLengthUnit, reportSkippedHungElements, warnGeometryDiagnostics } from './modelLoadedGeometryProps.js';
 import { stripSource } from '@/test/strip-comments.js';
 
 function diag(over: Partial<GeometryDiagnostics> = {}): GeometryDiagnostics {
@@ -158,6 +158,107 @@ describe('buildModelLoadedGeometryProps (#2388 attribution)', () => {
   });
 });
 
+describe('skipped hung elements (#4884)', () => {
+  const skipped = {
+    expressIds: [812, 9041, 9042],
+    byType: [
+      { ifcType: 'IFCBEAM', count: 2 },
+      { ifcType: 'IFCWALL', count: 1 },
+    ],
+  };
+
+  it('reports how many elements were skipped and of which IFC types, never their ids', () => {
+    const props = buildModelLoadedGeometryProps({
+      diagnostics: diag(),
+      skippedHungElements: skipped,
+      tessellationTier: undefined,
+      skipSmallCuts: false,
+      isResourceRetry: false,
+    });
+    assert.equal(props.hung_elements_skipped, 3);
+    assert.equal(props.hung_element_types, 'IFCBEAM:2,IFCWALL:1');
+    assert.ok(!JSON.stringify(props).includes('812'), 'express ids must stay out of telemetry');
+  });
+
+  it('leaves the skip fields absent on a load that skipped nothing', () => {
+    const props = buildModelLoadedGeometryProps({
+      diagnostics: diag(),
+      tessellationTier: undefined,
+      skipSmallCuts: false,
+      isResourceRetry: false,
+    });
+    assert.equal(props.hung_elements_skipped, undefined);
+    assert.equal(props.hung_element_types, undefined);
+  });
+
+  it('tells the user the model loaded without those elements', () => {
+    const notices: string[] = [];
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      reportSkippedHungElements('tower.ifc', skipped, (message) => notices.push(message));
+    } finally {
+      console.warn = warn;
+    }
+    assert.deepEqual(notices, [
+      '"tower.ifc" loaded without 3 elements whose geometry could not be computed (IFCBEAM, IFCWALL).',
+    ]);
+  });
+});
+
+describe('reportRefusedLengthUnit (#7678)', () => {
+  it('tells the user the 3D view is empty and that the data is still available', () => {
+    const notices: string[] = [];
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      reportRefusedLengthUnit('tower.ifc', (message) => notices.push(message));
+    } finally {
+      console.warn = warn;
+    }
+    assert.equal(notices.length, 1);
+    assert.match(notices[0], /"tower\.ifc" has an unusable length unit/);
+    assert.match(notices[0], /properties and hierarchy are still available/);
+  });
+
+  it('is wired to the geometry stream\'s unitRefused event in the loader', () => {
+    assert.match(loader.code, /case 'unitRefused':\s*reportRefusedLengthUnit\(file\.name, toast\.error\)/);
+  });
+});
+
+describe('reportOmittedTypeRecords (#8341)', () => {
+  function notices(count: number | undefined): string[] {
+    const out: string[] = [];
+    reportOmittedTypeRecords('haus.ifc', count, (message) => out.push(message));
+    return out;
+  }
+
+  it('tells the user how many type definitions could not be read and that their type geometry is missing', () => {
+    assert.deepEqual(notices(3), ['"haus.ifc": 3 type definitions could not be read, so their type geometry was left out.']);
+    assert.deepEqual(notices(1), ['"haus.ifc": 1 type definition could not be read, so its type geometry was left out.']);
+  });
+
+  it('says nothing for 0 or for an unknown count (older wasm, cache, server)', () => {
+    assert.deepEqual(notices(0), []);
+    assert.deepEqual(notices(undefined), []);
+  });
+});
+
+describe('geometryProcessingStallPhase (#4902)', () => {
+  it('reads the phase a live handle reports', () => {
+    const handle: StallPhaseHandle = { getStallPhase: () => 'shard-scan' };
+    assert.equal(geometryProcessingStallPhase(handle), 'shard-scan');
+  });
+
+  it('is absent when the pool has not wired a reader in yet', () => {
+    assert.equal(geometryProcessingStallPhase({}), undefined);
+  });
+
+  it('is absent when no handle was passed at all', () => {
+    assert.equal(geometryProcessingStallPhase(undefined), undefined);
+  });
+});
+
 /**
  * Read and stripped once. `code` has comments removed; `masked` is the same
  * text at the same offsets with string/template/regex bodies blanked. See
@@ -166,6 +267,12 @@ describe('buildModelLoadedGeometryProps (#2388 attribution)', () => {
  */
 const loaderPath = fileURLToPath(new URL('./useIfcLoader.ts', import.meta.url));
 const loader = stripSource(readFileSync(loaderPath, 'utf8'), loaderPath);
+// #7955 M2-C moved the exact processAdaptive options out of the loader, unchanged.
+const geometrySourcePath = fileURLToPath(new URL('./ingest/geometryEventSource.ts', import.meta.url));
+const geometrySource = stripSource(readFileSync(geometrySourcePath, 'utf8'), geometrySourcePath);
+// The small-file fast path moved the shared processAdaptive options into one builder, unchanged.
+const adaptiveOptionsPath = fileURLToPath(new URL('./ingest/adaptiveGeometryOptions.ts', import.meta.url));
+const adaptiveOptions = stripSource(readFileSync(adaptiveOptionsPath, 'utf8'), adaptiveOptionsPath);
 
 /**
  * The argument list of ONE `captureModelLoaded(…)` call in `useIfcLoader.ts` —
@@ -284,6 +391,38 @@ describe('ifc_model_loaded wiring (#2388)', () => {
     assert.match(src, /loadDiagnostics = event\.diagnostics/);
   });
 
+  it('feeds the builder, and the user notice, the elements the stream skipped (#4884)', () => {
+    const args = captureArgsAround('...buildModelLoadedPayload(');
+    assert.ok(args.includes('skippedHungElements'), 'the wasm-path capture must pass skippedHungElements');
+    assert.match(src, /skippedHungElements = event\.skippedHungElements/);
+    assert.match(src, /reportSkippedHungElements\(file\.name, skippedHungElements, toast\.info\)/);
+  });
+
+  it('opts in to hung-call recovery only because it reads the skipped elements, and never caches a partial model (#4884)', () => {
+    assert.match(adaptiveOptions.masked, /hungJobTimeoutMs: DEFAULT_HUNG_JOB_TIMEOUT_MS/);
+    assert.match(geometrySource.masked, /processAdaptive\(request\.view, adaptiveGeometryOptions\(/);
+    const cacheGate = src.indexOf('!skippedHungElements &&');
+    assert.notEqual(cacheGate, -1, 'the cache write must be gated on skippedHungElements');
+    const saveIdx = src.indexOf('saveToCache(cacheKey', cacheGate);
+    assert.ok(saveIdx !== -1 && saveIdx - cacheGate < 3_000, 'the gate must guard the saveToCache call that follows it');
+  });
+
+  it('does not cache a load that omitted type records (#8341): a hit would drop the notice', () => {
+    const gate = src.indexOf('!omittedTypeRecords &&');
+    assert.notEqual(gate, -1, 'the cache write must be gated on omittedTypeRecords');
+    const saveIdx = src.indexOf('saveToCache(cacheKey', gate);
+    assert.ok(saveIdx !== -1 && saveIdx - gate < 3_000, 'the gate must guard the saveToCache call that follows it');
+  });
+
+  it('aborts the geometry stream when it is closed, so a stalled pool is terminated (#4884)', () => {
+    assert.match(src, /signal: geometryAbort\.signal/);
+    const closeIdx = src.indexOf('closeGeometryIterator = async');
+    assert.notEqual(closeIdx, -1);
+    const returnIdx = src.indexOf('boundedIteratorReturn(geometryIterator)', closeIdx);
+    const abortIdx = src.indexOf('geometryAbort.abort()', closeIdx);
+    assert.ok(abortIdx !== -1 && abortIdx < returnIdx, 'the stream must be aborted before return() is awaited');
+  });
+
   it('marks the SERVER fast path\'s capture as a retry when it is one', () => {
     // The third capture site (#2393 self-review). It is reachable on a retry:
     // a first attempt falls through to WASM because the server is momentarily
@@ -307,51 +446,32 @@ describe('ifc_model_loaded wiring (#2388)', () => {
   });
 });
 
-/*
- * The cache-hit half of #2388 is tested where it can be OBSERVED, not here:
- * `useIfcLoader.cacheHitTelemetry.test.tsx` seeds a real cache entry, drives
- * the real `loadFile` to a real hit, and reads the `ifc_model_loaded` payload
- * that actually leaves `posthog.capture`. That path is reachable under
- * `tsx --test` — the hit is decided at `loadStage = 'cache-lookup'`, hundreds
- * of lines before the wasm engine is touched — so it needs no source-text
- * stand-in and no builder-level stand-in either, unlike the wasm-path wiring
- * above.
- *
- * A builder-level "mirrors the call shape the cache-hit site should use" test
- * lived here until #2393 review, and was removed rather than kept as a second
- * spelling of the same claim. The commit that removed it said every assertion
- * it made was "covered twice over". That was not accurate — counted row by
- * row in the #2393 self-review, five of its seven had two surviving homes and
- * two had one. Where the missing home was worth having, it was ADDED rather
- * than argued away:
- *
- *  - absent CSG counters (`total_csg_failures`, `csg_products_with_failures`,
- *    `csg_silent_no_ops`) for absent diagnostics — the builder unit test
- *    "leaves the CSG counts UNSET when no producer emitted diagnostics"
- *    above, and behaviourally `cacheHitTelemetry.test.tsx`'s "leaves the CSG
- *    counters ABSENT on a cache hit" (mutation-verified: flattening any of
- *    them to `?? 0` fails it). Two homes.
- *  - absent `csg_top_failure_reason` for ABSENT diagnostics — had exactly one
- *    home (`cacheHitTelemetry.test.tsx:271`). "Omits the top reason when
- *    nothing failed" above is a DIFFERENT input: real diagnostics with a zero
- *    count. The absent-diagnostics assertion is now part of "leaves the CSG
- *    counts UNSET …" too, so this row has two homes as well.
- *  - `tessellation_tier` / `skip_small_cuts` carrying real values — the
- *    builder unit test "records the two fidelity inputs …" above, and
- *    behaviourally the cache-hit test's two OPPOSITE-fidelity loads, which
- *    also rule out the hardcoded constant a single-value mirror cannot. Two
- *    homes.
- *  - the COMBINED case — CSG counters absent while the fidelity fields still
- *    carry real values, i.e. "absent CSG was not achieved by dropping the
- *    whole geometry-props spread" — still has exactly ONE home,
- *    `cacheHitTelemetry.test.tsx:280-282`, and deliberately so: the only
- *    second spelling available at the builder level is the mirrored call that
- *    was deleted, which asserts what the test file says rather than what the
- *    capture site does. One behavioural home beats two, one of them fictional.
- *
- * That single home is load-bearing, so it is worth stating why it cannot go
- * quiet: `captureCacheHitPayload` asserts it saw exactly one
- * `load_path === 'cache'` event and says in the failure message that a count
- * of 0 would prove nothing. A fixture that stopped reaching the cache-hit
- * branch fails loudly rather than passing vacuously — verified.
- */
+// #9268: normal diagnostics carry budget details without tracing.
+it('#9268 warns with budget demand and product/source identity', () => {
+  const calls: unknown[][] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => { calls.push(args); };
+  try {
+    warnGeometryDiagnostics('model.ifc', diag({ budgetRefusals: [{
+      budget: 'walk mapped attempts', limit: 65536, reached: 65537,
+      productId: 25, productType: 'IfcFlowTerminal', GlobalId: 'test', sourceId: 22,
+    }] }));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][0], '[useIfc] model.ifc: work budget refusal: walk mapped attempts limit=65536 reached=65537 product=#25 IfcFlowTerminal GlobalId=test source=#22');
+  } finally { console.warn = original; }
+});
+
+it('#9268 caps budget warning details and uses unknown for missing identity', () => {
+  const calls: unknown[][] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => { calls.push(args); };
+  try {
+    const refusal = { budget: 'logical mapped attempts', limit: 3, reached: 4,
+      sourceId: 8, productId: null, productType: null, GlobalId: null };
+    warnGeometryDiagnostics('model.ifc', diag({ totalBudgetRefusals: 40,
+      budgetRefusals: Array.from({ length: 20 }, () => refusal) }));
+    assert.equal(calls.length, 17);
+    assert.match(String(calls[0][0]), /product=#unknown unknown GlobalId=unavailable/);
+    assert.match(String(calls[16][0]), /and 24 more/);
+  } finally { console.warn = original; }
+});

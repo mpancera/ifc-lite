@@ -36,6 +36,19 @@ import {
   extractUserLayer as extractLayerForClient,
 } from './snapshot/layers.js';
 import { createUndoManager, type UndoController } from './undo.js';
+import { markRejectionHandled } from './internal/promise.js';
+
+/**
+ * Thrown by a disposed `CollabSession`: by `seed` / `transact` called after
+ * `dispose()`, and as the rejection of a `whenSynced` that had not settled
+ * when the session was disposed.
+ */
+export class CollabSessionDisposedError extends Error {
+  constructor(readonly roomId: string, action: string) {
+    super(`@ifc-lite/collab: session for room "${roomId}" is disposed (${action})`);
+    this.name = 'CollabSessionDisposedError';
+  }
+}
 
 export type ProviderKind = 'memory' | 'indexeddb' | 'websocket' | 'indexeddb+websocket';
 
@@ -85,11 +98,22 @@ export interface CollabSession {
   readonly undoController: UndoController;
   readonly conflicts: ConflictDetector;
   readonly provider: ProviderKind;
-  /** Resolves once both persistence and (if applicable) websocket sync have completed. */
+  /**
+   * Resolves once both persistence and (if applicable) websocket sync have
+   * completed. Rejects with `CollabSessionDisposedError` if the session is
+   * disposed first.
+   */
   readonly whenSynced: Promise<void>;
+  /** True once `dispose()` has run. */
+  readonly disposed: boolean;
+  /**
+   * Run `listener` once when the session is disposed (immediately if it
+   * already is). Returns an unsubscribe.
+   */
+  onDispose(listener: () => void): () => void;
   status(): WebSocketStatus | 'memory' | 'indexeddb';
   onStatus(listener: (s: WebSocketStatus | 'memory' | 'indexeddb') => void): () => void;
-  /** Seed this session's Y.Doc from an IFCX file. */
+  /** Seed this session's Y.Doc from an IFCX file. Throws once disposed. */
   seed(input: IfcxInput, options?: SeedOptions): IfcxFile;
   /** Snapshot the current state to an IFCX object. */
   snapshot(options?: SnapshotOptions): IfcxFile;
@@ -104,12 +128,13 @@ export interface CollabSession {
   captureDocState(): Uint8Array;
   /** Extract a per-user layer (defaults to *this* peer). */
   extractUserLayer(baseline: Uint8Array, clientId?: number, snapshot?: SnapshotOptions): IfcxFile;
-  /** Wrap edits in a Yjs transaction tagged with our local origin. */
+  /** Wrap edits in a Yjs transaction tagged with our local origin. Throws once disposed. */
   transact<T>(fn: () => T): T;
   /** Local-origin undo via Y.UndoManager. */
   undo(): boolean;
   redo(): boolean;
   onConflict(listener: ConflictListener): () => void;
+  /** Tear down providers, presence, undo and conflicts. Idempotent. */
   dispose(): void;
 }
 
@@ -141,28 +166,72 @@ export async function createCollabSession(opts: CollabSessionOptions): Promise<C
 
   const synced: Promise<void>[] = [];
 
-  if (providerKind === 'indexeddb' || providerKind === 'indexeddb+websocket') {
-    idb = await createIndexedDbProvider(doc, opts.roomId, { dbName: opts.dbName });
-    synced.push(idb.whenSynced);
-  } else if (providerKind === 'memory') {
-    idb = createMemoryProvider(doc, opts.roomId);
-    synced.push(idb.whenSynced);
+  // `presence` (and its live awareness-eviction timers, started the moment
+  // `createPresence` ran above) is constructed before either provider. If a
+  // provider fails to come up — e.g. `createIndexedDbProvider` throwing in a
+  // non-browser test harness where `indexedDB` is undefined — this function
+  // rejects and its caller never receives a `session` to call `.dispose()`
+  // on. Nothing else references `presence`, so its two `setInterval`s (the
+  // eviction sweep in presence.ts and y-protocols' own outdated-clients
+  // timer inside `new Awareness`) keep running forever, which is exactly
+  // the leak that kept a Node test process alive indefinitely (never
+  // observed in the browser, where a page unload reclaims everything).
+  // Dispose what we've built so far before propagating the failure.
+  try {
+    if (providerKind === 'indexeddb' || providerKind === 'indexeddb+websocket') {
+      idb = await createIndexedDbProvider(doc, opts.roomId, { dbName: opts.dbName });
+      synced.push(idb.whenSynced);
+    } else if (providerKind === 'memory') {
+      idb = createMemoryProvider(doc, opts.roomId);
+      synced.push(idb.whenSynced);
+    }
+
+    if (providerKind === 'websocket' || providerKind === 'indexeddb+websocket') {
+      if (!opts.serverUrl) {
+        throw new Error('@ifc-lite/collab: serverUrl is required for websocket providers');
+      }
+      ws = await createWebSocketProvider(doc, opts.roomId, opts.serverUrl, {
+        WebSocketPolyfill: opts.WebSocketPolyfill,
+        token: opts.token,
+        awareness: presence.awareness,
+        connect: opts.connect ?? true,
+        disableBc: opts.disableBc,
+      });
+      ws.onStatus(setStatus);
+      synced.push(ws.whenSynced);
+    }
+  } catch (err) {
+    if (ownsPresence) presence.dispose();
+    undoController.destroy();
+    conflicts.destroy();
+    if (idb) idb.destroy();
+    if (ws) ws.destroy();
+    throw err;
   }
 
-  if (providerKind === 'websocket' || providerKind === 'indexeddb+websocket') {
-    if (!opts.serverUrl) {
-      throw new Error('@ifc-lite/collab: serverUrl is required for websocket providers');
-    }
-    ws = await createWebSocketProvider(doc, opts.roomId, opts.serverUrl, {
-      WebSocketPolyfill: opts.WebSocketPolyfill,
-      token: opts.token,
-      awareness: presence.awareness,
-      connect: opts.connect ?? true,
-      disableBc: opts.disableBc,
-    });
-    ws.onStatus(setStatus);
-    synced.push(ws.whenSynced);
-  }
+  let disposed = false;
+  const disposeListeners = new Set<() => void>();
+  const assertLive = (action: string) => {
+    if (disposed) throw new CollabSessionDisposedError(opts.roomId, action);
+  };
+  // Settles on sync, or rejects when the session is disposed first. Without
+  // the dispose arm a caller parked on `whenSynced` of a session torn down
+  // mid-join (a provider that never syncs once destroyed) hung forever.
+  let rejectOnDispose: ((err: Error) => void) | null = null;
+  const whenSynced = new Promise<void>((resolve, reject) => {
+    rejectOnDispose = reject;
+    Promise.all(synced).then(
+      () => {
+        rejectOnDispose = null;
+        resolve();
+      },
+      (err: unknown) => {
+        rejectOnDispose = null;
+        reject(err);
+      },
+    );
+  });
+  markRejectionHandled(whenSynced);
 
   const session: CollabSession = {
     roomId: opts.roomId,
@@ -172,14 +241,27 @@ export async function createCollabSession(opts: CollabSessionOptions): Promise<C
     undoController,
     conflicts,
     provider: providerKind,
-    whenSynced: Promise.all(synced).then(() => undefined),
+    whenSynced,
+    get disposed() {
+      return disposed;
+    },
+    onDispose(listener) {
+      if (disposed) {
+        listener();
+        return () => false;
+      }
+      disposeListeners.add(listener);
+      return () => disposeListeners.delete(listener);
+    },
     status: () => currentStatus,
     onStatus(listener) {
-      statusListeners.add(listener);
       listener(currentStatus);
+      if (disposed) return () => false;
+      statusListeners.add(listener);
       return () => statusListeners.delete(listener);
     },
     seed(input, options) {
+      assertLive('seed');
       return seedFromIfcx(doc, input, options);
     },
     snapshot(options) {
@@ -198,6 +280,7 @@ export async function createCollabSession(opts: CollabSessionOptions): Promise<C
       });
     },
     transact(fn) {
+      assertLive('transact');
       let result!: ReturnType<typeof fn>;
       doc.transact(() => {
         result = fn();
@@ -214,6 +297,11 @@ export async function createCollabSession(opts: CollabSessionOptions): Promise<C
       return conflicts.onConflict(listener);
     },
     dispose() {
+      if (disposed) return;
+      disposed = true;
+      statusListeners.clear();
+      rejectOnDispose?.(new CollabSessionDisposedError(opts.roomId, 'whenSynced'));
+      rejectOnDispose = null;
       conflicts.destroy();
       undoController.destroy();
       // Only dispose presence we created; a shared (federation) presence is
@@ -221,6 +309,17 @@ export async function createCollabSession(opts: CollabSessionOptions): Promise<C
       if (ownsPresence) presence.dispose();
       if (ws) ws.destroy();
       if (idb) idb.destroy();
+      const listeners = [...disposeListeners];
+      disposeListeners.clear();
+      for (const listener of listeners) {
+        try {
+          listener();
+        } catch (err) {
+          // One failing listener must not leave the others attached.
+          // eslint-disable-next-line no-console
+          console.error('[collab] session dispose listener failed:', err);
+        }
+      }
     },
   };
 

@@ -8,8 +8,8 @@
  * set that suppresses the duplicated base-model geometry.
  *
  * Colours go through the same single overlay channel `useLens` uses
- * (`setPendingColorUpdates` → `scene.setColorOverrides` — overlay batches drawn
- * over the original geometry, instant to clear). The hidden set is reconciled
+ * (`setPendingColorUpdates` → `scene.setColorOverrides` — painted from the
+ * renderer's per-entity colour table, instant to clear). The hidden set is reconciled
  * with ownership tracking lifted from `useOverlayCompositor`: we remember which
  * ids we hid and whether the user had already hidden them, so teardown only
  * un-hides what we actually contributed.
@@ -20,7 +20,9 @@
 
 import { useEffect, useRef } from 'react';
 import { useViewerStore } from '@/store';
+import { analysisStampOf, useAnalysisStaleness } from './useAnalysisStaleness';
 import { buildCompareOverlay } from '@/lib/compare/overlay';
+import { ALL_COMPARE_RESULTS, type CompareResultFilter } from '@/lib/compare/resultFilter';
 
 type ViewerStore = ReturnType<typeof useViewerStore.getState>;
 
@@ -75,18 +77,19 @@ function reconcileHidden(
   ownedRef.current = next;
 }
 
-export function useCompareOverlay(): void {
+export function useCompareOverlay(filter: CompareResultFilter = ALL_COMPARE_RESULTS): void {
   // global id → "was the user already hiding this when we took over?"
   const ownedHiddenRef = useRef<Map<number, boolean>>(new Map());
   const colorActiveRef = useRef(false);
 
   const compareResult = useViewerStore((s) => s.compareResult);
   const showUnchanged = useViewerStore((s) => s.compareShowUnchanged);
+  const stale = useAnalysisStaleness(analysisStampOf(compareResult));
 
   useEffect(() => {
     const store = useViewerStore.getState();
 
-    if (!compareResult) {
+    if (!compareResult || stale) {
       if (colorActiveRef.current) {
         handBackColorChannel(store);
         colorActiveRef.current = false;
@@ -99,6 +102,7 @@ export function useCompareOverlay(): void {
       compareResult.diff,
       showUnchanged,
       compareResult.excludedHiddenIds,
+      filter,
     );
     reconcileHidden(hiddenIds, ownedHiddenRef, store);
     // Empty map signals the consumer to clear overlays (lens contract).
@@ -107,7 +111,7 @@ export function useCompareOverlay(): void {
     // override map clobbered any prior lens colours — so teardown must hand the
     // channel back regardless of the map size (don't gate on `.size`).
     colorActiveRef.current = true;
-  }, [compareResult, showUnchanged]);
+  }, [compareResult, showUnchanged, stale, filter]);
 
   // Teardown on unmount (panel closed) — restore the scene we touched.
   useEffect(() => {

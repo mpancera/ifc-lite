@@ -17,6 +17,8 @@ import {
   QuantityType,
   RelationshipType,
   isSpatialStructureTypeName,
+  IfcTypeEnum,
+  IfcTypeEnumFromString,
 } from '@ifc-lite/data';
 import { BinaryCacheWriter, BinaryCacheReader, xxhash64, SchemaVersion, FORMAT_VERSION } from './index.js';
 import type { CacheDataStore } from './types.js';
@@ -261,6 +263,46 @@ describe('BinaryCacheWriter and BinaryCacheReader', () => {
     expect(result.geometry!.totalTriangles).toBe(1);
   });
 
+  it('yieldBetweenSections returns to the event loop between sections and writes the same bytes', async () => {
+    const geometry = {
+      meshes: [{ expressId: 7, positions: new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0]), normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
+        indices: new Uint32Array([0, 1, 2]), color: [0.5, 0.5, 0.5, 1.0] as [number, number, number, number] }],
+      totalVertices: 3, totalTriangles: 1,
+      coordinateInfo: { originShift: { x: 0, y: 0, z: 0 }, originalBounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 0 } },
+        shiftedBounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 0 } }, hasLargeCoordinates: false } as CoordinateInfo,
+      instancedShards: [new Uint8Array([1, 2, 3, 4]).buffer as ArrayBuffer],
+    };
+    const options = { omitSourceHash: true, compressGeometryChunks: false };
+    const whole = await new BinaryCacheWriter().write(dataStore, geometry, sourceBuffer, options);
+    // Count macrotasks that run while the yielding write is in flight.
+    let turns = 0;
+    let writing = true;
+    const tick = (): void => { if (writing) { turns++; setTimeout(tick, 0); } };
+    setTimeout(tick, 0);
+    const sliced = await new BinaryCacheWriter().write(dataStore, geometry, sourceBuffer, { ...options, yieldBetweenSections: true });
+    writing = false;
+    expect(turns).toBeGreaterThanOrEqual(6);
+    expect(new Uint8Array(sliced)).toEqual(new Uint8Array(whole));
+  });
+
+  it('read(): mesh arrays own their buffers by default; `sharedArena` makes them views into shared blocks', async () => {
+    const tri = (expressId: number, x: number): MeshData => ({ expressId, positions: new Float32Array([x, 0, 0, x + 1, 0, 0, x, 1, 0]),
+      normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]), indices: new Uint32Array([0, 1, 2]), color: [0.8, 0.8, 0.8, 1.0] });
+    const coordinateInfo: CoordinateInfo = {
+      originShift: { x: 0, y: 0, z: 0 },
+      originalBounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 4, y: 1, z: 0 } },
+      shiftedBounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 4, y: 1, z: 0 } },
+      hasLargeCoordinates: false,
+    };
+    const cacheBuffer = await new BinaryCacheWriter().write(dataStore, { meshes: [tri(4, 0), tri(5, 2)], totalVertices: 6, totalTriangles: 2, coordinateInfo }, sourceBuffer);
+    const owned = (await new BinaryCacheReader().read(cacheBuffer)).geometry!.meshes;
+    for (const m of owned) for (const a of [m.positions, m.normals, m.indices]) expect(a.buffer.byteLength).toBe(a.byteLength);
+    expect(new Set(owned.flatMap((m) => [m.positions.buffer, m.normals.buffer, m.indices.buffer])).size).toBe(6);
+    const shared = (await new BinaryCacheReader().read(cacheBuffer, { sharedArena: true })).geometry!.meshes;
+    expect(shared[0].positions.buffer).toBe(shared[1].positions.buffer);
+    expect([...shared[1].positions]).toEqual([...owned[1].positions]);
+  });
+
   it('should preserve GPU-instancing shards through round-trip', async () => {
     // Opaque repeated occurrences are partitioned into IFNS shards that are NOT in
     // the flat meshes; without persisting them, a cache reload silently drops all
@@ -482,6 +524,65 @@ describe('BinaryCacheWriter and BinaryCacheReader', () => {
 
     expect(entities.getTypeName(4)).toBe('IfcBuildingStorey');
     expect(isSpatialStructureTypeName(entities.getTypeName(4))).toBe(true);
+  });
+
+  // Most concrete IFC product classes are absent from the hand-maintained
+  // `IfcTypeEnum` (101 of the 157 concrete `IfcProduct` subtypes in the
+  // generated IFC4 registry). The live parser table carries a `rawTypeName`
+  // string column so `getTypeName` can fall back to the real class for those;
+  // the cache writer/reader pair must carry the same column, or every such
+  // element comes back as 'Unknown' after a cache load.
+  //
+  // Both directions, over a NAMED list rather than a count: classes that are
+  // in the enum must keep working (negative control), and classes that are
+  // not must come back with their real name (the regression).
+  it('preserves the class name of every named IFC4 class through a cache round-trip', async () => {
+    // Every name here is a concrete entity of the generated IFC4 registry.
+    const IN_ENUM = ['IfcWall', 'IfcSpace', 'IfcBuildingStorey'] as const;
+    const NOT_IN_ENUM = [
+      'IfcPump',
+      'IfcValve',
+      'IfcAirTerminal',
+      'IfcSanitaryTerminal',
+      'IfcLightFixture',
+      'IfcSurfaceFeature',
+      'IfcBoiler',
+      'IfcStructuralCurveMember',
+    ] as const;
+
+    // Anti-vacuity, both halves: the split must really be a split, and each
+    // name must really sit on the side of `IfcTypeEnum` this test claims.
+    // If a class is ever added to the enum it moves lists, it is not dropped.
+    expect(IN_ENUM.length).toBeGreaterThan(0);
+    expect(NOT_IN_ENUM.length).toBeGreaterThan(0);
+    for (const n of IN_ENUM) expect([n, IfcTypeEnumFromString(n)]).not.toEqual([n, IfcTypeEnum.Unknown]);
+    for (const n of NOT_IN_ENUM) expect([n, IfcTypeEnumFromString(n)]).toEqual([n, IfcTypeEnum.Unknown]);
+
+    const all = [...IN_ENUM, ...NOT_IN_ENUM];
+    const builder = new EntityTableBuilder(all.length, dataStore.strings);
+    all.forEach((cls, i) => {
+      builder.add(i + 1, cls.toUpperCase(), `guid-${i + 1}`, `Entity ${i + 1}`, '', '', false, false);
+    });
+    const entities = builder.build();
+
+    // Anti-vacuity: the pre-cache table already answers correctly for every
+    // name, so a failure below is the cache losing it and nothing else.
+    const before = all.map((cls, i) => [cls, entities.getTypeName(i + 1)]);
+    expect(before).toEqual(all.map((cls) => [cls, cls]));
+
+    const writer = new BinaryCacheWriter();
+    const cacheBuffer = await writer.write(
+      { ...dataStore, entities, entityCount: entities.count },
+      undefined,
+      sourceBuffer,
+      { includeGeometry: false },
+    );
+
+    const reader = new BinaryCacheReader();
+    const result = await reader.read(cacheBuffer);
+
+    const after = all.map((cls, i) => [cls, result.dataStore.entities.getTypeName(i + 1)]);
+    expect(after).toEqual(all.map((cls) => [cls, cls]));
   });
 
   it('should preserve property data through round-trip', async () => {

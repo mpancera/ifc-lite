@@ -30,6 +30,7 @@ import {
   projectTo2DBasis,
 } from './math.js';
 import { PolygonBuilder } from './polygon-builder.js';
+import { OpenSurfaceIndex } from './open-surface.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SECTION CUTTER CLASS
@@ -43,7 +44,7 @@ export class SectionCutter {
   /** Set when `config.customPlane` is supplied — disables cardinal projection. */
   private customPlane: SectionPlaneConfig['customPlane'];
 
-  constructor(config: SectionPlaneConfig) {
+  constructor(private config: SectionPlaneConfig) {
     this.axis = config.axis;
     this.flipped = config.flipped;
     this.customPlane = config.customPlane;
@@ -80,7 +81,6 @@ export class SectionCutter {
     let totalTriangles = 0;
     let intersectedTriangles = 0;
 
-    // Process each mesh - collect segment arrays for efficient flattening
     for (const mesh of meshes) {
       const result = this.cutSingleMesh(mesh);
       segmentArrays.push(result.segments);
@@ -91,15 +91,15 @@ export class SectionCutter {
     // Flatten all segments at once (more efficient than repeated push(...spread))
     const allSegments = segmentArrays.flat();
 
-    // Reconstruct closed polygons from segments
-    const polygonBuilder = new PolygonBuilder();
-    const polygons = polygonBuilder.buildPolygons(allSegments);
+    const openSurfaceSegments = new Set<CutSegment>();
+    const polygons = new PolygonBuilder().buildPolygons(allSegments, new OpenSurfaceIndex(meshes), openSurfaceSegments);
 
     const processingTimeMs = performance.now() - startTime;
 
     return {
       segments: allSegments,
       polygons,
+      openSurfaceSegments,
       stats: {
         totalTriangles,
         intersectedTriangles,
@@ -115,7 +115,8 @@ export class SectionCutter {
    */
   cutSingleMesh(mesh: MeshData): MeshCutResult {
     const segments: CutSegment[] = [];
-    const { positions, indices, expressId, ifcType, modelIndex, origin, color } = mesh;
+    if (this.config.sectionExcludedIds?.has(mesh.expressId)) return { segments, trianglesProcessed: 0, trianglesIntersected: 0 };
+    const { positions, indices, expressId, ifcType, modelIndex, origin, color, materialId } = mesh;
 
     const triangleCount = indices.length / 3;
     let intersectedCount = 0;
@@ -189,9 +190,9 @@ export class SectionCutter {
           entityId: expressId,
           ifcType: ifcType || 'Unknown',
           modelIndex: modelIndex || 0,
-          // Per-sub-mesh colour so material-layer walls/slabs split per layer
-          // in the polygon builder. One MeshData == one layer == one colour.
+          // Per-layer colour and IfcMaterial: the polygon builder splits on both.
           color,
+          ...(materialId !== undefined ? { materialId } : {}),
           // LOCAL (pre-origin) magnitude — lets the polygon builder size its
           // scale-aware weld tolerance off the element's own extent instead
           // of `p0_2d`/`p1_2d`'s world-frame magnitude. See the field's
@@ -386,18 +387,17 @@ export async function cutMeshesStreaming(
     }
   }
 
-  // Flatten all segments at once (more efficient than repeated push(...spread))
   const allSegments = allSegmentArrays.flat();
 
-  // Build polygons from all segments
-  const polygonBuilder = new PolygonBuilder();
-  const polygons = polygonBuilder.buildPolygons(allSegments);
+  const openSurfaceSegments = new Set<CutSegment>();
+  const polygons = new PolygonBuilder().buildPolygons(allSegments, new OpenSurfaceIndex(meshes), openSurfaceSegments);
 
   const processingTimeMs = performance.now() - startTime;
 
   return {
     segments: allSegments,
     polygons,
+    openSurfaceSegments,
     stats: {
       totalTriangles,
       intersectedTriangles,

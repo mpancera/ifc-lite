@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import { ErrorReportHost } from './components/error-report/ErrorReportHost';
 /**
  * Main application component.
  *
@@ -16,10 +17,14 @@ import { ViewerLayout } from './components/viewer/ViewerLayout';
 import { BimProvider } from './sdk/BimProvider';
 import { ExtensionHostProvider } from './sdk/ExtensionHostProvider';
 import { SourceHostProvider } from './services/sources/SourceHostProvider';
+import type { FileSourceProviderFactory } from './services/sources/source-host';
 import { Toaster } from './components/ui/toast';
 import { ChunkErrorBoundary } from './components/ChunkErrorBoundary';
-import { Suspense, lazy, useEffect, useState } from 'react';
-import { Analytics } from '@vercel/analytics/react';
+import { StaleDeploymentNotice } from './components/StaleDeploymentNotice';
+import { LensRuntimeHost } from './components/viewer/LensRuntimeHost';
+import { Suspense, useEffect, useState } from 'react';
+import { lazyChunk } from '@/lib/lazy-chunk';
+import { HostingAnalytics } from './components/HostingAnalytics';
 import { useViewerStore } from './store';
 import { useOpenerProject } from './hooks/useOpenerProject';
 import { useProjectScopedState } from './hooks/useProjectScopedState';
@@ -32,11 +37,14 @@ import { useProjectScopedState } from './hooks/useProjectScopedState';
 // three.js + the marketing code into their own async chunks, off the `/`
 // critical path. ViewerLayout stays static — it IS the `/` route, so keeping it
 // eager avoids an extra round-trip for the overwhelmingly common case.
-const McpLanding = lazy(() =>
+const McpLanding = lazyChunk(() =>
   import('./components/mcp/McpLanding').then((m) => ({ default: m.McpLanding })),
 );
-const McpPlayground = lazy(() =>
+const McpPlayground = lazyChunk(() =>
   import('./components/mcp/McpPlayground').then((m) => ({ default: m.McpPlayground })),
+);
+const RteGpuWitness = lazyChunk(() =>
+  import('./e2e/RteGpuWitness').then((m) => ({ default: m.RteGpuWitness })),
 );
 
 // Neutral full-viewport placeholder while a lazy MCP route chunk loads. Both
@@ -46,7 +54,12 @@ function RouteFallback() {
   return <div style={{ minHeight: '100vh', background: '#0a0a0c' }} />;
 }
 
-export function App() {
+export interface AppProps {
+  /** Host-supplied file-source providers; see `ViewerBootstrapOptions` in `bootstrap.tsx`. */
+  sourceProviders?: readonly FileSourceProviderFactory[];
+}
+
+export function App({ sourceProviders }: AppProps = {}) {
   const [pathname, setPathname] = useState(() => window.location.pathname);
 
   // When another application opened this window with a model, it is the only
@@ -78,6 +91,15 @@ export function App() {
   const normalizedPath = pathname.length > 1 && pathname.endsWith('/')
     ? pathname.slice(0, -1)
     : pathname;
+  if (normalizedPath === '/rte-gpu-witness') {
+    return (
+      <ChunkErrorBoundary key={normalizedPath} label="RTE GPU witness">
+        <Suspense fallback={<RouteFallback />}>
+          <RteGpuWitness />
+        </Suspense>
+      </ChunkErrorBoundary>
+    );
+  }
   // The two MCP branches below return the same fragment shape, so React
   // reconciles their ChunkErrorBoundary as ONE instance by type + position and
   // carries `state.error` across a route change: a failed playground chunk would
@@ -92,7 +114,8 @@ export function App() {
           </Suspense>
         </ChunkErrorBoundary>
         <Toaster />
-        <Analytics />
+        <StaleDeploymentNotice />
+        <HostingAnalytics />
       </>
     );
   }
@@ -105,21 +128,29 @@ export function App() {
           </Suspense>
         </ChunkErrorBoundary>
         <Toaster />
-        <Analytics />
+        <StaleDeploymentNotice />
+        <HostingAnalytics />
       </>
     );
   }
 
   return (
+    <>
+    {import.meta.env.VITE_MODEL_REPORTS_ENABLED === 'true' && <ErrorReportHost />}
     <BimProvider>
       <ExtensionHostProvider>
-        <SourceHostProvider>
+        <SourceHostProvider additionalProviders={sourceProviders}>
+          <LensRuntimeHost />
+          {/* Toasts mount inside `ViewportContainer` itself (#5504, charter
+              #5478 item 22), anchored to the viewport's bottom-right above
+              the status bar, rather than the whole window's here. */}
           <ViewerLayout />
-          <Toaster />
-          <Analytics />
+          <StaleDeploymentNotice />
+          <HostingAnalytics />
         </SourceHostProvider>
       </ExtensionHostProvider>
     </BimProvider>
+    </>
   );
 }
 

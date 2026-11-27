@@ -26,20 +26,31 @@
  */
 
 import proj4 from 'proj4';
+import { computeGridFrame, isGeographicProj4, projectedDefinitionInMetres } from '@ifc-lite/geo/proj4';
+export { computeGridConvergence } from '@ifc-lite/geo/proj4';
 import type { MapConversion, ProjectedCRS } from '@ifc-lite/parser';
 import type { CoordinateInfo } from '@ifc-lite/geometry';
-import { computeModelCenterInIfcMeters, effectiveMapConversionForGeometry, resolveProjection } from './reproject';
+import { computeModelCenterInIfcMeters, effectiveMapConversionForGeometry, reprojectPointToLatLon, resolveProjection } from './reproject';
+import { isMapAbsoluteGeometry } from './map-absolute';
+import { combinedScaleFactor, gridCoordinateSource, type GridCoordinateSource } from './ground-scale';
 import {
   resolveTerrainElevationDetailed,
   type ResolveTerrainElevationOptions,
   type TerrainElevationSample,
 } from './terrain-elevation';
-import { getEffectiveHorizontalScale, resolveMapUnitToMetreScale } from './geo-scale';
+import { getEffectiveAxisScales, resolveMapUnitToMetreScale } from './geo-scale';
 import { shouldApplyGeoidUndulation } from './cesium-placement';
-import { egm96Undulation } from './egm96-undulation';
+import { egm96Undulation } from '@ifc-lite/geo';
 import { viewerToEnuRotation, type ViewerToEnuRotation } from './viewer-enu-rotation';
 import { ecefCameraFrame } from './ecef-camera-frame';
 import { viewBasis } from '@ifc-lite/renderer';
+import { ifcToViewerAxes } from './coordinate-frame';
+import { resolveMapAxisDirection } from './map-axis-direction';
+import { buildViewerToEcefMatrix } from './cesium-viewer-frame';
+import { loadCesium } from '@/components/viewer/cesium/cesium-module';
+import { createBridgeGlobe, createExactCameraFrame } from './bridge-globe';
+import type { GeoMapping } from './geo-warp';
+import type { GlobePlacementMode, GlobePlacementPlan } from './globe-placement';
 
 // Re-exported so existing importers keep resolving it from the bridge; the
 // definitions now live in the dependency-free `viewer-enu-rotation` and
@@ -64,6 +75,8 @@ export interface CesiumBridge {
    * meridian convergence off the true-north basemap. See #1408.
    */
   viewerRotation: ViewerToEnuRotation;
+  /** Effective FactorZ/Scale coefficient for viewer Y-up deltas. */
+  viewerUpScale: number;
 
   /**
    * Sync the Cesium camera using lookAtTransform with a viewer→ECEF matrix.
@@ -87,7 +100,17 @@ export interface CesiumBridge {
     options?: ResolveTerrainElevationOptions,
   ): Promise<TerrainElevationSample | null>;
 
+  /**
+   * WGS84 XY with physical IFC-authored orthometric height (no geoid/placement
+   * override). In Exact placement a projected CRS goes through `geoMapping`,
+   * the mapping the model was baked with; in Anchor placement it keeps the
+   * anchor's map formula. Either way the pick is where the model is drawn.
+   */
   viewerToGeodetic(vx: number, vy: number, vz: number): GeodesicPosition | null;
+  /** Per-vertex mapping for a projected CRS (`geo-warp.ts`); null for a geographic one. */
+  geoMapping: GeoMapping | null;
+  /** Anchor or Exact, with the anchor-error estimate behind an Auto decision. */
+  placement: GlobePlacementPlan;
 }
 
 export interface CesiumModelOriginInfo extends GeodesicPosition {
@@ -101,13 +124,26 @@ export interface CesiumModelOriginInfo extends GeodesicPosition {
   geoidUndulation: number;
   easting: number;
   northing: number;
-  horizontalScale: number;
+  scaleX: number;
+  scaleY: number;
+  scaleZ: number;
   /**
    * Meridian convergence (radians) at this origin: the angle from grid north
    * to true north. Computed once here so the camera frame, the model placement
    * and the WebGPU sun all read the same value. See #1408.
    */
   gamma: number;
+  /** Combined grid-to-ground scale factor k_c = k·R/(R+h) at this origin (1 for a geographic CRS). */
+  combinedScaleFactor: number;
+  /** Why the geometry is read as grid coordinates, or null for true-length geometry (`ground-scale.ts`). */
+  gridSource: GridCoordinateSource | null;
+  /**
+   * Multiplier from map (grid) lengths to the ENU ground lengths Cesium draws:
+   * 1/k_c for a grid-coordinate source, else exactly 1. Applied to the
+   * horizontal rows of the viewer-to-ENU rotation only; heights are
+   * orthometric and unaffected.
+   */
+  groundScale: number;
 }
 
 export async function computeCesiumModelOrigin(
@@ -127,28 +163,29 @@ export async function computeCesiumModelOrigin(
   const projDef = await resolveProjection(projectedCRS);
   if (!projDef) return null;
 
+  const geographic = isGeographicProj4(projDef);
   const mapScale = resolveMapUnitToMetreScale(projectedCRS.mapUnitScale, lengthUnitScale);
   // Map-absolute geometry (#2526): neutralise a conversion the geometry
   // already carries, or the offsets/rotation get applied twice.
-  mapConversion = effectiveMapConversionForGeometry(mapConversion, mapScale, coordinateInfo);
-  const absc = mapConversion.xAxisAbscissa ?? 1.0;
-  const ordi = mapConversion.xAxisOrdinate ?? 0.0;
+  const mapAbsolute = !geographic && isMapAbsoluteGeometry(mapConversion, mapScale, coordinateInfo);
+  if (!geographic) mapConversion = effectiveMapConversionForGeometry(mapConversion, mapScale, coordinateInfo);
+  const axis = resolveMapAxisDirection(mapConversion.xAxisAbscissa, mapConversion.xAxisOrdinate);
+  if (!axis) return null;
   const center = computeModelCenterInIfcMeters(coordinateInfo);
-  const horizontalScale = getEffectiveHorizontalScale(
-    mapConversion.scale,
-    mapScale,
-    lengthUnitScale,
-  );
-  const easting = mapConversion.eastings * mapScale
-    + horizontalScale * (absc * center.ifcX - ordi * center.ifcY);
-  const northing = mapConversion.northings * mapScale
-    + horizontalScale * (ordi * center.ifcX + absc * center.ifcY);
-  const ifcOriginHeight = mapConversion.orthogonalHeight * mapScale + center.ifcZ;
+  const { x: scaleX, y: scaleY, z: scaleZ } = getEffectiveAxisScales(mapConversion, mapScale, lengthUnitScale);
+  // Geographic XY is the center anchor in source-datum degrees. Geometry
+  // remains physical ENU metres around that anchor, never angular offsets.
+  const easting = geographic ? mapConversion.eastings : mapConversion.eastings * mapScale
+    + axis.a * scaleX * center.ifcX - axis.b * scaleY * center.ifcY;
+  const northing = geographic ? mapConversion.northings : mapConversion.northings * mapScale
+    + axis.b * scaleX * center.ifcX + axis.a * scaleY * center.ifcY;
+  const ifcOriginHeight = mapConversion.orthogonalHeight * mapScale + scaleZ * center.ifcZ;
   const height = placementHeightOverride ?? ifcOriginHeight;
 
   try {
-    const [lon, lat] = proj4(projDef, 'WGS84', [easting, northing]);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    const point = await reprojectPointToLatLon(easting, northing, { ...projectedCRS, mapUnitScale: 1 });
+    if (!point) return null;
+    const { lon, lat } = point;
     // IFC OrthogonalHeight is orthometric (above the vertical datum); Cesium
     // places geometry by ellipsoidal height. Add the geoid undulation N so the
     // model isn't buried ~N below the world terrain (≈ +45 m in Czechia,
@@ -159,6 +196,9 @@ export async function computeCesiumModelOrigin(
     const geoidUndulation = shouldApplyGeoidUndulation(heightsAreEllipsoidal)
       ? egm96Undulation(lat, lon)
       : 0;
+    const frame = computeGridFrame(projDef, easting, northing, lat);
+    const kc = geographic ? 1 : combinedScaleFactor(frame.pointScale, lat, height + geoidUndulation);
+    const gridSource = geographic ? null : gridCoordinateSource(mapConversion, { x: scaleX, y: scaleY }, mapAbsolute, kc);
     return {
       longitude: lon,
       latitude: lat,
@@ -167,69 +207,18 @@ export async function computeCesiumModelOrigin(
       geoidUndulation,
       easting,
       northing,
-      horizontalScale,
-      gamma: computeGridConvergence(projDef, easting, northing, lon, lat),
+      scaleX,
+      scaleY,
+      scaleZ,
+      gamma: frame.gamma,
+      combinedScaleFactor: kc,
+      gridSource,
+      groundScale: gridSource ? 1 / kc : 1,
     };
-  } catch {
+  } catch (error) {
+    console.warn('[cesium] model origin transformation failed', error);
     return null;
   }
-}
-
-/**
- * Grid (meridian) convergence at a point in a projected CRS: the angle between
- * grid north (the projected CRS's +N axis) and true north (the geographic ENU
- * +N axis). Returned in radians, counter-clockwise positive, such that the grid
- * frame equals the true-ENU frame rotated by +gamma.
- *
- * WHY THIS EXISTS: `IfcMapConversion` aligns the model to GRID north (its
- * XAxisAbscissa/Ordinate are expressed in the projected grid), but Cesium's
- * `eastNorthUpToFixedFrame()` builds a TRUE-north ENU frame. Feeding the
- * grid-aligned model straight into that frame rotates it by the convergence —
- * up to ~3° for UTM near a zone edge, ~7-8° for oblique projections like
- * Krovak (EPSG:2065, S-JTSK / Czech Republic). See issue #1408.
- *
- * Computed by finite difference through proj4 so it works for any projection
- * (TM, LCC, Krovak, ...) without per-projection convergence formulae. A
- * geographic (longlat) def has zero convergence by definition.
- */
-export function computeGridConvergence(
-  projDef: string,
-  easting: number,
-  northing: number,
-  lon: number,
-  lat: number,
-): number {
-  // Geographic CRS: lat/lon is already true-north aligned.
-  if (/\+proj=longlat\b/.test(projDef)) return 0;
-  // Near the poles the local east/metre scale degenerates; skip.
-  if (Math.abs(lat) > 89.9) return 0;
-
-  const step = 1.0; // one projected-metre step along grid north
-  let lon2: number, lat2: number;
-  try {
-    [lon2, lat2] = proj4(projDef, 'WGS84', [easting, northing + step]);
-  } catch (err) {
-    // Zero is not a neutral answer here: it is indistinguishable from a
-    // genuinely zero convergence, so the model silently keeps its GRID
-    // alignment inside Cesium's TRUE-north ENU frame — a rotation of up to ~3°
-    // (UTM zone edge) or ~7-8° (Krovak). Called once per model, so logging it
-    // costs nothing and names the cause if it ever happens.
-    console.warn(
-      `[cesium] grid convergence unavailable for ${projDef}; the model is placed `
-      + 'grid-aligned in a true-north frame (rotation up to a few degrees).',
-      err,
-    );
-    return 0;
-  }
-  if (!Number.isFinite(lon2) || !Number.isFinite(lat2)) return 0;
-
-  // True-ENU components of the grid-north step (small-angle local metres).
-  const mPerDegLat = 111320;
-  const mPerDegLon = 111320 * Math.cos((lat * Math.PI) / 180);
-  const east = (lon2 - lon) * mPerDegLon;
-  const north = (lat2 - lat) * mPerDegLat;
-  // grid-north's bearing measured from true north is atan2(east, north) = -gamma.
-  return Math.atan2(-east, north);
 }
 
 export async function createCesiumBridge(
@@ -251,6 +240,8 @@ export async function createCesiumBridge(
    * `computeCesiumModelOrigin`). Default applies the correction. (#1355)
    */
   heightsAreEllipsoidal?: boolean,
+  /** Globe placement setting (`globe-placement.ts`); Anchor when omitted. */
+  placementMode: GlobePlacementMode = 'anchor',
 ): Promise<CesiumBridge | null> {
   const projDef = await resolveProjection(projectedCRS);
   if (!projDef) return null;
@@ -258,27 +249,25 @@ export async function createCesiumBridge(
   // Map-absolute geometry (#2526): the Helmert rotation below must use the
   // same neutralised conversion as `computeCesiumModelOrigin`, or the model
   // spins by the double-applied XAxis rotation around a correct origin.
-  mapConversion = effectiveMapConversionForGeometry(
+  const geographic = isGeographicProj4(projDef);
+  // `computeCesiumModelOrigin` needs the AUTHORED conversion: it detects
+  // map-absolute geometry from the authored anchor (a neutralised copy has
+  // zero offsets, so the grid-to-ground scale never applied in the bridge).
+  const authoredConversion = mapConversion;
+  if (!geographic) mapConversion = effectiveMapConversionForGeometry(
     mapConversion,
     resolveMapUnitToMetreScale(projectedCRS.mapUnitScale, lengthUnitScale),
     coordinateInfo,
   );
-  const absc = mapConversion.xAxisAbscissa ?? 1.0;
-  const ordi = mapConversion.xAxisOrdinate ?? 0.0;
+  const axis = resolveMapAxisDirection(mapConversion.xAxisAbscissa, mapConversion.xAxisOrdinate);
+  if (!axis) return null;
+  const { a: absc, b: ordi } = axis; // scalars: narrowing is lost inside `viewerToGeodetic`
   const rotAngle = Math.atan2(ordi, absc);
 
-  const bounds = coordinateInfo?.originalBounds;
-  const modelVX = bounds ? (bounds.min.x + bounds.max.x) / 2 : 0;
-  const modelVY = bounds ? (bounds.min.y + bounds.max.y) / 2 : 0;
-  const modelVZ = bounds ? (bounds.min.z + bounds.max.z) / 2 : 0;
-
   const shift = coordinateInfo?.originShift ?? { x: 0, y: 0, z: 0 };
-  const rtc = coordinateInfo?.wasmRtcOffset;
-  const rtcYup = rtc
-    ? { x: rtc.x, y: rtc.z, z: -rtc.y }
-    : { x: 0, y: 0, z: 0 };
+  const rtcYup = ifcToViewerAxes(coordinateInfo?.wasmRtcOffset ?? { x: 0, y: 0, z: 0 });
   const origin = await computeCesiumModelOrigin(
-    mapConversion,
+    authoredConversion,
     projectedCRS,
     coordinateInfo,
     lengthUnitScale,
@@ -291,71 +280,45 @@ export async function createCesiumBridge(
     latitude: origin.latitude,
     height: origin.height,
   };
-  const hScale = origin.horizontalScale;
   const mapScale = resolveMapUnitToMetreScale(projectedCRS.mapUnitScale, lengthUnitScale);
-  const oHeight = origin.height;
-  const originLon = origin.longitude;
-  const originLat = origin.latitude;
+  // Scalars, because TypeScript does not keep `origin`'s narrowing inside the callbacks.
+  const { height: oHeight, longitude: originLon, latitude: originLat } = origin;
+  const { scaleX: originScaleX, scaleY: originScaleY, scaleZ: originScaleZ } = origin;
 
   // Build the viewer-to-ENU 3x3 rotation matrix (converts a delta vector from
   // viewer space to ENU). Viewer Y-up maps to IFC Z-up ((vx,vy,vz) -> (vx,-vz,
   // vy)), then the Helmert grid alignment, then the meridian convergence
   // R(gamma) into true-north ENU; `viewerToEnuRotation` composes all three
   // (up = vy). The model-placement matrix reuses the very same `rot` via
-  // `bridge.viewerRotation` so the two never drift. Viewer-space deltas are
-  // already metres, so no lengthUnitScale.
-  const rot = viewerToEnuRotation(hScale, absc, ordi, origin.gamma);
-  const m00 = rot.eastFromVx;      // east  from vx
-  const m01 = 0;                   // east  from vy
-  const m02 = rot.eastFromVz;      // east  from vz
-  const m10 = rot.northFromVx;     // north from vx
-  const m11 = 0;                   // north from vy
-  const m12 = rot.northFromVz;     // north from vz
-  const m20 = 0;                   // up    from vx
-  const m21 = 1;                   // up    from vy (vertical = viewer Y, already metres)
-  const m22 = 0;                   // up    from vz
-
+  // `bridge.viewerRotation` so the two never drift. Viewer deltas are metres.
+  // Grid-coordinate sources are drawn at ground length (`groundScale` = 1/k_c);
+  // `viewerToGeodetic` keeps the unscaled map formula, which is exact for them.
+  const rot = viewerToEnuRotation(
+    originScaleX * origin.groundScale, absc, ordi, origin.gamma, originScaleY * origin.groundScale,
+  );
+  // A geographic CRS is a topocentric frame: the anchor placement is its exact meaning.
+  const globe = geographic ? null : createBridgeGlobe({
+    projDef, mapConversion: authoredConversion, projectedCRS, lengthUnitScale, origin, coordinateInfo,
+    heightsAreEllipsoidal, requested: placementMode,
+  });
+  const placement: GlobePlacementPlan = globe?.plan
+    ?? { requested: placementMode, mode: 'anchor', estimate: null, prescribed: null, key: '' };
+  const exactMapping = globe && placement.mode === 'exact' ? globe.mapping : null;
+  const exactCameraFrame = exactMapping ? createExactCameraFrame(exactMapping, modelOrigin) : null;
   // ── Cache for ECEF objects ──
   let viewerToEcefMatrix: InstanceType<typeof import('cesium').Matrix4> | null = null;
-  let modelOriginCartesian: InstanceType<typeof import('cesium').Cartesian3> | null = null;
   let cachedClampUp: number | null = null;
 
   function ensureEcefCache(Cesium: typeof import('cesium'), clampUp: number) {
     if (cachedClampUp === clampUp && viewerToEcefMatrix !== null) return;
     cachedClampUp = clampUp;
 
-    const originWithClamp = Cesium.Cartesian3.fromDegrees(
-      originLon, originLat, oHeight + clampUp,
-    );
-    modelOriginCartesian = originWithClamp;
-
-    // Get ENU→ECEF 4x4 matrix at model origin
-    const enuToEcef = Cesium.Transforms.eastNorthUpToFixedFrame(originWithClamp);
-
-    // Build viewer→ECEF = enuToEcef * viewerToENU
-    // viewerToENU is: translate(-modelCenter) then rotate by M
-    // As a 4x4: columns are the ENU directions of viewer axes, translation is -modelCenter in ENU
-    //
-    // viewerToENU_4x4 = [ m00  m01  m02  tx ]
-    //                    [ m10  m11  m12  ty ]
-    //                    [ m20  m21  m22  tz ]
-    //                    [ 0    0    0    1  ]
-    // where (tx, ty, tz) = M * (-modelVX, -modelVY, -modelVZ)
-    const tx = m00 * (-modelVX) + m01 * (-modelVY) + m02 * (-modelVZ);
-    const ty = m10 * (-modelVX) + m11 * (-modelVY) + m12 * (-modelVZ);
-    const tz = m20 * (-modelVX) + m21 * (-modelVY) + m22 * (-modelVZ);
-
-    // Cesium Matrix4 is column-major
-    const viewerToEnu = new Cesium.Matrix4(
-      m00, m01, m02, tx,
-      m10, m11, m12, ty,
-      m20, m21, m22, tz,
-      0,   0,   0,   1,
-    );
-
-    // Compose: viewerToEcef = enuToEcef * viewerToEnu
-    viewerToEcefMatrix = Cesium.Matrix4.multiply(
-      enuToEcef, viewerToEnu, new Cesium.Matrix4(),
+    viewerToEcefMatrix = buildViewerToEcefMatrix(
+      Cesium,
+      { longitude: originLon, latitude: originLat, height: oHeight + clampUp },
+      rot,
+      originScaleZ,
+      coordinateInfo,
     );
   }
 
@@ -384,8 +347,11 @@ export async function createCesiumBridge(
     terrainClampOffset?: number,
   ): void {
     const clampUp = terrainClampOffset ?? 0;
-    ensureEcefCache(Cesium, clampUp);
-    if (!viewerToEcefMatrix) return;
+    // Exact: the baked model's frame, linearised at the target (`bridge-globe.ts`).
+    const exactMatrix = exactCameraFrame?.(Cesium, camTarget, clampUp) ?? null;
+    if (!exactMatrix) ensureEcefCache(Cesium, clampUp);
+    const frameMatrix = exactMatrix ?? viewerToEcefMatrix;
+    if (!frameMatrix) return;
 
     // Make sure no prior lookAtTransform is still in effect — if the
     // overlay was activated from a previous bridge that called it, the
@@ -395,12 +361,12 @@ export async function createCesiumBridge(
     // Transform IFC viewer-space pose → ECEF.
     // Position uses full matrix (rotation + translation).
     const posECEF = Cesium.Matrix4.multiplyByPoint(
-      viewerToEcefMatrix,
+      frameMatrix,
       new Cesium.Cartesian3(camPos.x, camPos.y, camPos.z),
       new Cesium.Cartesian3(),
     );
     const targetECEF = Cesium.Matrix4.multiplyByPoint(
-      viewerToEcefMatrix,
+      frameMatrix,
       new Cesium.Cartesian3(camTarget.x, camTarget.y, camTarget.z),
       new Cesium.Cartesian3(),
     );
@@ -425,7 +391,7 @@ export async function createCesiumBridge(
     // direction, and the viewer→ECEF transform is a rigid rotation.
     const resolvedUp = viewBasis(camPos, camTarget, camUp).up;
     const upECEF = Cesium.Matrix4.multiplyByPointAsVector(
-      viewerToEcefMatrix,
+      frameMatrix,
       new Cesium.Cartesian3(resolvedUp.x, resolvedUp.y, resolvedUp.z),
       new Cesium.Cartesian3(),
     );
@@ -470,19 +436,44 @@ export async function createCesiumBridge(
     return resolveTerrainElevationDetailed(Cesium, viewer, originLat, originLon, options);
   }
 
+  // Geographic XY uses the exact rendered ENU/ECEF geometry. Heights retain
+  // the authored IFC contract shared with projected picks, before geoid/override.
+  const geographicCesium = geographic ? await loadCesium() : null;
+  // Model picks keep an immutable frame; syncCamera's terrain clamp changes
+  // only its camera cache, never the model's base-origin placement.
+  const geographicModelFrame = geographicCesium
+    ? buildViewerToEcefMatrix(geographicCesium, modelOrigin, rot, originScaleZ, coordinateInfo)
+    : null;
   function viewerToGeodetic(vx: number, vy: number, vz: number): GeodesicPosition | null {
+    if (![vx, vy, vz].every(Number.isFinite)) return null;
     const wx = vx + shift.x + rtcYup.x;
     const wy = vy + shift.y + rtcYup.y;
     const wz = vz + shift.z + rtcYup.z;
     const ifcX = wx;
     const ifcY = -wz;
     const ifcZ = wy;
+    const height = mapConversion.orthogonalHeight * mapScale + originScaleZ * ifcZ;
+    if (geographicCesium && geographicModelFrame) {
+      const ecef = geographicCesium.Matrix4.multiplyByPoint(geographicModelFrame,
+        new geographicCesium.Cartesian3(vx, vy, vz), new geographicCesium.Cartesian3());
+      const point = geographicCesium.Cartographic.fromCartesian(ecef);
+      if (!point) return null;
+      return { longitude: geographicCesium.Math.toDegrees(point.longitude),
+        latitude: geographicCesium.Math.toDegrees(point.latitude), height };
+    }
+    // Exact: the pick is where the baked model drew the point (`geo-warp.ts`).
+    // Anchor keeps the anchor formula below, which is where it drew it.
+    if (exactMapping) {
+      const point = exactMapping.toGeodetic(vx, vy, vz);
+      return point ? { longitude: point.longitude, latitude: point.latitude, height } : null;
+    }
     // Viewer coords (ifcX/Y/Z) are already in metres; only MapConversion values need scaling
-    const easting = mapConversion.eastings * mapScale + hScale * (absc * ifcX - ordi * ifcY);
-    const northing = mapConversion.northings * mapScale + hScale * (ordi * ifcX + absc * ifcY);
-    const height = mapConversion.orthogonalHeight * mapScale + ifcZ;
+    const easting = mapConversion.eastings * mapScale
+      + absc * originScaleX * ifcX - ordi * originScaleY * ifcY;
+    const northing = mapConversion.northings * mapScale
+      + ordi * originScaleX * ifcX + absc * originScaleY * ifcY;
     try {
-      const [lon, lat] = proj4(projDef!, 'WGS84', [easting, northing]);
+      const [lon, lat] = proj4(projectedDefinitionInMetres(projDef!), 'WGS84', [easting, northing]);
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
       return { longitude: lon, latitude: lat, height };
     } catch {
@@ -494,8 +485,11 @@ export async function createCesiumBridge(
     modelOrigin,
     rotationAngle: rotAngle,
     viewerRotation: rot,
+    viewerUpScale: originScaleZ,
     syncCamera,
     queryTerrainHeight,
     viewerToGeodetic,
+    geoMapping: globe?.mapping ?? null,
+    placement,
   };
 }

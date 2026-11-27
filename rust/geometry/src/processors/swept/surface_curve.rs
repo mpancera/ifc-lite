@@ -5,16 +5,22 @@
 //! `IfcSurfaceCurveSweptAreaSolid` / `IfcFixedReferenceSweptAreaSolid` — a 2D
 //! `SweptArea` profile swept along a `Directrix` curve.
 
+use crate::math::tol;
 use crate::{
     profile::Profile2D, profiles::ProfileProcessor, Error, Mesh, Point3, Result,
     TessellationQuality, Vector3,
 };
-use ifc_lite_core::{DecodedEntity, EntityDecoder, IfcSchema, IfcType};
+use ifc_lite_core::{slot, DecodedEntity, EntityDecoder, IfcSchema, IfcType};
 use nalgebra::Matrix4;
 
-use super::super::helpers::parse_axis2_placement_3d;
-use super::disk::build_tube_rmf;
+use super::disk::directrix_is_sweepable;
+use crate::placement::Axis2Placement;
+use crate::profiles::directrix::CurveMeasure;
 use crate::router::GeometryProcessor;
+#[path = "surface_plan.rs"]
+mod plan;
+pub(crate) use plan::SurfaceCurveSweepPlan;
+use plan::SectionRoll;
 
 /// Processor for `IfcSurfaceCurveSweptAreaSolid` and `IfcFixedReferenceSweptAreaSolid`.
 ///
@@ -25,17 +31,22 @@ use crate::router::GeometryProcessor;
 /// geometry at all because the router had no handler for the type — every
 /// duct-elbow body was silently dropped (issue #1485).
 ///
-/// The cross-section is oriented along the sweep with a rotation-minimising
-/// frame (RMF), identical to `IfcSweptDiskSolid`. For a circular profile the RMF
-/// is orientation-independent, so the swept tube is geometrically exact. For a
-/// planar directrix (every duct elbow) the RMF also keeps a non-circular
-/// section's out-of-plane axis stable, matching the natural placement. The exact
-/// reference-surface / fixed-reference roll of a *non-circular* section swept
-/// along a *non-planar* directrix is not modelled (no such case is known in the
-/// wild); the shape is still produced, only its roll about the tangent may
-/// differ. Both entity types share the attribute layout for slots 0..=4 and only
-/// differ in slot 5 (a reference surface vs. a fixed direction), which this RMF
-/// path does not consult, so one processor handles both.
+/// The roll of the section about the directrix tangent follows slot 5, as
+/// ISO 10303-42 defines it: Axis1 is the ReferenceSurface normal at the
+/// directrix point (`IfcSurfaceCurveSweptAreaSolid`) or the FixedReference
+/// projected onto the plane normal to the tangent
+/// (`IfcFixedReferenceSweptAreaSolid`), Axis3 the tangent, Axis2 = Axis3 x
+/// Axis1. This matters for every non-circular section: Revit slab edges and
+/// light fixtures sweep an arbitrary profile along a planar arc on an
+/// `IfcSurfaceOfLinearExtrusion`, and the rotation-minimising frame (RMF)
+/// rolled them 90° (width and height swapped). Reference surfaces evaluated:
+/// `IfcSurfaceOfLinearExtrusion` (normal from its own SweptCurve direction,
+/// so a directrix running against it keeps the normal) and `IfcPlane`. Any
+/// other surface, an absent slot 5, one that fails to read (logged), or a
+/// reference parallel to the tangent at any sample keeps the RMF of
+/// `IfcSweptDiskSolid` for the whole sweep, which is exact for circular
+/// profiles (the duct elbows). Both entity types share the attribute layout
+/// for slots 0..=4 and only differ in slot 5, so one processor handles both.
 pub struct SurfaceCurveSweptAreaSolidProcessor {
     profile_processor: ProfileProcessor,
 }
@@ -46,16 +57,13 @@ impl SurfaceCurveSweptAreaSolidProcessor {
             profile_processor: ProfileProcessor::new(schema),
         }
     }
-}
 
-impl GeometryProcessor for SurfaceCurveSweptAreaSolidProcessor {
-    fn process(
-        &self,
-        entity: &DecodedEntity,
-        decoder: &mut EntityDecoder,
-        _schema: &IfcSchema,
+    /// Resolve profiles, directrix samples and solid Position using the same
+    /// production admission. Retains raw file units, before router placement.
+    pub(crate) fn lower(
+        &self, entity: &DecodedEntity, decoder: &mut EntityDecoder,
         quality: TessellationQuality,
-    ) -> Result<Mesh> {
+    ) -> Result<Option<SurfaceCurveSweepPlan>> {
         // Shared IfcSweptAreaSolid attributes plus the swept-curve extension:
         //   0: SweptArea  (IfcProfileDef)         - 2D section in xy of Position
         //   1: Position   (IfcAxis2Placement3D)   - places the whole solid (opt.)
@@ -72,11 +80,14 @@ impl GeometryProcessor for SurfaceCurveSweptAreaSolidProcessor {
             .resolve_ref(profile_attr)?
             .ok_or_else(|| Error::geometry("Failed to resolve SweptArea".to_string()))?;
         self.profile_processor.set_tessellation_quality(quality);
-        let profile = self
+        // One sweep per disjoint area: a composite profile is several (#7685).
+        self.profile_processor.arm_solid_budget();
+        let mut regions = self
             .profile_processor
-            .process(&profile_entity, decoder, quality)?;
-        if profile.outer.len() < 3 {
-            return Ok(Mesh::new());
+            .process_regions(&profile_entity, decoder, quality)?;
+        regions.retain(|region| region.outer.len() >= 3);
+        if regions.is_empty() {
+            return Ok(None);
         }
 
         // --- Directrix -> 3D sample points -----------------------------------------
@@ -87,61 +98,46 @@ impl GeometryProcessor for SurfaceCurveSweptAreaSolidProcessor {
             .resolve_ref(directrix_attr)?
             .ok_or_else(|| Error::geometry("Failed to resolve Directrix".to_string()))?;
 
-        let start_param = entity.get_float(3);
-        let end_param = entity.get_float(4);
-        let has_trim = start_param.is_some() || end_param.is_some();
+        // Bounds are an IFC4x3 IfcCurveMeasureSelect (parameter or length).
+        // Same parametrisation as IfcSweptDiskSolid (one home). A trimmed conic
+        // (the duct-elbow case) carries its own Trim1/Trim2: a no-op there.
+        let start = CurveMeasure::read(entity, slot::IfcDirectrixCurveSweptAreaSolid::START_PARAM);
+        let end = CurveMeasure::read(entity, slot::IfcDirectrixCurveSweptAreaSolid::END_PARAM);
+        let samples =
+            self.profile_processor.get_directrix_samples(&directrix, decoder, start, end, quality)?;
 
-        // Mirror IfcSweptDiskSolid's directrix sampling so composite / polyline /
-        // line directrixes honour the solid-level Start/EndParam. A trimmed conic
-        // (the duct-elbow case) carries its own Trim1/Trim2, so get_curve_points
-        // already returns just the swept arc and the redundant solid params are a
-        // no-op.
-        let curve_points =
-            if has_trim && directrix.ifc_type.is_subtype_of(IfcType::IfcCompositeCurve) {
-                self.profile_processor.get_composite_curve_points_trimmed(
-                    &directrix,
-                    decoder,
-                    start_param,
-                    end_param,
-                )?
-            } else if has_trim && directrix.ifc_type == IfcType::IfcPolyline {
-                self.profile_processor.get_polyline_points_trimmed(
-                    &directrix,
-                    decoder,
-                    start_param,
-                    end_param,
-                )?
-            } else if has_trim && directrix.ifc_type == IfcType::IfcLine {
-                self.profile_processor.get_line_points_3d(
-                    &directrix,
-                    decoder,
-                    start_param.unwrap_or(0.0),
-                    end_param.unwrap_or(1.0),
-                )?
-            } else {
-                self.profile_processor
-                    .get_curve_points(&directrix, decoder, quality)?
-            };
-
+        // Refuse a non-finite sample before the dedupe below, whose `>`
+        // comparison would silently drop it (#5191).
+        if !directrix_is_sweepable(&samples.points)? {
+            return Ok(None);
+        }
         // Drop consecutive coincident samples — a zero-length step yields a NaN
-        // tangent in the RMF and shatters the tube.
-        let mut points: Vec<Point3<f64>> = Vec::with_capacity(curve_points.len());
-        for p in curve_points {
+        // tangent in the RMF and shatters the tube. Evaluated tangents (a
+        // gradient directrix) are kept in step with their points, in place.
+        let mut tangents = samples.tangents;
+        let mut points: Vec<Point3<f64>> = Vec::with_capacity(samples.points.len());
+        for (i, p) in samples.points.iter().enumerate() {
             if points
                 .last()
-                .is_none_or(|last: &Point3<f64>| (p - *last).norm() > 1e-9)
+                .is_none_or(|last: &Point3<f64>| (p - last).norm() > tol::POINT_COINCIDENT_EPS)
             {
-                points.push(p);
+                if let Some(t) = tangents.as_mut() {
+                    t[points.len()] = t[i];
+                }
+                points.push(*p);
             }
         }
+        if let Some(t) = tangents.as_mut() {
+            t.truncate(points.len());
+        }
         if points.len() < 2 {
-            return Ok(Mesh::new());
+            return Ok(None);
         }
 
         // --- Position: place the whole solid ---------------------------------------
         let position: Matrix4<f64> = match entity.get(1) {
             Some(pos_attr) if !pos_attr.is_null() => match decoder.resolve_ref(pos_attr)? {
-                Some(pos_entity) => parse_axis2_placement_3d(&pos_entity, decoder)?,
+                Some(pos_entity) => Axis2Placement::read_3d(&pos_entity, decoder)?.matrix(),
                 None => Matrix4::identity(),
             },
             _ => Matrix4::identity(),
@@ -149,10 +145,67 @@ impl GeometryProcessor for SurfaceCurveSweptAreaSolidProcessor {
         for p in &mut points {
             *p = position.transform_point(p);
         }
+        if let Some(tangents) = tangents.as_mut() {
+            tangents.iter_mut().for_each(|t| *t = position.transform_vector(t).normalize());
+        }
+        // The placement is file data too: re-gate the placed samples (#5191).
+        if !directrix_is_sweepable(&points)? {
+            return Ok(None);
+        }
 
-        // --- Sweep the profile along the placed directrix --------------------------
-        let (_, perp1s, perp2s) = build_tube_rmf(&points);
-        sweep_profile_along_frames(&profile, &points, &perp1s, &perp2s)
+        // --- Slot 5: the section roll, in the same (placed) frame as `points` ------
+        // A round section centred on the directrix is the same at any roll: it
+        // keeps the RMF, so round sweeps (the #1485 duct elbows) stay unchanged.
+        // Slot 5 only orients the section: one that fails to read keeps the
+        // RMF, the mesh this solid had before slot 5 was read, instead of
+        // dropping the solid. A refusal the decoder counted on the way stays
+        // counted.
+        let roll = section_is_round(&profile_entity, decoder).and_then(|round| {
+            if round { Ok(None) } else { self.section_roll(entity, decoder, &position, &points, quality) }
+        });
+        let roll = match roll {
+            Ok(roll) => roll,
+            Err(error) => {
+                crate::diag::diag_warn!(
+                    { entity_id = entity.id, error = %error,
+                      "surface_curve: section reference not read, keeping the rotation-minimising frame" }
+                    else {
+                        eprintln!(
+                            "[ifc-lite][surface_curve] #{}: section reference not read ({error}); \
+                             keeping the rotation-minimising frame",
+                            entity.id,
+                        );
+                    }
+                );
+                None
+            }
+        };
+
+        let up = position.transform_vector(&Vector3::z());
+        Ok(Some(SurfaceCurveSweepPlan { regions, points, tangents, up, entity_id: entity.id, roll }))
+    }
+}
+
+impl GeometryProcessor for SurfaceCurveSweptAreaSolidProcessor {
+    fn lower_owned(&self, entity: &DecodedEntity, decoder: &mut EntityDecoder,
+        quality: crate::TessellationQuality, rtc_file_units: Option<(f64, f64, f64)>)
+        -> Option<crate::Result<crate::program::OwnedConstructor>> {
+        use crate::program::constructor::Constructor;
+        if rtc_file_units.is_some() { return None; }
+        Some(self.lower(entity, decoder, quality).map(|plan| crate::program::OwnedConstructor::new(plan.map_or(Constructor::Empty, Constructor::SweptArea))))
+    }
+
+    fn process(
+        &self,
+        entity: &DecodedEntity,
+        decoder: &mut EntityDecoder,
+        _schema: &IfcSchema,
+        quality: TessellationQuality,
+    ) -> Result<Mesh> {
+        match self.lower(entity, decoder, quality)? {
+            Some(plan) => plan.evaluate(),
+            None => Ok(Mesh::new()),
+        }
     }
 
     fn supported_types(&self) -> Vec<IfcType> {
@@ -167,6 +220,95 @@ impl Default for SurfaceCurveSweptAreaSolidProcessor {
     fn default() -> Self {
         Self::new(IfcSchema::new())
     }
+}
+
+impl SurfaceCurveSweptAreaSolidProcessor {
+    /// Slot 5, resolved into the placed frame of `points`: `ReferenceSurface`
+    /// for `IfcSurfaceCurveSweptAreaSolid`, `FixedReference` for
+    /// `IfcFixedReferenceSweptAreaSolid`. The reference is defined in the
+    /// solid's own frame, like the directrix, so it takes the same `position`.
+    /// `None` when the slot is empty or the surface type is not evaluated yet;
+    /// the sweep then keeps the RMF roll. An `Err` (a reference that fails to
+    /// read) does the same in `lower()`.
+    fn section_roll(
+        &self, entity: &DecodedEntity, decoder: &mut EntityDecoder, position: &Matrix4<f64>,
+        points: &[Point3<f64>], quality: TessellationQuality,
+    ) -> Result<Option<SectionRoll>> {
+        const REFERENCE: usize = 5;
+        if entity.ifc_type == IfcType::IfcFixedReferenceSweptAreaSolid {
+            return Ok(decoder
+                .direction3_at(entity, REFERENCE)?
+                .map(|d| SectionRoll::Projected(position.transform_vector(&Vector3::from(d)))));
+        }
+        let Some(surface) = decoder.resolve_optional(entity, REFERENCE)? else {
+            return Ok(None);
+        };
+        match surface.ifc_type {
+            IfcType::IfcSurfaceOfLinearExtrusion => {
+                // SweptCurve (0), Position (1), ExtrudedDirection (2), Depth (3).
+                let Some(d) = decoder.direction3_at(&surface, 2)? else {
+                    return Ok(None);
+                };
+                let Some(curve) = swept_curve(&surface, decoder)? else {
+                    return Ok(None);
+                };
+                let frame = position * surface_position(&surface, 1, decoder)?;
+                let samples: Vec<Point3<f64>> = self
+                    .profile_processor
+                    .get_directrix_points(&curve, decoder, None, None, quality)?
+                    .iter()
+                    .map(|p| frame.transform_point(p))
+                    .collect();
+                let d = frame.transform_vector(&Vector3::from(d));
+                Ok(plan::extrusion_normals(&samples, &d, points).map(SectionRoll::Normals))
+            }
+            IfcType::IfcPlane => {
+                // Position (0): the plane normal is its local +Z.
+                let frame = position * surface_position(&surface, 0, decoder)?;
+                Ok(Some(SectionRoll::Projected(frame.transform_vector(&Vector3::new(0.0, 0.0, 1.0)))))
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+/// An `IfcCircleProfileDef` / `IfcCircleHollowProfileDef` whose `Position`
+/// (slot 2) is absent or centred at the origin: rotationally symmetric about
+/// the directrix, so its roll does not change the swept shape.
+fn section_is_round(profile: &DecodedEntity, decoder: &mut EntityDecoder) -> Result<bool> {
+    if !matches!(profile.ifc_type, IfcType::IfcCircleProfileDef | IfcType::IfcCircleHollowProfileDef) {
+        return Ok(false);
+    }
+    let Some(placement) = decoder.resolve_optional(profile, 2)? else {
+        return Ok(true);
+    };
+    Ok(match decoder.point3_at(&placement, 0)? {
+        Some([x, y, _]) => x.abs() <= tol::POINT_COINCIDENT_EPS && y.abs() <= tol::POINT_COINCIDENT_EPS,
+        None => false,
+    })
+}
+
+/// The curve of an `IfcSurfaceOfLinearExtrusion`'s `SweptCurve` profile: the
+/// `Curve` / `OuterCurve` (slot 2) of an arbitrary open or closed profile.
+/// `None` for any other profile, whose curve direction we do not read.
+fn swept_curve(surface: &DecodedEntity, decoder: &mut EntityDecoder) -> Result<Option<DecodedEntity>> {
+    let Some(profile) = decoder.resolve_optional(surface, 0)? else {
+        return Ok(None);
+    };
+    let arbitrary = profile.ifc_type.is_subtype_of(IfcType::IfcArbitraryOpenProfileDef)
+        || profile.ifc_type.is_subtype_of(IfcType::IfcArbitraryClosedProfileDef);
+    if !arbitrary {
+        return Ok(None);
+    }
+    Ok(decoder.resolve_optional(&profile, 2)?)
+}
+
+/// An elementary surface's optional `IfcAxis2Placement3D` as a matrix.
+fn surface_position(surface: &DecodedEntity, slot: usize, decoder: &mut EntityDecoder) -> Result<Matrix4<f64>> {
+    Ok(match decoder.resolve_optional(surface, slot)? {
+        Some(placement) => Axis2Placement::read_3d(&placement, decoder)?.matrix(),
+        None => Matrix4::identity(),
+    })
 }
 
 /// Sweep a 2D `profile` (outer boundary + holes) along the directrix samples

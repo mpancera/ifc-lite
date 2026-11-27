@@ -22,8 +22,9 @@ import { readEntities } from './sections/entities.js';
 import { readProperties } from './sections/properties.js';
 import { readQuantities } from './sections/quantities.js';
 import { readRelationships } from './sections/relationships.js';
-import { readGeometryV13 } from './sections/geometry-chunks.js';
+import { readGeometryV13, type ChunkDecodeOptions } from './sections/geometry-chunks.js';
 import { readInstancedShards } from './sections/instanced-shards.js';
+import { readSelectionRelationships } from './sections/selection-relationships.js';
 import { readEntityIndex } from './sections/entity-index.js';
 
 export class BinaryCacheReader {
@@ -64,7 +65,8 @@ export class BinaryCacheReader {
    */
   async read(
     buffer: ArrayBuffer,
-    options: CacheReadOptions = {}
+    /** `sharedArena`: decode geometry into shared arena blocks (see `ChunkDecodeOptions`); default: owned buffers. */
+    options: CacheReadOptions & Pick<ChunkDecodeOptions, 'sharedArena'> = {}
   ): Promise<CacheReadResult> {
     const { skipGeometry = false, sourceBuffer } = options;
 
@@ -99,7 +101,7 @@ export class BinaryCacheReader {
       throw new Error('Missing required Entities section');
     }
     reader.position = entitiesSection.offset;
-    const entities = readEntities(reader, strings);
+    const entities = readEntities(reader, strings, header.version);
 
     // Read properties
     const propertiesSection = sectionMap.get(SectionType.Properties);
@@ -123,7 +125,7 @@ export class BinaryCacheReader {
       throw new Error('Missing required Relationships section');
     }
     reader.position = relationshipsSection.offset;
-    const relationships = readRelationships(reader);
+    const relationships = readRelationships(reader, header.version);
 
     const dataStore: CacheDataStore = {
       schema: header.schema,
@@ -141,6 +143,7 @@ export class BinaryCacheReader {
     if (entityIndexSection) {
       reader.position = entityIndexSection.offset;
       result.entityIndex = readEntityIndex(reader);
+      if (header.version >= 28) dataStore.selectionRelationshipIndex = readSelectionRelationships(reader);
     }
 
     // Read geometry (optional)
@@ -158,7 +161,7 @@ export class BinaryCacheReader {
         }
         // v13: chunked section — decode every chunk sequentially. Streamed
         // consumers use openGeometryChunksV13 instead of this full read.
-        result.geometry = await readGeometryV13(buffer, geometrySection.offset, header.version);
+        result.geometry = await readGeometryV13(buffer, geometrySection.offset, header.version, { sharedArena: options.sharedArena === true });
       }
       // GPU-instancing shards (cache v10+): opaque repeated occurrences that were
       // partitioned off the flat geometry section. Restored via the instanced path.

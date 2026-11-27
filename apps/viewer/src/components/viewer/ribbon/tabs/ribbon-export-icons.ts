@@ -12,17 +12,32 @@
  * lets the node test runner render that component.
  */
 
-import { FileCsv, FileGlb, FileHbjson, FileIfc, FileJson, FileKmz, FilePdf, FileUsd, Screenshot } from '@/icons';
+import { EditProperty, Extension, FileCityjson, FileCsv, FileGlb, FileHbjson, FileIfc, FileJson, FileKmz, FilePdf, FileUsd, HideSelected, Layer, Screenshot } from '@/icons';
+import { CesiumIonUpload } from '@/icons';
 import type { ExportIconSet } from '../../toolbar/export-commands';
 
 export const RIBBON_EXPORT_ICONS: ExportIconSet = {
   ifc: FileIfc,
+  // No dedicated anonymized-export glyph exists in `src/icons/`; reused
+  // rather than adding a new SVG asset for one small ribbon button — the
+  // "hide/isolate" mark reads correctly for "export a hidden-away subset".
+  anonymized: HideSelected,
+  'modified-ifc': EditProperty,
   glb: FileGlb,
   kmz: FileKmz,
+  cityjson: FileCityjson,
+  ion: CesiumIonUpload,
   usd: FileUsd,
+  // No Rhino glyph in `src/icons/`; the layer mark reads as the layered scene
+  // the export writes, and avoids a new SVG asset for one small button.
+  '3dm': Layer,
   energy: FileHbjson,
+  // No terrain/LandXML glyph in `src/icons/`; the layer mark reads as a
+  // surface, and reusing it avoids a new SVG asset for one small button.
+  'landxml-terrain': Layer,
   csv: FileCsv,
   json: FileJson,
   screenshot: Screenshot,
   pdf: FilePdf,
+  extension: Extension,
 };

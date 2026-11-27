@@ -64,6 +64,8 @@ describe('isTypeVisible', () => {
       ['IfcSpace', 'spaces'],
       ['IfcSpatialZone', 'spatialZones'],
       ['IfcOpeningElement', 'openings'],
+      // #5409: IFC4's standard-case opening rode no toggle at all.
+      ['IfcOpeningStandardCase', 'openings'],
       ['IfcVirtualElement', 'virtualElements'],
       ['IfcSite', 'site'],
       ['IfcGeographicElement', 'site'],
@@ -115,7 +117,7 @@ describe('buildHiddenIfcTypes', () => {
     const expected: Partial<Record<keyof typeof ALL_ON, string[]>> = {
       spaces: ['IfcSpace'],
       spatialZones: ['IfcSpatialZone'],
-      openings: ['IfcOpeningElement'],
+      openings: ['IfcOpeningElement', 'IfcOpeningStandardCase'],
       virtualElements: ['IfcVirtualElement'],
       site: ['IfcSite', 'IfcGeographicElement'],
       ifcAnnotations: ['IfcAnnotation'],
@@ -153,12 +155,21 @@ describe('buildHiddenIfcTypes', () => {
       'IfcAnnotation',
       'IfcGeographicElement',
       'IfcOpeningElement',
+      'IfcOpeningStandardCase',
       'IfcSite',
       'IfcSpace',
       'IfcSpatialZone',
       'IfcVirtualElement',
     ]);
   });
+});
+
+it('#9923 structural mode is a separate gate from the boolean class map', () => {
+  assert.equal(isTypeVisible('IfcBeam',ALL_ON,'physical'),true);
+  assert.equal(isTypeVisible('IfcStructuralCurveMember',ALL_ON,'physical'),false);
+  assert.equal(isTypeVisible('IfcBeam',ALL_ON,'analytical'),false);
+  assert.equal(isTypeVisible('IfcStructuralCurveMember',ALL_ON,'analytical'),true);
+  assert.equal(isTypeVisible('IfcBeam',ALL_ON,'both'),true);
 });
 
 describe('isTypeVisible · kinds of space', () => {

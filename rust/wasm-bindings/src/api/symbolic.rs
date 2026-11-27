@@ -23,6 +23,10 @@ impl IfcAPI {
     /// Annotation, FootPrint, Axis). These are 2D curves used for
     /// architectural drawings instead of sectioning 3D geometry.
     ///
+    /// This standalone entry point detects an RTC frame from the whole source.
+    /// Use `parseSymbolicRepresentationsInFrame` when the symbols accompany
+    /// meshes produced by a streaming pre-pass or federation override.
+    ///
     /// Example:
     /// ```javascript
     /// const api = new IfcAPI();
@@ -37,8 +41,26 @@ impl IfcAPI {
     pub fn parse_symbolic_representations(
         &self,
         content: String,
-    ) -> crate::zero_copy::SymbolicRepresentationCollection {
-        let data = ifc_lite_processing::extract_symbolic_data(&content);
-        crate::zero_copy::SymbolicRepresentationCollection::from_data(data)
+    ) -> Result<crate::zero_copy::SymbolicRepresentationCollection, JsValue> {
+        let data = ifc_lite_processing::extract_symbolic_data_with_provenance(&content)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        Ok(crate::zero_copy::SymbolicRepresentationCollection::from_data_with_provenance(data))
+    }
+
+    /// Parse symbolic representations in the exact RTC frame selected by the
+    /// browser mesh pre-pass rather than detecting a second frame from the
+    /// whole source.
+    #[wasm_bindgen(js_name = parseSymbolicRepresentationsInFrame)]
+    pub fn parse_symbolic_representations_in_frame(
+        &self,
+        content: String,
+        #[wasm_bindgen(unchecked_param_type = "RtcFrame")] frame: JsValue,
+    ) -> Result<crate::zero_copy::SymbolicRepresentationCollection, JsValue> {
+        let frame = super::overlay_frame::parse_overlay_frame(&frame)?;
+        let data = ifc_lite_processing::extract_symbolic_data_with_provenance_in_frame(
+            &content,
+            frame,
+        ).map_err(|error| JsValue::from_str(&error.to_string()))?;
+        Ok(crate::zero_copy::SymbolicRepresentationCollection::from_data_with_provenance(data))
     }
 }

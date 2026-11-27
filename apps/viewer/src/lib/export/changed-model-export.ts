@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * Real per-model export implementations for the Export Changes flow, plus the
+ * Real per-model export implementations for the Export modified IFC… flow, plus the
  * production `BuildArtifactsDeps` wiring. Kept out of `model-changes.ts` so that
  * module (and its unit tests) stay free of the browser renderer and the store
  * barrel — the pure `buildChangedArtifacts` takes these as injected deps.
@@ -16,7 +16,9 @@
  * single global schedule into every exported file.
  */
 
-import { StepExporter, Ifc5Exporter } from '@ifc-lite/export';
+import { viewerDrawingAnnotations } from '@/lib/export/viewer-drawing-annotations';
+import { prepareAppearanceSerialization } from '../appearance/serialization.js';
+import { packagePortableIfcAsync } from './portable-ifc.js';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import type { MutablePropertyView } from '@ifc-lite/mutations';
 import { spliceScheduleIntoExport } from '@/sdk/adapters/export-schedule-splice';
@@ -39,7 +41,9 @@ export async function exportChangedModelToStep(
   view: MutablePropertyView | undefined,
   invocation: StepExportInvocation,
 ): Promise<ChangesExportArtifact> {
-  const exporter = new StepExporter(dataStore, view);
+  const { StepExporter } = await import('@/lib/export/step-export-runtime');
+  const serialized = prepareAppearanceSerialization(modelId, dataStore, view);
+  const exporter = new StepExporter(dataStore, viewerDrawingAnnotations(modelId, dataStore, serialized.view));
   const result = await exporter.exportAsync({
     schema: invocation.schema,
     includeGeometry: true,
@@ -55,7 +59,7 @@ export async function exportChangedModelToStep(
     content = spliceScheduleIntoExport({ content }, modelId, dataStore, invocation.scheduleState).content;
   }
 
-  return { content, ext: 'ifc', mime: 'text/plain' };
+  return packagePortableIfcAsync(modelId, content, serialized.resources);
 }
 
 /**
@@ -66,31 +70,45 @@ export async function exportChangedModelToStep(
  * without loading the browser renderer.
  */
 export async function exportChangedModelToIfcx(
-  _modelId: string,
+  modelId: string,
   dataStore: IfcDataStore,
   view: MutablePropertyView | undefined,
   invocation: IfcxExportInvocation,
 ): Promise<ChangesExportArtifact> {
-  const { withInstancedMeshes } = await import('../../utils/instancedExport.js');
-  const exportGeometry = invocation.geometryResult
-    ? withInstancedMeshes(invocation.geometryResult, invocation.idOffset === 0)
-    : invocation.geometryResult;
-
-  const exporter = new Ifc5Exporter(dataStore, exportGeometry, view, invocation.idOffset);
-  const result = exporter.export({
-    includeGeometry: true,
-    includeProperties: true,
-    applyMutations: true,
-    visibleOnly: false,
-    // A round-trip "export my edits" should not silently drop properties that
-    // lack an official IFC5 schema, so keep full fidelity here. (The Export
-    // dialog exposes this as a user toggle that defaults to on; the one-click
-    // changes button deliberately favors completeness.)
-    onlyKnownProperties: false,
-    author: 'ifc-lite',
+  const { exportModelIfcx } = await import('./model-ifcx-export');
+  const result = await exportModelIfcx({
+    modelId, dataStore, geometryResult: invocation.geometryResult, mutationView: view,
+    idOffset: invocation.idOffset, maxExpressId: invocation.maxExpressId, models: invocation.models,
+    options: { includeGeometry: true, includeProperties: true, applyMutations: true, visibleOnly: false,
+      stripPathPrefix: invocation.stripPathPrefix, onlyKnownProperties: false, author: 'ifc-lite' },
   });
 
-  return { content: result.content, ext: 'ifcx', mime: 'application/json' };
+  // An empty pset has no IFCX wire representation (#5201); the exporter
+  // counts it instead of dropping it silently, and the count travels with
+  // the artifact so the success toast can say so.
+  return { content: result.content, ext: 'ifcx', mime: 'application/json', skippedCount: result.stats.skippedCount };
+}
+
+/**
+ * Toast suffix for property sets an IFCX export left out because the format
+ * has no spelling for "this set exists with zero members" (#5201). Mirrors
+ * the layer-publish report (`publish.ts`, #2277): counted, never silent.
+ */
+export function unrepresentedPsetsNote(count: number): string {
+  if (count <= 0) return '';
+  return ` — ${count} empty property set${count === 1 ? '' : 's'} left out (IFCX cannot represent an empty set)`;
+}
+
+/**
+ * Toast suffix for official IFCX property keys (`bsi::ifc::prop::<Name>`) that
+ * two psets on one entity disagreed on while only the flat key was written,
+ * so one value is not in the file (#5376). Full-fidelity exports also write
+ * the pset-qualified key and lose nothing, so only lost values are counted.
+ */
+export function lostPropertyCollisionsNote(collisions: readonly { valueLost: boolean }[]): string {
+  const lost = collisions.filter((c) => c.valueLost).length;
+  if (lost === 0) return '';
+  return ` — ${lost} propert${lost === 1 ? 'y' : 'ies'} shared a name across property sets, and only one value was kept`;
 }
 
 /** Production dependency set for `buildChangedArtifacts`. */

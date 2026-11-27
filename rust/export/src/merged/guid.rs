@@ -1,0 +1,169 @@
+// SPDX-License-Identifier: MPL-2.0
+//! GlobalId reconciliation for merged export. Ports the GUID machinery of
+//! `merged-exporter.ts`: a deterministic 22-char IfcGloballyUniqueId minter
+//! (byte-identical to `@ifc-lite/parser`'s `deterministicGlobalId`), the
+//! schema-derived rooted-entity check, and the read/replace helpers used to
+//! unify or re-stamp a duplicated GlobalId across federated models.
+
+use std::collections::HashSet;
+
+use crate::rooted_type::is_rooted_type;
+use ifc_lite_core::{guid, parser::{keyword_starts_with, StepRecord}};
+
+/// Deterministic 22-char GlobalId from a seed, byte-identical to
+/// `@ifc-lite/parser`'s `deterministicGlobalId`. See [`ifc_lite_core::guid::deterministic`].
+pub fn deterministic_global_id(seed: &str) -> String {
+    ifc_lite_core::guid::deterministic(seed)
+}
+
+/// True for a 22-char IfcGloballyUniqueId (`^[0-9A-Za-z_$]{22}$`); the merge's
+/// long-standing shape check. See [`ifc_lite_core::guid::is_global_id_shaped`].
+#[cfg(test)]
+pub fn is_global_id(s: &str) -> bool {
+    ifc_lite_core::guid::is_global_id_shaped(s)
+}
+
+/// True for IfcRelationship subtypes (objectified relationships): a shared GUID
+/// on two of these does NOT imply the same membership, so they are re-stamped
+/// (never unified/dropped) during reconciliation.
+pub fn is_relationship_type(type_upper: &str) -> bool {
+    type_upper.starts_with("IFCREL")
+}
+
+fn can_unify_types(source: &str, written: &str) -> bool {
+    !is_relationship_type(source) && !keyword_starts_with(written, "IFCREL")
+        && (!written.eq_ignore_ascii_case("IFCPROXY") || source == "IFCPROXY")
+}
+
+/// Relationships and conversion-created proxies keep distinct records.
+pub(super) fn can_unify_by_global_id(type_upper: &str, converted: Option<&str>) -> bool {
+    match converted {
+        Some(line) => StepRecord::parse(line.as_bytes())
+            .and_then(|record| record.keyword())
+            .is_some_and(|written| can_unify_types(type_upper, written)),
+        None => can_unify_types(type_upper, type_upper),
+    }
+}
+
+pub(super) fn can_unify_converted_type(ty: &str, (from, to): (&'static str, &'static str)) -> bool {
+    use crate::schema_plan::{plan_for, Plan};
+    if from == to { return can_unify_by_global_id(ty, None); }
+    match plan_for(ty, from, to) {
+        Plan::Write { renamed, .. } => can_unify_types(ty, renamed.unwrap_or(ty)),
+        Plan::ProductProxy | Plan::Unrepresented => false,
+    }
+}
+
+/// True when `type_upper` is a **rooted** entity (an `IfcRoot` subtype). Delegates
+/// to the crate's shared, schema-driven [`crate::rooted_type::is_rooted_type`],
+/// which decides rootedness from the EXPRESS inheritance graph (plus the legacy
+/// IFC2X3/IFC4 rooted set for types the IFC4X3-only generated schema dropped)
+/// rather than a hand-maintained denylist — so a non-rooted resource that happens
+/// to lead with a 22-char Name/Identifier string (`IfcColourRgb`,
+/// `IfcMaterialLayer`, `IfcRegularTimeSeries`, an `IfcSimpleProperty`) is never
+/// misread as carrying a GlobalId. A single source of truth shared with the JS
+/// exporter's `isRootedType` and cross-language parity-gated (#3015/#3124), so the
+/// two sides cannot drift.
+pub fn is_rooted_entity_type(type_upper: &str) -> bool {
+    is_rooted_type(type_upper)
+}
+
+/// The leading 22-char GlobalId of a rooted entity's raw STEP line, or `None` if
+/// the type is not rooted or the first attribute is not a GlobalId string.
+pub fn extract_global_id_fast(type_upper: &str, line: &[u8]) -> Option<String> {
+    if !is_rooted_entity_type(type_upper) {
+        return None;
+    }
+    leading_guid(line).map(str::to_string)
+}
+
+fn leading_guid(line: &[u8]) -> Option<&str> {
+    let head = &line[..line.len().min(128)];
+    // A comment can contain a fake opening parenthesis or GUID. Use the
+    // STEP reader for commented heads and when trivia runs past the window.
+    if !head.windows(2).any(|pair| pair == b"/*") {
+        if let Some(id) = guid::leading_global_id(head) {
+            return Some(id);
+        }
+    }
+    let first = StepRecord::parse(line)?.attrs().next()?;
+    let id = std::str::from_utf8(first.strip_prefix(b"'")?.strip_suffix(b"'")?).ok()?;
+    guid::is_global_id_shaped(id).then_some(id)
+}
+
+/// The uppercase entity type token of a `#id=TYPE(...)` line, tolerating
+/// whitespace or a comment after `=` (some exporters write `#1= IFCPROJECT(`).
+pub fn entity_type_upper(line: &[u8]) -> Option<String> {
+    ifc_lite_core::parser::StepRecord::parse(line)?.keyword().map(str::to_ascii_uppercase)
+}
+
+/// The leading GlobalId of a raw STEP entity line, classified by TYPE (not just
+/// the 22-char shape): reads the type from the line and applies the rooted-entity
+/// rule, so a non-rooted entity leading with a 22-char charset Name (e.g. an
+/// `IfcColourRgb`) is not counted as a rooted GlobalId. For callers that only
+/// have raw text — the merge harness and duplicate-GlobalId diagnostics — and
+/// want the same classification the merge itself uses.
+pub fn leading_rooted_global_id(line: &[u8]) -> Option<String> {
+    let type_upper = entity_type_upper(line)?;
+    extract_global_id_fast(&type_upper, line)
+}
+
+/// Read the GlobalId of an already-rendered STEP line. Used to register the
+/// *actually emitted* GUID after remap /
+/// re-stamp / schema conversion. Returns `None` when the first string is not a
+/// GlobalId (safe — the caller then falls back to the known local GUID).
+pub fn read_leading_guid(text: &str) -> Option<String> {
+    leading_guid(text.as_bytes()).map(str::to_string)
+}
+
+/// Rewrite the leading GlobalId field of a STEP line with `new_guid`. Safe
+/// for a GlobalId-shaped first attribute, even when comments surround it.
+pub fn replace_global_id(text: &str, new_guid: &str) -> String {
+    let Some(id) = leading_guid(text.as_bytes()) else { return text.to_owned() };
+    let start = id.as_ptr() as usize - text.as_ptr() as usize;
+    let mut out = text.to_owned();
+    out.replace_range(start..start + id.len(), new_guid);
+    out
+}
+
+/// Mints deterministic replacement GlobalIds that avoid collisions with both the
+/// GUIDs already emitted into the merge and the ones minted so far. Seeded from
+/// the source GUID + stable model id so the result is reproducible and does not
+/// churn when an unrelated earlier model changes size.
+#[derive(Default)]
+pub struct GuidMinter {
+    pending: HashSet<String>,
+}
+
+impl GuidMinter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A fresh GlobalId for `original` (seeded by `model_id`), guaranteed not to
+    /// collide with anything in `emitted`, in `also` (e.g. the current model's own
+    /// unchanged GlobalIds, which are not yet in `emitted`), or previously minted here.
+    pub fn mint(
+        &mut self,
+        original: &str,
+        model_id: &str,
+        emitted: &HashSet<String>,
+        also: &HashSet<String>,
+    ) -> String {
+        let mut candidate = deterministic_global_id(&format!("{original}#{model_id}"));
+        let mut n: u32 = 0;
+        while emitted.contains(&candidate)
+            || also.contains(&candidate)
+            || self.pending.contains(&candidate)
+        {
+            candidate = deterministic_global_id(&format!("{original}#{model_id}#{n}"));
+            n = n.wrapping_add(1);
+        }
+        self.pending.insert(candidate.clone());
+        candidate
+    }
+}
+
+#[cfg(test)]
+#[path = "guid_tests.rs"]
+mod guid_tests;

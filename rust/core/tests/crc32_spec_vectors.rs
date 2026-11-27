@@ -23,12 +23,24 @@ use ifc_lite_core::IfcType;
 /// Hash `name` with the generated `crc32_hash`, via the only public route to it.
 fn unknown_hash(name: &str) -> u32 {
     match IfcType::from_str(name) {
-        IfcType::Unknown(hash) => hash,
+        IfcType::Unknown(unknown) => unknown.id(),
         known => panic!(
             "{name:?} was expected to be an unknown type (so that it reaches \
              crc32_hash), but it parsed as {known:?}"
         ),
     }
+}
+
+#[test]
+fn unknown_types_keep_their_normalized_keyword_and_do_not_reconstruct_from_id() {
+    let parsed = IfcType::from_str("ifc_vendor_widget");
+    let IfcType::Unknown(unknown) = &parsed else {
+        panic!("vendor keyword unexpectedly resolved to a schema type");
+    };
+    assert_eq!(unknown.as_str(), "IFC_VENDOR_WIDGET");
+    assert_eq!(parsed.as_str(), "IFC_VENDOR_WIDGET");
+    assert_eq!(parsed.name(), "IFC_VENDOR_WIDGET");
+    assert_eq!(IfcType::from_id(unknown.id()), None);
 }
 
 /// Independent, bit-at-a-time reference implementation of CRC-32/ISO-HDLC,
@@ -116,4 +128,16 @@ fn crc32_hash_agrees_with_the_independent_reference() {
 fn spec_vectors_are_the_same_ones_pinned_in_typescript() {
     assert_eq!(unknown_hash("123456789"), 0xCBF4_3926);
     assert_eq!(unknown_hash(""), 0x0000_0000);
+}
+
+/// CORE-10 (F4-2): `ifc_type_from_keyword` is `IfcType::from_str` and nothing
+/// else, so a keyword resolves the same way through either door, including one
+/// that only a Unicode fold maps (dotless `ı` upper-cases to `I`, for TS CRC
+/// parity) and one in lower case.
+#[test]
+fn the_keyword_resolver_is_from_str() {
+    for keyword in ["IfcWall", "ifcwall", "IFCWALL", "\u{131}fcwall", "IfcN\u{F6}pe", "ifcnot_in_the_schema"] {
+        assert_eq!(ifc_lite_core::ifc_type_from_keyword(keyword), IfcType::from_str(keyword), "{keyword}");
+    }
+    assert_eq!(ifc_lite_core::ifc_type_from_keyword("\u{131}fcwall"), IfcType::IfcWall);
 }

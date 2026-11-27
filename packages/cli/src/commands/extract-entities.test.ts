@@ -2,142 +2,61 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GeometryProcessor } from '@ifc-lite/geometry';
-import {
-  parseStep,
-  resolveToId,
-  forwardClosure,
-  buildSubset,
-  serializeSubset,
-  scoreTriage,
-  extractEntitiesCommand,
-} from './extract-entities.js';
+import { createMCPServer, fullScope, InMemoryModelRegistry, InProcessTransport, loadIfcModel } from '@ifc-lite/mcp';
+import { scoreTriage, extractEntitiesCommand } from './extract-entities.js';
+
+// The subset engine itself (parseStep, buildSubset, ...) is tested next to it in
+// packages/export/src/step-subset.test.ts. These cases drive the command.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Committed viewer demo sample with real render geometry, needed for the
 // `--detect` triage path (it meshes the model via GeometryProcessor).
 const SAMPLE_IFC = join(__dirname, '../../../../apps/viewer/public/samples/hello-wall.ifc');
 
-// A tiny but representative model: project + units + geometric context + a
-// storey, one wall placed under the storey (with a placement chain and a
-// rectangle-extrusion body), a containment relation, and — critically — a Name
-// literal carrying both `;` and `#` to exercise the string-aware tokenizer.
-const MODEL = `ISO-10303-21;
+// #4148: a Name literal naming a REAL id in the model is not a reference.
+const LOOKALIKE_MODEL = `ISO-10303-21;
 HEADER;
 FILE_DESCRIPTION((''),'2;1');
 FILE_NAME('m','2024',(''),(''),'','','');
 FILE_SCHEMA(('IFC2X3'));
 ENDSEC;
 DATA;
-#1= IFCPROJECT('PROJ00000000000000000X',$,'Proj',$,$,$,$,(#20),#30);
-#20= IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#21,$);
-#21= IFCAXIS2PLACEMENT3D(#22,$,$);
-#22= IFCCARTESIANPOINT((0.,0.,0.));
-#30= IFCUNITASSIGNMENT((#31));
-#31= IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);
-#40= IFCLOCALPLACEMENT($,#21);
-#41= IFCBUILDINGSTOREY('STOR00000000000000000X',$,'L01',$,$,#40,$,$,.ELEMENT.,0.);
-#50= IFCLOCALPLACEMENT(#40,#21);
-#60= IFCRECTANGLEPROFILEDEF(.AREA.,$,#21,2.,0.2);
-#61= IFCEXTRUDEDAREASOLID(#60,#21,#62,3.);
-#62= IFCDIRECTION((0.,0.,1.));
-#63= IFCSHAPEREPRESENTATION(#20,'Body','SweptSolid',(#61));
-#64= IFCPRODUCTDEFINITIONSHAPE($,$,(#63));
-#70= IFCWALLSTANDARDCASE('WALL00000000000000000X',$,'Basic Wall:type;01 #north',$,$,#50,#64,'tag');
-#80= IFCRELCONTAINEDINSPATIALSTRUCTURE('REL000000000000000000X',$,$,$,(#70),#41);
-#90= IFCWALLSTANDARDCASE('WALO00000000000000000X',$,'Other',$,$,#40,#64,'tag2');
-#91= IFCRELCONTAINEDINSPATIALSTRUCTURE('RELO00000000000000000X',$,$,$,(#70,#90),#41);
+#70= IFCFURNISHINGELEMENT('CHAIR000000000000000X',$,'Chair pairs with #71',$,$,#50,$,'tag');
+#50= IFCLOCALPLACEMENT($,$);
+#71= IFCFURNISHINGELEMENT('CHAIR100000000000000X',$,'Other chair',$,$,#51,$,'tag2');
+#51= IFCLOCALPLACEMENT($,$);
 ENDSEC;
 END-ISO-10303-21;
 `;
 
-describe('parseStep', () => {
-  it('tokenizes instances despite ; and # inside a string literal', () => {
-    const p = parseStep(MODEL);
-    const wall = p.instances.get(70);
-    expect(wall?.type).toBe('IFCWALLSTANDARDCASE');
-    // The Name "Basic Wall:type;01 #north" must NOT split the instance.
-    expect(wall?.full).toContain("'Basic Wall:type;01 #north'");
-    // 18 data instances parsed; the `#north` inside the Name string must NOT be
-    // mistaken for a 19th instance definition.
-    expect(p.instances.size).toBe(18);
-  });
-
-  it('indexes GlobalIds of rooted entities', () => {
-    const p = parseStep(MODEL);
-    expect(p.guidToId.get('WALL00000000000000000X')).toBe(70);
-    expect(p.guidToId.get('PROJ00000000000000000X')).toBe(1);
-  });
-});
-
-describe('resolveToId', () => {
-  const p = parseStep(MODEL);
-  it('resolves #id, bare id, and GlobalId', () => {
-    expect(resolveToId('#70', p)).toBe(70);
-    expect(resolveToId('70', p)).toBe(70);
-    expect(resolveToId('WALL00000000000000000X', p)).toBe(70);
-  });
-  it('throws on an unknown GlobalId', () => {
-    expect(() => resolveToId('NOPE00000000000000000X', p)).toThrow(/not found/);
-  });
-  it('throws on a non-existent express id / #id (not silently selecting nothing)', () => {
-    expect(() => resolveToId('999999', p)).toThrow(/expressId not found/);
-    expect(() => resolveToId('#999999', p)).toThrow(/expressId not found/);
+describe('extract-entities --product: string text is not a reference (#4148)', () => {
+  // CLI-level counterpart of the forwardClosure test in `@ifc-lite/export`'s
+  // step-subset.test.ts: `forwardClosure` is an internal helper `--product`
+  // runs through (see `extractEntitiesCommand`), so a regression there could pass that helper-level test while the
+  // command itself still emits the wrong bytes. Exercise the actual command
+  // and assert on its output file, not just the in-memory `keep` set.
+  it('extracting --product #70 does not emit the lookalike id pulled in only by string text', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ifc-extract-lookalike-'));
+    const src = join(dir, 'in.ifc');
+    const out = join(dir, 'sub.ifc');
+    await writeFile(src, LOOKALIKE_MODEL, 'latin1');
+    await extractEntitiesCommand([src, '--product', '#70', '--out', out]);
+    const text = await readFile(out, 'latin1');
+    expect(text).toContain('#70=');
+    expect(text).toContain('#50=');
+    // #71 and its own placement #51 are only mentioned inside #70's Name
+    // TEXT, never referenced as an attribute — they must not be emitted.
+    expect(text).not.toContain('#71=');
+    expect(text).not.toContain('#51=');
   });
 });
 
-describe('forwardClosure', () => {
-  it('pulls the whole reference subtree of a product', () => {
-    const p = parseStep(MODEL);
-    const keep = new Set<number>();
-    forwardClosure([70], p, keep);
-    // wall → placement chain (#50→#40→#21→#22), shape (#64→#63→#61→#60,#62), ctx (#20)
-    for (const id of [70, 50, 40, 21, 22, 64, 63, 61, 60, 62, 20]) {
-      expect(keep.has(id)).toBe(true);
-    }
-    // it must NOT drag in the unrelated wall #90
-    expect(keep.has(90)).toBe(false);
-  });
-});
-
-describe('buildSubset + serializeSubset', () => {
-  const p = parseStep(MODEL);
-  const keep = buildSubset(new Set([70]), p);
-
-  it('includes the project + spatial context roots', () => {
-    for (const id of [1, 20, 30, 31, 41]) expect(keep.has(id)).toBe(true);
-  });
-
-  it('keeps a containment relation whose members are ALL kept, drops one that references an unkept product', () => {
-    // #80 references only #70 (kept) → included; #91 references #70 AND #90
-    // (#90 not selected) → excluded to avoid a dangling reference.
-    expect(keep.has(80)).toBe(true);
-    expect(keep.has(91)).toBe(false);
-    expect(keep.has(90)).toBe(false);
-  });
-
-  it('serializes a valid, self-contained STEP file with zero dangling references', () => {
-    const out = serializeSubset(keep, p);
-    expect(out).toContain('FILE_SCHEMA');
-    expect(out.trimEnd().endsWith('END-ISO-10303-21;')).toBe(true);
-    const defined = new Set<number>();
-    for (const m of out.matchAll(/^#(\d+)=/gm)) defined.add(Number(m[1]));
-    const data = out.slice(out.indexOf('DATA;'));
-    for (const m of data.matchAll(/#(\d+)/g)) {
-      expect(defined.has(Number(m[1]))).toBe(true);
-    }
-  });
-});
-
-// A wall with a window opening: IfcRelVoidsElement (rel → wall) points BACKWARD
-// to the wall, and IfcRelFillsElement (rel → opening) to the filler window. The
-// opening carries its own faceted-brep cutter body. Forward closure from the
-// wall alone never reaches any of these.
 const VOID_MODEL = `ISO-10303-21;
 HEADER;
 FILE_DESCRIPTION((''),'2;1');
@@ -173,66 +92,299 @@ ENDSEC;
 END-ISO-10303-21;
 `;
 
-describe('buildSubset — voids and fills', () => {
-  const p = parseStep(VOID_MODEL);
-  const keep = buildSubset(new Set([70]), p);
+// L01's storey record carries a Description that is free TEXT naming L02's
+// REAL IfcLocalPlacement (`'dup of #44'`), and L01's own furniture Name
+// mentions L02's placement id too (`'see also #44'`). Neither is a reference;
+// both are `#id`-shaped substrings a raw `/#(\d+)/g` scan cannot tell apart
+// from one. #4166.
+const TWO_STOREY_MODEL = `ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('m','2024',(''),(''),'','','');
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#1= IFCPROJECT('PROJ000000000000000002',#5,'Proj',$,$,$,$,(#20),#30);
+#5= IFCOWNERHISTORY($,$,$,.NOCHANGE.,$,$,$,0);
+#20= IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#21,$);
+#21= IFCAXIS2PLACEMENT3D(#22,$,$);
+#22= IFCCARTESIANPOINT((0.,0.,0.));
+#30= IFCUNITASSIGNMENT((#31));
+#31= IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);
+#33= IFCLOCALPLACEMENT($,#21);
+#34= IFCSITE('SITE000000000000000002',#5,'Site',$,$,#33,$,$,.ELEMENT.,$,$,$,$,$);
+#35= IFCLOCALPLACEMENT(#33,#21);
+#36= IFCBUILDING('BLDG000000000000000002',#5,'Bldg',$,$,#35,$,$,.ELEMENT.,$,$,$);
+#40= IFCLOCALPLACEMENT(#35,#21);
+#41= IFCBUILDINGSTOREY('STOR000000000000000003',#5,'L01','dup of #44',$,#40,$,$,.ELEMENT.,0.);
+#44= IFCLOCALPLACEMENT(#35,#21);
+#45= IFCBUILDINGSTOREY('STOR000000000000000004',#5,'L02',$,$,#44,$,$,.ELEMENT.,3.);
+#50= IFCLOCALPLACEMENT(#40,#21);
+#54= IFCLOCALPLACEMENT(#44,#21);
+#60= IFCRECTANGLEPROFILEDEF(.AREA.,$,#21,2.,0.2);
+#61= IFCEXTRUDEDAREASOLID(#60,#21,#62,3.);
+#62= IFCDIRECTION((0.,0.,1.));
+#63= IFCSHAPEREPRESENTATION(#20,'Body','SweptSolid',(#61));
+#64= IFCPRODUCTDEFINITIONSHAPE($,$,(#63));
+#70= IFCWALLSTANDARDCASE('WALL000000000000000001',#5,'Wall L01',$,$,#50,#64,'w1');
+#90= IFCWALLSTANDARDCASE('WALL000000000000000002',#5,'Wall L02',$,$,#54,#64,'w2');
+#95= IFCFURNISHINGELEMENT('FURN000000000000000007',#5,'see also #44',$,$,#50,#64,'f1');
+ENDSEC;
+END-ISO-10303-21;
+`;
 
-  it('pulls the backward IfcRelVoidsElement + its opening into a wall-only selection', () => {
-    // The wall's forward closure never reaches these (the relation references
-    // the wall, not vice-versa); without void inclusion the wall extracts as an
-    // uncut box, hiding any void-cut defect.
-    expect(keep.has(104)).toBe(true); // IfcRelVoidsElement
-    expect(keep.has(103)).toBe(true); // IfcOpeningElement
-    expect(keep.has(102)).toBe(true); // opening's shape (its cutter body)
-    expect(keep.has(100)).toBe(true); // opening's extrusion
-  });
+it('extracts the same grid-placed storey members via CLI and MCP in IFC4X3_ADD2 (#11583)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ifc-extract-grid-storey-'));
+  try {
+    const src = join(dir, 'in.ifc');
+    const cliPath = join(dir, 'cli.ifc');
+    const mcpPath = join(dir, 'mcp.ifc');
+    const fixture = TWO_STOREY_MODEL
+      .replace("FILE_DESCRIPTION((''),'2;1')", "FILE_DESCRIPTION(('IFC5 Exporter'),'2;1')")
+      .replace("FILE_SCHEMA(('IFC4'))", "FILE_SCHEMA(('IFC4X3_ADD2'))")
+      .replace('#50= IFCLOCALPLACEMENT(#40,#21);', [
+        '#50= IFCGRIDPLACEMENT(#40,#58,$);',
+        '#55= IFCPOLYLINE((#22,#23));', '#56= IFCPOLYLINE((#22,#24));',
+        '#23= IFCCARTESIANPOINT((1.,0.,0.));', '#24= IFCCARTESIANPOINT((0.,1.,0.));',
+        "#57= IFCGRIDAXIS('A',#55,.T.);", "#59= IFCGRIDAXIS('1',#56,.T.);",
+        '#58= IFCVIRTUALGRIDINTERSECTION((#57,#59),(0.,0.));',
+      ].join('\n'));
+    await writeFile(src, fixture, 'latin1');
+    await extractEntitiesCommand([src, '--storey', 'L01', '--out', cliPath]);
+    const cli = await readFile(cliPath, 'latin1');
+    expect(cli).toContain('#70= IFCWALLSTANDARDCASE');
+    expect(cli).toContain('#50= IFCGRIDPLACEMENT(#40,#58,$);');
+    expect(cli).not.toContain('#90=');
 
-  it('pulls the IfcRelFillsElement + its filler window once the opening is kept', () => {
-    expect(keep.has(113)).toBe(true); // IfcRelFillsElement
-    expect(keep.has(112)).toBe(true); // IfcWindow
-    expect(keep.has(110)).toBe(true); // window shape
-  });
-
-  it('serializes with zero dangling references', () => {
-    const out = serializeSubset(keep, p);
-    const defined = new Set<number>();
-    for (const m of out.matchAll(/^#(\d+)=/gm)) defined.add(Number(m[1]));
-    const data = out.slice(out.indexOf('DATA;'));
-    for (const m of data.matchAll(/#(\d+)/g)) expect(defined.has(Number(m[1]))).toBe(true);
-  });
+    const model = await loadIfcModel(src);
+    const registry = new InMemoryModelRegistry();
+    registry.add(model);
+    const transport = new InProcessTransport();
+    try {
+      await transport.connect(createMCPServer({ registry, scope: fullScope(), config: { allowedPaths: [dir] } }));
+      await transport.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+        protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'extract parity', version: '1' },
+      } });
+      await transport.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: {
+        name: 'model_extract', arguments: { storeys: ['L01'], file_path: mcpPath },
+      } });
+      expect(await readFile(mcpPath, 'latin1')).toBe(cli);
+    } finally {
+      transport.close();
+      model.backend.dispose();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
-// Variant where each relation carries a DEDICATED IfcOwnerHistory (#11/#12)
-// referenced by nothing else in the file. Closing over only the opening/filler
-// (instead of the relation itself) used to leave these dangling in the subset.
-const REL_OWNED_MODEL = VOID_MODEL.replace(
-  "#104= IFCRELVOIDSELEMENT('VOID00000000000000000X',$,$,$,#70,#103);",
-  "#11= IFCOWNERHISTORY(#13,#14,$,.NOCHANGE.,$,$,$,0);\n" +
-    "#13= IFCPERSONANDORGANIZATION(#15,#16,$);\n" +
-    "#15= IFCPERSON($,'p',$,$,$,$,$,$);\n" +
-    "#16= IFCORGANIZATION($,'o',$,$,$);\n" +
-    "#14= IFCAPPLICATION(#16,'1','app','app');\n" +
-    "#104= IFCRELVOIDSELEMENT('VOID00000000000000000X',#11,$,$,#70,#103);",
-).replace(
-  "#113= IFCRELFILLSELEMENT('FILL00000000000000000X',$,$,$,#103,#112);",
-  "#12= IFCOWNERHISTORY($,$,$,$,$,$,$,0);\n" +
-    "#113= IFCRELFILLSELEMENT('FILL00000000000000000X',#12,$,$,#103,#112);",
-);
+it.each(['utf8', 'latin1'] as const)('selects %s storey Name and LongName with STEP escapes via CLI and MCP (#11583)', async (encoding) => {
+  const dir = await mkdtemp(join(tmpdir(), 'ifc-extract-storey-text-'));
+  try {
+    const src = join(dir, 'in.ifc');
+    const authoredName = String.raw`Café \X2\00FC\X0` + '\\';
+    const authoredLongName = String.raw`Étage d''été \\Annexe \X4\0001F600\X0` + '\\';
+    const fixture = TWO_STOREY_MODEL
+      .replace("'L01','dup of #44'", `'${authoredName}','dup of #44'`)
+      .replace("'L02',$,$,#44,$,$", `'L02',$,$,#44,$,'${authoredLongName}'`);
+    await writeFile(src, Buffer.from(fixture, encoding));
 
-describe('buildSubset — void/fill relations close over their own refs', () => {
-  const p = parseStep(REL_OWNED_MODEL);
-  const keep = buildSubset(new Set([70]), p);
+    const model = await loadIfcModel(src);
+    const registry = new InMemoryModelRegistry();
+    registry.add(model);
+    const transport = new InProcessTransport();
+    try {
+      await transport.connect(createMCPServer({ registry, scope: fullScope(), config: { allowedPaths: [dir] } }));
+      await transport.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+        protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'storey text parity', version: '1' },
+      } });
+      for (const [index, [selector, authored, member, excluded]] of [
+        ['Café ü', authoredName, '#70=', '#90='],
+        [String.raw`Étage d'été \Annexe 😀`, authoredLongName, '#90=', '#70='],
+      ].entries()) {
+        const cliPath = join(dir, 'cli.ifc');
+        const mcpPath = join(dir, `mcp-${index}.ifc`);
+        await extractEntitiesCommand([src, '--storey', selector, '--out', cliPath]);
+        const cli = await readFile(cliPath);
+        expect(cli.includes(Buffer.from(authored, encoding))).toBe(true);
+        expect(cli.toString('latin1')).toContain(member);
+        expect(cli.toString('latin1')).not.toContain(excluded);
+        await transport.send({ jsonrpc: '2.0', id: 2 + index, method: 'tools/call', params: {
+          name: 'model_extract', arguments: { storeys: [selector], file_path: mcpPath },
+        } });
+        expect(await readFile(mcpPath)).toEqual(cli);
+      }
+    } finally {
+      transport.close();
+      model.backend.dispose();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
-  it('keeps a rel-only OwnerHistory (and its subtree) for both relation kinds', () => {
-    for (const id of [11, 13, 14, 15, 16, 12]) expect(keep.has(id)).toBe(true);
+it('keeps the ordered IfcRelNests list when extracting an assembly with selected parts (#11583)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ifc-extract-nests-'));
+  try {
+    const src = join(dir, 'in.ifc');
+    const fixture = TWO_STOREY_MODEL.replace('ENDSEC;\nEND-ISO', [
+      "#76= IFCELEMENTASSEMBLY('ASSE000000000000000001',#5,'Assembly',$,$,$,$,$,.NOTDEFINED.,.NOTDEFINED.);",
+      "#77= IFCRELNESTS('NEST000000000000000001',#5,$,$,#76,(#90,#70));",
+      'ENDSEC;', 'END-ISO',
+    ].join('\n'));
+    for (const [products, sourceMembers, members, omitted] of [
+      ['#76,#70', '(#90,#70)', '(#70)', '#90='],
+      ['#76,#70,#90', '(#90,#95,#70)', '(#90,#70)', '#95='],
+    ]) {
+      await writeFile(src, fixture.replace('(#90,#70));', `${sourceMembers});`), 'latin1');
+      const out = join(dir, 'sub.ifc');
+      await extractEntitiesCommand([src, '--product', products, '--out', out]);
+      const text = await readFile(out, 'latin1');
+      expect(text).toContain('#76= IFCELEMENTASSEMBLY');
+      expect(text).toContain(`#77= IFCRELNESTS('NEST000000000000000001',#5,$,$,#76,${members});`);
+      expect(text).not.toContain(omitted);
+      const data = text.slice(text.indexOf('DATA;')).replace(/'(?:[^']|'')*'/g, "''");
+      const definitions = new Set(Array.from(data.matchAll(/^#(\d+)\s*=/gm), ([, id]) => id));
+      for (const [, id] of data.matchAll(/#(\d+)/g)) expect(definitions.has(id)).toBe(true);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it.each(['IFCRELNESTS', 'IFCRELAGGREGATES'])('narrows split assembly records including %s across one anchor (#11583)', async (relationType) => {
+  const dir = await mkdtemp(join(tmpdir(), 'ifc-extract-split-assembly-'));
+  try {
+    const src = join(dir, 'in.ifc');
+    const fixture = TWO_STOREY_MODEL.replace('ENDSEC;\nEND-ISO', [
+      "#76= IFCELEMENTASSEMBLY('ASSE000000000000000001',#5,'Assembly A',$,$,$,$,$,.NOTDEFINED.,.NOTDEFINED.);",
+      "#78= IFCELEMENTASSEMBLY('ASSE000000000000000002',#5,'Assembly B',$,$,$,$,$,.NOTDEFINED.,.NOTDEFINED.);",
+      `#77= ${relationType}('RELN000000000000000001',#5,$,$,#76,(#90));`,
+      "#79= IFCRELNESTS('RELN000000000000000002',#5,$,$,#76,(#70));",
+      "#80= IFCRELNESTS('RELN000000000000000003',#5,$,$,#78,(#95));",
+      'ENDSEC;', 'END-ISO',
+    ].join('\n'));
+    await writeFile(src, fixture, 'latin1');
+    for (const [products, expected, excluded] of [
+      ['#76,#70,#78', [70, 76, 78, 79, 80, 95], [77, 90]],
+      ['#76', [70, 76, 77, 79, 90], [78, 80, 95]],
+    ] as const) {
+      const out = join(dir, 'sub.ifc');
+      await extractEntitiesCommand([src, '--product', products, '--out', out]);
+      const text = await readFile(out, 'latin1');
+      const data = text.slice(text.indexOf('DATA;')).replace(/'(?:[^']|'')*'/g, "''");
+      const definitions = new Set(Array.from(data.matchAll(/^#(\d+)\s*=/gm), ([, id]) => Number(id)));
+      expect(text).toContain("#79= IFCRELNESTS('RELN000000000000000002',#5,$,$,#76,(#70));");
+      if (products.includes('#78')) expect(text).toContain("#80= IFCRELNESTS('RELN000000000000000003',#5,$,$,#78,(#95));");
+      for (const id of expected) expect(definitions.has(id), `expected #${id} for ${products}`).toBe(true);
+      for (const id of excluded) expect(definitions.has(id), `unexpected #${id} for ${products}`).toBe(false);
+      for (const [, id] of data.matchAll(/#(\d+)/g)) expect(definitions.has(Number(id)), `dangling #${id}`).toBe(true);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('resolves spaced comma lists, exact comma names, and mixed host placement (#11583)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ifc-extract-storey-lists-'));
+  try {
+    const src = join(dir, 'in.ifc');
+    const out = join(dir, 'sub.ifc');
+    await writeFile(src, TWO_STOREY_MODEL);
+    await extractEntitiesCommand([src, '--storey', 'L01, L02', '--out', out]);
+    expect(await readFile(out, 'latin1')).toMatch(/#70=[\s\S]*#90=/);
+    const splitPlacement = TWO_STOREY_MODEL.replace('ENDSEC;\nEND-ISO', [
+      "#76= IFCELEMENTASSEMBLY('ASSE000000000000000001',#5,'Assembly',$,$,#50,$,$,.NOTDEFINED.,.NOTDEFINED.);",
+      "#77= IFCRELNESTS('NEST000000000000000001',#5,$,$,#76,(#90));",
+      'ENDSEC;', 'END-ISO',
+    ].join('\n'));
+    await writeFile(src, splitPlacement.replace("'L01'", "'L01, Annex'"));
+    await extractEntitiesCommand([src, '--storey', 'L01, Annex', '--out', out]);
+    expect(await readFile(out, 'latin1')).toMatch(/#76=[\s\S]*#77=[\s\S]*#90=/);
+    await extractEntitiesCommand([src, '--storey', 'L02', '--out', out]);
+    const away = await readFile(out, 'latin1');
+    expect(away).toContain('#45= IFCBUILDINGSTOREY');
+    expect(away).not.toMatch(/#(?:76|77|90)=/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('rejects a numeric GlobalId that also names a different express ID (#11583)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ifc-extract-id-collision-'));
+  try {
+    const src = join(dir, 'in.ifc');
+    const out = join(dir, 'sub.ifc');
+    await writeFile(src, TWO_STOREY_MODEL.replace('WALL000000000000000001', '0000000000000000000090')
+      .replace('WALL000000000000000002', '0000000000000000000099'));
+    await expect(extractEntitiesCommand([src, '--product', '0000000000000000000090', '--out', out]))
+      .rejects.toThrow(/Ambiguous product selector/);
+    await extractEntitiesCommand([src, '--product', '0000000000000000000099', '--out', out]);
+    expect(await readFile(out, 'latin1')).toContain('#90= IFCWALLSTANDARDCASE');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('selects each exact authored storey Name, including surrounding spaces (#11583)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ifc-extract-authored-storey-'));
+  try {
+    const src = join(dir, 'in.ifc');
+    await writeFile(src, TWO_STOREY_MODEL.replace("'L02',$,$,#44", "' L01 ',$,$,#44"), 'latin1');
+    for (const [selector, expected, excluded] of [['L01', '#70=', '#90='], [' L01 ', '#90=', '#70=']]) {
+      const out = join(dir, 'sub.ifc');
+      await extractEntitiesCommand([src, '--storey', selector, '--out', out]);
+      const text = await readFile(out, 'latin1');
+      expect(text).toContain(expected);
+      expect(text).not.toContain(excluded);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+describe('extract-entities --storey: a free-text `#id` naming a real unrelated entity (#4166)', () => {
+  it('picks the storey genuine placement, not the id its Description text names', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ifc-extract-storey-'));
+    const src = join(dir, 'in.ifc');
+    const out = join(dir, 'sub.ifc');
+    await writeFile(src, TWO_STOREY_MODEL, 'latin1');
+    await extractEntitiesCommand([src, '--storey', 'L01', '--out', out]);
+    const text = await readFile(out, 'latin1');
+    // The genuine L01 wall is present …
+    expect(text).toContain('#70=');
+    // … the impostor pulled in only because #44 sits in L01's Description text
+    // (a real placement, but L02's) must not be.
+    expect(text).not.toContain('#90=');
   });
 
-  it('serializes with zero dangling references', () => {
-    const out = serializeSubset(keep, p);
-    const defined = new Set<number>();
-    for (const m of out.matchAll(/^#(\d+)=/gm)) defined.add(Number(m[1]));
-    const data = out.slice(out.indexOf('DATA;'));
-    for (const m of data.matchAll(/#(\d+)/g)) expect(defined.has(Number(m[1]))).toBe(true);
+  it('does not seed a product into a storey extraction because its Name mentions that storey placement id', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ifc-extract-storey-'));
+    const src = join(dir, 'in.ifc');
+    const out = join(dir, 'sub.ifc');
+    await writeFile(src, TWO_STOREY_MODEL, 'latin1');
+    // #95 is genuinely placed under L01 (#50 chains to #40), and its Name text
+    // mentions L02's placement id #44. Extracting L02 must not pull it in.
+    await extractEntitiesCommand([src, '--storey', 'L02', '--out', out]);
+    const text = await readFile(out, 'latin1');
+    expect(text).toContain('#90=');
+    expect(text).not.toContain('#95=');
+  });
+
+  it('a storey/product with no string-borne ids extracts exactly as before (regression guard)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ifc-extract-storey-'));
+    const src = join(dir, 'in.ifc');
+    const out = join(dir, 'sub.ifc');
+    // Same shape, no poison text in Description/Name.
+    const clean = TWO_STOREY_MODEL.replace("'dup of #44'", '$').replace("'see also #44'", "'Chair'");
+    await writeFile(src, clean, 'latin1');
+    await extractEntitiesCommand([src, '--storey', 'L01', '--out', out]);
+    const text = await readFile(out, 'latin1');
+    // #70 and #95 are both genuinely placed under L01 and belong in the
+    // extraction; #90 is genuinely under L02 and does not.
+    expect(text).toContain('#70=');
+    expect(text).toContain('#95=');
+    expect(text).not.toContain('#90=');
   });
 });
 
@@ -288,5 +440,63 @@ describe('triage (--detect) WASM disposal (#1959 P2 leak)', () => {
     ).rejects.toThrow('forced meshing failure');
 
     expect(disposeSpy).toHaveBeenCalledTimes(1);
+  }, 30_000);
+});
+
+describe('extract-entities --detect --report --json: --top', () => {
+  let stdoutSpy: ReturnType<typeof vi.spyOn>;
+
+  afterEach(() => {
+    stdoutSpy?.mockRestore();
+    vi.restoreAllMocks();
+  });
+
+  /** Runs the triage JSON path and returns the parsed `top` array. */
+  async function runTriage(extraArgs: string[]): Promise<unknown[]> {
+    const writes: string[] = [];
+    stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    await extractEntitiesCommand([SAMPLE_IFC, '--detect', '--report', '--json', ...extraArgs]);
+    const parsed = JSON.parse(writes.join(''));
+    return parsed.top;
+  }
+
+  it('falls back to the default 20-row --top on a non-numeric value, not an empty array', async () => {
+    const processGeometry = GeometryProcessor.prototype.process;
+    vi.spyOn(GeometryProcessor.prototype, 'process').mockImplementation(async function (
+      this: GeometryProcessor,
+      ...args
+    ) {
+      const result = await processGeometry.apply(this, args);
+      const seed = result.meshes[0];
+      if (seed === undefined) throw new Error('fixture must produce at least one mesh');
+      return {
+        ...result,
+        meshes: Array.from({ length: 25 }, (_, index) => ({
+          ...seed,
+          expressId: index + 1,
+        })),
+      };
+    });
+    const withBadTop = await runTriage(['--top', 'banana']);
+
+    // Pin the documented default itself. Deriving this expectation from an
+    // omitted --top invocation would let both paths regress to the same value.
+    expect(withBadTop).toHaveLength(20);
+    expect(withBadTop.map((row) => (row as { expressId: number }).expressId)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+      11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+    ]);
+  }, 30_000);
+
+  it('still honors an ordinary numeric --top', async () => {
+    const baseline = await runTriage([]);
+    stdoutSpy.mockRestore();
+    const withTopOne = await runTriage(['--top', '1']);
+
+    expect(baseline.length).toBeGreaterThan(1);
+    expect(withTopOne).toEqual(baseline.slice(0, 1));
   }, 30_000);
 });

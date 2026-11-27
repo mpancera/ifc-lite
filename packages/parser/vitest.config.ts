@@ -2,7 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
+
+const repoRoot = fileURLToPath(new URL('../../', import.meta.url)).replaceAll('\\', '/');
+const BUILT_SIBLING = new RegExp(
+  `^${repoRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}packages/[^/]+/(dist|pkg)/`,
+);
 
 /**
  * `--expose-gc` is required, not optional.
@@ -22,7 +28,13 @@ import { defineConfig } from 'vitest/config';
  */
 export default defineConfig({
   test: {
+    reporters: [
+      'default',
+      ...(process.env.GITHUB_ACTIONS === 'true' ? ['github-actions'] : []),
+      '@mergifyio/vitest',
+    ],
     pool: 'forks',
     env: { NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --expose-gc`.trim() },
+    server: { deps: { external: [BUILT_SIBLING] } },
   },
 });

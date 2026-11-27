@@ -1,6 +1,6 @@
 {
   "name": "@ifc-lite/oauth-pkce",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Browser OAuth 2.0 Authorization Code + PKCE flow, shared by ifc-lite's file-source providers",
   "type": "module",
   "main": "./dist/index.js",
@@ -19,8 +19,9 @@
     "test": "vitest run"
   },
   "devDependencies": {
+    "@mergifyio/vitest": "^2026.11.8",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^5.1.0"
   },
   "license": "MPL-2.0",
   "author": "Louis True",

@@ -7,6 +7,48 @@
 //!
 //! Split out of `consolidate.rs` to keep it under the module-size ratchet.
 
+#[path = "ring_guard.rs"]
+mod topology;
+#[path = "ring_regions.rs"]
+mod regions;
+#[cfg(test)]
+pub(super) use regions::clean_shapes;
+
+/// Rim noise as a fraction of a ring's own size, `2⁻¹³`, used by
+/// [`weld_near_coincident_2d`] before its absolute cap is applied.
+const RIM_NOISE_OF_SIZE: f64 = 1.0 / 8192.0;
+
+/// Physical ring-width noise limit, `2⁻¹²` metres. The legacy rim weld also
+/// uses this numeric value as a cap in caller units; its behavior is unchanged.
+const RIM_NOISE_CAP: f64 = 1.0 / 4096.0;
+
+/// Test shorthand for [`weld_near_coincident_2d_tracked`]: the welded ring only.
+#[cfg(test)]
+pub(super) fn weld_near_coincident_2d(
+    ring: &[nalgebra::Point2<f64>],
+) -> Vec<nalgebra::Point2<f64>> {
+    weld_near_coincident_2d_tracked(ring).0
+}
+
+/// Whether `p` and `q` are within the cross-bucket conform's reach of each
+/// other, on both axes.
+pub(super) fn within_conform_tol(p: nalgebra::Point2<f64>, q: nalgebra::Point2<f64>) -> bool {
+    let tol = super::conform::CONFORM_TOL;
+    (p.x - q.x).abs() <= tol && (p.y - q.y).abs() <= tol
+}
+
+/// A ring vertex [`weld_near_coincident_2d_tracked`] merged onto a kept neighbour
+/// from farther away than the cross-bucket conform reconciles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Welded {
+    pub(super) kept: nalgebra::Point2<f64>,
+    pub(super) dropped: nalgebra::Point2<f64>,
+    /// `dropped` came before `kept` in ring order: the last vertex, merged
+    /// onto the first by the closing merge, and whatever had been merged onto
+    /// that last vertex. Otherwise it came after `kept`.
+    pub(super) before: bool,
+}
+
 /// Merge consecutive near-coincident 2D contour vertices BEFORE the union/earcut.
 ///
 /// The exact mesh-arrangement kernel correctly preserves two distinct rim points
@@ -32,12 +74,15 @@
 /// genuine 1 mm chamfer on a long steel member. This runs in the already-
 /// non-exact consolidation post-pass; it does NOT touch the exact kernel's
 /// interner/predicates (no float weld in the determinism path).
-pub(super) fn weld_near_coincident_2d(
+///
+/// Also returns each vertex merged away from more than `CONFORM_TOL` off its
+/// kept neighbour, in the order `conform::restore` reads it back.
+pub(super) fn weld_near_coincident_2d_tracked(
     ring: &[nalgebra::Point2<f64>],
-) -> Vec<nalgebra::Point2<f64>> {
+) -> (Vec<nalgebra::Point2<f64>>, Vec<Welded>) {
     let n = ring.len();
     if n < 4 {
-        return ring.to_vec();
+        return (ring.to_vec(), Vec::new());
     }
     let (mut minx, mut miny, mut maxx, mut maxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for p in ring {
@@ -48,12 +93,16 @@ pub(super) fn weld_near_coincident_2d(
     }
     let extent = (maxx - minx).max(maxy - miny);
     if !extent.is_finite() || extent <= 0.0 {
-        return ring.to_vec();
+        return (ring.to_vec(), Vec::new());
     }
     // extent · 2⁻¹³ rounded DOWN to a power of two, capped at an absolute
     // 2⁻¹² m so big rings can't swallow mm-scale features ⇒ exact, deterministic.
-    let eps = (floor_pow2(extent) * 2.0_f64.powi(-13)).min(2.0_f64.powi(-12));
+    let eps = (floor_pow2(extent) * RIM_NOISE_OF_SIZE).min(RIM_NOISE_CAP);
     let eps2 = eps * eps;
+    // Every merge is recorded, near or far, and `welded[tail..]` is what was
+    // merged onto the last vertex of `kept`: the closing merge can still move
+    // that onto `first`. The near ones go once every `kept` is final.
+    let (mut welded, mut tail): (Vec<Welded>, usize) = (Vec::new(), 0);
     let mut kept: Vec<nalgebra::Point2<f64>> = Vec::with_capacity(n);
     for &p in ring {
         let dup = kept.last().is_some_and(|q| {
@@ -63,6 +112,9 @@ pub(super) fn weld_near_coincident_2d(
         });
         if !dup {
             kept.push(p);
+            tail = welded.len();
+        } else if let Some(&q) = kept.last() {
+            welded.push(Welded { kept: q, dropped: p, before: false });
         }
     }
     // close-the-loop check: last vs first.
@@ -72,12 +124,21 @@ pub(super) fn weld_near_coincident_2d(
         let dy = last.y - first.y;
         if dx * dx + dy * dy < eps2 {
             kept.pop();
+            // What was merged onto `last` now sits ahead of `first`. Reversed,
+            // because the restore walks the record backwards and inserts each
+            // one directly before `first`.
+            welded[tail..].reverse();
+            for w in &mut welded[tail..] {
+                *w = Welded { kept: first, before: true, ..*w };
+            }
+            welded.push(Welded { kept: first, dropped: last, before: true });
         }
     }
+    welded.retain(|w| !within_conform_tol(w.dropped, w.kept));
     if kept.len() >= 3 {
-        kept
+        (kept, welded)
     } else {
-        ring.to_vec()
+        (ring.to_vec(), Vec::new())
     }
 }
 
@@ -85,21 +146,66 @@ pub(super) fn weld_near_coincident_2d(
 /// i_overlay union of many small fragments often leaves "phantom"
 /// vertices on every fragment boundary that crosses the outer outline;
 /// without this pass earcut would emit one sliver triangle per phantom.
+#[cfg(test)]
 pub(super) fn simplify_2d_collinear(ring: &[nalgebra::Point2<f64>]) -> Vec<nalgebra::Point2<f64>> {
+    simplify_with_guard(ring, |_, _, _, _, _, _| true)
+}
+
+fn simplify_with_guard(
+    ring: &[nalgebra::Point2<f64>],
+    mut admits: impl FnMut(&[nalgebra::Point2<f64>], &[bool], usize, usize, usize, usize) -> bool,
+) -> Vec<nalgebra::Point2<f64>> {
     let n = ring.len();
+    #[cfg(feature = "opening-perf-trace")]
+    let mut work = crate::opening_perf_trace::RingSimplifierWork {
+        input_vertices: n as u64,
+        ..Default::default()
+    };
     if n < 4 {
+        #[cfg(feature = "opening-perf-trace")]
+        work.record();
         return ring.to_vec();
     }
     let mut keep = vec![true; n];
+    let mut live = n;
     let mut changed = true;
     while changed {
+        #[cfg(feature = "opening-perf-trace")]
+        {
+            work.sweeps = work.sweeps.saturating_add(1);
+        }
         changed = false;
         for i in 0..n {
             if !keep[i] {
                 continue;
             }
-            let prev = (1..n).map(|k| (i + n - k) % n).find(|&k| keep[k]);
-            let next = (1..n).map(|k| (i + k) % n).find(|&k| keep[k]);
+            #[cfg(feature = "opening-perf-trace")]
+            {
+                work.live_vertex_visits = work.live_vertex_visits.saturating_add(1);
+            }
+            // Each lazily generated candidate is exactly one find/keep probe.
+            // Diagnostic accounting neither looks up extra candidates nor
+            // changes the circular index order or the search predicate.
+            let prev = (1..n)
+                .map(|k| {
+                    #[cfg(feature = "opening-perf-trace")]
+                    {
+                        work.prev_probes = work.prev_probes.saturating_add(1);
+                        work.max_prev_probe_distance = work.max_prev_probe_distance.max(k as u64);
+                    }
+                    (i + n - k) % n
+                })
+                .find(|&k| keep[k]);
+            let next = (1..n)
+                .map(|k| {
+                    #[cfg(feature = "opening-perf-trace")]
+                    {
+                        work.next_probes = work.next_probes.saturating_add(1);
+                        work.max_next_probe_distance = work.max_next_probe_distance.max(k as u64);
+                    }
+                    (i + k) % n
+                })
+                .find(|&k| keep[k]);
             let (prev, next) = match (prev, next) {
                 (Some(p), Some(n)) if p != i && n != i && p != n => (p, n),
                 _ => continue,
@@ -119,17 +225,87 @@ pub(super) fn simplify_2d_collinear(ring: &[nalgebra::Point2<f64>]) -> Vec<nalge
             // (cavity 6-seg per quadrant ⇒ 15°/segment ⇒ sin ≈ 0.26); the
             // i_overlay union of split fragments leaves "phantom" vertices
             // whose sin(angle) ranges 1e-7..1e-5, all caught here.
-            if denom < 1.0e-18 || (cross.abs() / denom) < 1.0e-4 {
+            if (denom < 1.0e-18 || (cross.abs() / denom) < 1.0e-4)
+                && admits(ring, &keep, prev, i, next, live)
+            {
                 keep[i] = false;
+                live -= 1;
                 changed = true;
+                #[cfg(feature = "opening-perf-trace")]
+                {
+                    work.removals = work.removals.saturating_add(1);
+                }
             }
         }
     }
+    #[cfg(feature = "opening-perf-trace")]
+    work.record();
     ring.iter()
         .zip(keep.iter())
         .filter_map(|(p, k)| if *k { Some(*p) } else { None })
         .collect()
 }
+
+/// Keep the same weld/noise decision while retaining an optional pre-simplify
+/// contour for a baseline region that otherwise emits no surviving cells.
+#[cfg(test)]
+pub(super) fn clean_ring(
+    ring: &[[f64; 2]],
+    plane_area: f64,
+    length_unit_scale: f64,
+) -> Option<Vec<nalgebra::Point2<f64>>> {
+    let pts: Vec<_> = ring.iter().map(|p| nalgebra::Point2::new(p[0], p[1])).collect();
+    let simplified = simplify_2d_collinear(&weld_near_coincident_2d(&pts));
+    (!ring_is_noise(&simplified, plane_area, length_unit_scale)).then_some(simplified)
+}
+
+/// Is a simplified 2D ring noise? `plane_area` is the summed area of the plane
+/// bucket it came from. `length_unit_scale` is metres per caller unit; only the
+/// new width comparison is normalized, not the pre-existing absolute area floor
+/// or rim weld.
+///
+/// Noise is a ring under [`NOISE_AREA`], or one whose mean width
+/// `2·area / perimeter` is under [`RIM_NOISE_CAP`] metres and whose area is
+/// under [`NOISE_PLANE_SHARE`] of its plane. Multiplying area by metres per
+/// caller unit puts that width comparison in metres without changing the
+/// pre-existing caller-unit tests.
+///
+/// The width gate is what keeps a real opening on a large face, which the plane
+/// share alone filled (#4698). The share gate is what keeps a hairline ring that
+/// is most of its plane, such as a µm-deep reveal lip. Fewer than three vertices
+/// is noise.
+///
+pub(super) fn ring_is_noise(
+    ring: &[nalgebra::Point2<f64>],
+    plane_area: f64,
+    length_unit_scale: f64,
+) -> bool {
+    let n = ring.len();
+    if n < 3 {
+        return true;
+    }
+    let edges = || (0..n).map(|i| (ring[i], ring[(i + 1) % n]));
+    let twice_signed_area: f64 = edges().map(|(a, b)| a.x * b.y - b.x * a.y).sum();
+    let area = (twice_signed_area * 0.5).abs();
+    if area < NOISE_AREA {
+        return true;
+    }
+    if !(area < plane_area * NOISE_PLANE_SHARE) {
+        return false;
+    }
+    let perimeter: f64 = edges().map(|(a, b)| (b - a).norm()).sum();
+    2.0 * area * length_unit_scale < perimeter * RIM_NOISE_CAP
+}
+
+/// Absolute area floor for [`ring_is_noise`], in squared mesh units. Inherited
+/// from origin/main and still caller-unit-based. The physical width/share gate
+/// also catches small compact rings that occupy only a tiny share of their
+/// plane; the legacy floor can still differ by unit when that share gate is
+/// deliberately bypassed.
+const NOISE_AREA: f64 = 1.0e-8;
+
+/// Share of its plane under which a thin ring counts as noise ([`ring_is_noise`]).
+const NOISE_PLANE_SHARE: f64 = 1.0e-4;
 
 pub(super) fn floor_pow2(x: f64) -> f64 {
     if !x.is_finite() || x <= 0.0 {
@@ -142,3 +318,7 @@ pub(super) fn floor_pow2(x: f64) -> f64 {
     // representable exponent range we hit (|coords| ≲ 1e7 ⇒ exponent ≲ 24).
     2.0_f64.powi(unbiased as i32)
 }
+
+#[cfg(test)]
+#[path = "ring_ops_tests.rs"]
+mod tests;

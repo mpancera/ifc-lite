@@ -4,28 +4,16 @@
 
 use std::collections::HashSet;
 
+use crate::color_space::srgba_to_linear;
+
 // ── materials ───────────────────────────────────────────────────────────────
 
-/// Material dedup key: RGBA rounded to 2 decimals, clamped to 0..=100 (matches the
-/// glTF exporter's key; the clamp keeps the derived prim name a legal identifier even
-/// for an out-of-gamut IFC colour).
-pub(super) fn color_key(c: [f32; 4]) -> (i32, i32, i32, i32) {
-    let r = |v: f32| {
-        let v = if v.is_finite() { v } else { 0.0 };
-        ((v * 100.0).round() as i32).clamp(0, 100)
-    };
-    (r(c[0]), r(c[1]), r(c[2]), r(c[3]))
-}
-
-/// Legal-identifier material prim name from a (clamped, non-negative) colour key.
-pub(super) fn mat_name(key: (i32, i32, i32, i32)) -> String {
-    format!("Mat_{}_{}_{}_{}", key.0, key.1, key.2, key.3)
-}
-
-/// Clamp an RGBA colour into the [0,1] range USD expects (non-finite → mid-grey/opaque).
-pub(super) fn clamp_color(c: [f32; 4]) -> [f32; 4] {
+/// An IFC (sRGB) RGBA colour as the LINEAR colour USD's `color3f` inputs take,
+/// decoded the way the glTF writer decodes it. Clamped into [0,1] first;
+/// non-finite becomes mid-grey/opaque.
+pub(super) fn linear_color(c: [f32; 4]) -> [f32; 4] {
     let f = |v: f32, d: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { d };
-    [f(c[0], 0.8), f(c[1], 0.8), f(c[2], 0.8), f(c[3], 1.0)]
+    srgba_to_linear([f(c[0], 0.8), f(c[1], 0.8), f(c[2], 0.8), f(c[3], 1.0)])
 }
 
 // ── identifiers ───────────────────────────────────────────────────────────────
@@ -97,6 +85,13 @@ pub(super) fn fmt_f64(v: f64) -> String {
     } else {
         "0".to_string()
     }
+}
+
+/// A USD `matrix4d` value: four rows, each the image of one basis vector
+/// (row-vector convention, translation in the last row).
+pub(super) fn fmt_matrix4d(rows: &[[f64; 4]; 4]) -> String {
+    let row = |r: &[f64; 4]| r.map(fmt_f64).join(", ");
+    format!("( ({}), ({}), ({}), ({}) )", row(&rows[0]), row(&rows[1]), row(&rows[2]), row(&rows[3]))
 }
 
 pub(super) fn indent_str(level: usize) -> String {

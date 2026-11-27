@@ -11,28 +11,34 @@
  * export).
  */
 
-import { useState, useCallback, useMemo, useLayoutEffect, useEffect, useRef } from 'react';
-import { Download, Loader2, Check, AlertCircle } from 'lucide-react';
-import { zip, strToU8 } from 'fflate';
+import type { ExportSurface } from '@/lib/analytics-export-events';
+import { trackExportCompleted } from '@/lib/analytics';
+import { useState, useCallback, useLayoutEffect, useEffect, useRef, cloneElement, isValidElement, type MouseEvent, type ReactNode } from 'react';
+import { Download, Check, AlertCircle } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
+import { zipArtifacts } from '@/lib/export/artifact-bundle';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useViewerStore } from '@/store';
+import { useChangedModels } from '@/hooks/useUnexportedChanges';
+import { useReplaceableTimeout } from '@/hooks/useReplaceableTimeout';
+import { useTranslation } from '@/i18n';
 import { toast } from '@/components/ui/toast';
-import { downloadFile } from '@/lib/export/download';
-import {
-  collectChangedModels,
-  totalChangeCount,
-  buildChangedArtifacts,
-  type ArtifactFile,
-  type ChangedModelsResult,
-} from '@/lib/export/model-changes';
-import { defaultBuildArtifactsDeps } from '@/lib/export/changed-model-export';
+import { buildExportFilename, downloadFile } from '@/lib/export/download';
+// Fork: stamped names that do not grow per round, and a remembered project folder.
 import { restamp } from '@/lib/export/filename-stamp';
 import {
   saveTargetsSupported, saveTargetKey, loadSaveTarget, rememberSaveTarget, forgetSaveTarget,
   ensureWritable, writeIntoTarget, type DirectoryTarget,
 } from '@/lib/export/saveTarget';
+import {
+  collectChangedModels,
+  totalChangeCount,
+  buildChangedArtifacts,
+  type ChangedModelsResult,
+} from '@/lib/export/model-changes';
+import { defaultBuildArtifactsDeps, unrepresentedPsetsNote } from '@/lib/export/changed-model-export';
 import {
   ExportChangesReviewDialog,
   buildReviewGroups,
@@ -40,19 +46,16 @@ import {
 } from './ExportChangesReviewDialog';
 
 interface ExportChangesButtonProps {
+  surface: ExportSurface;
   /** Optional custom class name */
   className?: string;
-}
-
-/** Bundle produced files into a zip off the main thread (fflate async `zip`). */
-function zipArtifacts(files: ArtifactFile[]): Promise<Uint8Array> {
-  const entries: Record<string, Uint8Array> = {};
-  for (const f of files) {
-    entries[`${f.base}.${f.ext}`] = typeof f.content === 'string' ? strToU8(f.content) : f.content;
-  }
-  return new Promise((resolve, reject) => {
-    zip(entries, { level: 6 }, (err, data) => (err ? reject(err) : resolve(data)));
-  });
+  /**
+   * The export registry's dialog contract (`ExportDialogComponent`, #5838):
+   * a menu row, ribbon button or palette auto-trigger that opens the review.
+   * Without it this renders the standing amber toolbar button, shown only
+   * while there are unexported edits.
+   */
+  trigger?: ReactNode;
 }
 
 /**
@@ -151,50 +154,56 @@ export function useReviewGroups(
   // as the paint, before the user sees anything — the refused-confirm refresh
   // this state exists for is unaffected, since `setGroups` is still called
   // from ordinary event handlers there, not from this effect.
+  // `revision` (#4918 review finding, macroscope on this PR): `describeEntity`
+  // resolves its labels through the module-level `resolve` at BUILD time, so
+  // a locale switch while the review is open needs this effect to rebuild
+  // `groups` too, or the entity labels stay in the old locale while the
+  // dialog's own `t()`-driven chrome and `describeChangeKind(c, t)` (which
+  // both re-read the CURRENT locale on every render) retranslate around
+  // them — `revision` (not just `locale`) so an active-catalogue swap
+  // (`registerLocale` overwriting the locale currently in use, not only a
+  // `setLocale` call) also triggers a rebuild, matching what `useTranslation`
+  // itself documents as its own re-render trigger.
+  const { revision } = useTranslation();
   const [groups, setGroups] = useState<ModelReviewGroup[]>([]);
   useLayoutEffect(() => {
     setGroups(reviewOpen ? buildReviewGroups(useViewerStore.getState().mutationViews, changed) : []);
-  }, [reviewOpen, changed]);
+  }, [reviewOpen, changed, revision]);
   return [groups, setGroups];
 }
 
-export function ExportChangesButton({ className }: ExportChangesButtonProps) {
-  // Subscribe to everything that can change the pending-changes count so the
-  // badge stays live. `mutationVersion` bumps on every property / quantity /
-  // attribute / georef mutation; schedule edits are watched explicitly.
-  const models = useViewerStore((s) => s.models);
-  const mutationVersion = useViewerStore((s) => s.mutationVersion);
-  const georefMutations = useViewerStore((s) => s.georefMutations);
-  const scheduleData = useViewerStore((s) => s.scheduleData);
-  const scheduleIsEdited = useViewerStore((s) => s.scheduleIsEdited);
-  const scheduleSourceModelId = useViewerStore((s) => s.scheduleSourceModelId);
-  const legacyIfcDataStore = useViewerStore((s) => s.ifcDataStore);
-
+export function ExportChangesButton({ surface, className, trigger }: ExportChangesButtonProps) {
+  const { t } = useTranslation();
   const [isExporting, setIsExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  // The success/error tick reverts to idle on a timer owned by the latest export.
+  const statusReset = useReplaceableTimeout();
+  const flashStatus = useCallback((status: 'success' | 'error', ms: number) => {
+    setExportStatus(status);
+    statusReset.schedule(() => setExportStatus('idle'), ms);
+  }, [statusReset]);
   // Two-step export (issue #1915): the toolbar button opens a review dialog
   // listing the pending changes; the dialog's own Export button is the
   // confirm step that actually runs `handleExport` below.
   const [reviewOpen, setReviewOpen] = useState(false);
 
-  const changed = useMemo(
-    () => collectChangedModels(useViewerStore.getState()),
-    // getState() reads the live snapshot; these deps drive recomputation.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [models, mutationVersion, georefMutations, scheduleData, scheduleIsEdited, scheduleSourceModelId, legacyIfcDataStore],
-  );
+  // The same live change set the unexported-edits guards read (#5604).
+  const changed = useChangedModels();
 
   const totalCount = totalChangeCount(changed);
   const modelCount = changed.models.length;
 
-  // Somebody else asked to see the pending changes — the restore prompt does,
-  // right after it puts a saved state back, because "1255 Änderungen" in a
-  // badge is a number and this is the list behind it. Only ever opens when
-  // there is something to show: an empty review would answer the question
-  // "what did that do?" with a blank dialog.
-  // The project folder this model's exports go to, if one was chosen. Keyed on
-  // the name without its stamp, so it survives every further export of the same
-  // model — see `lib/export/saveTarget`.
+  // Built only while the dialog is open, from the live overlay — this is what
+  // the user sees on screen. `handleConfirm` below re-derives this same shape
+  // synchronously at click time and compares, to catch a mutation that landed
+  // while the review was open without bumping `mutationVersion` (a direct
+  // mutation of the same `MutablePropertyView` instance, bypassing the
+  // store's tracked `set()`). See `useReviewGroups` above for why this is
+  // `useState` + `useLayoutEffect`, not `useMemo` or a passive `useEffect`.
+  const [groups, setGroups] = useReviewGroups(reviewOpen, changed);
+
+  // Fork: the project folder this model's exports go to, if one was chosen.
+  // Keyed on the name without its stamp (see `lib/export/saveTarget`).
   const activeModelName = useViewerStore((s) => (
     s.activeModelId ? s.models.get(s.activeModelId)?.name ?? null : null
   ));
@@ -231,6 +240,7 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
     toast.info('Exporte gehen wieder in den Download-Ordner.');
   }, [targetKey]);
 
+  // Fork: somebody else (the restore prompt) asked to see the pending changes.
   const reviewRequests = useViewerStore((s) => s.changesReviewRequests);
   const lastHandledRequest = useRef(reviewRequests);
   useEffect(() => {
@@ -239,17 +249,9 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
     if (totalCount > 0) setReviewOpen(true);
   }, [reviewRequests, totalCount]);
 
-  // Built only while the dialog is open, from the live overlay — this is what
-  // the user sees on screen. `handleConfirm` below re-derives this same shape
-  // synchronously at click time and compares, to catch a mutation that landed
-  // while the review was open without bumping `mutationVersion` (a direct
-  // mutation of the same `MutablePropertyView` instance, bypassing the
-  // store's tracked `set()`). See `useReviewGroups` above for why this is
-  // `useState` + `useLayoutEffect`, not `useMemo` or a passive `useEffect`.
-  const [groups, setGroups] = useReviewGroups(reviewOpen, changed);
-
   const handleExport = useCallback(async (reviewedGroups: ModelReviewGroup[]) => {
     setIsExporting(true);
+    statusReset.cancel();
     setExportStatus('idle');
 
     try {
@@ -272,8 +274,7 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
       const postState = useViewerStore.getState();
       const postGroups = buildReviewGroups(postState.mutationViews, collectChangedModels(postState));
       if (!reviewGroupsEqual(reviewedGroups, postGroups)) {
-        setExportStatus('error');
-        setTimeout(() => setExportStatus('idle'), 3000);
+        flashStatus('error', 3000);
         toast.error('Changes were made while exporting — check the updated list and confirm again.');
         setGroups(postGroups);
         setReviewOpen(true);
@@ -282,8 +283,7 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
 
       if (files.length === 0) {
         if (skipped.length > 0) {
-          setExportStatus('error');
-          setTimeout(() => setExportStatus('idle'), 3000);
+          flashStatus('error', 3000);
           toast.error(`Export failed: ${skipped[0].reason}`);
         } else {
           toast.info('No changes to export');
@@ -291,21 +291,15 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
         return;
       }
 
-      // `restamp`, not "append": the file being exported is often itself a
-      // previous export, and appending grew the name by a stamp per round.
+      // Fork: `restamp`, not "append": the file being exported is often itself
+      // a previous export, and appending grew the name by a stamp per round.
       const named: Array<{ name: string; content: Blob | Uint8Array | string; mime: string }> =
         files.length === 1
-          ? [{ name: `${restamp(files[0].base)}.${files[0].ext}`, content: files[0].content, mime: files[0].mime }]
-          : [{
-            name: `${restamp('ifc-lite-changes')}.zip`,
-            content: await zipArtifacts(files),
-            mime: 'application/zip',
-          }];
+          ? [{ name: buildExportFilename(restamp(files[0].base), files[0].ext), content: files[0].content, mime: files[0].mime }]
+          : [{ name: `${restamp('ifc-lite-changes')}.zip`, content: await zipArtifacts(files), mime: 'application/zip' }];
 
-      // A chosen project folder wins over the download folder — but only with
-      // permission, which the browser re-asks for after a reload and only
-      // inside this click. A refusal falls back to the download rather than
-      // leaving the user with nothing saved.
+      // Fork: a chosen project folder wins over the download folder, but only
+      // with permission; a refusal falls back to the download.
       let wroteTo: string | null = null;
       if (target && await ensureWritable(target, { prompt: true })) {
         try {
@@ -322,14 +316,24 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
         toast.success(`${named[0].name} in „${wroteTo}“ gespeichert`);
       }
 
-      setExportStatus('success');
-      setTimeout(() => setExportStatus('idle'), 2000);
+      flashStatus('success', 2000);
 
       const exportedChanges = files.reduce((n, f) => n + f.changeCount, 0);
+      trackExportCompleted({
+        format: files.length === 1 ? files[0].ext : 'zip',
+        surface,
+        model_count: files.length,
+        change_count: exportedChanges,
+      });
+      const unrepresented = files.reduce((n, f) => n + f.skippedCount, 0);
       if (skipped.length > 0) {
+        // The empty-pset note rides along: a skipped model must not hide it (#5201).
         toast.info(
-          `Exported ${files.length} of ${files.length + skipped.length} models — ${skipped.length} skipped (${skipped[0].reason})`,
+          `Exported ${files.length} of ${files.length + skipped.length} models — ${skipped.length} skipped (${skipped[0].reason})${unrepresentedPsetsNote(unrepresented)}`,
         );
+      } else if (unrepresented > 0) {
+        // Not a plain success: part of the edits could not be written (#5201).
+        toast.info(`Exported ${files.length === 1 ? `${files[0].base}.${files[0].ext}` : `${files.length} models`} (${exportedChanges} changes)${unrepresentedPsetsNote(unrepresented)}`);
       } else if (files.length === 1) {
         toast.success(`Exported ${files[0].base}.${files[0].ext} (${exportedChanges} changes)`);
       } else {
@@ -337,13 +341,12 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
       }
     } catch (error) {
       console.error('[ExportChangesButton] Export failed:', error);
-      setExportStatus('error');
-      setTimeout(() => setExportStatus('idle'), 3000);
+      flashStatus('error', 3000);
       toast.error(`Export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setIsExporting(false);
     }
-  }, []);
+  }, [surface, statusReset, flashStatus, target]);
 
   const handleConfirm = useCallback(() => {
     // Re-derive fresh, synchronously, at click time — comparing against
@@ -371,6 +374,32 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
     void handleExport(freshGroups);
   }, [groups, handleExport]);
 
+  const review = (
+    <ExportChangesReviewDialog
+      open={reviewOpen}
+      onOpenChange={setReviewOpen}
+      groups={groups}
+      totalCount={totalCount}
+      isExporting={isExporting}
+      onConfirm={handleConfirm}
+      targetFolder={target?.name ?? null}
+      onChooseFolder={saveTargetsSupported() ? chooseFolder : undefined}
+      onClearFolder={clearFolder}
+    />
+  );
+
+  // A registry surface's own trigger; it composes with (not replaces) the
+  // trigger's click handler, and the surface gates it on pending changes.
+  if (isValidElement<{ onClick?: (event: MouseEvent) => void }>(trigger)) {
+    const own = trigger.props.onClick;
+    return (
+      <>
+        {cloneElement(trigger, { onClick: (event: MouseEvent) => { own?.(event); setReviewOpen(true); } })}
+        {review}
+      </>
+    );
+  }
+
   // Nothing to export — but keep rendering while an export is in flight so a
   // mid-export clear (count -> 0) doesn't unmount the button and drop state.
   if (totalCount === 0 && !isExporting) {
@@ -379,8 +408,8 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
 
   const tooltip =
     modelCount > 1
-      ? `Export changes in ${modelCount} models (${totalCount} changes)`
-      : `Export IFC with ${totalCount} change${totalCount === 1 ? '' : 's'} applied`;
+      ? t('exportChangesButton.tooltipMulti', { models: modelCount, count: totalCount })
+      : t('exportChangesButton.tooltipSingle', { count: totalCount });
 
   return (
     <>
@@ -399,33 +428,23 @@ export function ExportChangesButton({ className }: ExportChangesButtonProps) {
             className={`border-amber-500/60 bg-amber-500/10 text-amber-600 hover:bg-amber-500/20 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300 ${className ?? ''}`}
           >
             {isExporting ? (
-              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              <Spinner size="md" className="mr-2" />
             ) : exportStatus === 'success' ? (
-              <Check className="h-4 w-4 mr-2 text-green-500" />
+              <Check className="h-4 w-4 mr-2 text-ok" />
             ) : exportStatus === 'error' ? (
-              <AlertCircle className="h-4 w-4 mr-2 text-red-500" />
+              <AlertCircle className="h-4 w-4 mr-2 text-danger" />
             ) : (
               <Download className="h-4 w-4 mr-2" />
             )}
-            Export Changes
-            <Badge className="ml-2 text-xs bg-amber-500 text-white border-transparent hover:bg-amber-500">
+            {t('exportChangesButton.buttonLabel')}
+            <Badge className="ml-2 text-xs bg-warn-solid text-solid-foreground border-transparent hover:bg-warn-solid">
               {totalCount}
             </Badge>
           </Button>
         </TooltipTrigger>
         <TooltipContent>{tooltip}</TooltipContent>
       </Tooltip>
-      <ExportChangesReviewDialog
-        open={reviewOpen}
-        onOpenChange={setReviewOpen}
-        groups={groups}
-        totalCount={totalCount}
-        isExporting={isExporting}
-        onConfirm={handleConfirm}
-        targetFolder={target?.name ?? null}
-        onChooseFolder={saveTargetsSupported() ? chooseFolder : undefined}
-        onClearFolder={clearFolder}
-      />
+      {review}
     </>
   );
 }

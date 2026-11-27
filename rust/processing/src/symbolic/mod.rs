@@ -15,7 +15,7 @@
 //! Primitive coverage matches the wasm pipeline that ships to production:
 //!
 //! - `IfcPolyline`, `IfcIndexedPolyCurve` → [`SymbolicPolyline`].
-//! - `IfcCircle` → [`SymbolicCircle`] (full circle).
+//! - `IfcCircle` → [`SymbolicCircle`] for XY similarities, otherwise a sampled [`SymbolicPolyline`].
 //! - `IfcEllipse` → [`SymbolicPolyline`] (64-segment tessellation).
 //! - `IfcTrimmedCurve` on `IfcCircle` → [`SymbolicPolyline`] (arc with
 //!   `PLANEANGLEUNIT` scaling, sense agreement, wrap-around). Near-
@@ -35,18 +35,24 @@
 //!
 //! Coordinate handling matches the wasm pipeline:
 //!
-//! - Per-product `ObjectPlacement` is resolved through the
-//!   `IfcLocalPlacement` chain; symbolic uses a 2D
-//!   translation-plus-rotation accumulation that intentionally diverges
-//!   from the 3D geometry router so floor-plan annotations aren't
-//!   distorted by parent rotations.
+//! - Per-product `ObjectPlacement` is resolved through the shared 3D chain
+//!   (`ifc_lite_geometry::placement::resolve_chain`: `IfcLocalPlacement`,
+//!   `IfcLinearPlacement` and `IfcGridPlacement`, no depth cap, memoised on
+//!   the decoder) and projected to XY. A symbol therefore lands where the mesh
+//!   of the same product does; under a tilted parent it is foreshortened.
 //! - Per-representation `ContextOfItems.WorldCoordinateSystem` is
 //!   composed in when present (Plan reps occasionally use a different
 //!   WCS than Body).
-//! - RTC offset is auto-detected from the first geometry-bearing
-//!   element and subtracted alongside the mesh pipeline.
-//! - The Y-axis is flipped (`y → -y + rtc_z`) to match the renderer's
-//!   section-cut coordinate convention.
+//! - The frame comes from the caller when it has one of its own — the native
+//!   server, whose meshes travel in the same response, hands in
+//!   `ProcessingResult::frame` (#4706) — and from the browser mesh frame
+//!   selection (`MeshFrame::for_overlay`) otherwise.
+//! - The whole RTC offset is subtracted — easting and northing into the
+//!   plan pair (whose Y axis is flipped to match the renderer's section-cut
+//!   handedness), elevation into `world_y` — and the frame's rotation, which
+//!   only the site tier carries, comes out of the plan pair and out of the
+//!   text baselines with it. `rebase::RenderFrameRebase` is the single place
+//!   either conversion happens.
 //!
 //! Style resolution:
 //!
@@ -61,25 +67,46 @@
 //!   default fill colour.
 
 
-use ifc_lite_core::{build_entity_index, EntityDecoder, EntityScanner, IfcType};
+use output_cap::SymbolicAccumulator;
+use ifc_lite_core::resource_stop::ProgramStop;
+use rebase::RenderFrameRebase;
+use ifc_lite_core::{build_entity_index, keyword_eq, EntityDecoder, EntityScanner};
 
 mod color;
+mod conic;
 mod fill;
+mod fill_provenance;
+mod provenance;
+pub use provenance::SymbolicDataWithProvenance;
 mod grid;
+mod item_walk;
 mod items;
+#[cfg(test)]
+mod items_cycle_tests;
+mod output_cap;
+#[cfg(test)]
+mod output_cap_tests;
+mod output_cap_types;
+mod output_cap_validate;
 mod primitives;
+#[cfg(test)]
+mod projected_conic_tests;
+mod rebase;
 mod text;
 mod transform;
+mod representation_walk;
 mod trimmed_curve;
+mod type_symbols;
 
+pub use output_cap_types::{SymbolicTruncation, SymbolicTruncationReason};
 pub use primitives::{
     SymbolicCircle, SymbolicData, SymbolicFillArea, SymbolicGridAxis, SymbolicPolyline, SymbolicText,
 };
 
 use color::build_styled_item_index;
 use grid::extract_grid;
-use items::extract_symbolic_item;
-use transform::{compose_transforms, parse_axis2_placement_2d, resolve_object_placement, Transform2D};
+use representation_walk::walk_own_representations;
+use transform::resolve_object_placement;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Top-level extraction. Mirror of the wasm `parse_symbolic_representations`
@@ -91,28 +118,95 @@ use transform::{compose_transforms, parse_axis2_placement_2d, resolve_object_pla
 /// Annotation / FootPrint / Axis representation, and return the full
 /// symbolic primitive collection. Pure-Rust (no `wasm_bindgen`), so it
 /// works inside the HTTP server.
-pub fn extract_symbolic_data<T>(content: &T) -> SymbolicData
+///
+/// In controlled execution, a terminal stop discards all staged symbols and
+/// provenance and returns the exact `ProgramStop`. An empty successful collection
+/// means no symbols were found; geometric truncation remains an `Ok` result.
+pub fn extract_symbolic_data<T>(content: &T) -> Result<SymbolicData, ProgramStop>
 where
     T: AsRef<[u8]> + ?Sized,
 {
+    extract_symbolic_data_with_provenance(content).map(|data| data.into_parts().0)
+}
+
+/// Extract symbols with ordinal-bound direct fill provenance, preserving the legacy data shape.
+///
+/// Resolves the OVERLAY frame (`MeshFrame::for_overlay`): the frame a consumer
+/// that only parses the file can know. That is the browser's frame, and the
+/// wasm binding (`rust/wasm-bindings/src/api/symbolic.rs`) is its caller. A
+/// caller that also ran the native geometry pipeline must use
+/// [`extract_symbolic_data_with_provenance_in_frame`] instead, or its symbols
+/// and its meshes end up in two different frames (#4706).
+pub fn extract_symbolic_data_with_provenance<T>(content: &T) -> Result<SymbolicDataWithProvenance, ProgramStop>
+where
+    T: AsRef<[u8]> + ?Sized,
+{
+    ifc_lite_geometry::resource::with_terminal_scope(|| {
+        let mut out = SymbolicAccumulator::new();
+        extract_symbolic_data_into(content, &mut out);
+        out.into_provenance()
+    })
+}
+
+/// Extract symbols in a frame the caller already chose: the native pipeline's
+/// [`crate::ProcessingResult::frame`].
+///
+/// The server ships both streams in one response, so both must be in one
+/// frame. `process_geometry` selects `MeshFrame::SiteLocal` for a translated
+/// `IfcSite` and bakes its meshes as `Rᵀ · (P − t_site)`; before #4706 the
+/// symbolic stream resolved its own frame here and kept both the site
+/// translation and the site rotation the meshes had dropped. The frame is
+/// handed in rather than re-derived so the two answers cannot differ.
+pub fn extract_symbolic_data_with_provenance_in_frame<T>(
+    content: &T,
+    frame: crate::MeshFrame,
+) -> Result<SymbolicDataWithProvenance, ProgramStop>
+where
+    T: AsRef<[u8]> + ?Sized,
+{
+    ifc_lite_geometry::resource::with_terminal_scope(|| {
+        let mut out = SymbolicAccumulator::new();
+        extract_symbolic_data_into_frame(content, Some(frame), &mut out);
+        out.into_provenance()
+    })
+}
+
+/// The overlay-frame extraction, writing into a caller-supplied accumulator.
+///
+/// Split out so a test can supply an accumulator with a small injected cap
+/// and exercise the real path, instead of building a fixture that emits two
+/// million primitives to reach `MAX_SYMBOLIC_ELEMENTS`.
+fn extract_symbolic_data_into<T>(content: &T, out: &mut SymbolicAccumulator)
+where
+    T: AsRef<[u8]> + ?Sized,
+{
+    extract_symbolic_data_into_frame(content, None, out)
+}
+
+/// The extraction itself. `frame` is `None` when the caller has no frame of
+/// its own and this must resolve the overlay one.
+fn extract_symbolic_data_into_frame<T>(
+    content: &T,
+    frame: Option<crate::MeshFrame>,
+    out: &mut SymbolicAccumulator,
+) where
+    T: AsRef<[u8]> + ?Sized,
+{
+    if out.is_exhausted() { return; }
     let content = content.as_ref();
     let entity_index = build_entity_index(content);
-    let mut decoder = EntityDecoder::with_index(content, entity_index);
-
+    // Symbolic geometry refuses unrepresentable reals (#7678, D15).
+    let mut decoder = EntityDecoder::with_index(content, entity_index).with_strict_reals();
     // Reuse the geometry router for both unit-scale and the RTC offset.
+    // Not drained: meshes nothing. Pinned by rust/geometry/tests/issue_3821_auxiliary_routers_mesh_nothing.rs.
     let router = ifc_lite_geometry::GeometryRouter::with_units(content, &mut decoder);
-    let unit_scale = router.unit_scale() as f32;
-
-    // RTC offset detection matches the wasm path so the symbolic stream
-    // aligns with the mesh stream. The threshold (>10 km) is empirical —
-    // anything smaller is local-coord territory where RTC subtraction
-    // would shift things off-screen.
-    let rtc_offset = router.detect_rtc_offset_from_first_element(content, &mut decoder);
-    let needs_rtc = rtc_offset.0.abs() > 10_000.0
-        || rtc_offset.1.abs() > 10_000.0
-        || rtc_offset.2.abs() > 10_000.0;
-    let rtc_x = if needs_rtc { rtc_offset.0 as f32 } else { 0.0 };
-    let rtc_z = if needs_rtc { rtc_offset.2 as f32 } else { 0.0 };
+    if router.length_unit_refused() { return; } // a refused unit draws nothing (#7678)
+    let unit_scale = router.unit_scale();
+    // Re-based by the frame the caller's meshes are in, or - when it has none
+    // - by the browser mesh frame this can resolve for itself (#4706).
+    let frame =
+        frame.unwrap_or_else(|| crate::MeshFrame::for_overlay(&router, content, &mut decoder));
+    let rebase = RenderFrameRebase::from_frame(frame);
 
     // Pre-pass: build a reverse index from "styled representation-item id"
     // to "list of style refs". Walked once at parse start (O(n)) so per-
@@ -121,11 +215,24 @@ where
     // IfcFillAreaStyle → IfcColourRgb).
     let styled_items = build_styled_item_index(content, &mut decoder);
 
-    let mut out = SymbolicData::default();
+    // Occurrence -> type, for the type-level symbol fallback (#8233).
+    let type_of = type_symbols::build_type_of(content, &mut decoder);
+
     let mut scanner = EntityScanner::new(content);
 
     while let Some((id, type_name, start, end)) = scanner.next_entity() {
-        let is_grid = type_name == "IFCGRID";
+        #[cfg(test)]
+        output_cap::execution_tests::on_entity(id, out);
+        // Stop the SCAN, not just the innermost item loop. Breaking only the
+        // inner loop still decodes every remaining product, resolves its
+        // placements and composes its transforms, which is not the "stop" this
+        // bound claims. Bounded by file size rather than by the fan-out, so it
+        // was never the DoS lever -- but it is work with a known-useless
+        // result.
+        if out.is_exhausted() {
+            break;
+        }
+        let is_grid = keyword_eq(type_name, "IFCGRID");
         if !is_grid && !ifc_lite_core::has_geometry_by_name(type_name) {
             // IfcGrid isn't in `has_geometry_by_name` (it's not a building
             // element) but carries axis curves that we render as symbolic
@@ -144,122 +251,41 @@ where
                 &mut decoder,
                 unit_scale,
                 &grid_transform,
-                rtc_x,
-                rtc_z,
-                &mut out,
+                rebase,
+                out,
             );
             continue;
         }
 
         // Standard representation walk: IfcProductDefinitionShape → Plan /
         // Annotation / FootPrint / Axis IfcShapeRepresentation → items.
-        let Some(representation_attr) = entity.get(6) else {
-            continue;
-        };
-        if representation_attr.is_null() {
-            continue;
-        }
-        let Ok(Some(representation)) = decoder.resolve_ref(representation_attr) else {
-            continue;
-        };
-        let Some(reps_attr) = representation.get(2) else {
-            continue;
-        };
-        let Ok(representations) = decoder.resolve_ref_list(reps_attr) else {
-            continue;
-        };
-
-        let ifc_type_name = entity.ifc_type.name().to_string();
-
-        for shape_rep in representations {
-            if shape_rep.ifc_type != IfcType::IfcShapeRepresentation {
-                continue;
-            }
-            let rep_identifier = shape_rep
-                .get(1)
-                .and_then(|a| a.as_string())
-                .unwrap_or("")
-                .to_string();
-            if !matches!(
-                rep_identifier.as_str(),
-                "Plan" | "Annotation" | "FootPrint" | "Axis"
-            ) {
-                continue;
-            }
-
-            // ObjectPlacement transform for this entity (translations
-            // accumulated directly, rotations accumulated to orient symbols).
-            let placement_transform = resolve_object_placement(&entity, &mut decoder, unit_scale);
-
-            // ContextOfItems WCS: some Plan reps use a different coord
-            // system than Body. Compose it in when present and non-trivial.
-            // `ContextOfItems` (IfcRepresentation attr 0) and
-            // `WorldCoordinateSystem` (IfcGeometricRepresentationContext
-            // attr 4) are both MANDATORY, so a dangling ref or absent
-            // attribute is malformed data, not a legitimate default —
-            // `unresolved()` per #2352's convention. A resolved
-            // `IfcGeometricRepresentationSubContext`, in contrast, derives
-            // its WCS from `ParentContext` and legitimately does not store
-            // one inline, so it alone stays `identity()`.
-            let context_transform = match shape_rep.get_ref(0) {
-                Some(context_ref) => match decoder.decode_by_id(context_ref) {
-                    Ok(context) if context.ifc_type == IfcType::IfcGeometricRepresentationContext => {
-                        match context.get_ref(4) {
-                            Some(wcs_ref) => match decoder.decode_by_id(wcs_ref) {
-                                Ok(wcs) => parse_axis2_placement_2d(&wcs, &mut decoder, unit_scale),
-                                Err(_) => Transform2D::unresolved(),
-                            },
-                            None => Transform2D::unresolved(),
-                        }
-                    }
-                    // SubContext inherits WCS from ParentContext — legitimately
-                    // has none inline (the wasm pipeline does the same).
-                    Ok(context) if context.ifc_type == IfcType::IfcGeometricRepresentationSubContext => {
-                        Transform2D::identity()
-                    }
-                    // Dangling context_ref, or a ref resolving to neither
-                    // Context nor SubContext: malformed data.
-                    _ => Transform2D::unresolved(),
-                },
-                None => Transform2D::unresolved(),
-            };
-            let combined_transform = if context_transform.tx.abs() > 0.001
-                || context_transform.ty.abs() > 0.001
-                || context_transform.tz.abs() > 0.001
-                || (context_transform.m00 - 1.0).abs() > 0.0001
-                || context_transform.m01.abs() > 0.0001
-                || context_transform.m10.abs() > 0.0001
-                || (context_transform.m11 - 1.0).abs() > 0.0001
-                || context_transform.tz.is_nan()
-            {
-                compose_transforms(&context_transform, &placement_transform)
-            } else {
-                placement_transform
-            };
-
-            let Some(items_attr) = shape_rep.get(3) else {
-                continue;
-            };
-            let Ok(items) = decoder.resolve_ref_list(items_attr) else {
-                continue;
-            };
-            for item in items {
-                extract_symbolic_item(
-                    &item,
-                    &mut decoder,
+        let ifc_type_name = entity.ifc_type.name();
+        let has_own_symbolic = walk_own_representations(
+            &entity,
+            id,
+            ifc_type_name,
+            &mut decoder,
+            unit_scale,
+            rebase,
+            &styled_items,
+            out,
+        );
+        // No symbolic representation of its own: the symbol may be held only
+        // on the type's RepresentationMaps (#8233).
+        if !has_own_symbolic {
+            if let Some(&type_id) = type_of.get(&id) {
+                type_symbols::walk_type_representation_maps(
+                    &entity,
                     id,
-                    &ifc_type_name,
-                    &rep_identifier,
+                    type_id,
+                    ifc_type_name,
+                    &mut decoder,
                     unit_scale,
-                    &combined_transform,
-                    rtc_x,
-                    rtc_z,
+                    rebase,
                     &styled_items,
-                    &mut out,
+                    out,
                 );
             }
         }
     }
-
-    out
 }

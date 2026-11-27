@@ -14,12 +14,60 @@
  * single-model state when the `models` Map is empty.
  */
 
+import { mutationViewBaseStore } from '@/utils/configureMutationView';
 import type { IfcDataStore } from '@ifc-lite/parser';
+import type { MutablePropertyView } from '@ifc-lite/mutations';
 import type { SchemaVersion } from '@ifc-lite/sdk';
 import type { ViewerState } from '../../store/index.js';
 
 /** Sentinel model ID used for the legacy single-model path */
 export const LEGACY_MODEL_ID = 'default';
+
+/** Key used for the mutation view in a legacy single-model session. */
+export const LEGACY_MUTATION_MODEL_ID = '__legacy__';
+
+export const LEGACY_MUTATION_MODEL_IDS: readonly string[] = [LEGACY_MUTATION_MODEL_ID, LEGACY_MODEL_ID, 'legacy'];
+
+/** Resolve historical keys in the same order for every legacy model reader. */
+export function getLegacyMutationView<T>(views: ReadonlyMap<string, T>): T | undefined {
+  for (const id of LEGACY_MUTATION_MODEL_IDS) {
+    const view = views.get(id);
+    if (view !== undefined) return view;
+  }
+  return undefined;
+}
+
+type LegacySourceState = Pick<ViewerState, 'models' | 'ifcDataStore'>;
+
+/** Real federated identifiers keep their own overlay, even if they spell an old alias. */
+export function isLegacySourceRef(state: LegacySourceState, modelId: string): boolean {
+  return LEGACY_MUTATION_MODEL_IDS.includes(modelId)
+    && (state.models.size === 0 || (!!state.ifcDataStore && !state.models.has(modelId)));
+}
+
+/** Resolve the overlay paired with the legacy source during single-model
+ * loading and while another model is being added to the federation. */
+export function getLegacySourceMutationView(
+  state: LegacySourceState & { mutationViews: ReadonlyMap<string, MutablePropertyView> },
+) {
+  for (const alias of LEGACY_MUTATION_MODEL_IDS) {
+    const view = state.mutationViews.get(alias);
+    if (!view) continue;
+    if (!isLegacySourceRef(state, alias)) continue;
+    const viewStore = mutationViewBaseStore(view);
+    if (state.ifcDataStore && viewStore && viewStore !== state.ifcDataStore) continue;
+    return view;
+  }
+  return null;
+}
+
+export function isLegacyMutationRef(state: Pick<ViewerState, 'models'>, modelId: string): boolean {
+  return state.models.size === 0 && LEGACY_MUTATION_MODEL_IDS.includes(modelId);
+}
+
+export function normalizeMutationModelId(state: Pick<ViewerState, 'models'>, modelId: string): string {
+  return isLegacyMutationRef(state, modelId) ? LEGACY_MUTATION_MODEL_ID : modelId;
+}
 
 /** Minimal model shape needed by the SDK adapters.
  *
@@ -36,19 +84,18 @@ export interface ModelLike {
   fileSize: number;
   loadedAt: number;
   idOffset: number;
-  maxExpressId: number;
 }
 
 /**
  * Resolve a model by ID — checks the multi-model Map first,
  * then falls back to the legacy single-model state.
  */
-export function getModelForRef(state: ViewerState, modelId: string): ModelLike | undefined {
+export function getModelForRef(state: Pick<ViewerState, 'models' | 'ifcDataStore'>, modelId: string): ModelLike | undefined {
   const model = state.models.get(modelId);
   if (model) return model;
 
-  // Legacy single-model fallback
-  if ((modelId === LEGACY_MODEL_ID || modelId === 'legacy') && state.models.size === 0 && state.ifcDataStore) {
+  // A top-level source may remain available while another model enters the federation.
+  if (isLegacySourceRef(state, modelId) && state.ifcDataStore) {
     return buildLegacyModel(state.ifcDataStore);
   }
 
@@ -59,7 +106,7 @@ export function getModelForRef(state: ViewerState, modelId: string): ModelLike |
  * List all model entries — from the multi-model Map or the legacy state.
  * Returns [modelId, model][] pairs.
  */
-export function getAllModelEntries(state: ViewerState): [string, ModelLike][] {
+export function getAllModelEntries(state: Pick<ViewerState, 'models' | 'ifcDataStore'>): [string, ModelLike][] {
   if (state.models.size > 0) {
     return [...state.models.entries()];
   }
@@ -72,6 +119,31 @@ export function getAllModelEntries(state: ViewerState): [string, ModelLike][] {
   return [];
 }
 
+/**
+ * The model an SDK call means when it names none — `bim.export.ifc()` with no
+ * ref list (#4738). The user's active selection wins when that id still
+ * resolves to an entry, then the first entry of the unified list, which is the
+ * legacy single-model store when the federated Map is empty. `undefined` when
+ * nothing is loaded.
+ *
+ * "Resolves to an entry" is not "has parsed data": a metadata-only entry (Tauri
+ * native load, `ifcDataStore: null`) is returned like any other, and the caller
+ * reports it cannot export that model rather than silently exporting a
+ * different one.
+ *
+ * Three neighbours answer the same question with their own precedence and are
+ * deliberately NOT changed here: `model-adapter.ts`'s `activeId` (does not
+ * check the id resolves), and `schedule-adapter.ts` / `structural-adapter.ts`'s
+ * `resolveStore` (legacy store before the active selection). Aligning them
+ * would move which model those namespaces read in a federated session, which
+ * is a behaviour change of its own.
+ */
+export function getDefaultModelId(state: ViewerState): string | undefined {
+  const active = state.activeModelId;
+  if (active && getModelForRef(state, active)) return active;
+  return getAllModelEntries(state)[0]?.[0];
+}
+
 function buildLegacyModel(dataStore: IfcDataStore): ModelLike {
   return {
     id: LEGACY_MODEL_ID,
@@ -81,6 +153,5 @@ function buildLegacyModel(dataStore: IfcDataStore): ModelLike {
     fileSize: dataStore.source?.byteLength ?? 0,
     loadedAt: 0,
     idOffset: 0,
-    maxExpressId: dataStore.entities?.count ?? 0,
   };
 }

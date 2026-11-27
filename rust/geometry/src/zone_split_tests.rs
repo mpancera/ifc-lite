@@ -13,6 +13,7 @@
 
 use super::*;
 use crate::kernel::arrangement::box_mesh;
+use crate::kernel::budget;
 
 /// A 6 x 1 x 1 m wall from x = 0 to x = 6, so a boundary at x = c leaves
 /// exactly `c` m3 below it. Volume 6.
@@ -29,6 +30,12 @@ fn slab(x0: f64, x1: f64) -> ZoneShape {
     })
 }
 
+/// `split_mesh_by_zones` for a host known to enclose volume.
+fn split_by(host: &[Tri], zones: &[ZoneShape]) -> ZoneSplit {
+    let _caps = budget::GLOBAL_CAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    split_mesh_by_zones(host, zones).expect("this host encloses volume")
+}
+
 fn volume_of(split: &ZoneSplit, zone: Option<usize>) -> f64 {
     split
         .pieces
@@ -43,8 +50,52 @@ fn volume_of(split: &ZoneSplit, zone: Option<usize>) -> f64 {
 const EPS: f64 = 1e-9;
 
 #[test]
+fn issue_7292_zone_budget_failure_cannot_report_a_complete_empty_split() {
+    let _caps = budget::GLOBAL_CAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let profile = budget::TestProfile::new();
+    let _element = budget::enter_element();
+    let host = box_mesh([0.; 3], [1.; 3]);
+    let occupied = ZoneBox { center: [0.5; 3], size: [1.; 3], rotation_y: 0. };
+    let zones = [ZoneShape::Box(occupied)];
+
+    // Establish actual intersection work, without pinning an incidental count.
+    profile.set_cap(Some(budget::DEFAULT_CAP));
+    budget::begin();
+    let operand = orient_outward(host.clone());
+    let intersection = boolean(&operand, &operand, BoolOp::Intersection);
+    assert!(!intersection.is_empty() && !budget::tripped());
+    assert!((signed_volume_of(&intersection) - 1.).abs() < EPS);
+    assert!(budget::count() > 0, "the real coincident boxes must exercise budgeted work");
+
+    profile.set_cap(Some(1));
+    budget::begin();
+    let interrupted = split_mesh_by_zones(&host, &zones);
+    assert!(budget::tripped(), "the actual split must exhaust its tiny work budget");
+    assert!(interrupted.is_none(),
+        "an aborted intersection must not become a successful whole-host remainder");
+
+    // A new operation must recover from the preceding per-operation trip.
+    profile.set_cap(Some(budget::DEFAULT_CAP));
+    let split = split_mesh_by_zones(&host, &zones).expect("the occupied zone completes normally");
+    assert!(!budget::tripped() && !split.remainder_failed);
+    assert_eq!(split.pieces.len(), 1);
+    assert_eq!(split.pieces[0].zone, Some(0));
+    assert!((volume_of(&split, Some(0)) - 1.).abs() < EPS);
+    assert!(split.sum_error_rel() < 1e-12);
+
+    // This touching zone enters the kernel but has genuinely empty volume.
+    let touching = [ZoneShape::Box(ZoneBox { center: [1.5, 0.5, 0.5], ..occupied })];
+    let empty = split_mesh_by_zones(&host, &touching).expect("a genuine empty intersection completes");
+    assert!(!budget::tripped() && !empty.remainder_failed);
+    assert_eq!(empty.pieces.len(), 1);
+    assert_eq!(empty.pieces[0].zone, None);
+    assert!((volume_of(&empty, None) - 1.).abs() < EPS);
+    assert!(empty.sum_error_rel() < 1e-12);
+}
+
+#[test]
 fn wall_crossing_one_boundary_splits_at_the_known_fraction() {
-    let split = split_mesh_by_zones(&wall(), &[slab(-1.0, 2.0), slab(2.0, 7.0)]);
+    let split = split_by(&wall(), &[slab(-1.0, 2.0), slab(2.0, 7.0)]);
 
     assert!((split.whole_volume - 6.0).abs() < EPS, "whole {}", split.whole_volume);
     assert!((volume_of(&split, Some(0)) - 2.0).abs() < EPS, "{:?}", split.pieces.iter().map(|p| (p.zone, p.volume)).collect::<Vec<_>>());
@@ -54,7 +105,7 @@ fn wall_crossing_one_boundary_splits_at_the_known_fraction() {
 
 #[test]
 fn wall_crossing_two_boundaries_gives_three_pieces() {
-    let split = split_mesh_by_zones(&wall(), &[slab(-1.0, 1.5), slab(1.5, 4.5), slab(4.5, 7.0)]);
+    let split = split_by(&wall(), &[slab(-1.0, 1.5), slab(1.5, 4.5), slab(4.5, 7.0)]);
 
     assert!((volume_of(&split, Some(0)) - 1.5).abs() < EPS);
     assert!((volume_of(&split, Some(1)) - 3.0).abs() < EPS);
@@ -65,7 +116,7 @@ fn wall_crossing_two_boundaries_gives_three_pieces() {
 
 #[test]
 fn an_element_wholly_inside_one_zone_is_one_piece_of_the_whole() {
-    let split = split_mesh_by_zones(&wall(), &[slab(-1.0, 7.0)]);
+    let split = split_by(&wall(), &[slab(-1.0, 7.0)]);
 
     assert_eq!(split.pieces.len(), 1);
     assert_eq!(split.pieces[0].zone, Some(0));
@@ -76,7 +127,7 @@ fn an_element_wholly_inside_one_zone_is_one_piece_of_the_whole() {
 fn an_element_in_no_zone_becomes_the_remainder_rather_than_vanishing() {
     // The zone is far away in x. Returning no pieces here would say the
     // element ceased to exist, which is the one answer a split must never give.
-    let split = split_mesh_by_zones(&wall(), &[slab(100.0, 110.0)]);
+    let split = split_by(&wall(), &[slab(100.0, 110.0)]);
 
     assert_eq!(split.pieces.len(), 1);
     assert_eq!(split.pieces[0].zone, None);
@@ -86,7 +137,7 @@ fn an_element_in_no_zone_becomes_the_remainder_rather_than_vanishing() {
 
 #[test]
 fn part_of_an_element_outside_every_zone_survives_as_the_remainder() {
-    let split = split_mesh_by_zones(&wall(), &[slab(-1.0, 2.0)]);
+    let split = split_by(&wall(), &[slab(-1.0, 2.0)]);
 
     assert!((volume_of(&split, Some(0)) - 2.0).abs() < EPS);
     assert!((volume_of(&split, None) - 4.0).abs() < EPS);
@@ -99,7 +150,7 @@ fn an_element_ending_exactly_on_a_boundary_plane_produces_no_second_piece() {
     // common case in takt planning, where sets tile a building on shared
     // planes, and it is why v1's straddle epsilon is negative. A zero-thickness
     // "piece" here would be a solid of no volume for a user to wonder about.
-    let split = split_mesh_by_zones(&wall(), &[slab(-1.0, 6.0), slab(6.0, 9.0)]);
+    let split = split_by(&wall(), &[slab(-1.0, 6.0), slab(6.0, 9.0)]);
 
     assert_eq!(split.pieces.len(), 1, "{:?}", split.pieces.iter().map(|p| (p.zone, p.volume)).collect::<Vec<_>>());
     assert_eq!(split.pieces[0].zone, Some(0));
@@ -120,7 +171,7 @@ fn a_rotated_zone_cuts_where_its_own_axes_are() {
     // z extent (0.5 m, centred at z = 0.5) still covers the wall, so a naive
     // implementation passes. Hence the second, tighter zone below.
     let inside = ZoneShape::Box(ZoneBox { center: [3.0, 0.5, 0.5], size: [8.0, 4.0, 8.0], rotation_y: 45f64.to_radians() });
-    let split = split_mesh_by_zones(&wall(), &[inside]);
+    let split = split_by(&wall(), &[inside]);
     assert!((volume_of(&split, Some(0)) - 6.0).abs() < EPS);
 
     // A thin blade, 0.4 m across its local x, standing at 45 degrees through
@@ -130,7 +181,7 @@ fn a_rotated_zone_cuts_where_its_own_axes_are() {
     // (0.4/cos45) * 1 in the x/z plane... which is 0.5656854 m2, times the 1 m
     // height = 0.5656854 m3. Unrotated, the same blade would take 0.4 m3.
     let blade = ZoneShape::Box(ZoneBox { center: [3.0, 0.5, 0.5], size: [0.4, 4.0, 8.0], rotation_y: 45f64.to_radians() });
-    let split = split_mesh_by_zones(&wall(), &[blade]);
+    let split = split_by(&wall(), &[blade]);
     let expected = 0.4 * 2f64.sqrt();
     assert!(
         (volume_of(&split, Some(0)) - expected).abs() < 1e-6,
@@ -143,7 +194,7 @@ fn a_rotated_zone_cuts_where_its_own_axes_are() {
 
 #[test]
 fn a_zone_bigger_than_the_element_takes_all_of_it_and_leaves_no_remainder() {
-    let split = split_mesh_by_zones(
+    let split = split_by(
         &wall(),
         &[ZoneShape::Box(ZoneBox { center: [3.0, 0.5, 0.5], size: [100.0, 100.0, 100.0], rotation_y: 0.0 })],
     );
@@ -153,7 +204,7 @@ fn a_zone_bigger_than_the_element_takes_all_of_it_and_leaves_no_remainder() {
 
 #[test]
 fn a_zero_size_zone_takes_nothing_and_does_not_crash() {
-    let split = split_mesh_by_zones(
+    let split = split_by(
         &wall(),
         &[ZoneShape::Box(ZoneBox { center: [3.0, 0.5, 0.5], size: [0.0, 0.0, 0.0], rotation_y: 0.0 })],
     );
@@ -162,10 +213,49 @@ fn a_zero_size_zone_takes_nothing_and_does_not_crash() {
 }
 
 #[test]
-fn an_empty_host_produces_nothing_rather_than_panicking() {
-    let split = split_mesh_by_zones(&[], &[slab(0.0, 1.0)]);
-    assert_eq!(split.whole_volume, 0.0);
-    assert!(split.pieces.iter().all(|p| p.volume.abs() < EPS));
+fn a_host_without_volume_is_refused_not_split_perfectly() {
+    // An empty host used to come back as a split with one zero-triangle
+    // "remainder", `sum_error_rel() == 0.0` and `remainder_failed == false`:
+    // every signal the wasm boundary forwards read as a perfect split (the
+    // predecessor of this test asserted exactly that). Mutation: drop the
+    // `is_empty` and `NO_VOLUME_REL` guards in `split_mesh_by_zones` and every
+    // case below becomes `Some` with a perfect-looking report.
+    assert!(split_mesh_by_zones(&[], &[slab(0.0, 1.0)]).is_none(), "empty host");
+    // A non-empty shell that encloses nothing is the same outcome: a flat
+    // double-sided sheet has a divergence sum of exactly zero.
+    let sheet: Vec<Tri> = vec![
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+    ];
+    assert!(split_mesh_by_zones(&sheet, &[slab(0.0, 1.0)]).is_none(), "zero-volume sheet");
+    // Tilted and away from the origin, the same sheet sums to rounding residue
+    // rather than to zero, which an absolute zero test lets through as a
+    // perfect split. Mutation: compare against `f64::MIN_POSITIVE` again and
+    // this case reads `Some`.
+    let residue = tilted_double_sided_sheet();
+    assert!(
+        split_mesh_by_zones(&residue, &[slab(0.0, 10.0)]).is_none(),
+        "a tilted double-sided sheet encloses no volume"
+    );
+}
+
+/// A 6 by 6 grid on the plane z = 0.3x + 0.1y + 2.7, offset from the origin,
+/// front triangles then the same triangles reversed.
+fn tilted_double_sided_sheet() -> Vec<Tri> {
+    let p = |i: usize, j: usize| {
+        let (x, y) = (3.1 + 0.37 * i as f64, -1.3 + 0.41 * j as f64);
+        [x, y, 0.3 * x + 0.1 * y + 2.7]
+    };
+    let mut front = Vec::new();
+    for i in 0..6 {
+        for j in 0..6 {
+            front.push([p(i, j), p(i + 1, j), p(i + 1, j + 1)]);
+            front.push([p(i, j), p(i + 1, j + 1), p(i, j + 1)]);
+        }
+    }
+    let back: Vec<Tri> = front.iter().map(|t| [t[0], t[2], t[1]]).collect();
+    front.extend(back);
+    front
 }
 
 #[test]
@@ -177,7 +267,7 @@ fn an_inward_wound_host_still_yields_positive_pieces() {
     for t in &mut flipped {
         t.swap(1, 2);
     }
-    let split = split_mesh_by_zones(&flipped, &[slab(-1.0, 2.0), slab(2.0, 7.0)]);
+    let split = split_by(&flipped, &[slab(-1.0, 2.0), slab(2.0, 7.0)]);
 
     assert!(split.whole_volume > 0.0, "whole {}", split.whole_volume);
     assert!((volume_of(&split, Some(0)) - 2.0).abs() < EPS);
@@ -189,7 +279,7 @@ fn overlapping_zones_are_reported_by_the_sum_invariant_rather_than_hidden() {
     // v1 does not forbid overlapping zones. Both pieces are individually
     // correct and together they double-count the overlap, so the honest signal
     // is the invariant failing loudly rather than a plausible-looking split.
-    let split = split_mesh_by_zones(&wall(), &[slab(-1.0, 4.0), slab(2.0, 7.0)]);
+    let split = split_by(&wall(), &[slab(-1.0, 4.0), slab(2.0, 7.0)]);
 
     assert!((volume_of(&split, Some(0)) - 4.0).abs() < EPS);
     assert!((volume_of(&split, Some(1)) - 4.0).abs() < EPS);
@@ -206,7 +296,7 @@ fn the_pieces_are_closed_solids_and_not_merely_clipped_shells() {
     // for a CLOSED surface: the divergence sum of an open shell depends on the
     // point it is measured about. This is what distinguishes a real split from
     // a set of cut-open faces that happen to sum correctly.
-    let split = split_mesh_by_zones(&wall(), &[slab(-1.0, 2.0), slab(2.0, 7.0)]);
+    let split = split_by(&wall(), &[slab(-1.0, 2.0), slab(2.0, 7.0)]);
     for piece in &split.pieces {
         let shifted: Vec<Tri> = piece
             .tris
@@ -236,7 +326,7 @@ fn a_prism_zone_cuts_by_its_polygon_and_not_by_its_bounding_box() {
         min_y: -1.0,
         max_y: 2.0,
     };
-    let split = split_mesh_by_zones(&wall(), &[prism]);
+    let split = split_by(&wall(), &[prism]);
 
     assert!(
         (volume_of(&split, Some(0)) - 3.0).abs() < 1e-6,
@@ -259,7 +349,7 @@ fn two_prisms_tiling_the_plan_split_the_element_between_them() {
         min_y: -1.0,
         max_y: 2.0,
     };
-    let split = split_mesh_by_zones(&wall(), &[lower, upper]);
+    let split = split_by(&wall(), &[lower, upper]);
 
     assert!(volume_of(&split, None) < 1e-6, "the tiling should leave no remainder");
     assert!(split.sum_error_rel() < 1e-9, "sum error {}", split.sum_error_rel());
@@ -271,7 +361,7 @@ fn two_prisms_tiling_the_plan_split_the_element_between_them() {
 #[test]
 fn a_prism_with_too_few_points_takes_nothing_rather_than_panicking() {
     let degenerate = ZoneShape::Prism { footprint: vec![[0.0, 0.0], [1.0, 0.0]], min_y: -1.0, max_y: 2.0 };
-    let split = split_mesh_by_zones(&wall(), &[degenerate]);
+    let split = split_by(&wall(), &[degenerate]);
     assert!(volume_of(&split, Some(0)) < EPS);
     assert!((volume_of(&split, None) - 6.0).abs() < EPS);
 }
@@ -282,7 +372,7 @@ fn oriented_key(t: &Tri) -> String {
     let start = (0..3)
         .min_by(|&a, &b| {
             let (x, y) = (t[a], t[b]);
-            x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
+            x.partial_cmp(&y).expect("finite test vertex")
         })
         .unwrap_or(0);
     (0..3)
@@ -327,7 +417,7 @@ fn a_tiling_leaves_no_membrane_inside_the_remainder() {
     // against the host, so BOTH survive into the remainder as a zero-volume
     // membrane. Volume cannot see it (the pair cancels), which is why the
     // assertion is on the faces rather than on any number.
-    let split = split_mesh_by_zones(&wall(), &[slab(0.0, 2.0), slab(2.0, 4.0)]);
+    let split = split_by(&wall(), &[slab(0.0, 2.0), slab(2.0, 4.0)]);
 
     let remainder = split
         .pieces
@@ -360,7 +450,7 @@ fn a_prism_tiling_leaves_no_membrane_either() {
         min_y: -1.0,
         max_y: 2.0,
     };
-    let split = split_mesh_by_zones(&wall(), &[lower, upper]);
+    let split = split_by(&wall(), &[lower, upper]);
     let remainder = split
         .pieces
         .iter()
@@ -376,7 +466,7 @@ fn a_zone_the_element_only_abuts_is_not_subtracted_from_the_remainder() {
     // Subtracting it anyway would hand the arrangement an exactly-coplanar
     // operand with no intersection to show for it, and a refusal there
     // (`difference_all` returns None) would lose the remainder entirely.
-    let split = split_mesh_by_zones(&wall(), &[slab(0.0, 2.0), slab(6.0, 9.0)]);
+    let split = split_by(&wall(), &[slab(0.0, 2.0), slab(6.0, 9.0)]);
 
     let remainder = split.pieces.iter().find(|p| p.zone.is_none());
     assert!(remainder.is_some(), "the x = 2..6 remainder was lost");

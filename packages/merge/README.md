@@ -7,15 +7,36 @@ plans merges at **(entity, componentKey)** granularity: an architect
 editing a wall's placement and an agent editing `Pset_FireSafety` on the
 same wall is *not* a conflict.
 
+Merge planning, comparison, rebase, revert, and snapshot hashing require the
+shared diff runtime to be initialized once. These APIs remain synchronous after
+`await initDiff()`. Failed initialization can be retried; applications should
+initialize at their asynchronous startup boundary.
+
+```bash
+npm install @ifc-lite/merge @ifc-lite/diff
+```
+
 ```ts
+import { initDiff } from '@ifc-lite/diff';
+import type { IfcxFile } from '@ifc-lite/ifcx';
 import {
   planThreeWayMerge,
   applyResolutions,
   buildMergeLayer,
 } from '@ifc-lite/merge';
 
+await initDiff();
+
 // A = the candidate layer's base, O = the target ref's state,
 // T = the candidate applied to A (all ordered weakest-first).
+declare const ancestor: readonly IfcxFile[];
+declare const ours: readonly IfcxFile[];
+declare const theirs: readonly IfcxFile[];
+// Content hash of the stack the merge applies on top of, and the id of
+// the candidate layer being merged.
+declare const stackHash: string;
+declare const candidate: string;
+
 const plan = planThreeWayMerge({ ancestor, ours, theirs });
 // plan.autoOps   — apply cleanly on top of `ours`
 // plan.conflicts — explicit records: concurrent-edit, delete-vs-modify,

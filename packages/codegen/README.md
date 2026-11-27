@@ -21,6 +21,35 @@ node dist/cli.js schemas/IFC4X3.exp --output ./generated/ifc4x3
 ```
 
 Pass `--rust` to also emit Rust type tables (consumed by the ifc-lite Rust core).
+Rust output is public by default. Add `--rust-crate-private` when the generated
+registry is an implementation detail of one crate and must use `pub(crate)`
+instead of becoming part of that crate's public API; the flag has no effect
+unless `--rust` is also present.
+Pass `--rust` to also emit Rust type tables (consumed by the ifc-lite Rust core). To generate
+one exact-name universe across supported releases while keeping the first schema authoritative
+for attributes, pass older schemas with `--rust-supplemental-schema`. Rust generation also
+includes class-shaped rows from `@ifc-lite/data`'s IFC4 family catalog, covering accepted IFC4X1
+entities such as `IfcAlignmentCurve` that are absent from the bundled IFC4 ADD2 EXPRESS file:
+
+```bash
+node dist/cli.js schemas/IFC4X3.exp --rust \
+  --rust-supplemental-schema schemas/IFC4_ADD2_TC1.exp schemas/IFC2X3_TC1.exp
+```
+
+To also emit the typed attribute slots (`slots.rs`, consumed as `ifc_lite_core::slot`), pass
+every other bundled release with `--rust-slot-schema` and the same-position rename table with
+`--rust-slot-renames`. Slots are named by the canonical attribute name, stable positions become
+`Slot<Kind>` consts and positions that move between releases become `SchemaSlot<Kind>`; every
+row of `schemas/attribute-renames.json` is validated against the schemas and a rename whose names
+sit at different positions fails generation. `scripts/check-codegen-sync.mjs` regenerates the
+committed file:
+
+```bash
+node dist/cli.js schemas/IFC4X3.exp --rust \
+  --rust-supplemental-schema schemas/IFC4_ADD2_TC1.exp schemas/IFC2X3_TC1.exp \
+  --rust-slot-schema schemas/IFC2X3_TC1.exp schemas/IFC4_ADD2_TC1.exp schemas/IFC4X1.exp schemas/IFC4X2.exp \
+  --rust-slot-renames schemas/attribute-renames.json
+```
 
 Generated files (one per output directory, e.g. `./generated/ifc4`):
 
@@ -65,6 +94,8 @@ END_ENTITY;
 
 You get a TypeScript interface with full inheritance:
 
+<!-- Reason: shows generator OUTPUT; IfcBuildingElement and IfcWallTypeEnum only exist in the emitted files. -->
+<!-- docs-check: skip -->
 ```typescript
 export interface IfcWall extends IfcBuildingElement {
   PredefinedType?: IfcWallTypeEnum;
@@ -73,6 +104,8 @@ export interface IfcWall extends IfcBuildingElement {
 
 Plus runtime metadata for the same entity:
 
+<!-- Reason: shows generator OUTPUT; SCHEMA_REGISTRY lives in the emitted schema-registry.ts. -->
+<!-- docs-check: skip -->
 ```typescript
 SCHEMA_REGISTRY.IfcWall = {
   parent: 'IfcBuildingElement',

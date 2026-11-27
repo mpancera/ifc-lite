@@ -7,6 +7,7 @@
  */
 
 import type { CodeBlock } from './types.js';
+import { isA2uiFence } from './a2ui-blocks.js';
 
 /**
  * Parse fenced code blocks from a markdown string.
@@ -14,14 +15,19 @@ import type { CodeBlock } from './types.js';
  */
 export function extractCodeBlocks(markdown: string): CodeBlock[] {
   const blocks: CodeBlock[] = [];
-  // Match ```lang\n...code...\n```
-  const regex = /```(\w*)\n([\s\S]*?)```/g;
+  // Match ```lang\n...code...\n```. `\r?` before the newline tolerates CRLF
+  // source text (pasted/Windows-authored messages) - without it, the fence's
+  // opening line never matches, the block is silently treated as plain text,
+  // and its "Run" affordance never appears.
+  const regex = /```(\w*)\r?\n([\s\S]*?)```/g;
   let match: RegExpExecArray | null;
   let index = 0;
 
   while ((match = regex.exec(markdown)) !== null) {
     const language = match[1] || 'js';
     const code = match[2].trim();
+    // A fenced <a2ui> block is UI for the renderer, never a script to run.
+    if (isA2uiFence(match[0])) continue;
 
     // Only extract JS/TS code blocks (skip html, css, json, etc. unless they look like scripts)
     const isExecutable = ['js', 'javascript', 'ts', 'typescript', ''].includes(language.toLowerCase());

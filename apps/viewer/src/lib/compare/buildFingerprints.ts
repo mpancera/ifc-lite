@@ -22,58 +22,47 @@
  * RTC- and origin-relative and would report a moved element as stationary.
  *
  * A federated model whose vertices were re-baked into the anchor's frame has
- * had its boxes re-framed with them (`hooks/ingest/federationAlignAabb.ts`),
- * so both sides of a compare are read in one frame no matter which of them
- * the federation anchored on.
+ * had its boxes re-framed with them (`hooks/ingest/federationAlignAabb.ts`), so
+ * both sides of a compare are read in one frame regardless of anchor.
  *
  * The proved enclosed volume (#1993) rides on `MeshData.geometryVolume` from
- * that same pass, and is the one fingerprint that does NOT survive that trip:
- * the alignment rescales, and no re-measurement is available on this side. It
- * is therefore withheld for a re-baked model rather than re-derived — see
- * `geometryVolumesSurviveAlignment`.
+ * that same pass, and is the one fingerprint that does NOT survive a federation
+ * re-bake (the alignment rescales, and there is no re-measurement on this side),
+ * so it is withheld rather than re-derived — see `geometryVolumesSurviveAlignment`.
  *
  * Scope: every entity that produced at least one mesh, PLUS every `IfcProduct`
- * with a GlobalId — see `compareScope.ts` for why that second half exists and
+ * or `IfcTypeObject` with a GlobalId — see `compareScope.ts` for why that second half exists and
  * where its line is drawn. The mesh-only enumeration this widens made "did it
  * change?" quietly mean "did a renderable thing change?", so a geometry-less
- * `IfcElementAssembly` could have its attributes rewritten, and a geometry-less
- * `IfcSite` could be deleted outright, with the panel reporting neither.
- * Data-only edits on meshed entities were, and remain, detected via the data
- * hash.
+ * `IfcElementAssembly` could have its attributes rewritten, or a geometry-less
+ * `IfcSite` deleted outright, with the panel reporting neither.
  *
  * A product with no mesh carries, in place of a WASM geometry hash, a
- * fingerprint of its COMPOSED WORLD PLACEMENT (`worldPlacement.ts`). Leaving it
- * with no geometry hash at all made the whole geometry channel silent for that
- * population, and an entire re-georeferenced `IfcSite` — moved 40 m, turned 60
- * degrees, subtree and all — was reported as unchanged. It must be the composed
- * transform rather than the local placement: re-georeferencing rewrites the
- * placement *expression* of objects that did not move, and flagging those cries
- * wolf on every corrected model.
+ * fingerprint of its COMPOSED WORLD PLACEMENT (`worldPlacement.ts`) — leaving it
+ * with none at all silenced the whole geometry channel for that population (a
+ * re-georeferenced `IfcSite`, moved and rotated, read as unchanged). It must be
+ * the composed transform, not the local one: re-georeferencing rewrites the
+ * placement *expression* of objects that did not move.
  *
  * The data fingerprint also carries the entity's RESOLVED MATERIAL NAMES,
- * through every `IfcMaterial*` indirection. Material was in no channel at all,
- * so re-specifying an element moved nothing.
+ * resolved CLASSIFICATION REFERENCES, and, for a Qto_ Length/Area/Volume
+ * quantity, the value SCALED TO BASE SI (`quantitySiScale`) — so a re-authored
+ * length unit with no physical quantity change does not read as modified.
  */
 
+import { buildFingerprintBatch } from '@ifc-lite/diff/internal';
 import {
-  buildComponentFingerprints,
-  buildDataFingerprint,
-  type DataFingerprintInput,
+  initDiff,
   type EntityFingerprint,
+  type DataFingerprintInput,
 } from '@ifc-lite/diff';
-import { RelationshipType } from '@ifc-lite/data';
-import {
-  extractAllEntityAttributes,
-  extractAllMaterialsOnDemand,
-  extractPropertiesOnDemand,
-  extractQuantitiesOnDemand,
-  type IfcDataStore,
-} from '@ifc-lite/parser';
-import { lensMaterialNames } from '../lens-material-names.js';
+import { extractProjectUnits, spatialContainerPath, type IfcDataStore } from '@ifc-lite/parser';
 import type { EntityWorldAabb, MeshData } from '@ifc-lite/geometry';
-import { comparableProductIds } from './compareScope.js';
-import { isGeometricDataName } from './geometricData.js';
-import { isTypeObjectClass, typeObjectTag } from './typeObjectTag.js';
+import { authoredKeyOwnerIds, comparableObjectIds, isProductClass } from './compareScope.js';
+import { resolveAuthoredKeys } from './authoredKeys.js';
+import type { ExtractedPropertySets } from './comparePropertySets.js';
+import { buildDataInput } from './buildDataInput.js';
+export { AUTHORED_KEY_PREFIX } from './authoredKeys.js';
 import { worldPlacementFingerprint, type PlacementComposeCache } from './worldPlacement.js';
 
 /**
@@ -92,19 +81,17 @@ export interface CompareRef {
   /**
    * Did the geometry pass produce anything drawable under {@link globalId}?
    *
-   * `false` for a product that reached the comparison through
-   * `comparableProductIds` alone — there is no mesh and no instanced entry, so
+   * `false` for an object that reached the comparison through
+   * `comparableObjectIds` alone — there is no mesh and no instanced entry, so
    * `setColorOverrides` on this id is a no-op and hiding it suppresses nothing.
    * The overlay needs that distinction: its rule for a modified element is
    * "colour the head copy, hide the base copy so the two do not z-fight", and
-   * that rests on the head copy being drawable. See `overlay.ts`.
-   *
-   * Distinct from `geometryHash === undefined`, which is also what a meshed
-   * entity carries when hashing is off — that entity is still drawn.
+   * that rests on the head copy being drawable (`overlay.ts`). Distinct from
+   * `geometryHash === undefined`, also true of a meshed entity when hashing is
+   * off — that entity is still drawn.
    *
    * OPTIONAL and read as "drawable unless explicitly `false`": a hand-built
-   * ref (tests, older call sites) keeps the pre-existing behaviour rather than
-   * being demoted to invisible by omission.
+   * ref (tests, older call sites) keeps the pre-existing behaviour.
    */
   meshed?: boolean;
 }
@@ -165,11 +152,21 @@ export interface BuildFingerprintsModel {
   geometryVolumesTrusted?: boolean;
   /** This model's federation id offset (0 for the anchor / single-model load). */
   idOffset: number;
+  /**
+   * An authored key to compare on instead of GlobalId (issue #4955): `Tag` or
+   * `<PsetName>.<PropertyName>`. An entity carrying a non-empty, unique value
+   * is keyed `prop:<value>`; every other entity keeps its GlobalId, and a
+   * value two entities share is refused for both (`duplicateAuthoredKeys`).
+   */
+  keyProperty?: string;
+  /** Receives every authored value more than one entity carried. */
+  duplicateAuthoredKeys?: Map<string, number[]>;
 }
+
 
 /**
  * Build one {@link EntityFingerprint} per compared entity in a model — every
- * meshed entity, plus every geometry-less `IfcProduct` (`comparableProductIds`).
+ * meshed entity, plus products and type objects with GlobalIds (`comparableObjectIds`).
  *
  * Entities are de-duplicated by express id (an entity emits several
  * submeshes); the first mesh carrying a `geometryHash` wins (all submeshes of
@@ -181,6 +178,7 @@ export interface BuildFingerprintsModel {
 export async function buildEntityFingerprints(
   model: BuildFingerprintsModel,
 ): Promise<EntityFingerprint<CompareRef>[]> {
+  await initDiff();
   const {
     store,
     meshes,
@@ -194,6 +192,7 @@ export async function buildEntityFingerprints(
   // alignment is a caller whose model was never re-baked, and defaulting to
   // "believe them" keeps the flag a statement about the one case that needs it.
   const volumesTrusted = model.geometryVolumesTrusted !== false;
+  const units = extractProjectUnits(store.source, store.entityIndex); // for quantitySiScale/scaledPropertyValue
 
   // local express id → first geometry hash seen for it (may be undefined when
   // hashing was disabled or the WASM build predates it — data diff still works)
@@ -254,9 +253,9 @@ export async function buildEntityFingerprints(
     }
   }
 
-  // Finally, the products the geometry pass never saw: an IfcElementAssembly
+  // Finally, the products and types the geometry pass never saw: an IfcElementAssembly
   // whose meshes all hang off its IfcRelAggregates parts, an IfcSite, a
-  // placeholder proxy marking a survey origin. They are compared on their data
+  // placeholder proxy or a type without RepresentationMaps. They are compared on their data
   // alone, so they enter with an explicitly UNDEFINED geometry hash — the same
   // value a meshed entity gets when hashing is off, and the value
   // `geometryEqual` reads as "no geometry change" when both sides have it.
@@ -273,7 +272,7 @@ export async function buildEntityFingerprints(
   // cannot go stale across runs.
   const placementCache: PlacementComposeCache = new Map();
   let scanned = 0;
-  for (const localId of comparableProductIds(store)) {
+  for (const localId of comparableObjectIds(store)) {
     if (geometryByLocalId.has(localId)) continue;
     // Not `undefined` — their COMPOSED WORLD PLACEMENT, when they have one.
     // These entities have no mesh, so nothing else can speak for where they
@@ -285,7 +284,12 @@ export async function buildEntityFingerprints(
     // (`undefined`, the prior behaviour) for a product with no placement, an
     // uncomposable chain or a malformed one — see `worldPlacement.ts` for why
     // it must be the composed transform and never the local one.
-    geometryByLocalId.set(localId, worldPlacementFingerprint(store, localId, placementCache));
+    // Only IfcProduct has ObjectPlacement at slot 5. A type has
+    // HasPropertySets there, so never read it as a placement reference.
+    const geometryHash = isProductClass(store.entities.getTypeName(localId))
+      ? worldPlacementFingerprint(store, localId, placementCache)
+      : undefined;
+    geometryByLocalId.set(localId, geometryHash);
     geometryless.add(localId);
     // Placement composition re-reads STEP records, so this scan carries the
     // same responsiveness duty as the extraction loop below (#924): yield
@@ -296,12 +300,26 @@ export async function buildEntityFingerprints(
     }
   }
 
+  // A Pset.Property key uses the same extraction as the data fingerprint.
+  // Cache that pre-pass so large models do not parse every property set twice.
+  const propertySetsById = new Map<number, ExtractedPropertySets>();
+  const authoredKeyOwners = new Set(geometryByLocalId.keys());
+  for (const localId of authoredKeyOwnerIds(store)) authoredKeyOwners.add(localId);
+  const authoredKeys = await resolveAuthoredKeys(
+    store,
+    authoredKeyOwners,
+    model.keyProperty,
+    model.duplicateAuthoredKeys,
+    propertySetsById,
+  );
+
   const fingerprints: EntityFingerprint<CompareRef>[] = [];
+  const inputs: DataFingerprintInput[] = [];
   let processed = 0;
   for (const [localId, geometryHash] of geometryByLocalId) {
     const ifcType = store.entities.getTypeName(localId) || 'IfcProduct';
     const globalId = store.entities.getGlobalId(localId);
-    const key = globalId || `missing:${modelId}:${localId}`;
+    const key = authoredKeys.get(localId) ?? (globalId || `missing:${modelId}:${localId}`);
 
     // One extraction, two fingerprints. `components` is the collision guard on
     // content matching's destructive path (#1891): retiring a real add+delete
@@ -310,7 +328,7 @@ export async function buildEntityFingerprints(
     // the 64-bit data hash cannot. Both are computed from the SAME input
     // object - a sub-hash over a different projection would stop being a
     // collision guard and start rejecting genuine re-export matches.
-    const dataInput = buildDataInput(store, localId, ifcType);
+    const dataInput = buildDataInput(store, localId, ifcType, units, propertySetsById.get(localId));
 
     // The box goes on ONLY when the pass produced one: the engine's contract is
     // that a missing box is `undefined`, and a NaN-bearing object would pass
@@ -321,15 +339,21 @@ export async function buildEntityFingerprints(
     // Same rule for the volume, and the same reason: `NaN` was resolved to
     // absent at the wasm boundary, so a number reaching here is a proved one.
     const volume = volumeByLocalId.get(localId);
+    // Where the element sits, as a name path, for the successor stage's
+    // `position` profile (issue #4955). Absent when the store's hierarchy does
+    // not contain it, which the engine reads as "no evidence", never as "moved".
+    const container = spatialContainerPath(store, localId);
 
+    inputs.push(dataInput);
     fingerprints.push({
       key,
       ifcType,
-      dataHash: buildDataFingerprint(dataInput),
-      components: buildComponentFingerprints(dataInput),
+      dataHash: '',
+      components: {},
       geometryHash,
       ...(aabb ? { aabb } : {}),
       ...(volume !== undefined ? { volume } : {}),
+      ...(container !== undefined ? { container } : {}),
       ref: { modelId, localId, globalId: localId + idOffset, meshed: !geometryless.has(localId) },
     });
 
@@ -342,104 +366,13 @@ export async function buildEntityFingerprints(
     }
   }
 
+  // Hash in the same bounded slices and yield between them, so one large model
+  // doesn't freeze the main thread in a single WASM call (#924). Inputs hash
+  // independently, so slicing doesn't change any result.
+  for (let start = 0; start < inputs.length; start += 1500) {
+    const hashes = buildFingerprintBatch(inputs.slice(start, start + 1500));
+    for (let i = 0; i < hashes.length; i++) Object.assign(fingerprints[start + i], hashes[i]);
+    if (start + 1500 < inputs.length) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
   return fingerprints;
-}
-
-/**
- * Assemble the canonical {@link DataFingerprintInput} for one entity from the
- * store's on-demand extractors. Mirrors the extraction in
- * `examples/threejs-viewer/src/compare.ts`; `@ifc-lite/diff` does the sorting
- * + hashing so base and head produce byte-identical hashes for an unchanged
- * entity.
- */
-function buildDataInput(
-  store: IfcDataStore,
-  localId: number,
-  ifcType: string,
-): DataFingerprintInput {
-  const predefinedType = extractAllEntityAttributes(store, localId).find(
-    (attribute) => attribute.name === 'PredefinedType',
-  )?.value;
-  // `Tag`, and only for a TYPE OBJECT (issue #2021). Type objects reach this
-  // adapter because the wasm pass emits type geometry too (#957/#994 —
-  // geometryClass 1 orphan, 2 instanced type library), and they are exactly the
-  // entities the data hash cannot separate on its own: same name, same class,
-  // no occurrence attributes, differing only in `Tag`. On an OCCURRENCE it stays
-  // out, because there it is the authoring tool's element id rather than design
-  // content and `dataHash` is the content bucket key; see
-  // `DataFingerprintInput.tag`.
-  const tag = isTypeObjectClass(ifcType)
-    ? typeObjectTag(store, localId, ifcType)
-    : undefined;
-
-  // Data vs geometry: placement/coordinate data (elevation, level offsets, …)
-  // is owned by the geometry hash, so strip it from the data fingerprint — a
-  // pure move must read as a geometry change only, never "data · geometry"
-  // (see geometricData.ts).
-  const propertySets = extractPropertiesOnDemand(store, localId)
-    .filter((set) => !isGeometricDataName(set.name))
-    .map((set) => ({
-      name: set.name,
-      properties: set.properties
-        .filter((property) => !isGeometricDataName(property.name))
-        .map((property) => ({ name: property.name, value: property.value })),
-    }))
-    .filter((set) => set.properties.length > 0);
-
-  // Quantities (Volume/Area/Length/…) ARE part of the data story: adding or
-  // removing a quantity set, or editing a quantity, is a real change a
-  // coordinator needs to see (#1198 — they were previously excluded wholesale
-  // and so never reported). They're geometry-*derived*, so a reshape also
-  // recomputes them and reads as "data · geometry" — that's correct, the
-  // numbers genuinely changed. A pure translation leaves Volume/Area/Length
-  // untouched, so it stays a geometry-only change. Values are rounded to the
-  // panel's display precision so re-export float noise can't fabricate a diff.
-  const quantitySets = extractQuantitiesOnDemand(store, localId)
-    .filter((set) => !isGeometricDataName(set.name))
-    .map((set) => ({
-      name: set.name,
-      quantities: set.quantities
-        .filter((quantity) => !isGeometricDataName(quantity.name))
-        .map((quantity) => ({ name: quantity.name, value: roundQuantity(quantity.value) })),
-    }))
-    .filter((set) => set.quantities.length > 0);
-
-  const typeAssignments = store.relationships
-    .getRelated(localId, RelationshipType.DefinesByType, 'inverse')
-    .map((typeId) => ({
-      globalId: store.entities.getGlobalId(typeId) || undefined,
-      name: store.entities.getName(typeId) || undefined,
-      type: store.entities.getTypeName(typeId) || undefined,
-    }));
-
-  // Resolved material NAMES (never entity references — express ids are
-  // reassigned on every save). `extractAllMaterialsOnDemand` is the parser's
-  // canonical resolver: it follows `IfcMaterialLayerSetUsage` /
-  // `IfcMaterialProfileSetUsage` to their sets, and occurrence associations
-  // take precedence over the type's; `lensMaterialNames` then takes the
-  // individual layer / constituent / profile / list-member names, falling back
-  // to the top-level name only when the element has no sub-structure. Two
-  // proxies re-specified from `Soil1` to `topsoil` went unreported before this
-  // — materials were in no comparison channel at all.
-  const materials = extractAllMaterialsOnDemand(store, localId).flatMap(lensMaterialNames);
-
-  return {
-    ifcType,
-    name: store.entities.getName(localId) || undefined,
-    description: store.entities.getDescription(localId) || undefined,
-    objectType: store.entities.getObjectType(localId) || undefined,
-    predefinedType: predefinedType != null ? String(predefinedType) : undefined,
-    tag: tag != null ? String(tag) : undefined,
-    propertySets,
-    quantitySets,
-    typeAssignments,
-    materials,
-  };
-}
-
-/** Round a geometry-derived quantity to the compare panel's display precision
- *  (4 dp) so re-exporting a model with sub-tolerance float jitter doesn't flip
- *  the data hash on an otherwise-identical element. */
-function roundQuantity(value: number): number {
-  return Number.isFinite(value) ? Math.round(value * 1e4) / 1e4 : value;
 }

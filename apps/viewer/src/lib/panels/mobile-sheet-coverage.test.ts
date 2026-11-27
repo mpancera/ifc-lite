@@ -22,7 +22,12 @@
 import '@/test/setup-dom.js';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { createElement, isValidElement, Suspense, type ComponentType, type ReactNode } from 'react';
+import { ChunkErrorBoundary } from '@/components/ChunkErrorBoundary';
+import { PanelModelGate } from '@/components/viewer/PanelModelGate';
+import { AssistantSourceContext } from '@/components/viewer/assistant/AssistantAction';
 import { WORKSPACE_PANELS, getPanelDef } from './registry.js';
+import { DeferredPanel } from './DeferredPanel.js';
 import { renderPanelBody } from './renderPanelBody.js';
 
 describe('workspace panel registry coverage', () => {
@@ -38,15 +43,35 @@ describe('workspace panel registry coverage', () => {
     );
   });
 
-  it('renders a DISTINCT body per panel, so none silently falls through to another', () => {
+  it('renders a DISTINCT body per panel, so none silently falls through to another', async () => {
     // The defect was a fall-through, so identity is the property under test:
     // two ids resolving to the same component is how Compare came out as
     // Properties. Compares the element TYPE, which is the component function.
     const byType = new Map<unknown, string[]>();
     for (const panel of WORKSPACE_PANELS) {
-      const body = renderPanelBody(panel.id, () => {}) as { type?: unknown } | null;
-      const type = body?.type;
-      if (type === undefined) continue;
+      let body = renderPanelBody(panel.id, () => {});
+      // #4243: Layers and Appearance share loading/error hosts, not content.
+      // Compare the actual panel beneath those hosts so the fall-through
+      // regression remains detectable without rejecting legitimate wrappers.
+      // #6720: the no-model gate wraps model-dependent panels the same way,
+      // and the Information panel sits in a plain `<div>` carrying its tour
+      // anchor. Walk down to the first COMPONENT that is not one of those
+      // wrappers. The assistant context supplies scope, not panel content (#6813).
+      // Stopping at a host element would let `properties` report
+      // 'div', unique by construction, so another id falling through to a
+      // bare <PropertiesPanel /> would pass unnoticed.
+      // #9742: a deferred host now takes a cached loader rather than a lazy
+      // child. Resolve its real component: two different loaders for the same
+      // feature must still fail this fall-through check.
+      while (isValidElement<{ children?: ReactNode; load?: () => Promise<{ default: ComponentType<{ onClose: () => void }> }> }>(body) &&
+        (typeof body.type === 'string' || body.type === ChunkErrorBoundary || body.type === Suspense || body.type === PanelModelGate || body.type === AssistantSourceContext || body.type === DeferredPanel)) {
+        body = body.type === DeferredPanel && body.props.load
+          ? createElement((await body.props.load()).default, { onClose: () => {} })
+          : body.props.children;
+      }
+      assert.ok(isValidElement(body), `${panel.id} must have panel content beneath its loading/error hosts`);
+      assert.notEqual(typeof body.type, 'string', `${panel.id} must resolve to a panel component, not a host element`);
+      const type = body.type;
       const ids = byType.get(type) ?? [];
       ids.push(panel.id);
       byType.set(type, ids);
@@ -56,9 +81,35 @@ describe('workspace panel registry coverage', () => {
     assert.deepEqual(shared, [], 'these panel ids render the same component — one is showing the other\'s panel');
   });
 
+  it('keeps each panel component identity stable across host renders (#4243)', () => {
+    // A wrapper allocated inside renderPanelBody would pass distinctness but
+    // remount the active editor on every host render, discarding its local state.
+    // The WHOLE wrapper chain down to the panel is compared, not just the
+    // outermost type: a wrapper allocated one level down (beneath the
+    // chunk boundary or the #6720 no-model gate) remounts just the same. A
+    // component that swaps its own wrapper on a store change is invisible
+    // to this static check; renderPanelBody.no-model.test.tsx mounts one.
+    const typeChain = (node: ReactNode): unknown[] => {
+      const chain: unknown[] = [];
+      let current = node;
+      while (isValidElement<{ children?: ReactNode; load?: unknown }>(current)) {
+        chain.push(current.type);
+        if (current.type === DeferredPanel && current.props.load) chain.push(current.props.load);
+        current = current.props.children;
+      }
+      return chain;
+    };
+    for (const panel of WORKSPACE_PANELS) {
+      const first = typeChain(renderPanelBody(panel.id, () => {}));
+      const next = typeChain(renderPanelBody(panel.id, () => {}));
+      assert.ok(first.length > 0, `${panel.id} renders an element`);
+      assert.deepStrictEqual(first, next, `${panel.id} remounts on host render`);
+    }
+  });
+
   it('gives every registered panel a title for the sheet header', () => {
     const untitled = WORKSPACE_PANELS
-      .filter((panel) => !getPanelDef(panel.id)?.title)
+      .filter((panel) => !getPanelDef(panel.id)?.titleKey)
       .map((panel) => panel.id);
 
     assert.deepEqual(untitled, [], 'these panels would head the mobile sheet with a blank title');

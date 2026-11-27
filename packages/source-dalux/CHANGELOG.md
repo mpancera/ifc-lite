@@ -1,5 +1,81 @@
 # @ifc-lite/source-dalux
 
+## 0.5.0
+
+### Minor Changes
+
+- [#8648](https://github.com/LTplus-AG/ifc-lite/pull/8648) [`da1cf63`](https://github.com/LTplus-AG/ifc-lite/commit/da1cf63ff43962081b3826895cc427de8b1068da) Thanks [@bruadam](https://github.com/bruadam)! - `DaluxBuildProvider` now implements `listRevisions`, so the viewer's file-browser "Versions" panel works for Dalux files. `capabilities.revisionHistory` flips from `false` to `true` to match.
+  
+  Dalux has no endpoint that lists a file's revisions directly — only "fetch this exact revision's content" if you already have its id. Version sets are the way in: `GET /2.1/projects/{p}/version_sets` plus `GET /3.0/.../version_sets/{vs}/files` enumerate every revision a project's snapshots pinned, and sweeping them (new `commit-index.ts`) reconstructs each file's history from that.
+  
+  A history row is a file revision, not a version set: two sets pinning the same revision collapse into one row carrying both set names. The current revision is included even when no set pins it. Rows order by numeric revision number first (highest first), then date, sweep position and revision ID. Missing dates stay blank; raw user IDs are omitted. Incomplete or oversized sweeps are reported as unavailable rather than presented as a complete history.
+
+- [#9526](https://github.com/LTplus-AG/ifc-lite/pull/9526) [`dbb660f`](https://github.com/LTplus-AG/ifc-lite/commit/dbb660fecb80156fa194656005d5c4cfb2eed3ae) Thanks [@bruadam](https://github.com/bruadam)! - The Dalux provider implements `uploadFile` and declares `writeBack: ['new-version', 'new-file', 'new-location']`. It uses Dalux's three-step upload (slot, 4 MiB parts with `Content-Range`, the most the same-origin relay accepts, finalize with `fileId` for a new revision or `folderId` for a new file). It reports `stale-base` and `name-exists` conflicts before sending any bytes, refuses published and shared file areas, refuses folders that require file properties, and carries a file's existing properties onto its new revision. In the browser it needs the relay's upload routes ([#9524](https://github.com/LTplus-AG/ifc-lite/issues/9524)). Part of [#9522](https://github.com/LTplus-AG/ifc-lite/issues/9522).
+
+### Patch Changes
+
+- [#8648](https://github.com/LTplus-AG/ifc-lite/pull/8648) [`da1cf63`](https://github.com/LTplus-AG/ifc-lite/commit/da1cf63ff43962081b3826895cc427de8b1068da) Thanks [@bruadam](https://github.com/bruadam)! - The Dalux revision-history cache now evicts expired project indexes and keeps at most eight, so reopening the browser no longer accumulates full indexes. A pinned label survives a current-file response without `version`, and a newer pinned revision is listed before stale current metadata.
+
+- [#8647](https://github.com/LTplus-AG/ifc-lite/pull/8647) [`ad55253`](https://github.com/LTplus-AG/ifc-lite/commit/ad552530fcf6e4105bb283ee680865b1723fb361) Thanks [@bruadam](https://github.com/bruadam)! - Keep revision-index cache entries scoped to their API client, retry incomplete reads with fresh version-set pins, and use the first valid file timestamp. Project histories beyond the bounded sweep are explicitly incomplete instead of presenting an arbitrary subset as complete.
+- Updated dependencies [[`dbb660f`](https://github.com/LTplus-AG/ifc-lite/commit/dbb660fecb80156fa194656005d5c4cfb2eed3ae)]:
+  - @ifc-lite/plugin-api@0.6.0
+
+## 0.4.1
+
+### Patch Changes
+
+- Updated dependencies [[`7c00fad`](https://github.com/LTplus-AG/ifc-lite/commit/7c00fadaf7bb702f8fe3d9a98541bd1d3db2d3b2)]:
+  - @ifc-lite/plugin-api@0.5.0
+
+## 0.4.0
+
+### Minor Changes
+
+- [#6460](https://github.com/LTplus-AG/ifc-lite/pull/6460) [`9bbe599`](https://github.com/LTplus-AG/ifc-lite/commit/9bbe599a1d256bff7648584517eb258bbe42cb65) Thanks [@louistrue](https://github.com/louistrue)! - Report download progress from the Dropbox, OneDrive/SharePoint and Dalux providers. `@ifc-lite/plugin-api` gains `readWithProgress(response, onProgress, fallbackTotal)`, which streams a response body and calls `DownloadOptions.onProgress` about ten times a second, starting at `(0, total)` and ending at `(byteLength, byteLength)`. When `Content-Length` is missing, the total falls back to the file's listed size. The `@ifc-lite/source-fixture` conformance suite now checks that a provider's download progress only increases and ends at the byte length.
+
+### Patch Changes
+
+- Updated dependencies [[`9bbe599`](https://github.com/LTplus-AG/ifc-lite/commit/9bbe599a1d256bff7648584517eb258bbe42cb65)]:
+  - @ifc-lite/plugin-api@0.4.0
+
+## 0.3.1
+
+### Patch Changes
+
+- [#3370](https://github.com/LTplus-AG/ifc-lite/pull/3370) [`a76bc4e`](https://github.com/LTplus-AG/ifc-lite/commit/a76bc4ec0df4b683b5d03c89ff3f48fa1ab51057) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix "Failed to fetch" downloading a Dalux Box file for an account on a node other than node1.
+  
+  `download()` falls back to a `downloadLink`/revision-content URL Dalux hands back when the file carries no known revision id. For an account on, say, node2, that URL points straight at `node2.field.dalux.com` — not the canonical `node1.field.dalux.com` origin every request in this provider is otherwise built against. The client only ever routed URLs matching that canonical origin through the app's same-origin relay, so this one went out as a direct cross-origin fetch to Dalux, which sends no CORS headers on any node, and the browser blocked it.
+  
+  `getBinary` now recognises a Dalux field-node-shaped URL that lands on a *different* node than `baseUrl` and reroutes it back onto the canonical origin with that node stamped as the relay's `daluxNode` parameter, the same way an explicit node preference is already stamped onto same-origin requests. A genuinely different host (an opaque signed CDN link) is still left byte-for-byte untouched.
+
+- [#3521](https://github.com/LTplus-AG/ifc-lite/pull/3521) [`0e3e71f`](https://github.com/LTplus-AG/ifc-lite/commit/0e3e71fb0a42ea752405a4c54862c8f1159a1ae9) Thanks [@BIMvoice](https://github.com/BIMvoice)! - `toSourceFile` now forwards Dalux's `version` field into `SourceFile.meta.version`. `decodeFile` already decoded it, but the mapper dropped it before it reached the `SourceFile` the host consumes — unlike `fileType`/`fileSize`/`lastModified`, which all reach the produced `SourceFile`, or `fileAreaId`/`folderId`, which already flow through the same `meta` bag. `SourceFile.meta` is documented as the provider-specific pass-through channel, and Dalux has no revision-history API to carry a version label through `SourceRevision` the way the msgraph/SharePoint provider does, so `meta` is the only place this value can reach a consumer.
+
+## 0.3.0
+
+### Minor Changes
+
+- [#2796](https://github.com/LTplus-AG/ifc-lite/pull/2796) [`5103734`](https://github.com/LTplus-AG/ifc-lite/commit/51037344717fe3d4c7c138e03f709a01a19ddccd) Thanks [@louistrue](https://github.com/louistrue)! - Let a Dalux user reach their own node. Dalux assigns each customer a node and
+  prints its base URL beside the API key, but the base URL was fixed at node1, so
+  every customer on node2 or above could not use Dalux Box at all. A new optional
+  "API base URL" preference accepts the URL Dalux shows them.
+  
+  Only the node NAME is taken from that URL, and the relay assembles the origin
+  from an anchored allowlist. A caller-supplied base URL is never forwarded,
+  because `/api/dalux` is unauthenticated and publicly reachable: any host the
+  relay can be aimed at becomes reachable by anyone through our egress IPs.
+  Building the origin ourselves bounds that to Dalux.
+
+### Patch Changes
+
+- [#2807](https://github.com/LTplus-AG/ifc-lite/pull/2807) [`a257092`](https://github.com/LTplus-AG/ifc-lite/commit/a2570927c5496fc4a6e3a54183a4f6d99c6f5edf) Thanks [@louistrue](https://github.com/louistrue)! - Fix the Dalux node selection in local development, which was inert. The dev
+  proxy was given a `router` callback to pick the upstream per request, but Vite
+  has no such option: it uses `http-proxy-3`, while `router` belongs to
+  `http-proxy-middleware`. The callback was silently ignored, so a developer on a
+  non-default node still reached node1.
+  
+  Dev now serves `/api/dalux` with the same relay handler production uses, rather
+  than a second proxy configuration that can drift from it.
+
 ## 0.2.3
 
 ### Patch Changes

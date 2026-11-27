@@ -3,17 +3,17 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * File-command surface shared by every desktop toolbar style (classic
- * `MainToolbar` and the ribbon). Owns the Open / Add Model / Refresh
- * flows, the hidden file inputs, and the global `ifc-lite:*` load
- * events, so both toolbars drive the exact same load pipeline and the
- * logic lives once. Exactly one toolbar mounts at a time, so the
- * window listeners registered here never double-fire.
+ * Shared file-command surface for desktop and mobile. Owns the Open / Add Model / Refresh
+ * flows, hidden file inputs, and global `ifc-lite:*` load events. The active toolbar
+ * mounts it once, so the window listeners never double-fire.
  */
 
-import React, { useRef, useState, useCallback, useEffect, useMemo } from 'react';
+import { isFeatureEnabled } from '@/lib/features';
+import React, { Suspense, useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useViewerStore, isIfcxDataStore, type FederatedModel } from '@/store';
-import { useIfc } from '@/hooks/useIfc';
+import { useIfcLoader } from '@/hooks/useIfcLoader';
+import { useIfcFederation } from '@/hooks/useIfcFederation';
+import { selectCanRefreshModels, selectHasModelsLoaded } from '@/hooks/model-presence';
 import { recordRecentFiles, cacheFileBlobs } from '@/lib/recent-files';
 import {
   supportsFileSystemAccess,
@@ -21,26 +21,39 @@ import {
   readFreshFile,
 } from '@/services/file-system-access';
 import { toast } from '@/components/ui/toast';
+import { refuseWhileWorkflowBusy } from '@/lib/flow/workflow-busy-refusal';
+import { startWorkflowRun } from '@/lib/flow/run-session';
+import { lazyChunk } from '@/lib/lazy-chunk';
+import { useCollabShareReview } from '@/lib/collab/share-review';
+import { useTranslation } from '@/i18n';
 import { isCollabEnabled } from '@/lib/collab/config';
 import { ingestDxfFiles, splitDxfFiles } from '@/hooks/ingest/dxfIngest';
-import { ShareDialog } from '../ShareDialog';
+import { reportFileOpenRejected } from '@/hooks/ingest/fileOpenRejected';
+import { usePreparedModelFileRoute } from '@/hooks/ingest/usePreparedModelFileRoute';
+import { useFileHostRegistration } from './useFileHostRegistration';
+import { isIfcxModelFile, useAgentModelLoader } from './useAgentModelLoader';
+import { FederationSetupControls } from '../FederationSetupControls';
 
-/** Extensions the viewer can ingest (IFC / IFCX / GLB / point clouds). */
-export function isSupportedModelFile(f: File): boolean {
-  const n = f.name.toLowerCase();
-  return n.endsWith('.ifc') || n.endsWith('.ifcx') || n.endsWith('.ifczip') || n.endsWith('.glb')
-    || n.endsWith('.las') || n.endsWith('.laz') || n.endsWith('.ply') || n.endsWith('.pcd')
-    || n.endsWith('.e57') || n.endsWith('.pts') || n.endsWith('.xyz');
-}
+import { FILE_ACCEPT, isModelSidecarFile, isSupportedModelFile } from '@/services/supported-model-files';
+import { captureModelTags, restoreModelTags } from '@/lib/model-tags/carry-over';
 
-/** Case-insensitive IFCX check (filenames are accepted case-insensitively). */
-function isIfcxModelFile(f: File): boolean {
-  return f.name.toLowerCase().endsWith('.ifcx');
-}
+// Share the import between the lazy UI and the operation that needs its consent surface.
+let shareChunkFailed = false;
+const importShareDialog = () => import('../ShareDialog').then(module => ({ default: module.ShareDialog }), (error: unknown) => {
+  shareChunkFailed = true;
+  useCollabShareReview.setState({ dialogOpen: false, candidate: null });
+  throw error;
+});
+let shareDialogLoad: ReturnType<typeof importShareDialog> | undefined;
+const loadShareDialog = () => shareDialogLoad ??= importShareDialog();
+const ShareDialog = lazyChunk(loadShareDialog);
 
-// `.dxf` files are 2D reference underlays, not models: they split off to
-// the DXF ingest path (issue #1782) before model routing.
-const FILE_ACCEPT = '.ifc,.ifcx,.ifczip,.glb,.las,.laz,.ply,.pcd,.e57,.pts,.xyz,.dxf';
+// FILE_ACCEPT offers `.dxf` while `isSupportedModelFile` rejects it: DXF
+// files are 2D reference underlays, not models, and split off to the DXF
+// ingest path (issue #1782) before model routing.
+
+/** Re-exported so the toolbar's existing call sites keep their import path. */
+export { isSupportedModelFile };
 
 export interface FileCommands {
   /**
@@ -66,36 +79,39 @@ export interface FileCommands {
 }
 
 export function useFileCommands(): FileCommands {
+  const { t } = useTranslation();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const addModelInputRef = useRef<HTMLInputElement>(null);
-  const {
-    loadFile,
-    loading,
-    geometryResult,
-    ifcDataStore,
-    models,
-    clearAllModels,
-    loadFilesSequentially,
-    loadFederatedIfcx,
-    addIfcxOverlays,
-    addModel,
-  } = useIfc();
+  // Narrow selectors (#6232 perf): `useIfc()` subscribes to `models` and
+  // `geometryResult`, re-rendering the toolbar on every geometry update.
+  const { loadFile } = useIfcLoader();
+  const { loadFilesSequentially, loadFederatedIfcx, addIfcxOverlays, addModel } = useIfcFederation(loadFile);
+  const ifcDataStore = useViewerStore((s) => s.ifcDataStore);
+  const clearAllModels = useViewerStore((s) => s.clearAllModels);
   const resetViewerState = useViewerStore((state) => state.resetViewerState);
 
   // Share dialog host. Owned here (not by a toolbar or tab panel) because
-  // this hook is mounted by whichever toolbar style is active for the whole
-  // session, while ribbon tab panels unmount on tab switch/collapse — the
+  // this hook is mounted by the active toolbar for the whole session, while its
+  // tab panels unmount on tab switch/collapse — the
   // `ifc-lite:open-share-dialog` event (RoomPanel's "Create a room") must
   // always find a live listener.
   const collabEnabled = useMemo(() => isCollabEnabled(), []);
-  const [shareDialogOpen, setShareDialogOpen] = useState(false);
-  const openShareDialog = useCallback(() => setShareDialogOpen(true), []);
+  // Defer the first mount until a user or agent requests sharing. Keep the
+  // dialog mounted after that so its close effects and room state still run.
+  const [shareDialogOpen, setShareDialogOpen] = useState<boolean | null>(null);
+  // Mark Share open at the request, before the lazy dialog mounts, so collab.prepareRoom refuses meanwhile.
+  // Set at the request itself, so an unmount before the next render still clears what this instance opened.
+  const shareRequestedRef = useRef(false); if (shareDialogOpen === false) shareRequestedRef.current = false;
+  const requestShareDialog = useCallback(() => { shareRequestedRef.current = true; if (!shareChunkFailed) useCollabShareReview.setState({ dialogOpen: true }); setShareDialogOpen(true); }, []);
+  const openShareDialog = requestShareDialog;
+  // This instance's dialog mounts under its component: a request it made must not stay open after it unmounts.
+  useEffect(() => () => { if (shareRequestedRef.current) useCollabShareReview.setState({ dialogOpen: false }); }, []);
   useEffect(() => {
     if (!collabEnabled) return;
-    const shareHandler = () => setShareDialogOpen(true);
+    const shareHandler = requestShareDialog;
     window.addEventListener('ifc-lite:open-share-dialog', shareHandler);
     return () => window.removeEventListener('ifc-lite:open-share-dialog', shareHandler);
-  }, [collabEnabled]);
+  }, [collabEnabled, requestShareDialog]);
 
   // Listen for programmatic file-load requests (from command palette recent files)
   useEffect(() => {
@@ -111,6 +127,7 @@ export function useFileCommands(): FileCommands {
           console.warn('[useFileCommands] ifc-lite:load-file ignored - a load is already in progress');
           return;
         }
+        if (refuseWhileWorkflowBusy(t)) return;
         recordRecentFiles([{ name: file.name, size: file.size }]);
         void loadFile(file);
       }
@@ -119,13 +136,13 @@ export function useFileCommands(): FileCommands {
     // replacing it (the compare tour loads demo revision B this way).
     const addHandler = (e: Event) => {
       const file = (e as CustomEvent<unknown>).detail;
-      if (file instanceof File) void addModel(file);
+      if (file instanceof File && !refuseWhileWorkflowBusy(t)) void addModel(file);
     };
     // Layer-stack variant: load a File[] as a composed .ifcx federation
     // (the Layers panel demo + tour dispatch this, see lib/layers/demo-stack).
     const stackHandler = (e: Event) => {
       const files = (e as CustomEvent<unknown>).detail;
-      if (Array.isArray(files) && files.every((f) => f instanceof File) && files.length > 0) {
+      if (Array.isArray(files) && files.every((f) => f instanceof File) && files.length > 0 && !refuseWhileWorkflowBusy(t)) {
         void loadFederatedIfcx(files as File[]);
       }
     };
@@ -137,9 +154,27 @@ export function useFileCommands(): FileCommands {
       window.removeEventListener('ifc-lite:add-model', addHandler);
       window.removeEventListener('ifc-lite:load-layer-stack', stackHandler);
     };
-  }, [loadFile, addModel, loadFederatedIfcx]);
+  }, [loadFile, addModel, loadFederatedIfcx, t]);
 
-  const hasModelsLoaded = models.size > 0 || Boolean(geometryResult?.meshes && geometryResult.meshes.length > 0);
+  useAgentModelLoader(loadFile, addModel, loadFederatedIfcx);
+
+  const hasModelsLoaded = useViewerStore(selectHasModelsLoaded);
+
+  const routeOpenedFiles = useCallback((supportedFiles: File[], handles?: (FileSystemFileHandle | undefined)[]) => {
+    // Every branch's load is refused under a workflow lease; say so before any clear.
+    if (refuseWhileWorkflowBusy(t)) return;
+    if (supportedFiles.length === 1) {
+      void loadFile(supportedFiles[0], { kind: 'primary' }, { sourceHandle: handles?.[0] });
+      return;
+    }
+    const allIfcx = supportedFiles.every(isIfcxModelFile);
+    resetViewerState();
+    clearAllModels();
+    if (allIfcx) void loadFederatedIfcx(supportedFiles);
+    else void loadFilesSequentially(supportedFiles, handles);
+  }, [loadFile, loadFilesSequentially, loadFederatedIfcx, resetViewerState, clearAllModels, t]);
+
+  const prepareAndOpen = usePreparedModelFileRoute(routeOpenedFiles);
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -150,41 +185,19 @@ export function useFileCommands(): FileCommands {
     if (dxfFiles.length > 0) void ingestDxfFiles(dxfFiles);
 
     // Filter to supported files (IFC, IFCX, GLB, point clouds)
-    const supportedFiles = modelFiles.filter(isSupportedModelFile);
+    const supportedFiles = modelFiles.filter(file => isSupportedModelFile(file) || isModelSidecarFile(file));
 
     if (supportedFiles.length === 0) {
+      if (modelFiles.length > 0) reportFileOpenRejected(modelFiles);
       e.target.value = '';
       return;
     }
 
-    // Track recently opened files (metadata + blob cache for instant reload)
-    recordRecentFiles(supportedFiles.map(f => ({ name: f.name, size: f.size })));
-    cacheFileBlobs(supportedFiles);
-
-    if (supportedFiles.length === 1) {
-      // Single file - use loadFile (simpler single-model path)
-      loadFile(supportedFiles[0]);
-    } else {
-      // Multiple files - check if ALL are IFCX (use federated loading for layer composition)
-      const allIfcx = supportedFiles.every(isIfcxModelFile);
-
-      resetViewerState();
-      clearAllModels();
-
-      if (allIfcx) {
-        // IFCX files use federated loading (layer composition - later files override earlier ones)
-        // This handles overlay files that add properties without geometry
-        console.log(`[toolbar] Loading ${supportedFiles.length} IFCX files with federated composition`);
-        loadFederatedIfcx(supportedFiles);
-      } else {
-        // Mixed or all IFC4/GLB files - load sequentially as independent models
-        loadFilesSequentially(supportedFiles);
-      }
-    }
+    prepareAndOpen(supportedFiles);
 
     // Reset input so same files can be selected again
     e.target.value = '';
-  }, [loadFile, loadFilesSequentially, loadFederatedIfcx, resetViewerState, clearAllModels]);
+  }, [prepareAndOpen]);
 
   // Shared Add-Model routing. `handles` is positionally aligned with
   // `supportedFiles`, carrying a live FS Access handle per file (Chromium) so
@@ -194,6 +207,8 @@ export function useFileCommands(): FileCommands {
     handles?: (FileSystemFileHandle | undefined)[],
   ) => {
     if (supportedFiles.length === 0) return;
+    // Every branch's load is refused under a workflow lease; an IFCX overlay would also reset the scene first.
+    if (refuseWhileWorkflowBusy(t)) return;
     const newFilesAreIfcx = supportedFiles.every(isIfcxModelFile);
     const existingIsIfcx = isIfcxDataStore(ifcDataStore);
 
@@ -204,12 +219,14 @@ export function useFileCommands(): FileCommands {
     } else if (newFilesAreIfcx && !existingIsIfcx && ifcDataStore) {
       // User trying to add IFCX to IFC4 model - won't work
       console.warn('[toolbar] Cannot add IFCX files to non-IFCX model');
-      alert(`IFCX overlay files cannot be added to IFC4 models.\n\nPlease load IFCX files separately.`);
+      toast.error(t('viewerShell.file.ifcxOverlayRequiresIfcx'));
     } else {
       // Standard case - add as independent models (IFC4, GLB, or mixed)
       void loadFilesSequentially(supportedFiles, handles);
     }
-  }, [loadFilesSequentially, addIfcxOverlays, ifcDataStore]);
+  }, [loadFilesSequentially, addIfcxOverlays, ifcDataStore, t]);
+
+  const prepareAndAdd = usePreparedModelFileRoute(addSupportedFiles);
 
   const handleAddModelSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -218,15 +235,17 @@ export function useFileCommands(): FileCommands {
     const { dxfFiles, modelFiles } = splitDxfFiles(Array.from(files));
     if (dxfFiles.length > 0) void ingestDxfFiles(dxfFiles);
     // <input> yields no live handle, so models added this way aren't refreshable.
-    const supportedFiles = modelFiles.filter(isSupportedModelFile);
-    addSupportedFiles(supportedFiles);
+    const supportedFiles = modelFiles.filter(file => isSupportedModelFile(file) || isModelSidecarFile(file));
+    if (supportedFiles.length === 0 && modelFiles.length > 0) reportFileOpenRejected(modelFiles);
+    else prepareAndAdd(supportedFiles);
     // Reset input so same files can be selected again
     e.target.value = '';
-  }, [addSupportedFiles]);
+  }, [prepareAndAdd]);
 
   // Preferred Add-Model path: the picker captures a handle per file so the
   // resulting federation can be refreshed. Falls back to the hidden <input>.
   const handleAddModelClick = useCallback(async () => {
+    if (useViewerStore.getState().loading) return;
     if (!supportsFileSystemAccess()) {
       addModelInputRef.current?.click();
       return;
@@ -236,15 +255,16 @@ export function useFileCommands(): FileCommands {
     // DXF reference underlays split off before model routing (issue #1782).
     const dxfPicked = opened.filter(o => o.file.name.toLowerCase().endsWith('.dxf'));
     if (dxfPicked.length > 0) void ingestDxfFiles(dxfPicked.map(o => o.file));
-    const supported = opened.filter(o => isSupportedModelFile(o.file));
-    addSupportedFiles(supported.map(o => o.file), supported.map(o => o.handle));
-  }, [addSupportedFiles]);
+    const supported = opened.filter(o => isSupportedModelFile(o.file) || isModelSidecarFile(o.file));
+    prepareAndAdd(supported.map(o => o.file), supported.map(o => o.handle));
+  }, [prepareAndAdd]);
 
   // Open via the File System Access API when available (Chromium) so we capture
   // a live FileSystemFileHandle for each file — that handle is what lets the
   // Refresh button re-read the same file from disk later (issue #1345). Browsers
   // without the API fall back to the hidden <input type="file">.
   const handleOpenClick = useCallback(async () => {
+    if (useViewerStore.getState().loading) return;
     if (!supportsFileSystemAccess()) {
       fileInputRef.current?.click();
       return;
@@ -256,30 +276,11 @@ export function useFileCommands(): FileCommands {
     if (dxfPicked.length > 0) void ingestDxfFiles(dxfPicked.map(o => o.file));
     // The picker keeps an "all files" option, so drop anything unsupported
     // before it reaches the load pipeline (matches the <input> + Add Model paths).
-    const opened = picked.filter(o => isSupportedModelFile(o.file));
+    const opened = picked.filter(o => isSupportedModelFile(o.file) || isModelSidecarFile(o.file));
     if (opened.length === 0) return;
 
-    const files = opened.map(o => o.file);
-    recordRecentFiles(files.map(f => ({ name: f.name, size: f.size })));
-    void cacheFileBlobs(files);
-
-    if (opened.length === 1) {
-      // Single model: keep the handle so Refresh can re-read it from disk.
-      void loadFile(opened[0].file, { kind: 'primary' }, { sourceHandle: opened[0].handle });
-    } else {
-      // Multiple files mirror handleFileSelect's branching.
-      const allIfcx = files.every(isIfcxModelFile);
-      resetViewerState();
-      clearAllModels();
-      if (allIfcx) {
-        // IFCX layers compose into one shared store — no per-file handle.
-        void loadFederatedIfcx(files);
-      } else {
-        // Carry each file's handle so the whole federation stays refreshable.
-        void loadFilesSequentially(files, opened.map(o => o.handle));
-      }
-    }
-  }, [loadFile, loadFilesSequentially, loadFederatedIfcx, resetViewerState, clearAllModels]);
+    prepareAndOpen(opened.map(o => o.file), opened.map(o => o.handle));
+  }, [prepareAndOpen]);
 
   // Refresh re-reads files from disk and re-parses them. Offered when EVERY
   // loaded model has a live FS Access handle (a single model, or a federation
@@ -287,16 +288,14 @@ export function useFileCommands(): FileCommands {
   // <input type="file">, cache-restored, and IFCX-composed models have no
   // handle, so a mixed session hides the button rather than risk dropping the
   // handle-less models during the rebuild.
-  const canRefresh = useMemo(() => {
-    if (loading || models.size === 0) return false;
-    return Array.from(models.values()).every(m => m.sourceHandle);
-  }, [models, loading]);
+  const canRefresh = useViewerStore(selectCanRefreshModels);
 
   const handleRefresh = useCallback(async () => {
     const targets = (Array.from(useViewerStore.getState().models.values()) as FederatedModel[])
       .filter((m): m is FederatedModel & { sourceHandle: FileSystemFileHandle } => Boolean(m.sourceHandle))
       .sort((a, b) => (a.loadedAt ?? 0) - (b.loadedAt ?? 0));
     if (targets.length === 0) return;
+    if (refuseWhileWorkflowBusy(t)) return;
 
     // Re-read every handle BEFORE clearing anything, so a failed read never
     // leaves the viewer empty.
@@ -319,47 +318,45 @@ export function useFileCommands(): FileCommands {
       return;
     }
 
+    // A workflow may have started while the reads (and any permission prompt) were pending.
+    if (refuseWhileWorkflowBusy(t)) return;
+
+    // Model tags die with the model; an explicit reload must keep them (#4215).
+    const carry = captureModelTags(useViewerStore.getState());
     recordRecentFiles(ok.map((r) => ({ name: r.fresh.name, size: r.fresh.size })));
     void cacheFileBlobs(ok.map((r) => r.fresh));
 
     if (targets.length === 1) {
       // Await so the success toast only fires once the reload has completed.
       await loadFile(ok[0].fresh, { kind: 'primary' }, { sourceHandle: ok[0].model.sourceHandle });
+      const reloadedId = useViewerStore.getState().activeModelId;
+      if (reloadedId) restoreModelTags(useViewerStore.getState(), carry, ok[0].model.id, reloadedId);
     } else {
-      // Rebuild the federation from fresh bytes, preserving id + order + state.
-      clearAllModels();
-      for (const r of ok) {
-        const reloadedId = await addModel(r.fresh, {
-          name: r.model.name,
-          modelId: r.model.id,
-          loadedAt: r.model.loadedAt,
-          visible: r.model.visible,
-          collapsed: r.model.collapsed,
-          sourceHandle: r.model.sourceHandle,
-        });
-        if (reloadedId && r.model.visible === false) {
-          useViewerStore.getState().setModelVisibility(r.model.id, false);
+      // Rebuild from fresh bytes (id + order + state kept), holding the lease like Re-align so a flow run cannot refuse the remaining adds.
+      const lease = startWorkflowRun('refresh');
+      try {
+        clearAllModels();
+        for (const { fresh, model } of ok) {
+          const { id, name, loadedAt, visible, collapsed, sourceHandle } = model;
+          const reloadedId = await addModel(fresh, { name, modelId: id, loadedAt, visible, collapsed, sourceHandle, workflowOwner: lease.id });
+          if (reloadedId) restoreModelTags(useViewerStore.getState(), carry, id, reloadedId);
+          if (reloadedId && visible === false) useViewerStore.getState().setModelVisibility(id, false);
         }
-      }
+      } finally { lease.release(); }
     }
 
     // Any failed read returned early above, so reaching here means every
     // targeted model was re-read and reloaded.
     toast.success(ok.length === 1 ? `Refreshed "${ok[0].fresh.name}"` : `Refreshed ${ok.length} models`);
-  }, [loadFile, addModel, clearAllModels]);
+  }, [loadFile, addModel, clearAllModels, t]);
 
-  // The command palette dispatches this (synchronously, inside the click) so the
-  // toolbar's handle-capturing open path runs while user activation is still
-  // live — required for the file dialog to actually open on Chrome.
-  useEffect(() => {
-    const handler = () => { void handleOpenClick(); };
-    window.addEventListener('ifc-lite:open-files', handler);
-    return () => window.removeEventListener('ifc-lite:open-files', handler);
-  }, [handleOpenClick]);
+  useFileHostRegistration({ handleOpenClick, handleAddModelClick, handleRefresh,
+    openShareDialog: collabEnabled ? openShareDialog : undefined,
+    preloadShareDialog: collabEnabled ? loadShareDialog : undefined, loadFile });
 
   const fileInputs = (
     <>
-      <input
+      {isFeatureEnabled('files.local') && <><input
         id="file-input-open"
         ref={fileInputRef}
         type="file"
@@ -369,14 +366,20 @@ export function useFileCommands(): FileCommands {
         className="hidden"
       />
       <input
+        id="file-input-add"
         ref={addModelInputRef}
         type="file"
         accept={FILE_ACCEPT}
         multiple
         onChange={handleAddModelSelect}
         className="hidden"
-      />
-      {collabEnabled && <ShareDialog open={shareDialogOpen} onOpenChange={setShareDialogOpen} />}
+      /></>}
+      {collabEnabled && shareDialogOpen !== null && (
+        <Suspense fallback={null}>
+          <ShareDialog open={shareDialogOpen} onOpenChange={setShareDialogOpen} />
+        </Suspense>
+      )}
+      <FederationSetupControls />
     </>
   );
 
