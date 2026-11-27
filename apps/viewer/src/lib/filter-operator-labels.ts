@@ -37,6 +37,7 @@ export const FILTER_OPERATOR_LABEL_KEYS = {
 
 export const LIST_OPERATOR_LABEL_KEYS = {
   exists: FILTER_OPERATOR_LABEL_KEYS.isSet,
+  notExists: FILTER_OPERATOR_LABEL_KEYS.isNotSet,
   equals: FILTER_OPERATOR_LABEL_KEYS.eq,
   notEquals: FILTER_OPERATOR_LABEL_KEYS.ne,
   contains: FILTER_OPERATOR_LABEL_KEYS.contains,

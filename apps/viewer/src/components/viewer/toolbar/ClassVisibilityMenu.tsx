@@ -211,21 +211,21 @@ export function ClassVisibilityControls({ inMenu = false, onNavigate }: { inMenu
             icon={<Box className="h-4 w-4 shrink-0" style={{ color: '#33d9ff' }} />}
             label={SPACE_KIND_LABEL.room}
             description={SPACE_KIND_DESCRIPTION.room}
-            checked={typeVisibility.rooms}
+            checked={typeVisibility.rooms !== false}
             onChange={() => toggleTypeVisibility('rooms')}
           />
           <ClassVisibilityRow
             icon={<Box className="h-4 w-4 shrink-0" style={{ color: '#7fd4ff' }} />}
             label={SPACE_KIND_LABEL.storeySpace}
             description={SPACE_KIND_DESCRIPTION.storeySpace}
-            checked={typeVisibility.storeySpaces}
+            checked={typeVisibility.storeySpaces !== false}
             onChange={() => toggleTypeVisibility('storeySpaces')}
           />
           <ClassVisibilityRow
             icon={<Box className="h-4 w-4 shrink-0" style={{ color: '#2aa9cc' }} />}
             label={SPACE_KIND_LABEL.parking}
             description={SPACE_KIND_DESCRIPTION.parking}
-            checked={typeVisibility.parking}
+            checked={typeVisibility.parking !== false}
             onChange={() => toggleTypeVisibility('parking')}
           />
         </div>

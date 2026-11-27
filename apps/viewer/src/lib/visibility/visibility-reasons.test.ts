@@ -56,6 +56,7 @@ const LENS_FIELDS = {
   lensHiddenIds: ['lens'],
   lensAppliedHiddenIds: ['lens'],
   lensRuleIsolation: ['isolation'],
+  lensGhostUnmatched: [], // Fork: only changes how unmatched rows render while a lens is active.
   lensRuleCounts: [],
   lensRuleEntityIds: [],
   lensAutoColorLegend: [],

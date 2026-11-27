@@ -32,17 +32,10 @@ interface DoorParams { Width: number; Height: number; FrameThickness: number }
 interface WindowParams { Width: number; Height: number; FrameThickness: number }
 interface SpaceParams { Width: number; Depth: number; Height: number }
 
-// Fork: devices and catalogue products also preview through this builder.
-import type { AddElementSensorParams, AddElementLibraryParams } from './addElementSlice';
-import type { CatalogEntry } from '@/lib/catalog';
-
-/** Every kind this builder previews: upstream's authored kinds plus the fork's devices. */
-export type MeshElementKind = AuthoredElementKind | 'sensor' | 'library';
-
 type Vec3 = [number, number, number];
 
 /** Per-type colour palette for the preview mesh. RGBA, 0..1. */
-const COLORS: Record<MeshElementKind, [number, number, number, number]> = {
+const COLORS: Record<AuthoredElementKind, [number, number, number, number]> = {
   wall:   [0.85, 0.85, 0.82, 1.0],
   slab:   [0.78, 0.78, 0.78, 1.0],
   beam:   [0.65, 0.50, 0.35, 1.0],
@@ -53,23 +46,9 @@ const COLORS: Record<MeshElementKind, [number, number, number, number]> = {
   roof:   [0.55, 0.35, 0.30, 1.0],
   plate:  [0.70, 0.70, 0.72, 1.0],
   member: [0.55, 0.55, 0.50, 1.0],
-  sensor: [0.90, 0.15, 0.15, 1.0],
-  // Unused fallback — 'library' meshes always pass an explicit colour
-  // override (discipline-coded, see DISCIPLINE_COLORS) since the IFC
-  // type/colour depends on the selected catalog entry, not the tool type.
-  library: [0.55, 0.55, 0.55, 1.0],
 };
 
-/** Discipline-coded colour for library elements — a cheap first cut at F9 "Data-Visualization". */
-const DISCIPLINE_COLORS: Record<CatalogEntry['discipline'], [number, number, number, number]> = {
-  fire: [0.90, 0.25, 0.15, 1.0],
-  security: [0.15, 0.45, 0.90, 1.0],
-  intrusion: [0.90, 0.60, 0.10, 1.0],
-  automation: [0.15, 0.70, 0.45, 1.0],
-  other: [0.55, 0.55, 0.55, 1.0],
-};
-
-const IFC_TYPE: Record<MeshElementKind, string> = {
+const IFC_TYPE: Record<AuthoredElementKind, string> = {
   wall:   'IfcWall',
   slab:   'IfcSlab',
   beam:   'IfcBeam',
@@ -80,14 +59,10 @@ const IFC_TYPE: Record<MeshElementKind, string> = {
   roof:   'IfcRoof',
   plate:  'IfcPlate',
   member: 'IfcMember',
-  sensor: 'IfcSensor',
-  // Unused fallback — see the COLORS comment above; the real IFC entity
-  // comes from the selected catalog entry via an explicit override.
-  library: 'IfcSensor',
 };
 
 export interface ElementBuildContext {
-  type: MeshElementKind;
+  type: AuthoredElementKind;
   /** New entity's globalId (federation-aware). Tags every vertex. */
   globalId: number;
   /** Storey elevation in IFC Z (metres) — added to vertex Y in renderer. */
@@ -107,9 +82,7 @@ export type ElementMeshPayload =
   | { type: 'slab'; params: SlabParams; corners: Vec3[] }
   | { type: 'space'; params: SpaceParams; corners: Vec3[] }
   | { type: 'roof'; params: SlabParams; corners: Vec3[] }
-  | { type: 'plate'; params: SlabParams; corners: Vec3[] }
-  | { type: 'sensor'; params: AddElementSensorParams; position: Vec3 }
-  | { type: 'library'; params: AddElementLibraryParams; position: Vec3; ifcEntity: string; discipline: CatalogEntry['discipline'] };
+  | { type: 'plate'; params: SlabParams; corners: Vec3[] };
 
 /**
  * Build a renderer-frame `MeshData` for a freshly-added element.
@@ -141,17 +114,6 @@ export function buildElementMesh(ctx: ElementBuildContext): MeshData | null {
       const { Width, Height, FrameThickness } = payload.params;
       return buildAxisBox(globalId, type, payload.position, Width, FrameThickness, Height, storeyElevation);
     }
-    case 'sensor': {
-      const { Width, Depth, Height } = payload.params;
-      return buildAxisBox(globalId, type, payload.position, Width, Depth, Height, storeyElevation);
-    }
-    case 'library': {
-      const { Width, Depth, Height } = payload.params;
-      return buildAxisBox(
-        globalId, type, payload.position, Width, Depth, Height, storeyElevation, undefined,
-        { ifcType: payload.ifcEntity, color: DISCIPLINE_COLORS[payload.discipline] },
-      );
-    }
     case 'slab':
     case 'roof':
     case 'plate': {
@@ -175,7 +137,7 @@ export function buildElementMesh(ctx: ElementBuildContext): MeshData | null {
  */
 function buildLinearBox(
   globalId: number,
-  type: MeshElementKind,
+  type: AuthoredElementKind,
   startIfc: Vec3,
   endIfc: Vec3,
   thickness: number,
@@ -215,14 +177,13 @@ function buildLinearBox(
 /** Box centred on a point (column / door / window), its X size along `xAxis` in plan (default +x). */
 function buildAxisBox(
   globalId: number,
-  type: MeshElementKind,
+  type: AuthoredElementKind,
   centerIfc: Vec3,
   sizeX: number,
   sizeY: number,
   sizeZ: number,
   storeyElevation: number,
   xAxis: readonly [number, number] = [1, 0],
-  override?: { ifcType: string; color: [number, number, number, number] },
 ): MeshData {
   const len = Math.hypot(xAxis[0], xAxis[1]) || 1;
   const ux = xAxis[0] / len, uy = xAxis[1] / len, hx = sizeX / 2, hy = sizeY / 2;
@@ -237,13 +198,13 @@ function buildAxisBox(
     at(-1, -1, baseZ), at(1, -1, baseZ), at(1, 1, baseZ), at(-1, 1, baseZ),
     at(-1, -1, topZ), at(1, -1, topZ), at(1, 1, topZ), at(-1, 1, topZ),
   ];
-  return buildBoxFromIfcCorners(globalId, type, ifcCorners, storeyElevation, override);
+  return buildBoxFromIfcCorners(globalId, type, ifcCorners, storeyElevation);
 }
 
 /** Polygon footprint extruded vertically (slab / space / roof / plate). */
 function buildPolygonExtrusion(
   globalId: number,
-  type: MeshElementKind,
+  type: AuthoredElementKind,
   ifcFootprint: Vec3[],
   thickness: number,
   storeyElevation: number,
@@ -331,10 +292,9 @@ function buildPolygonExtrusion(
  */
 function buildBoxFromIfcCorners(
   globalId: number,
-  type: MeshElementKind,
+  type: AuthoredElementKind,
   ifcCorners: Vec3[],
   storeyElevation: number,
-  override?: { ifcType: string; color: [number, number, number, number] },
 ): MeshData {
   // Centre of the box in the IFC frame. Every corner belongs to exactly 3 of
   // the 6 faces, so the mean of the 8 corners is the centre for any of the
@@ -397,11 +357,11 @@ function buildBoxFromIfcCorners(
   entityIds.fill(globalId);
   return {
     expressId: globalId,
-    ifcType: override?.ifcType ?? IFC_TYPE[type],
+    ifcType: IFC_TYPE[type],
     positions,
     normals,
     indices,
-    color: override?.color ?? COLORS[type],
+    color: COLORS[type],
     entityIds,
   };
 }

@@ -57,7 +57,7 @@ export function useSpaceGraphOverlay(): void {
   useEffect(() => {
     const callbacks = useViewerStore.getState().cameraCallbacks;
     if (!enabled || !graph || storeyId === null) {
-      callbacks.clearSpaceOverlayMeshes?.();
+      callbacks.clearAuthoringOverlayMeshes?.('spaceGraph');
       return undefined;
     }
 
@@ -79,9 +79,9 @@ export function useSpaceGraphOverlay(): void {
 
     const view = spaceGraphView(graph, { steps: stepsToSafety(rooms, doors), safe, labels });
     const elevation = dataStore?.spatialHierarchy?.storeyElevations?.get(storeyId) ?? 0;
-    callbacks.setSpaceOverlayMeshes?.(spaceGraphMeshes(view, { elevation }));
+    callbacks.setAuthoringOverlayMeshes?.('spaceGraph', spaceGraphMeshes(view, { elevation }));
 
-    return () => { useViewerStore.getState().cameraCallbacks.clearSpaceOverlayMeshes?.(); };
+    return () => { useViewerStore.getState().cameraCallbacks.clearAuthoringOverlayMeshes?.('spaceGraph'); };
   }, [enabled, graph, dataStore, storeyId]);
 }
 

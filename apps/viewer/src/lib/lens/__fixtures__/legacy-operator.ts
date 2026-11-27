@@ -52,5 +52,5 @@ export const IDS = [10, 20, 30, 40];
 export const listCases = {
   equals: ['Text', 'red'], notEquals: ['Text', 'red'], contains: ['Text', 'red'],
   gt: ['Number', '10'], gte: ['Number', '10'], lt: ['Number', '10'], lte: ['Number', '10'],
-  exists: ['Nullable', ''],
+  exists: ['Nullable', ''], notExists: ['Nullable', ''],
 } satisfies Record<ConditionOperator, [string, string]>;

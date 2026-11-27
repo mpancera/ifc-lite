@@ -90,18 +90,18 @@ export function isTypeVisible(
   if (ifcType === 'IfcSpace') {
     if (!typeVisibility.spaces) return false;
     if (spaceKind === undefined) return true;
-    return typeVisibility[SPACE_KIND_TO_VISIBILITY_KEY[spaceKind]];
+    return typeVisibility[SPACE_KIND_TO_VISIBILITY_KEY[spaceKind]] !== false;
   }
   const key = IFC_TYPE_TO_VISIBILITY_KEY[ifcType];
   if (key === undefined) return true;
-  return typeVisibility[key];
+  return typeVisibility[key] !== false;
 }
 
 const VISIBILITY_KEYS = [...new Set([...Object.values(IFC_TYPE_TO_VISIBILITY_KEY), ...Object.values(SPACE_KIND_TO_VISIBILITY_KEY)])];
 
 /** Whether `isTypeVisible` can drop anything: a structural mode or any class toggle off. */
 export function classFilterActive(typeVisibility: TypeVisibilityGate, mode: StructuralViewMode = 'both'): boolean {
-  return mode !== 'both' || VISIBILITY_KEYS.some((key) => !typeVisibility[key]);
+  return mode !== 'both' || VISIBILITY_KEYS.some((key) => typeVisibility[key] === false);
 }
 
 /** Global id to class after edits, for retyped entities (`retypedClasses`). */
@@ -141,5 +141,5 @@ export function allSpaceKindsHidden(
   typeVisibility: Pick<TypeVisibility, TypeVisibilityKey>,
 ): boolean {
   return !typeVisibility.spaces
-    || (!typeVisibility.rooms && !typeVisibility.storeySpaces && !typeVisibility.parking);
+    || (typeVisibility.rooms === false && typeVisibility.storeySpaces === false && typeVisibility.parking === false);
 }

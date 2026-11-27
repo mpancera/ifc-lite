@@ -214,7 +214,7 @@ function withActiveModelGeometry(
   return { geometryResult, models };
 }
 
-export const createDataSlice: StateCreator<DataSlice & DataCrossSliceState, [], [], DataSlice> = (set, _get) => ({
+export const createDataSlice: StateCreator<DataSlice & DataCrossSliceState, [], [], DataSlice> = (set, get) => ({
   // Initial state
   ifcDataStore: null,
   geometryResult: null,
@@ -283,7 +283,7 @@ export const createDataSlice: StateCreator<DataSlice & DataCrossSliceState, [], 
     // three kilometres from the project origin keeps its f32 precision, and
     // rewriting every vertex per drag frame would spend that precision and the
     // time for nothing.
-    const meshes = existing.meshes.map((mesh) => {
+    const meshes = existing.meshes.map((mesh: MeshData) => {
       if (!wanted.has(mesh.expressId)) return mesh;
       touched = true;
       const [ox, oy, oz] = mesh.origin ?? [0, 0, 0];
@@ -299,15 +299,7 @@ export const createDataSlice: StateCreator<DataSlice & DataCrossSliceState, [], 
     if (!touched) return;
 
     const geometryResult = { ...existing, meshes };
-    const modelId = state.activeModelId;
-    const model = modelId ? state.models.get(modelId) : null;
-    if (!modelId || !model) {
-      set({ geometryResult, geometryUpdateTick: state.geometryUpdateTick + 1 });
-      return;
-    }
-    const models = new Map(state.models);
-    models.set(modelId, { ...model, geometryResult });
-    set({ geometryResult, models, geometryUpdateTick: state.geometryUpdateTick + 1 });
+    set({ ...withActiveModelGeometry(state, geometryResult), geometryUpdateTick: state.geometryUpdateTick + 1 });
   },
 
   replaceMeshesForEntity: (ids, replacement) => {
@@ -316,7 +308,7 @@ export const createDataSlice: StateCreator<DataSlice & DataCrossSliceState, [], 
     if (!existing) return [];
 
     const wanted = new Set(ids);
-    const removed = existing.meshes.filter((mesh) => wanted.has(mesh.expressId));
+    const removed = existing.meshes.filter((mesh: MeshData) => wanted.has(mesh.expressId));
 
     // The new mesh takes the old one's identity. Where there was nothing to
     // replace it keeps its own.

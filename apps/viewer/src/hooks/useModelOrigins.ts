@@ -20,10 +20,9 @@ import { useViewerStore } from '@/store';
 import {
   computeIfcOriginViewerPosition,
   type IfcOriginPlacement,
-  type ModelGeorefInput,
+  type IfcOriginFrame,
 } from '@/lib/geo/ifc-origin';
-import { getEffectiveGeoreference } from '@/lib/geo/effective-georef';
-import { selectAnchorGeoref } from '@/lib/geo/useAnchorGeoreference';
+import { extractModelSpatialPlacement, findReferenceSpatialModel } from '@/hooks/ingest/federationAlign';
 import type { FederatedModel } from '@/store/types';
 import type { IfcDataStore } from '@ifc-lite/parser';
 
@@ -53,20 +52,12 @@ export function useModelOrigins(enabled: boolean): ModelOrigin[] {
   // The anchor's georef input, computed once per dependency change. Shares the
   // "user-pinned anchor, else earliest-loaded model with a usable
   // map-conversion georef" selection with the measure-tool readout.
-  const anchorInput = useMemo((): { id: string | null; input: ModelGeorefInput | null } => {
-    const selection = selectAnchorGeoref({ models, anchorModelIdOverride, georefMutations });
-    if (!selection) return { id: null, input: null };
-    const model = models.get(selection.modelId);
-    return {
-      id: selection.modelId,
-      input: {
-        coordinateInfo: selection.coordinateInfo,
-        mapConversion: selection.eff.mapConversion,
-        projectedCRS: selection.eff.projectedCRS,
-        lengthUnitScale: selection.eff.lengthUnitScale,
-        preAlignmentCoordinateInfo: model?.preAlignment?.coordinateInfo,
-      },
-    };
+  // Same canonical-anchor predicate as upstream's BasepointOverlay and the
+  // federation itself.
+  const anchorInput = useMemo((): { id: string | null; input: IfcOriginFrame | null } => {
+    const selection = findReferenceSpatialModel();
+    return selection ? { id: selection.modelId, input: selection.placement } : { id: null, input: null };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the store inputs are the change signal
   }, [models, anchorModelIdOverride, georefMutations]);
 
   useEffect(() => {
@@ -83,16 +74,14 @@ export function useModelOrigins(enabled: boolean): ModelOrigin[] {
         if (!model.visible) continue;
         const ds = model.ifcDataStore;
         if (!ds) continue;
-        const eff = getEffectiveGeoreference(
+        const ownPlacement = extractModelSpatialPlacement(
           ds as IfcDataStore,
           model.geometryResult?.coordinateInfo,
           georefMutations.get(modelId),
         );
-        const modelInput: ModelGeorefInput = {
+        const modelInput: IfcOriginFrame = {
+          ...(ownPlacement ?? {}),
           coordinateInfo: model.geometryResult?.coordinateInfo,
-          mapConversion: eff?.mapConversion,
-          projectedCRS: eff?.projectedCRS,
-          lengthUnitScale: eff?.lengthUnitScale,
           preAlignmentCoordinateInfo: model.preAlignment?.coordinateInfo,
         };
         const anchorIsThis = anchorInput.id === modelId;

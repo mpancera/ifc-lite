@@ -38,6 +38,8 @@ const MESH_FIELDS = {
   texture: 'texture', textureRef: 'scalar', textureBitmap: 'bitmap', geometryHash: 'scalar',
   geometryAabb: 'scalar', geometryVolume: 'scalar', geometryClass: 'scalar', origin: 'scalar',
   occurrenceKey: 'scalar', localBounds: 'scalar', localToWorld: 'scalar',
+  // Fork: instanced occurrences stay flagged so the upload path still skips them.
+  instancedOccurrence: 'scalar',
   // A compact mesh (`?compactGeom`) is stored as the f32 arrays its three properties decode to, so its
   // record is an ordinary mesh: the row into a worker payload is not part of the image.
   compact: 'unstored',

@@ -258,3 +258,29 @@ export async function queryTerrainElevation(latLon: LatLon): Promise<number | nu
     clearTimeout(timeoutId);
   }
 }
+
+/**
+ * Stable key over everything a point reprojection reads, so async effects
+ * re-run when a georef edit changes the projection without renaming the CRS.
+ * JSON-encoded so free-text CRS fields cannot make two georefs collide.
+ */
+export function reprojectionInputKey(
+  eastings: number,
+  northings: number,
+  crs: ProjectedCRS,
+  lengthUnitScale = 1,
+): string {
+  const mapScale = resolveMapUnitToMetreScale(crs.mapUnitScale, lengthUnitScale);
+  const eMm = Math.round(eastings * mapScale * 1000);
+  const nMm = Math.round(northings * mapScale * 1000);
+  return JSON.stringify([
+    crs.name ?? '',
+    crs.mapZone ?? '',
+    crs.description ?? '',
+    crs.mapProjection ?? '',
+    crs.mapUnitScale ?? '',
+    lengthUnitScale,
+    eMm,
+    nMm,
+  ]);
+}

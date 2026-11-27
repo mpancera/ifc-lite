@@ -340,7 +340,7 @@ function compoundPlaneAngleToDecimalDegrees(value: unknown): number | undefined 
 export function extractLegacySiteGeoreference(
   entities: Map<number, IfcEntity>,
   entitiesByType: Map<string, number[]>,
-): SiteReferenceLocation | null {
+): GeoreferenceInfo | null {
   const siteIds = entitiesByType.get('IfcSite') || [];
   for (const siteId of siteIds) {
     const site = entities.get(siteId);
@@ -372,10 +372,25 @@ export function extractLegacySiteGeoreference(
     if (latitude === undefined || longitude === undefined) continue;
 
     return {
-      expressId: site.expressId,
-      latitude,
-      longitude,
-      elevation: getNumber(getAttributeValueByName(site, 'RefElevation')) ?? 0,
+      hasGeoreference: true,
+      source: 'siteLocation',
+      projectedCRS: {
+        id: site.expressId,
+        name: 'EPSG:4326',
+        description: 'Legacy IfcSite geolocation',
+        geodeticDatum: 'WGS84',
+        mapProjection: 'Geographic',
+        mapUnit: 'DEGREE',
+      },
+      mapConversion: {
+        id: site.expressId,
+        sourceCRS: 0,
+        targetCRS: site.expressId,
+        eastings: longitude,
+        northings: latitude,
+        orthogonalHeight: elevation,
+        scale: 1,
+      },
     };
   }
 

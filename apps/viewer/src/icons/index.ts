@@ -95,3 +95,5 @@ export { default as StructuralDerive } from '~icons/viewer/structural-derive';
 
 export { default as FileCityjson } from '~icons/viewer/file-cityjson';
 export { default as DemoFlows } from '~icons/viewer/demo-flows';
+// Fork: the discipline ribbon's add-element command.
+export { default as AddElement } from '~icons/viewer/add-element';

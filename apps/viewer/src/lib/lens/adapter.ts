@@ -162,7 +162,7 @@ export function createLensDataProvider(
       for (const entry of entries) {
         for (const _row of effectiveRows(entry)) count++;
       }
-      return count + overlayById.size;
+      return count;
     },
 
     forEachEntity(callback: (globalId: number, modelId: string) => void): void {
@@ -176,7 +176,6 @@ export function createLensDataProvider(
           callback(globalId, entry.id);
         }
       }
-      for (const [globalId, authored] of overlayById) callback(globalId, authored.modelId);
     },
 
     getEntityType(globalId: number): string | undefined {

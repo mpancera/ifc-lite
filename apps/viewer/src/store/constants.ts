@@ -388,9 +388,9 @@ export const TYPE_VISIBILITY_SEMANTIC_DEFAULTS: TypeVisibility = {
 export function getPersistedTypeVisibility(): TypeVisibility {
   return {
     spaces:          readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.spaces, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.spaces),
-    rooms:           readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.rooms, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.rooms),
-    storeySpaces:    readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.storeySpaces, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.storeySpaces),
-    parking:         readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.parking, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.parking),
+    rooms:           readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.rooms, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.rooms !== false),
+    storeySpaces:    readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.storeySpaces, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.storeySpaces !== false),
+    parking:         readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.parking, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.parking !== false),
     spatialZones:    readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.spatialZones, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.spatialZones),
     openings:        readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.openings, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.openings),
     virtualElements: readPersistedBool(TYPE_VISIBILITY_STORAGE_KEYS.virtualElements, TYPE_VISIBILITY_SEMANTIC_DEFAULTS.virtualElements),

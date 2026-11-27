@@ -295,7 +295,7 @@ export const STRAND_03_RELATIONS: ScreenflowClip = {
         const state = store.getState();
         // Rooms back on: they are what gets painted. Strand 1 turned them off
         // so the devices could be seen, and this clip starts from its result.
-        if (!state.typeVisibility.rooms) state.toggleTypeVisibility('rooms');
+        if (state.typeVisibility.rooms === false) state.toggleTypeVisibility('rooms');
         // And let go of the detector the sample beats left selected. The brush
         // paints whatever is selected, so an armed brush over a device puts a
         // refusal on screen -- "IFC lässt nur Räume zu" -- in the middle of a
@@ -305,7 +305,7 @@ export const STRAND_03_RELATIONS: ScreenflowClip = {
         state.setSelectedEntity(null);
         state.setActiveTool('zonePaint');
       },
-      settled: (s) => s.activeTool === 'zonePaint' && s.typeVisibility.rooms && s.selectedEntityId === null,
+      settled: (s) => s.activeTool === 'zonePaint' && s.typeVisibility.rooms !== false && s.selectedEntityId === null,
       settleTimeoutMs: 8000,
       holdMs: 4200,
     },

@@ -12,7 +12,7 @@
 import { Fragment } from 'react';
 import type { DisciplineTab } from './definitions';
 import { DisciplineItemButton } from './DisciplineItemButton';
-import { RibbonGroup, RibbonGroupDivider, RibbonLargeButton } from '../ribbon/primitives';
+import { RibbonGroup, RibbonGroupDivider, RibbonContentLargeButton } from '../ribbon/primitives';
 
 export function DisciplineRibbonTab({ tab }: { tab: DisciplineTab }) {
   return (
@@ -26,9 +26,11 @@ export function DisciplineRibbonTab({ tab }: { tab: DisciplineTab }) {
                 key={item.id}
                 item={item}
                 render={(state) => (
-                  <RibbonLargeButton
+                  <RibbonContentLargeButton
                     icon={item.icon}
-                    label={item.ribbonLabel ?? item.label}
+                    contentLabel={item.ribbonLabel ?? item.label}
+                    contentSource="registered"
+                    contentId={`discipline.${item.id}`}
                     tooltip={item.tooltip}
                     // A dialog trigger is not a latch, so it carries no
                     // aria-pressed at all rather than a permanent "false".

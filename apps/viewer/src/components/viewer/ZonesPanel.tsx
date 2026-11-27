@@ -412,11 +412,10 @@ export function ZonesPanel({ onClose }: ZonesPanelProps) {
               <IconButton
                 label={t('zonesPanel.addZoneTitle')}
                 className="h-6 w-6"
-                title="Add zone"
-                onClick={() => addZone(zs.id, {
+                onClick={() => { addZone(zs.id, {
                   name: `Zone ${zs.zones.length + 1}`,
                   ...defaultZoneGeometry(newZoneBounds()),
-                })}
+                }); }}
               >
                 <Plus className="h-3.5 w-3.5" />
               </IconButton>

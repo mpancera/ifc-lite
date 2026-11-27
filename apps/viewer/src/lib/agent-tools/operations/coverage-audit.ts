@@ -7,6 +7,10 @@ export type AuditFamily = 'core' | 'authoring' | 'clash' | 'analytics' | 'appear
 /** Explicit current-control audits, never inferred from an operation count.
  * Adding a panel requires an audit entry and concrete classified bindings. */
 export const panelControlAudits: Readonly<Record<WorkspacePanelId, readonly AuditFamily[]>> = {
+  // Fork panels.
+  exports: ['core'], heights: ['authoring'], graph: ['analytics'], housekeeping: ['coordination'],
+  proxyTriage: ['authoring'], classTriage: ['authoring'], roomTriage: ['authoring'], doorNumbers: ['authoring'],
+  detectorGroups: ['authoring'], wiring: ['authoring'],
   hierarchy: ['core'], properties: ['core', 'authoring', 'coordination'], layers: ['coordination'], zones: ['authoring'],
   model: ['authoring'], placement: ['authoring'], changes: ['authoring', 'core'], changeSets: ['authoring'],
   clash: ['clash'], validation: ['authoring'], idsStudio: ['authoring'], compare: ['coordination'], bcf: ['coordination'],

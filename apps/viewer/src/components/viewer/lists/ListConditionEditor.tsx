@@ -55,6 +55,7 @@ export function ListConditionEditor({ rule, onChange }: { rule: ListConditionRul
     property: t('lists.builder.source.property'), quantity: t('lists.builder.source.quantity'),
     material: t('lists.builder.source.material'), classification: t('lists.builder.source.classification'),
     geometry: t('lists.builder.source.geometry'),
+    group: t('lists.builder.source.group'),
   };
   const levelLabels: Record<string, string> = {
     Container: t('lists.builder.spatial.container'), Storey: t('lists.builder.spatial.storey'),

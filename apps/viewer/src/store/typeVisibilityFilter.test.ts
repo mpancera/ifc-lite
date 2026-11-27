@@ -183,27 +183,27 @@ describe('isTypeVisible · kinds of space', () => {
   it('hides the storey-sized gross-area volume on its own', () => {
     // The whole point: look at rooms without a slab over the entire floor.
     const tv = { ...ALL_ON, storeySpaces: false };
-    assert.equal(isTypeVisible('IfcSpace', tv, 'storeySpace'), false);
-    assert.equal(isTypeVisible('IfcSpace', tv, 'room'), true);
-    assert.equal(isTypeVisible('IfcSpace', tv, 'parking'), true);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'both', 'storeySpace'), false);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'both', 'room'), true);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'both', 'parking'), true);
   });
 
   it('hides parking on its own', () => {
     const tv = { ...ALL_ON, parking: false };
-    assert.equal(isTypeVisible('IfcSpace', tv, 'parking'), false);
-    assert.equal(isTypeVisible('IfcSpace', tv, 'storeySpace'), true);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'both', 'parking'), false);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'both', 'storeySpace'), true);
   });
 
   it('hides rooms on their own', () => {
     const tv = { ...ALL_ON, rooms: false };
-    assert.equal(isTypeVisible('IfcSpace', tv, 'room'), false);
-    assert.equal(isTypeVisible('IfcSpace', tv, 'storeySpace'), true);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'both', 'room'), false);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'both', 'storeySpace'), true);
   });
 
   it('lets the master switch beat every kind', () => {
     const tv = { ...ALL_ON, spaces: false };
     for (const kind of ['room', 'storeySpace', 'parking'] as const) {
-      assert.equal(isTypeVisible('IfcSpace', tv, kind), false, kind);
+      assert.equal(isTypeVisible('IfcSpace', tv, 'both', kind), false, kind);
     }
   });
 

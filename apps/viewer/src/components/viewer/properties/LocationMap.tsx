@@ -390,7 +390,6 @@ export function LocationMap({
       // network layer, so nothing is requested at all.
       if (!externalRequestsAllowed()) {
         setMapUnavailable('external_requests_off');
-        setMapState('idle');
         return;
       }
 

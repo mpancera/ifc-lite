@@ -94,11 +94,11 @@ export const STRAND_02_MODEL_ALREADY_THERE: ScreenflowClip = {
     },
     {
       id: 'ids-load',
-      anchor: 'activity-ids',
-      panel: 'ids',
+      anchor: 'activity-validation',
+      panel: 'validation',
       captionDe: 'Was die Brandmeldeplanung braucht, steht als IDS – prüfbar, nicht als Mail.',
       captionEn: 'What the planning needs is an IDS - checkable, not an email.',
-      prepare: (store) => { store.getState().showWorkspacePanel('ids'); },
+      prepare: (store) => { store.getState().showWorkspacePanel('validation'); },
       perform: async () => {
         const res = await fetch(IDS_PATH);
         if (!res.ok) throw new Error(`IDS nicht gefunden: ${res.status} ${IDS_PATH}`);
@@ -112,8 +112,8 @@ export const STRAND_02_MODEL_ALREADY_THERE: ScreenflowClip = {
     },
     {
       id: 'ids-run',
-      anchor: 'activity-ids',
-      panel: 'ids',
+      anchor: 'activity-validation',
+      panel: 'validation',
       captionDe: 'Vier Anforderungen, gegen das Modell gerechnet.',
       captionEn: 'Four requirements, run against the model.',
       perform: (store) => store.getState().setIdsRunRequested(true),
@@ -123,16 +123,16 @@ export const STRAND_02_MODEL_ALREADY_THERE: ScreenflowClip = {
     },
     {
       id: 'ids-read',
-      anchor: 'activity-ids',
-      panel: 'ids',
+      anchor: 'activity-validation',
+      panel: 'validation',
       captionDe: 'Erfüllt oder nicht – Anforderung für Anforderung, nicht als Gesamturteil.',
       captionEn: 'Met or not - requirement by requirement, not as one verdict.',
       holdMs: 5200,
     },
     {
       id: 'ids-isolate',
-      anchor: 'activity-ids',
-      panel: 'ids',
+      anchor: 'activity-validation',
+      panel: 'validation',
       captionDe: 'Und was nicht erfüllt ist, lässt sich im Modell isolieren.',
       captionEn: 'And what is not met can be isolated in the model.',
       perform: (store) => store.getState().setIdsIsolateMode('failed'),

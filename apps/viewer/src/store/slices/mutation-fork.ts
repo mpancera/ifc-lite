@@ -66,7 +66,7 @@ import {
   nextRunName, planWiring, RUN_OBJECT_TYPE, type WirePlan,
 } from '@/lib/wiring/wirePlan';
 import { findAlarmPanelSite } from '@/lib/wiring/alarmPanelSite';
-import { resolveEntityLongName } from '@/lib/entity-predefined-type';
+import { resolveEntityLongName } from '@ifc-lite/rules';
 import { isDeviceType } from '@/lib/plan/deviceSymbols';
 import { reshapeRoomOutline } from '@/lib/roomShape/reshape';
 import { mayCreateEntities, mayEditEntity, type EditPermission } from '@/lib/roles/roleGuard';

@@ -282,14 +282,15 @@ export interface TypeVisibility {
   spaces: boolean;
   /** `IfcSpace` that is not gross-area or parking — the rooms people work in.
    *  Rooms are the DEFAULT kind, since real files mark them INTERNAL or
-   *  NOTDEFINED far more often than `.SPACE.` (see `spaceKind.ts`). */
-  rooms: boolean;
+   *  NOTDEFINED far more often than `.SPACE.` (see `spaceKind.ts`).
+   *  Fork: the three kinds are optional; absent reads as shown. */
+  rooms?: boolean;
   /** `IfcSpace.GFA` — one storey-sized volume per floor carrying the gross
    *  floor area. Hidden separately because it covers every room on the floor
    *  and made the plain "Spaces" toggle unusable. */
-  storeySpaces: boolean;
+  storeySpaces?: boolean;
   /** `IfcSpace.PARKING` — parking spots for vehicles. */
-  parking: boolean;
+  parking?: boolean;
   /**
    * `IfcSpatialZone` - off by default. A spatial REGION: fire compartment,
    * security or thermal zone. Not to be confused with the gross-area volume,
@@ -454,7 +455,7 @@ export interface CameraCallbacks {
 import type { IfcDataStore } from '@ifc-lite/parser';
 import type { CoordinateInfo, EntityWorldAabb, GeometryResult, MeshData, ModelSpatialReference, PointCloudAsset } from '@ifc-lite/geometry';
 import type { ModelLoadReportFields } from '../lib/loadReport'; // #3927 load report
-export type AuthoringOverlayChannel = 'command' | 'grids' | 'proposal' | 'scan'; // authoring ghost-mesh channels (#6232); 'proposal': reviewed AI authoring (P15A); 'scan': scan-to-BIM detections (#6894)
+export type AuthoringOverlayChannel = 'command' | 'grids' | 'proposal' | 'scan' | 'spaceGraph'; // authoring ghost-mesh channels (#6232); 'proposal': reviewed AI authoring (P15A); 'scan': scan-to-BIM detections (#6894)
 /**
  * Compound identifier for entities across multiple models.
  *

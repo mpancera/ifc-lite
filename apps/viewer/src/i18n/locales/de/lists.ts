@@ -184,6 +184,7 @@ export const listsDe = {
   'lists.builder.source.spatial': 'Räumlich',
   'lists.builder.source.model': 'Modell',
   'lists.builder.source.zone': 'Zone',
+  'lists.builder.source.group': 'Zone / System (IFC)',
   'lists.builder.source.geometry': 'Weltkoordinate',
   'lists.builder.listValueSourceAriaLabel': 'Quelle der Listenwerte',
   'lists.builder.chooseZoneSet': 'Zonensatz wählen',

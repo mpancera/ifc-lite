@@ -22,7 +22,7 @@ import type { MutablePropertyView } from '@ifc-lite/mutations';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import type { GeometryResult, MeshData } from '@ifc-lite/geometry';
 import { deviceSymbolKind, type DeviceMark } from '@/lib/plan/deviceSymbols';
-import { resolveEntityPredefinedType } from '@/lib/entity-predefined-type';
+import { resolveEntityPredefinedType } from '@ifc-lite/rules';
 import type { PlanElementTest } from '@/lib/plan/planVisibility';
 import { overlayAttribute } from '@/lib/mutations/overlayAttribute';
 

@@ -216,6 +216,7 @@ export const listsEn = {
   'lists.builder.source.spatial': 'Spatial',
   'lists.builder.source.model': 'Model',
   'lists.builder.source.zone': 'Zone',
+  'lists.builder.source.group': 'Zone / System (IFC)',
   'lists.builder.source.geometry': 'World coordinate',
   'lists.builder.listValueSourceAriaLabel': 'List value source',
   'lists.builder.chooseZoneSet': 'Choose a zone set',

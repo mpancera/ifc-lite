@@ -101,7 +101,7 @@ export function useMeasure2D({
     // A plan may be turned for display. Undo the angle before the scale, so a
     // measurement taken on a turned plan is stored in TRUE drawing coordinates
     // — the same rule the plan's own picking follows.
-    const rotation = currentAxis === 'down' ? (viewTransform.rotation ?? 0) : 0;
+    const rotation = sectionAxis === 'down' ? (viewTransform.rotation ?? 0) : 0;
     let dx = screenX - viewTransform.x;
     let dy = screenY - viewTransform.y;
     if (rotation !== 0) {

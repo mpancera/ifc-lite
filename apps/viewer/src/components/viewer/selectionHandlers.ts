@@ -13,6 +13,7 @@ import type { MouseHandlerContext } from './mouseHandlerTypes.js';
 import { handleAddElementClick } from './addElementHandlers.js';
 import { openContextMenuAt } from './contextMenuSelection.js';
 import { useViewerStore } from '@/store';
+import { fromGlobalIdFromModels } from '@/store/globalId';
 import { toast } from '@/components/ui/toast';
 import { routeCommandPointer } from './commandPointer.js';
 import { runToolAt } from './toolTap.js';

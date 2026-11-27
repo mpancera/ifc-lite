@@ -35,7 +35,8 @@
  */
 
 import React, { useMemo, useRef, useState, useCallback, useEffect } from 'react';
-import { Loader2 } from 'lucide-react';
+import { Loader2, X } from 'lucide-react';
+import type { CachedSheetTransform } from '@/lib/drawing/sheet-geometry-key';
 import { Button } from '@/components/ui/button';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
@@ -261,9 +262,7 @@ export function PlanView({
   }, []);
 
   const containerRef = useRef<HTMLDivElement>(null);
-  const cachedSheetTransformRef = useRef<{
-    translateX: number; translateY: number; scaleFactor: number;
-  } | null>(null);
+  const cachedSheetTransformRef = useRef<CachedSheetTransform | null>(null);
 
   const { combinedHiddenIds, combinedIsolatedIds } = useCombinedVisibilityIds();
   const colorKeys = useDrawingColorKeys(modelIdToIndex);
@@ -662,7 +661,7 @@ export function PlanView({
     if (soloBackupRef.current === null) {
       soloBackupRef.current = { mode: state.levelDisplayMode };
     }
-    applyLevelDisplayMode('solo', { modelId: storeyModelId, expressId: storey.expressId });
+    applyLevelDisplayMode('solo', [{ modelId: storeyModelId, expressId: storey.expressId }]);
   }, [active, storey, storeyModelId]);
 
   useEffect(() => {
@@ -724,7 +723,9 @@ export function PlanView({
   /** How many parts the product left off this sheet, for the strip to say so. */
   const [productHiddenCount, setProductHiddenCount] = useState(0);
 
+  const planActiveTool = useViewerStore((s) => s.activeTool);
   const { doRegenerate, isRegenerating } = useDrawingGeneration({
+    activeTool: planActiveTool,
     geometryResult,
     ifcDataStore,
     sectionPlane,
@@ -2055,7 +2056,7 @@ export function PlanView({
               // disagree about which floor is in scope.
               const expressId = Number.parseInt(e.target.value, 10);
               if (storeyModelId && Number.isFinite(expressId)) {
-                applyLevelDisplayMode('solo', { modelId: storeyModelId, expressId });
+                applyLevelDisplayMode('solo', [{ modelId: storeyModelId, expressId }]);
               }
             }}
           >
@@ -2090,13 +2091,14 @@ export function PlanView({
           they need a sized, positioned host or they collapse to nothing. */}
       {settingsOpen && (
         <div className="absolute top-0 right-0 bottom-0 w-72 z-50 shadow-xl">
-          <DrawingSettingsPanel onClose={() => setSettingsOpen(false)} />
+          <PlanPanelClose onClose={() => setSettingsOpen(false)} />
+          <DrawingSettingsPanel />
         </div>
       )}
       {dxfPanelOpen && (
         <div className="absolute top-0 right-0 bottom-0 w-80 z-50 shadow-xl">
+          <PlanPanelClose onClose={() => setDxfPanelOpen(false)} />
           <DxfUnderlayPanel
-            onClose={() => setDxfPanelOpen(false)}
             onCenterOnModel={centerDxfUnderlay}
             // A plan IS the cardinal plan view the underlays are for, always.
             planViewActive
@@ -2173,3 +2175,20 @@ export function PlanView({
 }
 
 export default PlanView;
+
+/**
+ * Close button for the panels the plan hosts. Upstream's panels dropped their
+ * own close since the inspector tab carries it; the plan has no such tab.
+ */
+function PlanPanelClose({ onClose }: { onClose: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClose}
+      aria-label="Schliessen"
+      className="absolute top-1.5 right-1.5 z-10 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+    >
+      <X className="h-3.5 w-3.5" />
+    </button>
+  );
+}

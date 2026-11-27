@@ -20,7 +20,7 @@ import { toGlobalIdFromModels } from './globalId.js';
 import { resolveViewHiddenEntities, retypedClasses } from '../lib/visibility/structural-view';
 import { isMeshTypeVisible, isTypeVisible } from './typeVisibilityFilter.js';
 import { buildSpaceKindIndex, spaceKindIndexFor, type SpaceKind } from './spaceKind.js';
-import { resolveEntityPredefinedType } from '../lib/entity-predefined-type.js';
+import { resolveEntityPredefinedType } from '@ifc-lite/rules';
 import { instancedPassDrawn } from '../lib/visibility/visible-bounds';
 import { getGlobalRenderer, readInstancedSceneRevision } from '../lib/renderer-ref.js';
 import { collectAggregatedDescendants, type AggregationRelationships } from '../utils/aggregation.js';

@@ -327,7 +327,7 @@ export const createAnnotationsSlice: StateCreator<ViewerState, [], [], Annotatio
       // over from before this id's `remote` flag flipped to true — a guard on
       // `existing.remote` here would skip that cleanup. A pin that was never
       // persisted (never non-remote) is simply a no-op write.
-      saveToStorage(next);
+      saveToStorage(next, get().currentProjectKey());
       return {
         annotations: next,
         selectedAnnotationId: state.selectedAnnotationId === id ? null : state.selectedAnnotationId,

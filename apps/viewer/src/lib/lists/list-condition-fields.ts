@@ -52,5 +52,7 @@ export function defaultConditionFor(source: ConditionSource, zoneSets: readonly 
     case 'zone': return { source, psetName: zoneSets[0]?.id ?? '', propertyName: ZONE_MODE_NAME, operator: 'equals', value: '' };
     case 'geometry': return { source, propertyName: 'X', operator: 'gt', value: '' };
     case 'attribute': return { source, propertyName: 'Name', operator: 'contains', value: '' };
+    // Fork: IFC zone / system membership.
+    case 'group': return { source, propertyName: 'Zone', operator: 'equals', value: '' };
   }
 }

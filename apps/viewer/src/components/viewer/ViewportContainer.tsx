@@ -34,7 +34,7 @@ import { OverlayAutosaveMount } from './OverlayAutosaveMount';
 import { PlanView } from './PlanView';
 import { useSpaceGraphOverlay } from '@/hooks/useSpaceGraphOverlay';
 import { buildSpaceKindIndex, spaceKindIndexFor } from '@/store/spaceKind';
-import { resolveEntityPredefinedType } from '@/lib/entity-predefined-type';
+import { resolveEntityPredefinedType } from '@ifc-lite/rules';
 import { AnnotationLayer } from './annotations/AnnotationLayer';
 import { CollabPresenceLayer } from './CollabPresenceLayer';
 import { MeasurementSceneLayer } from './scene/MeasurementSceneLayer';

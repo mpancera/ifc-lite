@@ -23,6 +23,17 @@ import type { WorkspacePanelId } from './registry';
 
 export const PANEL_FEATURE: Readonly<Record<Exclude<WorkspacePanelId, 'hierarchy' | 'properties'>, FeatureId>> = {
   sources: 'files.sources',
+  // Fork panels, gated by the feature their work belongs to.
+  exports: 'export.files',
+  heights: 'edit.model',
+  graph: 'data.zones',
+  housekeeping: 'check.validation',
+  proxyTriage: 'edit.model',
+  classTriage: 'edit.model',
+  roomTriage: 'edit.model',
+  doorNumbers: 'edit.model',
+  detectorGroups: 'edit.model',
+  wiring: 'edit.model',
   measurements: 'tools.measure',
   lens: 'view.lens',
   environment: 'view.environment',
