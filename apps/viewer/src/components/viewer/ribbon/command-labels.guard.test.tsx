@@ -98,7 +98,8 @@ it('#5870/#5878 mounts every ribbon command with its registry name across the he
     cesiumAvailable: true, cesiumEnabled: true, editEnabled: true,
   }));
   const container = render(<RibbonToolbar />);
-  assert.equal(container.querySelectorAll('[role="tab"]').length, TABS.length,
+  // Fork: the discipline tabs carry their own commands and are guarded on their own.
+  assert.equal([...container.querySelectorAll('[role="tab"]')].filter((tab) => !tab.hasAttribute('data-discipline-tab')).length, TABS.length,
     'the guard visits every ribbon tab');
   const rawByTab: Record<string, number> = {};
   const renderedIds = new Set<string>();

@@ -85,6 +85,8 @@ const MARKED = /^⟦(ribbon\.[^|]+)\|/;
 function readableSlots(root: HTMLElement): Map<string, string> {
   const out = new Map<string, string>();
   root.querySelectorAll('*').forEach((element, index) => {
+    // Fork: the discipline tabs are named in the fork's own words, not the catalogue.
+    if (element.closest('[data-discipline-tab]')) return;
     const label = element.getAttribute('aria-label');
     if (label) out.set(`${index}:aria`, label);
     const descriptionId = element.getAttribute('aria-describedby');
@@ -102,7 +104,7 @@ function readableSlots(root: HTMLElement): Map<string, string> {
 }
 
 function showTab(container: HTMLElement, tab: RibbonTabId): void {
-  const tabs = [...container.querySelectorAll('[role="tab"]')];
+  const tabs = [...container.querySelectorAll('[role="tab"]')].filter((tab) => !tab.hasAttribute('data-discipline-tab'));
   const target = tabs[TABS.indexOf(tab)];
   assert.ok(target, `tab ${tab} is rendered`);
   mouseDown(target);
@@ -139,7 +141,7 @@ afterEach(() => {
 describe('RibbonToolbar localization (#4785)', () => {
   it('#5815 ArrowRight selects View and labels the command band', async () => {
     const container = render(<RibbonToolbar />);
-    const tabs = [...container.querySelectorAll<HTMLElement>('[role="tab"]')];
+    const tabs = [...container.querySelectorAll<HTMLElement>('[role="tab"]')].filter((tab) => !tab.hasAttribute('data-discipline-tab'));
     assert.equal(tabs.length, TABS.length);
     tabs[1].focus(); // Home is the initial tab.
     press(tabs[1], 'ArrowRight');

@@ -18,6 +18,9 @@ const PANEL_IDS = [
   'panel:cost', 'panel:chat', 'panel:lens', 'panel:layers', 'panel:sources', 'panel:agentBridge',
   'panel:zones', 'panel:loadReport', 'panel:pointclouds', 'panel:measurements',
   'panel:appearance', 'panel:collab', 'panel:extensions',
+  // Fork panels.
+  'panel:exports', 'panel:heights', 'panel:graph', 'panel:housekeeping', 'panel:proxyTriage',
+  'panel:classTriage', 'panel:roomTriage', 'panel:doorNumbers', 'panel:detectorGroups', 'panel:wiring',
 ] as const;
 
 function params(): CommandPaletteBuildParams {

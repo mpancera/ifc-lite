@@ -72,8 +72,9 @@ function armTheGizmo(viewMode: '2d' | '3d') {
     cameraCallbacks: {
       ...useViewerStore.getState().cameraCallbacks,
       // A projection that always answers: the point of the test is the gate,
-      // not the camera.
-      projectToScreen: () => ({ x: 100, y: 100 }),
+      // not the camera. Each axis moves the point, because upstream's gizmo
+      // draws no arrow for an axis that projects to nothing.
+      projectToScreen: (p: { x: number; y: number; z: number }) => ({ x: 100 + 10 * p.x + 4 * p.z, y: 100 - 10 * p.y + 4 * p.z }),
     } as never,
     readEntityPosition: () => ({ x: 0, y: 0, z: 0 }) as never,
   } as never);
@@ -81,11 +82,10 @@ function armTheGizmo(viewMode: '2d' | '3d') {
 
 /** The axis arrows, by the colours the overlay assigns them. */
 function axisElements(container: HTMLElement): number {
-  return [...container.querySelectorAll('line, path, polygon')]
-    .filter((el) => {
-      const paint = `${el.getAttribute('stroke') ?? ''}${el.getAttribute('fill') ?? ''}`;
-      return /#ef4444|#10b981|#3b82f6/i.test(paint);
-    }).length;
+  // Upstream paints the axes with theme tokens now, so count the arrow
+  // markers' users rather than literal colours.
+  return [...container.querySelectorAll('line')]
+    .filter((el) => (el.getAttribute('marker-end') ?? '').includes('gizmo-arrow-')).length;
 }
 
 describe('the move gizmo in plan mode', () => {

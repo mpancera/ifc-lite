@@ -134,6 +134,7 @@ export function RibbonToolbar({ onShowShortcuts }: RibbonToolbarProps = {} as Ri
               <TabsTrigger
                 key={tab.id}
                 value={tab.id}
+                data-discipline-tab=""
                 onClick={() => { if (isActive && ribbonCollapsed) setRibbonCollapsed(false); }}
                 onDoubleClick={() => {
                   if (isActive) setRibbonCollapsed(!ribbonCollapsed);

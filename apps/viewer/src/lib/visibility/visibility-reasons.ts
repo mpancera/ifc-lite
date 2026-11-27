@@ -64,7 +64,7 @@ export interface VisibilityReason {
 /** Class-type toggles that are ON by default but the user turned OFF. */
 export function hiddenTypeToggles(typeVisibility: TypeVisibility): (keyof TypeVisibility)[] {
   return (Object.keys(TYPE_VISIBILITY_SEMANTIC_DEFAULTS) as (keyof TypeVisibility)[])
-    .filter((key) => TYPE_VISIBILITY_SEMANTIC_DEFAULTS[key] && !typeVisibility[key]);
+    .filter((key) => TYPE_VISIBILITY_SEMANTIC_DEFAULTS[key] && typeVisibility[key] === false);
 }
 
 function hiddenModelIds(state: ViewerState): string[] {
