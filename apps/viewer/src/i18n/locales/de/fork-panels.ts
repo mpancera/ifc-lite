@@ -6,7 +6,7 @@ import type { Catalogue } from '../../registry';
 
 export const forkPanelsDe = {
   "forkPanels.heights": "Höhen & Lage",
-  "forkPanels.graph": "Graph",
+  "forkPanels.graph": "Beziehungsgraph",
   "forkPanels.housekeeping": "Prüfplan",
   "forkPanels.proxyTriage": "Proxys bereinigen",
   "forkPanels.classTriage": "Klassen bereinigen",
@@ -15,4 +15,5 @@ export const forkPanelsDe = {
   "forkPanels.exports": "Exportprodukte",
   "forkPanels.wiring": "Verkabeln",
   "forkPanels.detectorGroups": "Meldergruppen",
+  "forkPanels.assistantBoundary": "Dieses Panel gehört zu dieser Ausgabe des Viewers. Der Assistent liest es noch nicht.",
 } satisfies Catalogue;

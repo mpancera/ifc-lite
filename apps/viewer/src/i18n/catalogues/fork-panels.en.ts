@@ -14,4 +14,5 @@ export const forkPanelsEn = {
   'forkPanels.exports': 'Export products',
   'forkPanels.wiring': 'Wiring',
   'forkPanels.detectorGroups': 'Detector groups',
+  'forkPanels.assistantBoundary': 'This panel belongs to this edition of the viewer. The assistant does not read it yet.',
 } as const;

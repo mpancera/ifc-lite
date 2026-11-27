@@ -52,6 +52,34 @@ export interface InstancedShardDrainParams {
   isStreaming?: boolean;
 }
 
+/**
+ * Fork: occurrences expanded from instanced shards join the mesh list (plan
+ * cut, room labels, class tree read it). Publishing them once per drain made
+ * store traffic grow with the batch count; they are gathered and published at
+ * most every `EXPANDED_PUBLISH_MS` instead, the last batch included.
+ */
+const EXPANDED_PUBLISH_MS = 200;
+const pendingExpanded = new Map<string, MeshData[]>();
+let lastExpandedPublish = 0;
+let expandedTimer: ReturnType<typeof setTimeout> | null = null;
+
+function publishExpandedOccurrences(): void {
+  expandedTimer = null;
+  lastExpandedPublish = Date.now();
+  const batches = [...pendingExpanded];
+  pendingExpanded.clear();
+  for (const [modelId, meshes] of batches) useViewerStore.getState().appendGeometryBatch(modelId, meshes);
+}
+
+function queueExpandedOccurrences(modelId: string, meshes: MeshData[]): void {
+  const list = pendingExpanded.get(modelId);
+  if (list) list.push(...meshes); else pendingExpanded.set(modelId, [...meshes]);
+  if (expandedTimer !== null) return;
+  const wait = lastExpandedPublish + EXPANDED_PUBLISH_MS - Date.now();
+  if (wait <= 0) publishExpandedOccurrences();
+  else expandedTimer = setTimeout(publishExpandedOccurrences, wait);
+}
+
 export function useInstancedShardDrain(params: InstancedShardDrainParams): void {
   const latest = useRef(params);
   const schedule = useRef<(() => void) | null>(null);
@@ -125,7 +153,7 @@ export function useInstancedShardDrain(params: InstancedShardDrainParams): void 
             settle(pending, outcome);
           }
           noteDroppedInstancedShards('ownerless', ownerless.length, ownerless);
-          for (const [modelId, meshes] of expandedByModel) useViewerStore.getState().appendGeometryBatch(modelId, meshes);
+          for (const [modelId, meshes] of expandedByModel) queueExpandedOccurrences(modelId, meshes);
           if (uploaded === 0) return;
           if (instanceOnlyLoadPossible(p.geometryKernel, scene) && p.geometry?.length === 0 && !p.appearanceSourceGeometry?.length
             && scene.getInstancedModelIndices().length > 0) {

@@ -19,7 +19,7 @@ export const SIDEBAR_PANEL_FLAGS: ReadonlyArray<readonly [keyof ViewerState, Wor
   ['collabPanelVisible', 'collab'],
   ['layersPanelVisible', 'layers'],
   // Fork side panels with their own dock flag.
-  ['exportsPanelVisible', 'exports'],
+  ['exportsPanelVisible', 'planProducts'],
   ['housekeepingPanelVisible', 'housekeeping'],
   ['proxyTriagePanelVisible', 'proxyTriage'],
   ['classTriagePanelVisible', 'classTriage'],

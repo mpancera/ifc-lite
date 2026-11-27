@@ -24,7 +24,7 @@ import type { WorkspacePanelId } from './registry';
 export const PANEL_FEATURE: Readonly<Record<Exclude<WorkspacePanelId, 'hierarchy' | 'properties'>, FeatureId>> = {
   sources: 'files.sources',
   // Fork panels, gated by the feature their work belongs to.
-  exports: 'export.files',
+  planProducts: 'export.files',
   heights: 'edit.model',
   graph: 'data.zones',
   housekeeping: 'check.validation',

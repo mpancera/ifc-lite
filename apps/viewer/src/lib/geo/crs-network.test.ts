@@ -1,6 +1,8 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+// Fork: the privacy switch reads window storage; the test DOM turns it on.
+import '@/test/setup-dom.js';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { resetFeaturesForTest } from '../features/index.js';

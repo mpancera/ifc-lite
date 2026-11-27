@@ -208,7 +208,7 @@ function panelBody(id: WorkspacePanelId, onClose: () => void): ReactNode {
     case 'lists': return <DeferredPanel id="lists" onClose={onClose} load={loadListPanel} />;
     case 'collab': return <RoomPanel onClose={onClose} />;
     case 'zones': return <ZonesPanel onClose={onClose} />;
-    case 'exports': return <ExportProductsPanel onClose={onClose} />;
+    case 'planProducts': return <ExportProductsPanel onClose={onClose} />;
     case 'heights': return <HeightsPanel onClose={onClose} />;
     case 'graph': return <GraphPanel onClose={onClose} />;
     case 'housekeeping': return <HousekeepingPanel onClose={onClose} />;

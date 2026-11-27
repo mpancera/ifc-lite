@@ -22,9 +22,16 @@ export function setTexturedProductMembership(hierarchy: SpatialHierarchy, contai
   }
   if (present) {
     hierarchy.elementToContainer?.set(objectId, containerId);
-    // This index is direct storey containment, not the nearest ancestor. Space
-    // and building containment must not invent a storey entry on authored load.
+    // This index is direct storey containment, not the nearest ancestor. Building
+    // containment must not invent a storey entry on authored load.
     if (hierarchy.byStorey.has(containerId)) hierarchy.elementToStorey.set(objectId, containerId);
+    // Fork: the parser gives a space-contained element its space's storey
+    // (`SpatialHierarchyBuilder`), so the live index does the same and a reparse
+    // after export agrees with the session.
+    else if (hierarchy.bySpace.has(containerId)) {
+      const storey = hierarchy.elementToStorey.get(containerId);
+      if (storey !== undefined) hierarchy.elementToStorey.set(objectId, storey);
+    }
   } else {
     hierarchy.elementToContainer?.delete(objectId);
     hierarchy.elementToStorey.delete(objectId);

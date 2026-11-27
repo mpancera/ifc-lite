@@ -94,6 +94,7 @@ import { landXmlIt } from './it/landxml';
 import { layersPanelIt } from './it/layers-panel';
 import { lensPanelIt } from './it/lens-panel';
 import { listsIt } from './it/lists';
+import { forkPanelsIt } from './it/fork-panels';
 import { manualValidationIt } from './it/manual-validation';
 import { mcpPlaygroundIt } from './it/mcp-playground';
 import { mcpIt } from './it/mcp';
@@ -260,6 +261,7 @@ export default {
   ...layersPanelIt,
   ...lensPanelIt,
   ...listsIt,
+  ...forkPanelsIt,
   ...manualValidationIt,
   ...mcpPlaygroundIt,
   ...mcpIt,

@@ -94,6 +94,7 @@ import { landXmlFr } from './fr/landxml';
 import { layersPanelFr } from './fr/layers-panel';
 import { lensPanelFr } from './fr/lens-panel';
 import { listsFr } from './fr/lists';
+import { forkPanelsFr } from './fr/fork-panels';
 import { manualValidationFr } from './fr/manual-validation';
 import { mcpPlaygroundFr } from './fr/mcp-playground';
 import { mcpFr } from './fr/mcp';
@@ -260,6 +261,7 @@ export default {
   ...layersPanelFr,
   ...lensPanelFr,
   ...listsFr,
+  ...forkPanelsFr,
   ...manualValidationFr,
   ...mcpPlaygroundFr,
   ...mcpFr,

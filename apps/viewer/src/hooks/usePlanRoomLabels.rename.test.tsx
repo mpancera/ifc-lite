@@ -25,6 +25,8 @@ import { MutablePropertyView } from '@ifc-lite/mutations';
 import type { GeometryResult, MeshData } from '@ifc-lite/geometry';
 import { render, cleanup } from '@/test/render.js';
 import { useViewerStore } from '@/store/index.js';
+// Upstream publishes edits to hooks after its edit window (#10535); read live.
+import { LiveViewerScope } from '@/store/live-scope.js';
 import { roomLabelLines } from '@/lib/plan/roomLabels.js';
 import { usePlanRoomLabels } from './usePlanRoomLabels.js';
 
@@ -94,13 +96,13 @@ after(() => cleanup());
 
 describe('plan room labels', () => {
   it('prints what the file states while nothing has been authored', () => {
-    const container = render(<Probe />);
+    const container = render(<LiveViewerScope><Probe /></LiveViewerScope>);
     assert.ok(container.textContent?.includes('0.99'), container.textContent ?? '');
     assert.ok(container.textContent?.includes('unbenannt'), container.textContent ?? '');
   });
 
   it('prints the new number and name as soon as the room is renamed', () => {
-    const container = render(<Probe />);
+    const container = render(<LiveViewerScope><Probe /></LiveViewerScope>);
     act(() => {
       view.setAttribute(SPACE, 'Name', '0.14');
       view.setAttribute(SPACE, 'LongName', 'Durchgang Küche');
@@ -116,7 +118,7 @@ describe('plan room labels', () => {
   });
 
   it('does not print one word twice when number and name were typed alike', () => {
-    const container = render(<Probe />);
+    const container = render(<LiveViewerScope><Probe /></LiveViewerScope>);
     act(() => {
       view.setAttribute(SPACE, 'Name', 'Technik');
       view.setAttribute(SPACE, 'LongName', 'Technik');

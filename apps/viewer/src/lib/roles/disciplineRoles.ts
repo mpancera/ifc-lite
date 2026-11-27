@@ -71,6 +71,17 @@ const LEGACY_STANDARD_ROLE_ID = 'standard';
  * falls back to Viewer rather than leaving authoring in a mode nothing
  * describes — read-only is the safe direction to fail in.
  */
+/**
+ * The role a store acts under. A store composed without the role slice (the
+ * SDK, scripts, partial test stores) has no role at all, which is not the same
+ * as a user who chose Viewer: it writes as upstream does. A role slice always
+ * holds a string, so the app itself never takes this branch.
+ */
+export function activeRoleOf(state: { activeDisciplineSystemId?: string | null }): string {
+  if (state.activeDisciplineSystemId === undefined) return EDITOR_ROLE_ID;
+  return normalizeRoleId(state.activeDisciplineSystemId);
+}
+
 export function normalizeRoleId(stored: string | null | undefined): string {
   if (stored === LEGACY_STANDARD_ROLE_ID) return EDITOR_ROLE_ID;
   if (isBaseRole(stored ?? null)) return stored as string;

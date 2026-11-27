@@ -8,7 +8,7 @@ export type AuditFamily = 'core' | 'authoring' | 'clash' | 'analytics' | 'appear
  * Adding a panel requires an audit entry and concrete classified bindings. */
 export const panelControlAudits: Readonly<Record<WorkspacePanelId, readonly AuditFamily[]>> = {
   // Fork panels.
-  exports: ['core'], heights: ['authoring'], graph: ['analytics'], housekeeping: ['coordination'],
+  planProducts: ['core'], heights: ['authoring'], graph: ['analytics'], housekeeping: ['coordination'],
   proxyTriage: ['authoring'], classTriage: ['authoring'], roomTriage: ['authoring'], doorNumbers: ['authoring'],
   detectorGroups: ['authoring'], wiring: ['authoring'],
   hierarchy: ['core'], properties: ['core', 'authoring', 'coordination'], layers: ['coordination'], zones: ['authoring'],
@@ -35,6 +35,9 @@ export const toolControlAudits: Readonly<Record<string, ToolControlAudit>> = {
   annotate: { controls: 'Numerical pin placement with entity anchors, note edits, deletion and selection', operations: ['annotations.read', 'annotations.create', 'annotations.createAnchored', 'annotations.manage'], notes: 'Existing in-progress human drafts are preserved; numerical creation replaces the pointer-placement gesture.' },
   walk: { controls: 'Native navigation activation and numerical camera/view-path equivalents', operations: ['camera.read', 'camera.set', 'presentation.play', 'presentation.stop'], native_tools: ['viewer_commands', 'viewer_command_run'], notes: 'Held-key and pointer motion are presentation gestures; numerical poses and timed view paths expose their scene effects.' },
   command: { controls: 'Live palette discovery and native command invocation with current prerequisites', operations: [], native_tools: ['viewer_commands', 'viewer_command_run'] },
+  // Fork tools: pointer placement only for now; reachable as native commands.
+  addElement: { controls: 'Catalogue and device placement by pointer on the active storey', operations: [], native_tools: ['viewer_commands', 'viewer_command_run'], notes: 'Fork tool; numerical placement operations are not built yet.' },
+  wiring: { controls: 'Cable run between placed devices by pointer', operations: [], native_tools: ['viewer_commands', 'viewer_command_run'], notes: 'Fork tool; numerical wiring operations are not built yet.' },
   'polygon-area': { controls: 'Native 2D polygon-area markup by numerical vertices, listed with the other markups', operations: ['drawing.addPolygon', 'drawing.markups'] },
   cloud: { controls: 'Native 2D revision-cloud markup by numerical corners', operations: ['drawing.addCloud', 'drawing.markups'] },
   text: { controls: 'Native 2D text markup and its typography edits', operations: ['drawing.addText', 'drawing.styleText', 'drawing.markups'] },

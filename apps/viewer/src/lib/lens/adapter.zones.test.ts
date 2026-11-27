@@ -14,6 +14,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { MutablePropertyView } from '@ifc-lite/mutations';
+import { RelationshipType } from '@ifc-lite/data';
 import { createLensDataProvider } from './adapter.js';
 import { createZone, paintZone } from '../ifcZones/authoring.js';
 import { authoredEntities } from '../mutations/authoredEntities.js';
@@ -35,8 +36,16 @@ function parsedStore(options: {
       getObjectType: () => '',
     },
     entityIndex: { byId: new Map() },
+    getEntity: () => undefined,
     relationships: {
       getRelated: (id: number) => options.groupsOf.get(id) ?? [],
+      // Upstream reads group membership as inverse AssignsToGroup edges.
+      inverse: {
+        getEdges: (id: number, type: RelationshipType) =>
+          type === RelationshipType.AssignsToGroup
+            ? (options.groupsOf.get(id) ?? []).map((target) => ({ target, type, relationshipId: -target }))
+            : [],
+      },
     },
   };
 }

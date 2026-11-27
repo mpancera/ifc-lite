@@ -27,6 +27,8 @@ import { MutablePropertyView } from '@ifc-lite/mutations';
 import type { GeometryResult, MeshData } from '@ifc-lite/geometry';
 import { render, cleanup } from '@/test/render.js';
 import { useViewerStore } from '@/store/index.js';
+// Upstream publishes edits to hooks after its edit window (#10535); read live.
+import { LiveViewerScope } from '@/store/live-scope.js';
 import { roomLabelLines } from '@/lib/plan/roomLabels.js';
 import { planDrawsElement } from '@/lib/plan/planVisibility.js';
 import { usePlanRoomLabels } from './usePlanRoomLabels.js';
@@ -107,13 +109,13 @@ after(() => cleanup());
 
 describe('plan room labels after a deletion', () => {
   it('stamps both rooms while both exist', () => {
-    const container = render(<Probe />);
+    const container = render(<LiveViewerScope><Probe /></LiveViewerScope>);
     assert.ok(container.textContent?.includes('1.01'), container.textContent ?? '');
     assert.ok(container.textContent?.includes('1.99'), container.textContent ?? '');
   });
 
   it('drops the stamp of the room that was deleted, and only that one', () => {
-    const container = render(<Probe />);
+    const container = render(<LiveViewerScope><Probe /></LiveViewerScope>);
     act(() => {
       view.deleteEntity(WRONG);
       // What the store does after a deletion — the signal every overlay reader
@@ -130,7 +132,7 @@ describe('plan room labels after a deletion', () => {
 
   it('leaves the drawing empty once every room of the floor is deleted', () => {
     // The reported case: all of them at once.
-    const container = render(<Probe />);
+    const container = render(<LiveViewerScope><Probe /></LiveViewerScope>);
     act(() => {
       view.deleteEntity(KEPT);
       view.deleteEntity(WRONG);

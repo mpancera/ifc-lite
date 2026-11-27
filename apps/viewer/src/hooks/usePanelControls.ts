@@ -64,7 +64,7 @@ function setDockedVisible(id: AnalysisPanelId, visible: boolean): void {
     case 'script': case 'gantt': case 'lists': case 'charts': case 'document': case 'flow': case 'drawing': case 'presentation': case 'heights': case 'graph': s[BOTTOM_PANEL_SETTER[id]](visible); break;
     case 'layers': s.setLayersPanelVisible(visible); break;
     // Fork side panels with their own dock flag.
-    case 'exports': s.setExportsPanelVisible(visible); break;
+    case 'planProducts': s.setExportsPanelVisible(visible); break;
     case 'housekeeping': s.setHousekeepingPanelVisible(visible); break;
     case 'proxyTriage': s.setProxyTriagePanelVisible(visible); break;
     case 'roomTriage': s.setRoomTriagePanelVisible(visible); break;

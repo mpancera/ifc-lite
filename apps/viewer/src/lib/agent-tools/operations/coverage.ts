@@ -33,6 +33,13 @@ function control(control: string, operations: readonly string[], classification:
 }
 /** Inventories contain concrete controls, their shared native bindings and real boundaries.
  * Notes describe existing native limits; coverage checks both directions of the bindings. */
+/** Fork panels and the audit family each one is listed under (`coverage-audit.ts`). */
+const FORK_PANEL_AUDITS = [
+  ['planProducts', 'core'], ['heights', 'authoring'], ['graph', 'analytics'], ['housekeeping', 'coordination'],
+  ['proxyTriage', 'authoring'], ['classTriage', 'authoring'], ['roomTriage', 'authoring'], ['doorNumbers', 'authoring'],
+  ['detectorGroups', 'authoring'], ['wiring', 'authoring'],
+] as const;
+
 export function operationControlInventory(): Inventory[] {
   return [
     ...coreControlInventory.map(row => ({ owner: row.owner, family: 'core' as const, controls: row.controls.map(item => control(item.control, item.operations,
@@ -57,6 +64,9 @@ export function operationControlInventory(): Inventory[] {
       controls: [control(row.controls.join('; '), row.operations, classify(row.status), 'boundary' in row ? row.boundary : undefined)], notes: [] })),
     ...appearanceNativeControlBindings.map(row => ({ owner: 'appearance', family: 'appearance' as const,
       controls: [control(row.controls.join('; '), row.operations, classify(row.status), row.boundary)], notes: [] })),
+    // Fork panels: classified as a native boundary until they get agent operations.
+    ...FORK_PANEL_AUDITS.map(([owner, family]) => ({ owner, family,
+      controls: [control(`${owner} panel controls`, [], 'native-boundary', 'Fork panel: no agent operations yet; the panel is used by hand.')], notes: [] })),
   ];
 }
 interface CoverageGap { id: string; reason: string }

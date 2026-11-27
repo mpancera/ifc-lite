@@ -245,6 +245,7 @@ export const listsRu = {
   "lists.builder.source.material": "Материал",
   "lists.builder.source.classification": "Классификация",
   "lists.builder.source.spatial": "Пространственная структура",
+  "lists.builder.source.group": "Зона / система (группа IFC)",
   "lists.builder.source.model": "Модель",
   "lists.builder.source.zone": "Зона",
   "lists.builder.source.geometry": "Мировая координата",

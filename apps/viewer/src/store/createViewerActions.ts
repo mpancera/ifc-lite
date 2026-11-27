@@ -162,7 +162,7 @@ export const createViewerActions: StateCreator<ViewerState, [], [], ViewerAction
       sourcesPanelVisible: panel === 'sources',
       collabPanelVisible: panel === 'collab',
       layersPanelVisible: panel === 'layers',
-      exportsPanelVisible: panel === 'exports',
+      exportsPanelVisible: panel === 'planProducts',
       housekeepingPanelVisible: panel === 'housekeeping',
       proxyTriagePanelVisible: panel === 'proxyTriage',
       classTriagePanelVisible: panel === 'classTriage',

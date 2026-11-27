@@ -20,7 +20,7 @@
 // lucide only, never `@/icons`: the store imports this module, so it sits in
 // the viewer-embed bundle too, which has no unplugin-icons resolver for the
 // `~icons/viewer/*` virtual modules (#6315 broke that build).
-import { BarChart3, Blocks, Bot, Box, Boxes, Cable, ClipboardList, DoorClosed, DoorOpen, PackageCheck, Radio, CalendarRange, ChartLine, ClipboardCheck, ClipboardPen, Cloud, Coins, Crosshair, DraftingCompass, FileText, FileWarning, GitBranch, GitCompareArrows, History, Info, Link2, Layers as LayersIcon, ListChecks, ListTree, MessageSquare, Move3d, Paintbrush, Palette, PencilRuler, Presentation, Puzzle, Ruler, Scan, Sun, Table2, Terminal, type LucideIcon, Users, Workflow } from 'lucide-react';
+import { BarChart3, Blocks, Bot, Box, Boxes, Cable, ClipboardList, DoorClosed, DoorOpen, PackageCheck, Radio, CalendarRange, ChartLine, ClipboardCheck, ClipboardPen, Cloud, Coins, Crosshair, DraftingCompass, FileText, FileWarning, GitBranch, GitCompareArrows, History, Info, Link2, Layers as LayersIcon, ListChecks, ListTree, MessageSquare, Move3d, MoveVertical, Network, Paintbrush, Palette, PencilRuler, Presentation, Puzzle, Ruler, Scan, Sun, Table2, Terminal, type LucideIcon, Users, Workflow } from 'lucide-react';
 import type { TranslationKey } from '@/i18n';
 
 /** Every panel reachable from the unified sidebar rail. `properties` is the
@@ -65,7 +65,7 @@ export type WorkspacePanelId =
   | 'idsStudio'
   | 'influx'
   // Fork panels (appended, see WORKSPACE_PANELS).
-  | 'exports'
+  | 'planProducts'
   | 'heights'
   | 'graph'
   | 'housekeeping'
@@ -229,10 +229,10 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   // Alt+1..0 mapping) stays intact; none has an Alt shortcut.
   // The project's reference height system. Bottom strip, like Lists: a wide
   // verification table consulted occasionally.
-  { id: 'heights', titleKey: 'forkPanels.heights', Icon: Ruler, group: 'coordinate', region: 'bottom' },
+  { id: 'heights', titleKey: 'forkPanels.heights', Icon: MoveVertical, group: 'coordinate', region: 'bottom' },
   // The schematic view: elements by what they belong to. Bottom strip, read
   // ALONGSIDE the model rather than instead of it.
-  { id: 'graph', titleKey: 'forkPanels.graph', Icon: Workflow, group: 'coordinate', region: 'bottom', prefersWide: true },
+  { id: 'graph', titleKey: 'forkPanels.graph', Icon: Network, group: 'coordinate', region: 'bottom', prefersWide: true },
   // The model's Prüfplan. Side panel: its rows select elements in the model.
   { id: 'housekeeping', titleKey: 'forkPanels.housekeeping', Icon: ClipboardList, group: 'check', region: 'side' },
   // Class-cleaning tools: side panels so they can isolate and stand beside the viewport.
@@ -241,7 +241,7 @@ export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   { id: 'roomTriage', titleKey: 'forkPanels.roomTriage', Icon: DoorOpen, group: 'author', region: 'side' },
   { id: 'doorNumbers', titleKey: 'forkPanels.doorNumbers', Icon: DoorClosed, group: 'author', region: 'side' },
   // Deliverables: what this project gets issued as.
-  { id: 'exports', titleKey: 'forkPanels.exports', Icon: PackageCheck, group: 'site', region: 'side', prefersWide: true },
+  { id: 'planProducts', titleKey: 'forkPanels.exports', Icon: PackageCheck, group: 'site', region: 'side', prefersWide: true },
   { id: 'wiring', titleKey: 'forkPanels.wiring', Icon: Cable, group: 'author', region: 'side' },
   { id: 'detectorGroups', titleKey: 'forkPanels.detectorGroups', Icon: Radio, group: 'author', region: 'side' },
 ];

@@ -86,6 +86,12 @@ describe('#5892 legacy operator adapters over one parsed IFC store', () => {
       const migrated = migrateLegacyListConditions(definition.legacyConditions ?? []);
       assert.deepEqual(migrated.unreadableConditions, [], `Lists ${operator} migrates losslessly`);
       const rule = migrated.groups[0]?.rules[0];
+      // Fork operator `notExists` has no canonical value op, so it migrates to a
+      // `listCondition` rule the Lists engine still answers (no rows change).
+      if (operator === 'notExists') {
+        assert.equal(rule?.kind, 'listCondition', operator);
+        continue;
+      }
       assert.equal(rule?.kind, 'property', operator);
       if (!rule || rule.kind !== 'property') continue;
       const actual = evaluateFilterGroups('m', store, migrated.groups, { candidateExpressIds: IDS, limit: IDS.length })

@@ -100,7 +100,7 @@ import {
   zoneTypeOf, currentDescription, DEFAULT_SPACE_HEIGHT, type ForkMutationSlice,
 } from './mutation-fork.js';
 import { mayCreateEntities } from '@/lib/roles/roleGuard';
-import { normalizeRoleId } from '@/lib/roles/disciplineRoles';
+import { activeRoleOf } from '@/lib/roles/disciplineRoles';
 import { preserveZoneColour } from '@/lib/ifcZones/zoneDisplay';
 import { footprintsToSkip } from '@/lib/spaces/skipFootprints.js';
 import { overlayContainerOf } from '@/lib/persistence/storeAdapter';
@@ -867,7 +867,7 @@ function runInStoreElementBuilder(
   element: AuthoredElement,
 ): { expressId: number } | { error: string } {
   // Fork: creation has its own discipline-role gate.
-  const mayCreate = mayCreateEntities(normalizeRoleId(get().activeDisciplineSystemId));
+  const mayCreate = mayCreateEntities(activeRoleOf(get()));
   if (!mayCreate.allowed) return { error: mayCreate.reason };
   const denial = mutationDenial(get(), modelId);
   if (denial) return { error: denial };

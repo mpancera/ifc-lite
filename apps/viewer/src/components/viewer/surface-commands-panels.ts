@@ -167,7 +167,7 @@ export const PANEL_SURFACE_COMMANDS = [
     true, (state) => state.collabEnabled === true),
   rightCommand('panel:extensions', 'extensions', 'extension plugin install manage iflx permissions grants revoke audit log repair queue', Puzzle, true),
   // Fork panels.
-  forkPanelCommand('exports', 'plan products export brandschutzplan feuerwehrplan sheet pdf deliverable', PackageCheck),
+  forkPanelCommand('planProducts', 'plan products export brandschutzplan feuerwehrplan sheet pdf deliverable', PackageCheck),
   forkPanelCommand('heights', 'heights storey levels elevation höhen kote geschoss', Ruler),
   forkPanelCommand('graph', 'graph relations chain schema space graph beziehungen', Workflow),
   forkPanelCommand('housekeeping', 'housekeeping checks model hygiene validation aufräumen', ClipboardList),

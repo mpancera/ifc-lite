@@ -52,9 +52,7 @@ import {
 import { TRADE_PROPERTY, TRADE_PSET, tradeCodeFor } from '@/lib/catalog/tradeCode';
 import { AAS_CONNECTOR_PSET, AAS_KIND, aasConnectorProperties } from '@/lib/aas/connectorPset';
 import type { CatalogEntry } from '@/lib/catalog';
-import {
-  disciplineSystemName, findDisciplineSystem, normalizeRoleId, parsedDisciplineSystemOf,
-} from '@/lib/roles/disciplineRoles';
+import { disciplineSystemName, findDisciplineSystem, parsedDisciplineSystemOf, activeRoleOf } from '@/lib/roles/disciplineRoles';
 import { parsedZonesOf, readZones, readZonesForDisplay } from '@/lib/ifcZones/membership';
 import { themeOfZone } from '@/lib/ifcZones/themes';
 import { authoredEntities } from '@/lib/mutations/authoredEntities';
@@ -262,7 +260,7 @@ function runGroupRelation<T>(
   build: (editor: StoreEditor, anchor: ReturnType<typeof resolveSpatialAnchor>) => T,
 ): T | { error: string } {
   if (expressIds.length === 0) return { error: 'Keine Elemente ausgewählt' };
-  const mayCreate = mayCreateEntities(normalizeRoleId(get().activeDisciplineSystemId));
+  const mayCreate = mayCreateEntities(activeRoleOf(get()));
   if (!mayCreate.allowed) return { error: mayCreate.reason };
   if (!get().canCollabEdit()) return { error: 'Editing is disabled for your role in this shared session' };
 
@@ -417,7 +415,7 @@ export function runForkElementBuilder(
 ): { expressId: number } | { error: string } {
   // Creation needs its own gate: `canAuthorOn` asks about an entity, and a new
   // element has none yet.
-  const mayCreate = mayCreateEntities(normalizeRoleId(get().activeDisciplineSystemId));
+  const mayCreate = mayCreateEntities(activeRoleOf(get()));
   if (!mayCreate.allowed) return { error: mayCreate.reason };
   const denial = mutationDenial(get(), modelId);
   if (denial) return { error: denial };
@@ -756,7 +754,7 @@ export function createForkMutationActions(set: SetState, get: () => ViewerState)
     // Normalised so a missing or unrecognised id lands on read-only rather than
     // in the discipline branch, which would refuse with a message about a
     // Fachrolle nobody selected.
-    const activeSystemId = normalizeRoleId(get().activeDisciplineSystemId);
+    const activeSystemId = activeRoleOf(get());
     const system = findDisciplineSystem(activeSystemId);
     // Both base roles answer without knowing the entity — Editor permits
     // everything, Viewer permits nothing — so skip the ownership lookup
@@ -963,7 +961,7 @@ export function createForkMutationActions(set: SetState, get: () => ViewerState)
   },
 
   reshapeSpace: (modelId, expressId, outline) => {
-    const mayCreate = mayCreateEntities(normalizeRoleId(get().activeDisciplineSystemId));
+    const mayCreate = mayCreateEntities(activeRoleOf(get()));
     if (!mayCreate.allowed) return { error: mayCreate.reason };
     // A room is REFERENCE-model content, and a discipline role may not touch
     // it — the same gate every other edit passes through. Checked here, up

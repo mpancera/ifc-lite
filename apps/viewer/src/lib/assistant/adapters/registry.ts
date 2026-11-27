@@ -73,4 +73,15 @@ export const UNSUPPORTED_PANELS: Partial<Record<WorkspacePanelId, TranslationKey
   environment: 'assistantSources.boundaryEnvironment',
   idsStudio: 'assistantSources.boundaryIdsStudio',
   influx: 'assistantSources.boundaryInflux',
+  // Fork panels: no assistant adapter yet.
+  planProducts: 'forkPanels.assistantBoundary',
+  heights: 'forkPanels.assistantBoundary',
+  graph: 'forkPanels.assistantBoundary',
+  housekeeping: 'forkPanels.assistantBoundary',
+  proxyTriage: 'forkPanels.assistantBoundary',
+  classTriage: 'forkPanels.assistantBoundary',
+  roomTriage: 'forkPanels.assistantBoundary',
+  doorNumbers: 'forkPanels.assistantBoundary',
+  detectorGroups: 'forkPanels.assistantBoundary',
+  wiring: 'forkPanels.assistantBoundary',
 };

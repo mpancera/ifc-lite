@@ -86,6 +86,7 @@ import { landxmlTerrainExportRu } from './ru/landxml-terrain-export';
 import { layersPanelRu } from './ru/layers-panel';
 import { lensPanelRu } from './ru/lens-panel';
 import { listsRu } from './ru/lists';
+import { forkPanelsRu } from './ru/fork-panels';
 import { manualValidationRu } from './ru/manual-validation';
 import { mcpRu } from './ru/mcp';
 import { mcpPlaygroundRu } from './ru/mcp-playground';
@@ -249,6 +250,7 @@ export default {
   ...layersPanelRu,
   ...lensPanelRu,
   ...listsRu,
+  ...forkPanelsRu,
   ...manualValidationRu,
   ...mcpRu,
   ...mcpPlaygroundRu,

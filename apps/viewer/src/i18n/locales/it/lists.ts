@@ -218,6 +218,7 @@ export const listsIt = {
   'lists.builder.source.material': 'Materiale',
   'lists.builder.source.classification': 'Classificazione',
   'lists.builder.source.spatial': 'Spaziale',
+  'lists.builder.source.group': 'Zona / sistema (gruppo IFC)',
   'lists.builder.source.model': 'Modello',
   'lists.builder.source.zone': 'Zona',
   'lists.builder.source.geometry': 'Coordinata nel mondo',

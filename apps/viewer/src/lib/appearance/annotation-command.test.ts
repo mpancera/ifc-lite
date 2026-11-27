@@ -122,7 +122,8 @@ for (const containerId of [40, 50, 51]) for (const federated of [false, true]) t
     assert.ok(container.elements.includes(native.annotationId));
     assert.ok(containerMap.get(containerId)?.includes(native.annotationId));
     assert.equal(hierarchy.elementToContainer?.get(native.annotationId), containerId);
-    assert.equal(hierarchy.elementToStorey.get(native.annotationId), containerId === 40 ? 40 : undefined);
+    // Fork: a space-contained element carries its space's storey (51 sits on 40).
+    assert.equal(hierarchy.elementToStorey.get(native.annotationId), containerId === 40 || containerId === 51 ? 40 : undefined);
     assert.equal(hierarchy.getContainingSpace(native.annotationId), containerId === 51 ? 51 : null);
     assert.equal(hierarchy.getPath(native.annotationId).at(-1)?.expressId, containerId);
     const mesh = meshes.get(result.globalId)!;

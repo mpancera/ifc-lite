@@ -10,7 +10,7 @@
  * derives, so a proposal never states them.
  */
 
-import { IfcTypeEnum, IfcTypeEnumFromString } from '@ifc-lite/data';
+import { IfcTypeEnum, IfcTypeEnumFromString, getEntitiesIfc4x3 } from '@ifc-lite/data';
 import { ENTITY_ATTRIBUTES, type ColumnDefinition, type ListDefinition, type ListGrouping } from '@ifc-lite/lists';
 import { onlyKeys, parseEnvelope, parseNativeArtifactScope, record, requiredText, text, type ArtifactEnvelope } from './artifact-json';
 import { canonicalClasses, knownClassRefusal, parseProposalGroups } from './artifact-rules';
@@ -92,6 +92,23 @@ function parseGrouping(value: unknown, ids: ReadonlySet<string>): ListGrouping |
   return { columnId: columnIds[0], columnIds, sumColumnIds, ...(value.view ? { view: value.view as 'nested' | 'schedule' } : {}) };
 }
 
+// Fork: the enum also names non-product classes (IfcActor, IfcAsset, ...), so
+// "resolves to an enum member" no longer means "a list can target it".
+let productClasses: Set<string> | null = null;
+function isProductClass(name: string): boolean {
+  if (!productClasses) {
+    const parent = new Map<string, string | undefined>();
+    for (const entity of getEntitiesIfc4x3()) parent.set(entity.name.toUpperCase(), entity.parent?.toUpperCase());
+    productClasses = new Set();
+    for (const entity of parent.keys()) {
+      for (let at: string | undefined = entity; at; at = parent.get(at)) {
+        if (at === 'IFCPRODUCT') { productClasses.add(entity); break; }
+      }
+    }
+  }
+  return productClasses.has(name.toUpperCase());
+}
+
 export function parseListProposal(answer: string): ListProposal {
   const { value, envelope } = parseEnvelope(answer, 'list.proposal', ['list', 'scope']);
   if (!record(value.list)) throw new Error('A list.proposal needs a "list" object');
@@ -106,7 +123,7 @@ export function parseListProposal(answer: string): ListProposal {
     if (refusal) throw new Error(`The list "entityTypes": ${refusal}`);
   }
   // Lists target exact classes; expanding first keeps `IfcWall` reaching `IfcWallStandardCase`.
-  const entityTypes = [...new Set(canonicalClasses(classes as string[]).map(IfcTypeEnumFromString).filter((type) => type !== IfcTypeEnum.Unknown))];
+  const entityTypes = [...new Set(canonicalClasses(classes as string[]).filter(isProductClass).map(IfcTypeEnumFromString).filter((type) => type !== IfcTypeEnum.Unknown))];
   if (classes.length > 0 && entityTypes.length === 0) throw new Error(`Lists cannot target ${(classes as string[]).join(', ')}; use an element class such as IfcWall`);
   if (!Array.isArray(list.columns) || list.columns.length === 0 || list.columns.length > COLUMN_LIMIT) throw new Error(`The list needs 1 to ${COLUMN_LIMIT} columns`);
   const ids = new Set<string>();

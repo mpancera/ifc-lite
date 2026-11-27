@@ -32,7 +32,7 @@ import {
 import { readZones, type PaintMode, type ZoneInfo } from '@/lib/ifcZones/membership';
 import { authoredEntities } from '@/lib/mutations/authoredEntities';
 import { mayCreateEntities } from '@/lib/roles/roleGuard';
-import { normalizeRoleId } from '@/lib/roles/disciplineRoles';
+import { activeRoleOf } from '@/lib/roles/disciplineRoles';
 import { getOrCreateStoreEditor } from './mutationSlice.js';
 import type { ViewerState } from '../index.js';
 
@@ -129,7 +129,7 @@ export const createIfcZonesSlice: StateCreator<ViewerState, [], [], IfcZonesSlic
    * `runInStoreElementBuilder` calls `mayCreateEntities` separately.
    */
   const writable = (modelId: string) => {
-    if (!mayCreateEntities(normalizeRoleId(get().activeDisciplineSystemId)).allowed) return null;
+    if (!mayCreateEntities(activeRoleOf(get())).allowed) return null;
     if (!get().canCollabEdit()) return null;
 
     const view = get().mutationViews.get(modelId);
