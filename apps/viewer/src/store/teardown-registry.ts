@@ -89,6 +89,9 @@ import { zonesTeardown } from './slices/zonesSlice.js';
 import { layerStackTeardown } from './slices/layerStackSlice.teardown.js';
 import { modelTagsTeardown } from './slices/modelTagsSlice.teardown.js';
 import { sceneStateTeardown } from './slices/sceneStateSlice.js';
+import {
+  addElementTeardown, escapeRoutesTeardown, graphTeardown, ifcZonesTeardown, triageTeardown, wiringTeardown,
+} from './slices/forkSlices.teardown.js';
 
 /**
  * Every slice teardown the viewer store knows about.
@@ -143,6 +146,13 @@ export const viewerTeardownRegistry: readonly AnySliceTeardown[] = createTeardow
   flowTeardown,
   documentTeardown,
   sceneStateTeardown,
+  // Fork slices that hold model-derived ids.
+  addElementTeardown,
+  escapeRoutesTeardown,
+  graphTeardown,
+  triageTeardown,
+  wiringTeardown,
+  ifcZonesTeardown,
 ]);
 
 /**

@@ -28,6 +28,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  * field on every file swap.
  */
 const PINNED_SESSION_RESET_KEYS: readonly string[] = [
+  'activeIfcZoneKey', 'addElementModelId', 'addElementStoreyId', 'doorNumberRoom', 'escapeRouteFailure', 'escapeRouteStart', 'graphHighlight', 'graphStartSystems', 'ifcZoneBrushActive', 'wiringHover', 'wiringSequence', // fork slices: model-derived ids go with the models
   'serverPropertiesRuns', // #9538 model-owned optional property polling
   'appearanceReferenceEntry', // #6615 unopened section requests cannot outlive their live model session
   'siteContextAbort', 'siteContextCategories', 'siteContextError', 'siteContextLastChoice', 'siteContextModels', 'siteContextProgress', 'siteContextRequest', 'siteContextStats', // site context: the fetch and its context models belong to the session
@@ -106,6 +107,7 @@ const PINNED_SESSION_RESET_KEYS: readonly string[] = [
 
 /** The same, for `all-models-cleared`. */
 const PINNED_ALL_MODELS_CLEARED_KEYS: readonly string[] = [
+  'activeIfcZoneKey', 'addElementModelId', 'addElementStoreyId', 'doorNumberRoom', 'escapeRouteFailure', 'escapeRouteStart', 'graphHighlight', 'graphStartSystems', 'ifcZoneBrushActive', 'wiringHover', 'wiringSequence', // fork slices: model-derived ids go with the models
   'structuralViewMode',
   'siteContextAbort', 'siteContextCategories', 'siteContextModels', 'siteContextProgress', 'siteContextRequest', // site context: every context-model record goes with the models, no category stays reported loaded, and a running fetch ends (#10481 review)
   'floodCheck', // flood check: the result and its verdict colours go with the checked model
@@ -168,6 +170,7 @@ const PINNED_ALL_MODELS_CLEARED_KEYS: readonly string[] = [
  * like this one a compile error.
  */
 const PINNED_MODEL_REMOVED_KEYS: readonly string[] = [
+  'activeIfcZoneKey', 'doorNumberRoom', 'escapeRouteFailure', 'escapeRouteStart', 'graphHighlight', 'graphStartSystems', 'ifcZoneBrushActive', 'wiringHover', 'wiringSequence', // fork slices: model-derived ids go with the model
   'serverPropertiesRuns', // #9538 model-owned optional property polling
   'modelTagAssignments', // #4215 model tags: assignments die with the model, definitions survive
   'flowLastRun', 'flowLastError', 'flowLastRunWindow', // #5167 flow: the last run's outputs hold handles into the removed model
@@ -239,6 +242,7 @@ function modelRemovedFixture() {
  * `owns` list fails even when no scope emits it under an empty state.
  */
 const PINNED_OWNED_KEYS: readonly string[] = [
+  'activeIfcZoneKey', 'addElementModelId', 'addElementStoreyId', 'doorNumberRoom', 'escapeRouteFailure', 'escapeRouteStart', 'graphHighlight', 'graphStartSystems', 'ifcZoneBrushActive', 'wiringHover', 'wiringSequence', // fork slices: model-derived ids go with the models
   'serverPropertiesRuns', // #9538 model-owned optional property polling
   'appearanceReferenceEntry', // #6615 unopened section requests cannot outlive their live model session
   'siteContextAbort', 'siteContextCategories', 'siteContextError', 'siteContextLastChoice', 'siteContextModels', 'siteContextProgress', 'siteContextRequest', 'siteContextStats', // site context: the fetch and its context models belong to the session

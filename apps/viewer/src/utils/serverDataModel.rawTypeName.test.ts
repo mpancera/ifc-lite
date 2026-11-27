@@ -27,11 +27,13 @@ const parseResult: ServerParseResult = {
   stats: { total_time_ms: 1, parse_time_ms: 1, geometry_time_ms: 0, total_vertices: 0, total_triangles: 0 },
 };
 
-/** Classes the server can emit that `IfcTypeEnum` does not model. */
+/** Classes the server can emit that `IfcTypeEnum` does not model. The fork's
+ * enum covers the IFC4X3 products (IfcPump, IfcChiller, IfcBorehole...), so the
+ * fixture uses IFC2X3-only classes that stay outside it. */
 const OUTSIDE_ENUM = [
-  { id: 100, raw: 'IFCPUMP', display: 'IfcPump' },
-  { id: 101, raw: 'IFCCHILLER', display: 'IfcChiller' },
-  { id: 102, raw: 'IFCBOREHOLE', display: 'IfcBorehole' },
+  { id: 100, raw: 'IFCELECTRICALELEMENT', display: 'IfcElectricalElement' },
+  { id: 101, raw: 'IFCEQUIPMENTELEMENT', display: 'IfcEquipmentElement' },
+  { id: 102, raw: 'IFCELECTRICDISTRIBUTIONPOINT', display: 'IfcElectricDistributionPoint' },
 ];
 
 /** A class the enum DOES cover — the negative control for the fallback. */

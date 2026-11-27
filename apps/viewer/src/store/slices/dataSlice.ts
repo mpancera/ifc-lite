@@ -325,7 +325,24 @@ export const createDataSlice: StateCreator<DataSlice & DataCrossSliceState, [], 
     // Routed through upstream's `replaceEntityMeshes` (#6232 WP1), so the
     // renderer's mesh-edit drain swaps the GPU copy as well as the list.
     const modelId = state.activeModelId;
-    if (!modelId || !state.models.has(modelId)) return removed;
+    if (!modelId || !state.models.has(modelId)) {
+      // No federation entry (single-model / headless): swap in the flat list,
+      // in place, keeping the totals honest.
+      const at = existing.meshes.findIndex((mesh: MeshData) => wanted.has(mesh.expressId));
+      const meshes = existing.meshes.filter((mesh: MeshData) => !wanted.has(mesh.expressId));
+      meshes.splice(at >= 0 ? at : meshes.length, 0, stamped);
+      let totalTriangles = 0;
+      let totalVertices = 0;
+      for (const mesh of meshes) {
+        totalTriangles += mesh.indices.length / 3;
+        totalVertices += mesh.positions.length / 3;
+      }
+      set({
+        geometryResult: { ...existing, meshes, totalTriangles, totalVertices },
+        geometryUpdateTick: state.geometryUpdateTick + 1,
+      });
+      return removed;
+    }
     get().replaceEntityMeshes(modelId, new Map([[stamped.expressId, [stamped]]]));
     return removed;
   },

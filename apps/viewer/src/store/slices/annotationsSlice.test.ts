@@ -10,7 +10,8 @@ const STORAGE_KEY = 'ifc-lite:annotations:v1';
 
 /** Reads the persisted ids straight out of localStorage — not the in-memory map. */
 function persistedIds(): string[] {
-  const raw = localStorage.getItem(STORAGE_KEY);
+  // Storage is scoped per project (fork): read the stub project's key.
+  const raw = localStorage.getItem(`${STORAGE_KEY}:${PROJECT}`);
   if (!raw) return [];
   const parsed = JSON.parse(raw) as Array<{ id: string }>;
   return parsed.map((a) => a.id);

@@ -169,4 +169,29 @@ export const TEARDOWN_EXEMPTIONS: Readonly<Record<string, string>> = {
     're-attaches when the same file is loaded again (the clash-review pattern, #1468); ' +
     'removing a model or clearing the federation must NOT erase them, and nothing can go ' +
     'stale because no key names per-load state.',
+
+  // ── Fork slices ──────────────────────────────────────────────────────────
+  exportProductsSlice:
+    'The delivery list is project-scoped: `exportProductsProject` names the project it was ' +
+    'restored for and `restoreExportProductsForProject` swaps it when the project changes. It ' +
+    'names plan products and lists by id, not modelIds or expressIds.',
+
+  heightsSlice:
+    'The height system is project-scoped (`heightSystemProject`) and re-read when the project ' +
+    'changes; the rest is a panel flag. It names no modelId or expressId.',
+
+  housekeepingSlice:
+    'Only a panel-visibility flag.',
+
+  planProductsSlice:
+    'Plan products are project-scoped (`planProductsProject`) and restored per project. They ' +
+    'reference storeys by name and view settings, not by a modelId that goes stale.',
+
+  projectSlice:
+    'The bound project folder and recent-project list are a cross-file workspace preference; ' +
+    'they deliberately outlive a model load. No modelId or expressId.',
+
+  viewModeSlice:
+    'Plan view settings (mode, cut height, rotation, display toggles) are view preferences; ' +
+    'the rotation is project-scoped via `planRotationProject`. No modelId or expressId.',
 };
