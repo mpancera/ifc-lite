@@ -11,7 +11,7 @@
  * colours.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useViewerStore } from '@/store';
 import { applyPalette, parsePalette, setActiveDataVizPalette, type ColorPalette } from '@/lib/theme/palette';
 import { clearActivePalette, loadActivePalette, saveActivePalette } from '@/lib/theme/idbPaletteStorage';
@@ -45,8 +45,15 @@ export function useColorPalette() {
   // Lens evaluation reads this imperatively from an effect, so it is published
   // outside React rather than passed down. Bumping mutationVersion is what
   // makes an already-active lens pick up a newly loaded palette.
+  //
+  // Only when the palette really changed: a bump reads as an edit upstream
+  // (the renderer-first edit window holds panels for it), so the no-palette
+  // mount and load must not send one.
+  const applied = useRef<ColorPalette | null>(null);
   useEffect(() => {
     setActiveDataVizPalette(palette?.dataViz);
+    if (applied.current === palette) return;
+    applied.current = palette;
     useViewerStore.getState().bumpMutationVersion();
   }, [palette]);
 

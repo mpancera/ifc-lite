@@ -437,6 +437,7 @@ export function LensPanel({ onClose }: LensPanelProps) {
               size="sm"
               className="h-7 text-2xs uppercase tracking-wider rounded-sm"
               aria-pressed={!ghostUnmatched}
+              data-lens-ghost-toggle=""
               title={ghostUnmatched
                 ? 'Unmatched elements are ghosted — click to hide them instead'
                 : 'Unmatched elements are hidden — click to ghost them instead'}

@@ -42,7 +42,7 @@ afterEach(() => {
 
 it('#5823 keyboard opens grouped list rows', async () => {
   const ui = render(<ListResultsTable result={result} grouping={grouping} modelUnits={modelUnits} />);
-  click(ui.querySelector('button[aria-label="Showing visible objects only"]')!);
+  // Fork: lists open showing all objects, so there is no filter to switch off.
   await advance(5);
 
   const group = ui.querySelector('button[aria-expanded="false"]') as HTMLButtonElement;
@@ -56,7 +56,7 @@ it('#5823 keyboard opens grouped list rows', async () => {
 
 it('#5823 keyboard selects a result member', async () => {
   const ui = render(<ListResultsTable result={result} modelUnits={modelUnits} />);
-  click(ui.querySelector('button[aria-label="Showing visible objects only"]')!);
+  // Fork: lists open showing all objects, so there is no filter to switch off.
   await advance(5);
   const member = [...ui.querySelectorAll<HTMLButtonElement>('button.absolute[aria-pressed]')]
     .find((button) => button.textContent?.includes('Wall A'));

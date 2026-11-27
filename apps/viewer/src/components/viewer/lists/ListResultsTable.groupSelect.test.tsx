@@ -68,7 +68,7 @@ afterEach(() => {
 async function mount(grouping: ListGrouping): Promise<HTMLElement> {
   const ui = render(<ListResultsTable result={result} grouping={grouping} modelUnits={modelUnits} />);
   // No geometry is loaded, so "visible only" would hide every row.
-  click(ui.querySelector('button[aria-label="Showing visible objects only"]')!);
+  // Fork: lists open showing all objects, so there is no filter to switch off.
   await advance(5);
   return ui;
 }
@@ -221,6 +221,8 @@ for (const federated of [false, true]) {
       rows: [11, 12, 13].map((entityId) => ({ modelId, entityId, values: ['EG', null, null] })),
     };
     const ui = render(<ListResultsTable result={matching} grouping={{ columnId: 'storey', sumColumnIds: [], view: 'schedule' }} modelUnits={modelUnits} />);
+    // Fork: lists open showing all objects; this case is about the visible-only reading.
+    click(ui.querySelector('button[aria-label="Showing all objects"]')!);
     await advance(5);
 
     // A cache hit can publish flat meshes before the renderer receives instances.

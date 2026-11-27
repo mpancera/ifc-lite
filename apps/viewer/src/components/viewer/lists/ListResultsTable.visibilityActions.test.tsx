@@ -76,7 +76,8 @@ afterEach(() => {
 
 async function mount(grouping: ListGrouping, { visibleOnly = false } = {}): Promise<HTMLElement> {
   const ui = render(<ListResultsTable result={result} grouping={grouping} modelUnits={modelUnits} />);
-  if (!visibleOnly) click(ui.querySelector('button[aria-label="Showing visible objects only"]')!);
+  // Fork: lists open showing all objects; switch the filter on when asked.
+  if (visibleOnly) click(ui.querySelector('button[aria-label="Showing all objects"]')!);
   await advance(5);
   return ui;
 }

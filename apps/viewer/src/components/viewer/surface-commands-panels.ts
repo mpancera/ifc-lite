@@ -8,6 +8,7 @@ import {
   FileCode2, FileSpreadsheet, FileText, FileWarning, GitBranch, GitCompareArrows,
   History, Layout, Layers, Link2, ListChecks, MessageSquare, Palette, PencilLine, PencilRuler, Puzzle,
   Ruler, Scan, Sparkles, TreeDeciduous, Users, Workflow,
+  Blocks, Boxes, Cable, ClipboardList, DoorClosed, DoorOpen, PackageCheck, Radio,
 } from 'lucide-react';
 import type { TranslationKey } from '@/i18n';
 import type { WorkspacePanelId } from '@/lib/panels/registry';
@@ -65,6 +66,21 @@ function rightCommand<const Id extends string>(
     run: (context) => {
       if (!context.activateRightPanel) throw new Error(`Cannot open ${panel} without a panel host`);
       context.activateRightPanel(panel);
+    },
+  };
+}
+
+/** Fork panels: opened through the workspace, wherever the registry homes them. */
+function forkPanelCommand<const Id extends WorkspacePanelId>(
+  panel: Id, keywords: string, icon: Command['icon'],
+): SurfaceCommandDefinition & { id: `panel:${Id}` } {
+  return {
+    id: `panel:${panel}`, panelId: panel, panelGroup: panelGroupFor(panel),
+    labelKey: panelTitleKey(panel), keywords,
+    category: 'Panels', icon, surfaces: paletteOnly, enabled: alwaysEnabled,
+    run: () => {
+      closeActiveAnalysisExtension();
+      useViewerStore.getState().showWorkspacePanel(panel, 'palette');
     },
   };
 }
@@ -150,4 +166,15 @@ export const PANEL_SURFACE_COMMANDS = [
   rightCommand('panel:collab', 'collab', 'collaboration session share invite live multiplayer presence room realtime sync', Users,
     true, (state) => state.collabEnabled === true),
   rightCommand('panel:extensions', 'extensions', 'extension plugin install manage iflx permissions grants revoke audit log repair queue', Puzzle, true),
+  // Fork panels.
+  forkPanelCommand('exports', 'plan products export brandschutzplan feuerwehrplan sheet pdf deliverable', PackageCheck),
+  forkPanelCommand('heights', 'heights storey levels elevation höhen kote geschoss', Ruler),
+  forkPanelCommand('graph', 'graph relations chain schema space graph beziehungen', Workflow),
+  forkPanelCommand('housekeeping', 'housekeeping checks model hygiene validation aufräumen', ClipboardList),
+  forkPanelCommand('proxyTriage', 'proxy triage building element proxy classify', Boxes),
+  forkPanelCommand('classTriage', 'class triage generic classes reclassify ifc class', Blocks),
+  forkPanelCommand('roomTriage', 'rooms clean number name area räume', DoorOpen),
+  forkPanelCommand('doorNumbers', 'door numbers numbering türnummern', DoorClosed),
+  forkPanelCommand('detectorGroups', 'detector groups circuits fire alarm meldergruppen', Radio),
+  forkPanelCommand('wiring', 'wiring cable circuit loop verkabelung', Cable),
 ] as const satisfies readonly SurfaceCommandDefinition[];

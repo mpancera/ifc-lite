@@ -585,13 +585,14 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
               const globalId = toGlobalIdFromModels(models, row.modelId, row.entityId);
               const rowIdx = rowIdxOfItem[vRow.index];
               const isSelected = selection.isSelected(vRow.index);
+              // Cast: both tags take the same handlers; `type` only reaches the button.
+              const RowTag = (editable ? 'div' : 'button') as 'button';
               return (
-                // Fork: a div with the button role, so an open cell editor (an
-                // input) can sit inside the row.
-                <div
+                // Fork: an editable list renders a div with the button role, so an open
+                // cell editor (an input) can sit inside the row; otherwise a real button.
+                <RowTag
                   key={vRow.key}
-                  role="button"
-                  tabIndex={0}
+                  {...(editable ? { role: 'button', tabIndex: 0 } : { type: 'button' as const })}
                   aria-pressed={isSelected}
                   className={cn('absolute left-0 top-0 flex w-full cursor-pointer select-none border-b border-border/30 text-left hover:bg-muted/40', isSelected && 'bg-primary/10')}
                   style={{ transform }}
@@ -703,7 +704,7 @@ export function ListResultsTable({ result, listName, grouping, onGroupingChange,
                       </div>
                     );
                   })}
-                </div>
+                </RowTag>
               );
             })}
           </div>

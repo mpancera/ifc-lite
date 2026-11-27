@@ -176,7 +176,7 @@ describe('LensPanel: isolating a rule resolves geometry-less assemblies to their
 
     // A count of 0 renders the row un-clickable (RuleRow's `isEmpty`), which
     // would make every assertion below vacuously unreachable instead of red.
-    assert.equal(container.querySelectorAll('button[aria-pressed]').length, 5);
+    assert.equal(container.querySelectorAll('button[aria-pressed]:not([data-lens-ghost-toggle])').length, 5);
   });
 
   it('#5823 Enter on a legend button isolates the assembly\'s geometry-bearing parts', () => {

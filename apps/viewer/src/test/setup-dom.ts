@@ -24,6 +24,17 @@ const platformTimeoutSignal = AbortSignal.timeout.bind(AbortSignal);
 
 GlobalRegistrator.register({ url: 'http://localhost/' });
 
+// Fork: the app opens in the read-only Viewer role. Upstream's component tests
+// edit models without picking a role, so the suite starts as Editor; role tests
+// set their role explicitly.
+// Same for the fork's privacy switch (external requests off by default): the
+// suite never reaches the network (`no-external-network.mjs`), and upstream's
+// map and bSDD tests stub the requests the switch would refuse.
+try {
+  window.localStorage.setItem('ifclite.authoring.discipline-role', 'editor');
+  window.localStorage.setItem('ifclite.privacy.allow-external-requests', 'true');
+} catch { /* storage blocked */ }
+
 // happy-dom re-implements `AbortSignal.timeout` on a plain window timer, so
 // every request bounded by `AbortSignal.timeout(ms)` held the test process
 // open for the full `ms` after the request had finished (a minute per file for

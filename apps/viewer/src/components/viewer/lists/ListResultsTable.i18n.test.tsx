@@ -171,9 +171,9 @@ describe('ListResultsTable / ListGroupingBar / ColumnHeaderMenu localization (#4
     const container = render(<Harness />);
 
     // Reveal the two synthetic rows (see beforeEach note).
-    const visibilityToggle = container.querySelector('button[aria-label="Showing visible objects only"]');
+    // Fork: lists open showing all objects, so both rows render already.
+    const visibilityToggle = container.querySelector('button[aria-label="Showing all objects"]');
     assert.ok(visibilityToggle, 'expected the visibility-filter toggle button');
-    click(visibilityToggle as Element);
 
     const english = readableStrings(container);
 
@@ -212,8 +212,6 @@ describe('ListResultsTable / ListGroupingBar / ColumnHeaderMenu localization (#4
 
   it('translates the interpolated row-count and totals text directly', () => {
     const container = render(<Harness />);
-    const visibilityToggle = container.querySelector('button[aria-label="Showing visible objects only"]')!;
-    click(visibilityToggle);
 
     const rowCountSpan = [...container.querySelectorAll('span')].find((s) => /\d+ rows?$/.test(s.textContent ?? ''));
     assert.ok(rowCountSpan, 'expected the row-count span');
@@ -230,8 +228,6 @@ describe('ListResultsTable / ListGroupingBar / ColumnHeaderMenu localization (#4
 
   it('translates the schedule (pivot) table once toggled from nested view', () => {
     const container = render(<Harness />);
-    const visibilityToggle = container.querySelector('button[aria-label="Showing visible objects only"]')!;
-    click(visibilityToggle);
 
     const scheduleToggle = container.querySelector('button[aria-label="Switch to schedule (pivot) table view"]');
     assert.ok(scheduleToggle, 'expected the nested/schedule view toggle (only shown once grouped)');
@@ -257,8 +253,6 @@ describe('ListResultsTable / ListGroupingBar / ColumnHeaderMenu localization (#4
 
   it('translates the column-header menu (sort / group / sum / colour actions)', () => {
     const container = render(<Harness />);
-    const visibilityToggle = container.querySelector('button[aria-label="Showing visible objects only"]')!;
-    click(visibilityToggle);
 
     const menuTrigger = container.querySelector('button[aria-label="Column options"]');
     assert.ok(menuTrigger, 'expected at least one column-options trigger');
@@ -293,6 +287,8 @@ describe('ListResultsTable / ListGroupingBar / ColumnHeaderMenu localization (#4
 
   it('#5814 keeps pivot headers available when a schedule has no visible rows', () => {
     const container = render(<Harness />);
+    // Fork: lists open showing all objects; switch to the visible-only reading.
+    click(container.querySelector('button[aria-label="Showing all objects"]')!);
     const scheduleToggle = container.querySelector('button[aria-label="Switch to schedule (pivot) table view"]');
     assert.ok(scheduleToggle);
     click(scheduleToggle);
