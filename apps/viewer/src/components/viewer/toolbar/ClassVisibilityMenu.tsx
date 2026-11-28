@@ -3,9 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * The Visibility dropdown body — class toggles, the Model/Types 3D view
- * switch, and the load-time geometry settings — shared by the classic
- * toolbar and the ribbon so the two styles can never drift.
+ * The Visibility dropdown body used by the ribbon and Settings: class
+ * toggles, the Model/Types 3D view switch, and load-time geometry settings.
  *
  * Settings-style panel (not a list of menu-items): each row is a plain
  * <label> wrapping a right-aligned Switch, so toggling does NOT close
@@ -21,6 +20,7 @@
 import React from 'react';
 import {
   Axis3d,
+  ArrowDownToLine,
   Box,
   BoxSelect,
   Boxes,
@@ -35,11 +35,15 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
-import { DropdownMenuContent, DropdownMenuSeparator } from '@/components/ui/dropdown-menu';
+import { DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu';
+import { Separator } from '@/components/ui/separator';
+import { useTranslation } from '@/i18n';
 import { useViewerStore } from '@/store';
 import { isPreviewTier } from '@/store/constants';
 import { cn } from '@/lib/utils';
 import { SPACE_KIND_LABEL, SPACE_KIND_DESCRIPTION } from '@/store/spaceKind';
+import { openSettings } from '@/lib/settings/open-settings';
+import { structuralGlyphsMasked, structuralGlyphsVisible, toggleStructuralGlyphs } from '@/lib/visibility/structural-view';
 
 interface ClassVisibilityRowProps {
   /** Colored class glyph (caller sets the tint). */
@@ -66,7 +70,7 @@ function ClassVisibilityRow({ icon, label, description, checked, onChange }: Cla
         {icon}
         <span className="grid gap-0.5 min-w-0">
           <span className="text-sm leading-tight truncate">{label}</span>
-          <span className="text-[10px] leading-tight text-muted-foreground truncate">{description}</span>
+          <span className="text-2xs leading-tight text-muted-foreground truncate">{description}</span>
         </span>
       </span>
       <Switch checked={checked} onCheckedChange={onChange} />
@@ -81,6 +85,7 @@ function ClassVisibilityRow({ icon, label, description, checked, onChange }: Cla
  */
 export function useVisibleClassCount(): { visible: number; total: number } {
   const typeVisibility = useViewerStore((state) => state.typeVisibility);
+  const structuralViewMode = useViewerStore((state) => state.structuralViewMode);
   const toggles = [
     typeVisibility.spaces,
     typeVisibility.spatialZones,
@@ -89,14 +94,26 @@ export function useVisibleClassCount(): { visible: number; total: number } {
     typeVisibility.site,
     typeVisibility.ifcAnnotations,
     typeVisibility.ifcGrid,
+    structuralGlyphsVisible(typeVisibility, structuralViewMode),
   ];
   return { visible: toggles.filter(Boolean).length, total: toggles.length };
 }
 
 export function ClassVisibilityMenuContent({ align = 'start' }: { align?: 'start' | 'end' }) {
+  return <DropdownMenuContent align={align} className="w-[300px] p-1.5"><ClassVisibilityControls inMenu /></DropdownMenuContent>;
+}
+
+/** The same settings controls, hosted by a ribbon menu or a keyboard-friendly dialog. */
+export function ClassVisibilityControls({ inMenu = false, onNavigate }: { inMenu?: boolean; onNavigate?: () => void }) {
+  const { t } = useTranslation();
+  const controlId = React.useId();
   const typeVisibility = useViewerStore((state) => state.typeVisibility);
+  const showSelectionOrigin = useViewerStore((state) => state.showSelectionOrigin);
+  const setShowSelectionOrigin = useViewerStore((state) => state.setShowSelectionOrigin);
   const toggleTypeVisibility = useViewerStore((state) => state.toggleTypeVisibility);
   const resetTypeVisibility = useViewerStore((state) => state.resetTypeVisibility);
+  const structuralViewMode = useViewerStore((state) => state.structuralViewMode);
+  const glyphsMasked = structuralGlyphsMasked(typeVisibility, structuralViewMode);
   // #957 follow-up: Model/Types 3D view switch — 'model' shows placed
   // occurrences (default), 'types' shows the type-library shapes.
   const typeViewMode = useViewerStore((state) => state.typeViewMode);
@@ -111,13 +128,10 @@ export function ClassVisibilityMenuContent({ align = 'start' }: { align?: 'start
   const setGeometryMode = useViewerStore((state) => state.setGeometryMode);
   // #2544: a pinned `?geomTier=` override is otherwise invisible and permanent.
   const geomTierOverride = useViewerStore((state) => state.geomTierOverride);
-  const clearGeomTierOverride = useViewerStore((state) => state.clearGeomTierOverride);
-  const showSelectionOrigin = useViewerStore((state) => state.showSelectionOrigin);
-  const setShowSelectionOrigin = useViewerStore((state) => state.setShowSelectionOrigin);
   const { visible: visibleClassCount, total: classToggleCount } = useVisibleClassCount();
 
   return (
-    <DropdownMenuContent align={align} className="w-[300px] p-1.5">
+    <>
       {/* Model / Types 3D view switch (#957 follow-up). A type carries a
           RepresentationMap whose shape is drawn at its MappingOrigin; "Types"
           shows that type library, "Model" shows the placed occurrences. The
@@ -128,156 +142,148 @@ export function ClassVisibilityMenuContent({ align = 'start' }: { align?: 'start
       {hasTypeGeometry && (
         <>
           <div className="px-1.5 pb-1 pt-0.5">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-              3D View
+            <span className="text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
+              {t('classVisibility.viewHeading')}
             </span>
           </div>
-          <div className="flex gap-1 px-1.5 pb-1.5" role="radiogroup" aria-label="3D view mode">
-            <button
-              type="button"
-              role="radio"
-              aria-checked={typeViewMode === 'model'}
-              onClick={() => setTypeViewMode('model')}
+          <div className="flex gap-1 px-1.5 pb-1.5" role="radiogroup" aria-label={t('classVisibility.viewModeAriaLabel')}>
+            <label
               className={cn(
-                'flex flex-1 items-center justify-center gap-1.5 rounded-md border px-2 py-1.5 text-xs font-medium transition-colors',
+                'flex flex-1 items-center justify-center gap-1.5 rounded-md border px-2 py-1.5 text-xs font-medium transition-colors focus-within:ring-2 focus-within:ring-primary',
                 typeViewMode === 'model'
                   ? 'border-primary/40 bg-primary/10 text-foreground'
                   : 'border-transparent text-muted-foreground hover:bg-muted/50',
               )}
             >
+              <input type="radio" name={`${controlId}-type-view-mode`} value="model" checked={typeViewMode === 'model'} onChange={() => setTypeViewMode('model')} className="sr-only" />
               <Boxes className="h-3.5 w-3.5 shrink-0" />
-              Model
-            </button>
-            <button
-              type="button"
-              role="radio"
-              aria-checked={typeViewMode === 'types'}
-              onClick={() => setTypeViewMode('types')}
+              {t('classVisibility.modelMode')}
+            </label>
+            <label
               className={cn(
-                'flex flex-1 items-center justify-center gap-1.5 rounded-md border px-2 py-1.5 text-xs font-medium transition-colors',
+                'flex flex-1 items-center justify-center gap-1.5 rounded-md border px-2 py-1.5 text-xs font-medium transition-colors focus-within:ring-2 focus-within:ring-primary',
                 typeViewMode === 'types'
                   ? 'border-primary/40 bg-primary/10 text-foreground'
                   : 'border-transparent text-muted-foreground hover:bg-muted/50',
               )}
             >
+              <input type="radio" name={`${controlId}-type-view-mode`} value="types" checked={typeViewMode === 'types'} onChange={() => setTypeViewMode('types')} className="sr-only" />
               <Shapes className="h-3.5 w-3.5 shrink-0" />
-              Types
-            </button>
+              {t('classVisibility.typesMode')}
+            </label>
           </div>
 
-          <DropdownMenuSeparator className="my-1" />
+          <Separator className="my-1" />
         </>
       )}
 
       <div className="flex items-center justify-between gap-2 px-1.5 pb-1 pt-0.5">
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Visibility
+        <span className="text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
+          {t('classVisibility.heading')}
         </span>
         <div className="flex items-center gap-1">
-          <span className="text-[11px] tabular-nums text-muted-foreground/80">
+          <span className="text-2xs tabular-nums text-muted-foreground">
             {visibleClassCount}/{classToggleCount}
           </span>
           <Button
             variant="ghost"
             size="sm"
-            className="h-6 px-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground"
+            className="h-6 px-1.5 text-2xs font-medium text-muted-foreground hover:text-foreground"
             onClick={resetTypeVisibility}
           >
-            Reset
+            {t('classVisibility.reset')}
           </Button>
         </div>
       </div>
 
-      {/* Spaces is a master switch over three kinds that are used completely
-          differently. One toggle for all three meant turning rooms on also
-          dropped a storey-sized gross-area slab over the floor, which is why
-          it was usually left off. The children are indented and only reachable
-          while the master is on. */}
       <ClassVisibilityRow
         icon={<Box className="h-4 w-4 shrink-0" style={{ color: '#33d9ff' }} />}
-        label="Spaces"
-        description="All space volumes (IfcSpace)"
+        label={t('classVisibility.spaces.label')}
+        description={t('classVisibility.spaces.description')}
         checked={typeVisibility.spaces}
         onChange={() => toggleTypeVisibility('spaces')}
       />
+      {/* Fork: Spaces is a master switch over three kinds used completely
+          differently (rooms, storey-sized gross-area volume, parking). */}
       {typeVisibility.spaces && (
         <div className="ml-4 border-l border-border/60 pl-2">
           <ClassVisibilityRow
             icon={<Box className="h-4 w-4 shrink-0" style={{ color: '#33d9ff' }} />}
             label={SPACE_KIND_LABEL.room}
             description={SPACE_KIND_DESCRIPTION.room}
-            checked={typeVisibility.rooms}
+            checked={typeVisibility.rooms !== false}
             onChange={() => toggleTypeVisibility('rooms')}
           />
           <ClassVisibilityRow
             icon={<Box className="h-4 w-4 shrink-0" style={{ color: '#7fd4ff' }} />}
             label={SPACE_KIND_LABEL.storeySpace}
             description={SPACE_KIND_DESCRIPTION.storeySpace}
-            checked={typeVisibility.storeySpaces}
+            checked={typeVisibility.storeySpaces !== false}
             onChange={() => toggleTypeVisibility('storeySpaces')}
           />
           <ClassVisibilityRow
             icon={<Box className="h-4 w-4 shrink-0" style={{ color: '#2aa9cc' }} />}
             label={SPACE_KIND_LABEL.parking}
             description={SPACE_KIND_DESCRIPTION.parking}
-            checked={typeVisibility.parking}
+            checked={typeVisibility.parking !== false}
             onChange={() => toggleTypeVisibility('parking')}
           />
         </div>
       )}
-      {/* Not a gross-area volume — that is an IfcSpace.GFA and sits above.
-          IfcSpatialZone is a spatial REGION: fire compartment, security or
-          thermal zone. The panel used to say the opposite. */}
       <ClassVisibilityRow
         icon={<Box className="h-4 w-4 shrink-0" style={{ color: '#b85af2' }} />}
-        label="Compartments"
-        description="Fire, security and other spatial regions (IfcSpatialZone)"
+        label={t('classVisibility.spatialZones.label')}
+        description={t('classVisibility.spatialZones.description')}
         checked={typeVisibility.spatialZones}
         onChange={() => toggleTypeVisibility('spatialZones')}
       />
       <ClassVisibilityRow
         icon={<SquareX className="h-4 w-4 shrink-0" style={{ color: '#ff6b4a' }} />}
-        label="Openings"
-        description="Door & window voids"
+        label={t('classVisibility.openings.label')}
+        description={t('classVisibility.openings.description')}
         checked={typeVisibility.openings}
         onChange={() => toggleTypeVisibility('openings')}
       />
       <ClassVisibilityRow
         icon={<BoxSelect className="h-4 w-4 shrink-0" style={{ color: '#9aa0a6' }} />}
-        label="Virtual Elements"
-        description="Non-physical boundaries & clearance volumes"
+        label={t('classVisibility.virtualElements.label')}
+        description={t('classVisibility.virtualElements.description')}
         checked={typeVisibility.virtualElements}
         onChange={() => toggleTypeVisibility('virtualElements')}
       />
       <ClassVisibilityRow
         icon={<Building2 className="h-4 w-4 shrink-0" style={{ color: '#66cc4d' }} />}
-        label="Site"
-        description="Terrain & context"
+        label={t('classVisibility.site.label')}
+        description={t('classVisibility.site.description')}
         checked={typeVisibility.site}
         onChange={() => toggleTypeVisibility('site')}
       />
       <ClassVisibilityRow
         icon={<Pencil className="h-4 w-4 shrink-0" style={{ color: '#e4b400' }} />}
-        label="Annotations"
-        description="Text, dimensions, leaders"
+        label={t('classVisibility.annotations.label')}
+        description={t('classVisibility.annotations.description')}
         checked={typeVisibility.ifcAnnotations}
         onChange={() => toggleTypeVisibility('ifcAnnotations')}
       />
       <ClassVisibilityRow
         icon={<Grid3x3 className="h-4 w-4 shrink-0" style={{ color: '#e4b400' }} />}
-        label="Grids"
-        description="Structural axes"
+        label={t('classVisibility.grids.label')}
+        description={t('classVisibility.grids.description')}
         checked={typeVisibility.ifcGrid}
         onChange={() => toggleTypeVisibility('ifcGrid')}
       />
+      <ClassVisibilityRow
+        icon={<ArrowDownToLine className="h-4 w-4 shrink-0 text-status-ok" />}
+        label={t('classVisibility.structuralGlyphs.label')}
+        // The switch reports the drawn layer: Physical masks the glyphs whatever the preference (#10604).
+        description={glyphsMasked ? t('classVisibility.structuralGlyphs.maskedHint') : t('classVisibility.structuralGlyphs.description')}
+        checked={structuralGlyphsVisible(typeVisibility, structuralViewMode)}
+        onChange={() => toggleStructuralGlyphs(useViewerStore.getState())}
+      />
 
-      <DropdownMenuSeparator className="my-1" />
+      <Separator className="my-1" />
 
-      {/* Not a class toggle: a marker drawn ON the selection rather than a
-          kind of geometry shown or hidden. It sits with them because the
-          question it answers is the same one — what can I see, and where is
-          it — and because this menu is the classic strip's home for view
-          options that are not camera commands. */}
+      {/* Fork: not a class toggle but a marker drawn ON the selection. */}
       <ClassVisibilityRow
         icon={<Axis3d className="h-4 w-4 shrink-0 text-primary" />}
         label="Selection origin"
@@ -286,24 +292,24 @@ export function ClassVisibilityMenuContent({ align = 'start' }: { align?: 'start
         onChange={() => setShowSelectionOrigin(!showSelectionOrigin)}
       />
 
-      <DropdownMenuSeparator className="my-1" />
+      <Separator className="my-1" />
 
       {/* Merge multilayer walls rebuilds geometry, so unlike the live
           toggles above it only takes effect on the next model load.
           The "· on reload" suffix carries that nuance inline — keeps
           the row identical in shape to the others (no header, no chip
           crowding the long label). */}
-      <label className="group flex items-center justify-between gap-3 rounded-md px-2 py-1.5 cursor-pointer hover:bg-muted/50 transition-colors">
+      <label htmlFor={`${controlId}-merge-layers-switch`} className="group flex items-center justify-between gap-3 rounded-md px-2 py-1.5 cursor-pointer hover:bg-muted/50 transition-colors">
         <span className={cn('flex items-center gap-2.5 min-w-0 transition-opacity', !mergeLayers && 'opacity-50')}>
           <Layers2 className="h-4 w-4 shrink-0 text-primary" />
           <span className="grid gap-0.5 min-w-0">
-            <span className="text-sm leading-tight truncate">Merge multilayer walls</span>
-            <span className="text-[10px] leading-tight text-muted-foreground truncate">
-              Render walls as one solid · on reload
+            <span className="text-sm leading-tight truncate">{t('classVisibility.mergeLayers.label')}</span>
+            <span className="text-2xs leading-tight text-muted-foreground truncate">
+              {t('classVisibility.mergeLayers.description')}
             </span>
           </span>
         </span>
-        <Switch checked={mergeLayers} onCheckedChange={(next) => setMergeLayers(next === true)} />
+        <Switch id={`${controlId}-merge-layers-switch`} checked={mergeLayers} onCheckedChange={(next) => setMergeLayers(next === true)} />
       </label>
 
       {/* Fast vs Exact geometry — like merge-layers, a load-time geometry
@@ -311,19 +317,20 @@ export function ClassVisibilityMenuContent({ align = 'start' }: { align?: 'start
           Fast skips sub-10% detail cuts + auto-lowers density on heavy models
           for quick first paint; Exact keeps every cut at full density for
           display/measure/export fidelity. */}
-      <label className="group flex items-center justify-between gap-3 rounded-md px-2 py-1.5 cursor-pointer hover:bg-muted/50 transition-colors">
+      <label htmlFor={`${controlId}-fast-geometry-switch`} className="group flex items-center justify-between gap-3 rounded-md px-2 py-1.5 cursor-pointer hover:bg-muted/50 transition-colors">
         <span className={cn('flex items-center gap-2.5 min-w-0 transition-opacity', geometryMode !== 'fast' && 'opacity-50')}>
           <Zap className="h-4 w-4 shrink-0 text-primary" />
           <span className="grid gap-0.5 min-w-0">
-            <span className="text-sm leading-tight truncate">Fast geometry</span>
-            <span className="text-[10px] leading-tight text-muted-foreground truncate">
+            <span className="text-sm leading-tight truncate">{t('classVisibility.fastGeometry.label')}</span>
+            <span className="text-2xs leading-tight text-muted-foreground truncate">
               {geometryMode === 'fast'
-                ? 'Skip tiny cuts, auto-detail · on reload'
-                : 'Exact: full cuts + density · on reload'}
+                ? t('classVisibility.fastGeometry.descriptionFast')
+                : t('classVisibility.fastGeometry.descriptionExact')}
             </span>
           </span>
         </span>
         <Switch
+          id={`${controlId}-fast-geometry-switch`}
           checked={geometryMode === 'fast'}
           onCheckedChange={(next) => setGeometryMode(next === true ? 'fast' : 'exact')}
         />
@@ -343,24 +350,26 @@ export function ClassVisibilityMenuContent({ align = 'start' }: { align?: 'start
           <span className="flex items-center gap-2.5 min-w-0">
             <Gauge className="h-4 w-4 shrink-0 text-primary" />
             <span className="grid gap-0.5 min-w-0">
-              <span className="text-sm leading-tight truncate">Detail pinned: {geomTierOverride}</span>
-              <span className="text-[10px] leading-tight text-muted-foreground truncate">
+              <span className="text-sm leading-tight truncate">{t('classVisibility.pinnedDetail.label', { tier: geomTierOverride })}</span>
+              <span className="text-2xs leading-tight text-muted-foreground truncate">
                 {isPreviewTier(geomTierOverride) && geometryMode !== 'fast'
-                  ? 'Ignored in Exact · from a ?geomTier= link'
-                  : 'Overrides automatic detail · from a ?geomTier= link'}
+                  ? t('classVisibility.pinnedDetail.descriptionIgnored')
+                  : t('classVisibility.pinnedDetail.descriptionOverrides')}
               </span>
             </span>
           </span>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-7 shrink-0 px-2 text-[11px] font-semibold uppercase tracking-wider"
-            onClick={clearGeomTierOverride}
-          >
-            Clear
-          </Button>
+          <PerformanceSettingsAction inMenu={inMenu} onNavigate={onNavigate}>
+            {t('classVisibility.performanceSettings')}
+          </PerformanceSettingsAction>
         </div>
       )}
-    </DropdownMenuContent>
+    </>
   );
+}
+
+function PerformanceSettingsAction({ inMenu, onNavigate, children }: { inMenu: boolean; onNavigate?: () => void; children: React.ReactNode }) {
+  const open = () => { onNavigate?.(); openSettings('performance'); };
+  const button = <Button size="sm" variant="ghost" className="h-7 shrink-0 px-2 text-2xs font-semibold uppercase tracking-wider"
+    onClick={inMenu ? undefined : open}>{children}</Button>;
+  return inMenu ? <DropdownMenuItem asChild onSelect={open}>{button}</DropdownMenuItem> : button;
 }

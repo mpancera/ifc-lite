@@ -99,3 +99,22 @@ export function purgeMapContainer(container: HTMLElement) {
   container.replaceChildren();
   container.classList.remove('maplibregl-map');
 }
+
+/** Show a declared-origin marker only when that origin was resolved. A map
+ * centred on physical geometry (#6698) must not relabel it as the origin. */
+export function updateOriginMarker(
+  library: typeof import('maplibre-gl'),
+  map: InstanceType<typeof import('maplibre-gl').Map>,
+  marker: InstanceType<typeof import('maplibre-gl').Marker> | null,
+  position: { lon: number; lat: number },
+  showOrigin: boolean,
+): InstanceType<typeof import('maplibre-gl').Marker> | null {
+  if (!showOrigin) {
+    marker?.remove();
+    return null;
+  }
+  if (marker) return marker.setLngLat([position.lon, position.lat]);
+  // `currentColor`: the pin paints the map container's basemap ink (location-map-ink.ts).
+  return new library.Marker({ color: 'currentColor' })
+    .setLngLat([position.lon, position.lat]).addTo(map);
+}

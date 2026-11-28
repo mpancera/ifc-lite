@@ -22,7 +22,7 @@
    "volume": 0.001799
   }
  ],
- "engine": "ifcopenshell 0.8.2",
+ "engine": "ifcopenshell 0.9.0.post1",
  "fixture": "swept_disk_trimmed_line.ifc",
  "settings": {
   "use_world_coords": true,

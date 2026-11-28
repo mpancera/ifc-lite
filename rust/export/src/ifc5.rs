@@ -7,11 +7,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ifc_lite_core::{DecodedEntity, EntityDecoder, EntityScanner};
+use ifc_lite_core::{slot, DecodedEntity, EntityDecoder, EntityScanner};
 use serde_json::{json, Map, Value};
 
 use crate::json::typed_value;
 use crate::model::{build_export_model, EntityRow};
+use ifc_lite_processing::data_model::spatial_walk;
 
 /// IFC5 schema-package import URIs (ifcx.dev v5a).
 /// The value every IFCX writer in this repo puts in `header.ifcxVersion`.
@@ -55,11 +56,33 @@ impl Default for Ifc5Options {
 }
 
 /// Deterministic UUID-shaped path for an express id (no RNG/clock — wasm-safe).
+/// Fallback only — used when the entity has no `GlobalId` to carry forward
+/// (e.g. the `IfcProject` root, decoded separately from the product rows
+/// `path_for_id` below reads from).
 fn uuid_from_id(id: u32) -> String {
     let a = (id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xABCD_EF01_2345_6789;
     let b = (id as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) ^ 0x0F1E_2D3C_4B5A_6978;
     let s = format!("{a:016x}{b:016x}");
     format!("{}-{}-{}-{}-{}", &s[0..8], &s[8..12], &s[12..16], &s[16..20], &s[20..32])
+}
+
+/// IFCX node path for an express id: the entity's own `GlobalId` when it has
+/// one, so a BCF topic / diff / external reference keyed on the source
+/// model's GlobalId still resolves to the same element after IFC→IFCX
+/// conversion; the deterministic fallback otherwise. Mirrors the TS
+/// exporter's `buildEntityMaps` (`packages/export/src/ifc5-exporter.ts`),
+/// which already prefers GlobalId — the Rust port had dropped that and
+/// unconditionally minted a fresh identity for every product, discarding the
+/// original on every `ifc-lite export --format ifcx`.
+fn path_for_id(id: u32, by_id: &HashMap<u32, &EntityRow>) -> String {
+    if let Some(row) = by_id.get(&id) {
+        if let Some(g) = &row.global_id {
+            if !g.is_empty() {
+                return g.clone();
+            }
+        }
+    }
+    uuid_from_id(id)
 }
 
 /// Sanitize a USD prim name (the keys in a node's `children` dict).
@@ -108,7 +131,7 @@ pub(crate) fn decode_one(content: &[u8], id: u32) -> Option<DecodedEntity> {
 /// model doesn't carry it. Shared with the USD exporter (`crate::usd`).
 pub(crate) fn project_name(content: &[u8], project_id: u32) -> String {
     decode_one(content, project_id)
-        .and_then(|e| e.get(2).and_then(|a| a.as_string()).map(|s| s.to_string()))
+        .and_then(|e| e.string_at(slot::IfcProject::NAME).map(|s| s.to_string()))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Project".to_string())
 }
@@ -156,19 +179,10 @@ pub fn export_ifc5(content: &[u8], opts: &Ifc5Options) -> String {
         name_of
             .entry(pid)
             .or_insert_with(|| (project_name(content, pid), "IfcProject".to_string()));
-        let mut stack = vec![pid];
-        while let Some(id) = stack.pop() {
-            if !seen.insert(id) {
-                continue;
-            }
-            emit.push(id);
-            if let Some(ch) = children.get(&id) {
-                for &c in ch {
-                    if !seen.contains(&c) {
-                        stack.push(c);
-                    }
-                }
-            }
+        // D48: the one walk the other formats use, in source order.
+        for visit in spatial_walk::walk(&children, pid) {
+            seen.insert(visit.id);
+            emit.push(visit.id);
         }
     } else {
         // No project — emit every product as a flat list.
@@ -184,7 +198,7 @@ pub fn export_ifc5(content: &[u8], opts: &Ifc5Options) -> String {
             .cloned()
             .unwrap_or_else(|| (String::new(), "IfcProduct".to_string()));
         let mut node = Map::new();
-        node.insert("path".into(), json!(uuid_from_id(*id)));
+        node.insert("path".into(), json!(path_for_id(*id, &by_id)));
 
         if let Some(ch) = children.get(id) {
             let mut child_map = Map::new();
@@ -193,7 +207,7 @@ pub fn export_ifc5(content: &[u8], opts: &Ifc5Options) -> String {
                     continue;
                 }
                 let (cname, ctype) = name_of.get(&c).cloned().unwrap_or_default();
-                child_map.insert(prim_name(&cname, &ctype, c), json!(uuid_from_id(c)));
+                child_map.insert(prim_name(&cname, &ctype, c), json!(path_for_id(c, &by_id)));
             }
             if !child_map.is_empty() {
                 node.insert("children".into(), Value::Object(child_map));
@@ -231,86 +245,5 @@ pub fn export_ifc5(content: &[u8], opts: &Ifc5Options) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn duplex_exports_valid_ifcx() {
-        let s = export_ifc5(&fixture_or_skip!("ara3d/duplex.ifc"), &Ifc5Options::default());
-        let v: Value = serde_json::from_str(&s).expect("valid JSON");
-        assert_eq!(v["header"]["ifcxVersion"], IFCX_VERSION);
-        assert_eq!(v["imports"][0]["uri"], IMPORT_CORE);
-
-        let data = v["data"].as_array().expect("data array");
-        assert!(data.len() > 20, "expected a populated node graph, got {}", data.len());
-
-        // Every node has a UUID path; classes are bsi::ifc::*.
-        let paths: HashSet<&str> = data.iter().filter_map(|n| n["path"].as_str()).collect();
-        assert_eq!(paths.len(), data.len(), "paths are unique");
-        for n in data {
-            assert!(n["path"].as_str().unwrap().contains('-'), "uuid-shaped path");
-        }
-
-        // A project root exists and its class is IfcProject.
-        let has_project = data
-            .iter()
-            .any(|n| n["attributes"]["bsi::ifc::class"]["code"] == "IfcProject");
-        assert!(has_project, "project node present");
-
-        // Children dict values reference real node paths (no dangling spatial edges).
-        for n in data {
-            if let Some(ch) = n["children"].as_object() {
-                for (_k, cpath) in ch {
-                    assert!(paths.contains(cpath.as_str().unwrap()), "child path resolves");
-                }
-            }
-        }
-
-        // At least one node carries a known IFC5 property in the bsi::ifc::prop:: namespace.
-        let has_prop = data.iter().any(|n| {
-            n["attributes"].as_object().is_some_and(|a| {
-                a.keys().any(|k| k.starts_with("bsi::ifc::prop::") && k != "bsi::ifc::prop::Name")
-            })
-        });
-        assert!(has_prop, "expected a typed IFC5 property somewhere");
-    }
-
-    /// The header key a READER looks for, which is not the same thing as the
-    /// key this exporter happens to write.
-    ///
-    /// The assertion above was previously `header.version`, mirroring the
-    /// implementation — so it passed while every exported file was rejected by
-    /// `@ifc-lite/ifcx` ("missing or invalid header.ifcxVersion") and did not
-    /// match buildingSMART's own reference files either. Pinning the absence of
-    /// the old key is what makes that regression fail here instead of at the
-    /// other end of a round-trip.
-    #[test]
-    fn header_uses_the_key_readers_look_for() {
-        let s = export_ifc5(&fixture_or_skip!("ara3d/duplex.ifc"), &Ifc5Options::default());
-        let v: Value = serde_json::from_str(&s).expect("valid JSON");
-
-        let header = v["header"].as_object().expect("header object");
-        assert!(
-            header.contains_key("ifcxVersion"),
-            "header must carry ifcxVersion; got keys {:?}",
-            header.keys().collect::<Vec<_>>(),
-        );
-        assert!(
-            !header.contains_key("version"),
-            "the old `version` key is what readers ignore — it must not come back",
-        );
-        // Readers match case-insensitively on the substring "ifcx".
-        assert!(
-            header["ifcxVersion"].as_str().unwrap().to_lowercase().contains("ifcx"),
-            "ifcxVersion must contain 'ifcx'",
-        );
-    }
-
-    #[test]
-    fn unknown_props_filtered_by_default() {
-        let s = export_ifc5(&fixture_or_skip!("ara3d/duplex.ifc"), &Ifc5Options::default());
-        // 'LoadBearing' / 'Reference' are IFC4 props NOT in the IFC5 known set.
-        assert!(!s.contains("bsi::ifc::prop::LoadBearing"));
-        assert!(!s.contains("bsi::ifc::prop::Reference\""));
-    }
-}
+#[path = "ifc5_tests.rs"]
+mod tests;

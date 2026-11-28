@@ -24,6 +24,16 @@ program
   .option('-o, --output <dir>', 'Output directory', './generated')
   .option('-r, --rust', 'Generate Rust code', false)
   .option('--rust-dir <dir>', 'Rust output subdirectory (relative to output)', 'rust')
+  .option('--rust-crate-private', 'Keep generated Rust types crate-private', false)
+  .option(
+    '--rust-supplemental-schema <path...>',
+    'Additional EXPRESS schemas whose entity names extend the Rust IfcType universe'
+  )
+  .option(
+    '--rust-slot-schema <path...>',
+    'Every bundled EXPRESS release other than the input; their attribute positions feed generated slots.rs'
+  )
+  .option('--rust-slot-renames <path>', 'attribute-renames.json for the slot generator')
   .option('--skip-collision-check', 'Skip CRC32 collision check', false)
   .option('-v, --verbose', 'Verbose output', false)
   .action(
@@ -33,6 +43,10 @@ program
         output: string;
         rust: boolean;
         rustDir: string;
+        rustCratePrivate: boolean;
+        rustSupplementalSchema?: string[];
+        rustSlotSchema?: string[];
+        rustSlotRenames?: string;
         skipCollisionCheck: boolean;
         verbose: boolean;
       }
@@ -55,6 +69,10 @@ program
         const genOptions: GeneratorOptions = {
           rust: options.rust,
           rustDir: options.rustDir,
+          rustCratePrivate: options.rustCratePrivate,
+          rustSupplementalSchemaPaths: options.rustSupplementalSchema,
+          rustSlotSchemaPaths: options.rustSlotSchema,
+          rustSlotRenamesPath: options.rustSlotRenames,
           skipCollisionCheck: options.skipCollisionCheck,
         };
 

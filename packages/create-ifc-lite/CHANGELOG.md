@@ -1,5 +1,43 @@
 # create-ifc-lite
 
+## 1.16.1
+
+### Patch Changes
+
+- [#9538](https://github.com/LTplus-AG/ifc-lite/pull/9538) [`1ef56b3`](https://github.com/LTplus-AG/ifc-lite/commit/1ef56b371fb233ef3fb61cdd2bb5cca8a36f8a49) Thanks [@louistrue](https://github.com/louistrue)! - Keep the generated streaming example successful when optional model-property fetching rejects. Warn without discarding successful geometry; actual streaming failures still exit unsuccessfully.
+
+## 1.16.0
+
+### Minor Changes
+
+- [#7660](https://github.com/LTplus-AG/ifc-lite/pull/7660) [`6825102`](https://github.com/LTplus-AG/ifc-lite/commit/6825102be1ef80b843a672f7e6dfbcce7104db24) Thanks [@louistrue](https://github.com/louistrue)! - Pin inspected IFClite releases and reject missing transitive dependencies or worker assets; configure browser templates for module workers. Resolve each scaffold's complete dependency set with npm peer checks and write package-lock.json without running installation scripts. Recommend npm ci for reproducible installation; retain ordinary npm install for adding optional packages. Reuse the scaffold CI matrix after successful package publication and exercise the generated basic project on a real IFC reference model.
+
+## 1.15.1
+
+### Patch Changes
+
+- [#7080](https://github.com/LTplus-AG/ifc-lite/pull/7080) [`5682fa2`](https://github.com/LTplus-AG/ifc-lite/commit/5682fa28a422454b5e10a40c2b59a79cdff6ca7d) Thanks [@louistrue](https://github.com/louistrue)! - Use the canonical scrubbed FZK fixture in the Babylon.js and Three.js starter download links.
+
+## 1.15.0
+
+### Minor Changes
+
+- [#5567](https://github.com/LTplus-AG/ifc-lite/pull/5567) [`64af7d9`](https://github.com/LTplus-AG/ifc-lite/commit/64af7d9d2d15486982a4db12251bc5d059577d6d) Thanks [@louistrue](https://github.com/louistrue)! - The `threejs` and `babylonjs` starters now render the building in the right shape. Both converted `MeshData` without reading `origin`, and `positions` are relative to that per-element local frame — on `AC20-FZK-Haus.ifc` 285 of 317 meshes carry one, up to 15.4 m from their drawn position, so the model arrived as a pile of disconnected slabs. The repo's own Three.js and Babylon.js tutorials already showed the one-line fold; the scaffolds now do it too. Babylon meshes are also double-sided unconditionally, since IFC triangle winding is not reliably outward.
+  
+  `--template server` can be started at all: its `docker-compose.yml` and README referenced `ghcr.io/LTplus-AG/...`, which Docker rejects outright ("repository name must be lowercase"), so `docker compose up -d` — step 1 of the generated Quick Start — failed on every machine.
+  
+  Also: a scaffolded project is version `0.1.0` rather than inheriting `@ifc-lite/parser`'s major; every template ships a `.gitignore`, a `typecheck` script, and `private: true`; the `threejs`/`babylonjs` `postinstall` that rewrote a file inside `node_modules/@ifc-lite/geometry` is gone (it patched a specifier the published dist no longer contains, so it was a no-op); `tsc` no longer emits into a `dist/` that `vite build` immediately wipes; the `basic` sample prints canonical `IfcWallStandardCase` type names instead of raw `IFCWALLSTANDARDCASE`, reports a non-IFC file as a failure instead of "parsed successfully", and exits non-zero when it fails; the React template no longer stamps this project's licence header onto the developer's own files and is aligned on Vite 7 with its sibling templates; and two `ifclite.dev` links that 404 now resolve.
+  
+  The CLI argument parser rejects what it used to silently accept: an unknown flag (`--templat react` scaffolded a project literally named `react`), a second positional (`a b c` produced `c`), and a prototype-chain template name (`--template toString` produced the `basic` scaffold). `--version` prints the version instead of scaffolding a project, `-t` is documented, and a scaffold that fails partway — an offline run, since templates resolve versions from the registry before writing anything — cleans up its directory and reports the underlying cause instead of leaving a husk that makes the retry fail with "already exists".
+  
+  Version resolution also rejects a candidate whose own tarball is missing. A version can be `dist-tags.latest`, be listed in the packument, and advertise a `dist.tarball` that 404s; the resolver only checked the candidate's dependencies, so it happily wrote that version into the scaffold and `npm install` then failed on a URL npm itself had supplied.
+
+## 1.14.13
+
+### Patch Changes
+
+- [#3851](https://github.com/LTplus-AG/ifc-lite/pull/3851) [`1389598`](https://github.com/LTplus-AG/ifc-lite/commit/1389598ac7e8c4986a89b50d7671cbb5028ab066) Thanks [@louistrue](https://github.com/louistrue)! - The `server` and `server-native` scaffolds pinned `parquet-wasm: ^0.6.0` as an optional dependency, which falls outside `@ifc-lite/server-client`'s narrowed `^0.7.2` peer range. A strict package manager rejects the generated project's install; a permissive one installs a decoder the SDK no longer supports, so the first Parquet decode fails at runtime. Both templates now scaffold `^0.7.2`, and a test asserts the scaffolded pin stays inside the peer range that `packages/server-client/package.json` declares.
+
 ## 1.14.12
 
 ### Patch Changes

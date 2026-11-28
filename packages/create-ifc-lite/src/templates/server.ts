@@ -4,13 +4,14 @@
 
 import { mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
-import { getPackageVersion } from '../utils/config-fixers.js';
+import { writeServerStreamingExample } from './server-stream.js';
+import { getPinnedPackageVersion } from '../utils/config-fixers.js';
 
 /**
  * Scaffold a Docker-based IFC processing server with TypeScript client examples.
  */
 export function createServerTemplate(targetDir: string, projectName: string) {
-  const serverClientVersion = getPackageVersion('@ifc-lite/server-client');
+  const serverClientVersion = getPinnedPackageVersion('@ifc-lite/server-client');
 
   // docker-compose.yml - Production configuration
   writeFileSync(join(targetDir, 'docker-compose.yml'), `# IFC-Lite Server - Production Configuration
@@ -18,7 +19,7 @@ export function createServerTemplate(targetDir: string, projectName: string) {
 
 services:
   ifc-server:
-    image: ghcr.io/LTplus-AG/ifc-lite-server:latest
+    image: ghcr.io/ltplus-ag/ifc-lite-server:latest
     container_name: ${projectName}-server
     ports:
       - "\${PORT:-3001}:8080"
@@ -51,7 +52,7 @@ volumes:
 
 services:
   ifc-server:
-    image: ghcr.io/LTplus-AG/ifc-lite-server:latest
+    image: ghcr.io/ltplus-ag/ifc-lite-server:latest
     container_name: ${projectName}-server-dev
     ports:
       - "\${PORT:-3001}:8080"
@@ -176,6 +177,7 @@ cache
   writeFileSync(join(targetDir, 'package.json'), JSON.stringify({
     name: projectName,
     version: '0.1.0',
+    private: true,
     type: 'module',
     description: 'IFC processing server with TypeScript client',
     scripts: {
@@ -197,7 +199,7 @@ cache
       '@types/node': '^20.0.0',
     },
     optionalDependencies: {
-      'parquet-wasm': '^0.6.0',
+      'parquet-wasm': '^0.7.2',
       'apache-arrow': '^17.0.0',
     },
   }, null, 2));
@@ -348,109 +350,7 @@ The server will:
 main().catch(console.error);
 `);
 
-  // src/example-stream.ts - Streaming example for large files
-  writeFileSync(join(targetDir, 'src', 'example-stream.ts'), `/**
- * IFC-Lite Server Streaming Example
- *
- * This example demonstrates streaming parsing for large IFC files.
- * Geometry batches are received progressively, enabling immediate rendering
- * while the server continues processing.
- *
- * Best for: Files > 50MB where you want progressive rendering
- *
- * Prerequisites:
- *   1. Start the server: docker compose up -d
- *   2. Install optional deps: npm install parquet-wasm apache-arrow
- *   3. Run: npm run example:stream <path-to-ifc>
- */
-
-import { IfcServerClient } from '@ifc-lite/server-client';
-import { readFileSync, existsSync } from 'fs';
-
-const SERVER_URL = process.env.SERVER_URL || 'http://localhost:3001';
-
-async function main() {
-  const client = new IfcServerClient({
-    baseUrl: SERVER_URL,
-    timeout: 600000, // 10 minutes for very large files
-  });
-
-  // Check server
-  try {
-    await client.health();
-    console.log('Server connected');
-  } catch {
-    console.error('Server not available. Start with: docker compose up -d');
-    process.exit(1);
-  }
-
-  const ifcPath = process.argv[2];
-  if (!ifcPath || !existsSync(ifcPath)) {
-    console.log('Usage: npm run example:stream <path-to-ifc-file>');
-    process.exit(1);
-  }
-
-  const nodeBuffer = readFileSync(ifcPath);
-  const buffer = nodeBuffer.buffer.slice(
-    nodeBuffer.byteOffset,
-    nodeBuffer.byteOffset + nodeBuffer.byteLength,
-  ) as ArrayBuffer;
-  console.log(\`\\nStreaming: \${ifcPath} (\${(nodeBuffer.length / 1024 / 1024).toFixed(1)} MB)\`);
-
-  // Check Parquet support
-  const parquetAvailable = await client.isParquetSupported();
-  if (!parquetAvailable) {
-    console.error('Streaming requires parquet-wasm and apache-arrow.');
-    console.error('Install with: npm install parquet-wasm apache-arrow');
-    process.exit(1);
-  }
-
-  const startTime = performance.now();
-  let totalMeshes = 0;
-  let batchCount = 0;
-
-  try {
-    // Stream with batch callback
-    const result = await client.parseParquetStream(buffer, (batch) => {
-      batchCount++;
-      totalMeshes += batch.meshes.length;
-
-      // In a real app, you would render each batch immediately
-      console.log(
-        \`  Batch #\${batch.batch_number}: +\${batch.meshes.length} meshes \` +
-        \`(decode: \${batch.decode_time_ms.toFixed(0)}ms) - Total: \${totalMeshes}\`
-      );
-    });
-
-    const elapsed = performance.now() - startTime;
-    console.log(\`\\nStreaming complete!\`);
-    console.log(\`  Total time: \${elapsed.toFixed(0)}ms\`);
-    console.log(\`  Batches received: \${batchCount}\`);
-    console.log(\`  Total meshes: \${result.total_meshes}\`);
-    console.log(\`  Cache key: \${result.cache_key.substring(0, 16)}...\`);
-
-    if (result.stats) {
-      console.log(\`\\nServer processing:\`);
-      console.log(\`  Parse: \${result.stats.parse_time_ms}ms\`);
-      console.log(\`  Geometry: \${result.stats.geometry_time_ms}ms\`);
-      console.log(\`  Triangles: \${result.stats.total_triangles}\`);
-    }
-
-    // Optionally fetch full data model for properties panel
-    console.log(\`\\nFetching data model for properties...\`);
-    const dataModel = await client.fetchDataModel(result.cache_key);
-    if (dataModel) {
-      console.log(\`  Data model size: \${(dataModel.byteLength / 1024).toFixed(1)} KB\`);
-    }
-
-  } catch (error) {
-    console.error('Streaming failed:', error);
-    process.exit(1);
-  }
-}
-
-main().catch(console.error);
-`);
+  writeServerStreamingExample(targetDir);
 
   // src/index.ts - Library re-export for custom integrations
   writeFileSync(join(targetDir, 'src', 'index.ts'), `/**
@@ -498,7 +398,7 @@ IFC processing server using [IFC-Lite](https://github.com/LTplus-AG/ifc-lite).
 docker compose up -d
 
 # 2. Install client dependencies
-npm install
+npm ci
 
 # 3. Run the example (replace with your IFC file)
 npm run example ./your-model.ifc
@@ -600,8 +500,8 @@ The Docker image works on any container platform:
 
 \`\`\`bash
 # Pull and run
-docker pull ghcr.io/LTplus-AG/ifc-lite-server:latest
-docker run -p 8080:8080 -v ifc-cache:/app/cache ghcr.io/LTplus-AG/ifc-lite-server
+docker pull ghcr.io/ltplus-ag/ifc-lite-server:latest
+docker run -p 8080:8080 -v ifc-cache:/app/cache ghcr.io/ltplus-ag/ifc-lite-server
 \`\`\`
 
 ### Environment Variables
@@ -619,7 +519,7 @@ RUST_LOG=info
 ## Learn More
 
 - [IFC-Lite Documentation](https://ifclite.dev/docs/)
-- [Server API Reference](https://ifclite.dev/docs/api/server/)
+- [Server Guide](https://ifclite.dev/docs/guide/server/)
 - [GitHub Repository](https://github.com/LTplus-AG/ifc-lite)
 `);
 

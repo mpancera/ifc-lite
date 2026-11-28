@@ -35,9 +35,10 @@ once with `pnpm fixtures`):
 
 | Command | What it runs |
 |---------|--------------|
-| `pnpm test` | All package unit tests via Turbo (`turbo test`, Vitest per package) |
+| `pnpm test` | Package suites via Turbo, using each package's configured runner |
 | `pnpm test:e2e` | Playwright viewer end-to-end tests (project `viewer-e2e`) |
 | `pnpm test:e2e:ci` | Playwright e2e, CI variant (project `viewer-e2e-ci`) |
+| `pnpm test:packed` | Fresh external npm install from local tarballs; installed declarations, headless roundtrip, lifecycle, real WASM geometry and a Vite worker/WASM bundle |
 | `pnpm test:integration` | Cross-package integration pipeline (`tests/integration.test.ts`) |
 | `pnpm test:api` | Server API tests (`tests/api/`) |
 | `pnpm test:wasm-contract` | Real WASM boundary contract tests (run `pnpm build:wasm` first, or it skips) |
@@ -50,15 +51,58 @@ once with `pnpm fixtures`):
 # Run all TypeScript tests
 pnpm test
 
-# Run specific package
-cd packages/parser && pnpm test
+# Run one package through the dependency graph
+pnpm test --filter=@ifc-lite/parser --concurrency=2 -- --maxWorkers=2
 
-# Watch mode
-cd packages/parser && pnpm exec vitest --watch
+# Run one regression file
+pnpm test --filter=@ifc-lite/parser --concurrency=2 -- parse-model.test --maxWorkers=2
 
-# With coverage
-cd packages/parser && pnpm exec vitest run --coverage
+# Watch mode through the same graph
+pnpm test --filter=@ifc-lite/parser -- --watch
 ```
+
+### Browser-rendered viewer tests
+
+Every viewer test file that imports `apps/viewer/src/test/contrast/render-harness.ts` (the contrast tests and several layout tests) renders the real CSS in a headless Chromium. The harness picks the browser in this order:
+
+1. `IFCLITE_TEST_CHROME_EXECUTABLE`, used as given (a wrong path fails; it never falls back).
+2. System Google Chrome (`channel: 'chrome'`), which is what CI uses.
+3. Outside CI only: Playwright's bundled Chromium, if `pnpm exec playwright install chromium` already installed it. The harness never downloads a browser, and CI never switches away from the Chrome channel.
+
+With none of them, a local run reports those tests as skipped, with the reason on each one, and ends with a line starting `!! N contrast test(s) SKIPPED, not passed`. A run that prints that line has not checked contrast. In CI (`CI` set, or GitHub Actions) they are never skipped: the launch fails as it always has, and `scripts/check-contrast-skips.mjs` fails a viewer shard whose JUnit report holds any such skip. `scripts/pre-handoff.mjs` reports a revert oracle over these tests as SKIPPED, naming the missing browser, because the oracle runs with `CI=1` and the launch would otherwise fail.
+
+A new test that renders through the harness passes `{ skip: CONTRAST_BROWSER_SKIP }` on each `it`, not on its `describe`: node does not count the tests of a skipped suite, so its summary would show nothing skipped.
+
+### Packed consumer workflows
+
+Build the public packages, then exercise the artifacts a fresh consumer installs:
+
+```bash
+pnpm exec turbo build --filter=@ifc-lite/sdk --filter=@ifc-lite/geometry --filter=@ifc-lite/ids --concurrency=2
+pnpm test:packed
+```
+
+Geometry needs a built WASM runtime, or fetch one with `pnpm build:wasm:fetch`. The check creates tarballs with `pnpm pack`, resolves all first-party dependencies to those tarballs, installs them outside the checkout, and verifies that npm installed real directories with no workspace protocols. Its TypeScript consumer compiles against the installed declarations without workspace aliases.
+
+The runtime consumer queries a model, edits a declared property, exports/reopens it, verifies `GlobalId` and the property, checks unsupported-operation and closed-session errors, and exports real WASM geometry as GLB. The committed wall sample always runs. Fetch `ara3d/AC20-FZK-Haus.ifc` with `pnpm fixtures` for the independently authored five-door case; an absent optional fixture prints an explicit skip. CI provisions and verifies the fixtures before this check.
+
+The same external install also builds a browser entry with Vite and verifies that geometry workers and the WASM binary are emitted. This catches missing worker URLs that a Node-only geometry pass cannot detect.
+
+The check removes its temporary installation on success or failure. Capture its JSON receipt with `pnpm --silent test:packed > packed-receipt.json`. The receipt records package versions and fixture hashes, with no model bytes.
+
+### Local BCF publication peer
+
+Run `pnpm dev:bcf-test-server` from the repository root for a controlled local BCF API peer. It prints its loopback URL, synthetic token and project ID. In the viewer's BCF server connection form, choose a custom URL and the access-token sign-in method, then load the printed project. Use a local viewer origin (`localhost` or `127.0.0.1`); the peer does not allow other browser origins. It holds only in-memory test data and discards that data on shutdown.
+
+Run its integration acceptance through root Turbo:
+
+```bash
+TEST_PATTERN='bcf-server.publication' pnpm test --filter=@ifc-lite/viewer --only --env-mode=loose
+```
+
+The suite uses actual HTTP requests through the native viewer connector and BCF client. It covers creation/update, human comments, viewpoints referencing a parsed committed SketchUp IFC model, project pull and BCF archive roundtrip, vocabulary rejection, permission loss, and a connection closed after a committed write. This is controlled-peer evidence, not vendor conformance.
+
+The draft/outbox suites run against the same peer (`TEST_PATTERN='bcf-drafts|bcf-publication|BCFDraftsDialog'`). The peer's `loseNextWriteResponse` drops the next committed write's response, and `loseResponsesOfWrites` drops the responses of chosen accepted-write ordinals (1-based), so a test can lose exactly a viewpoint or comment response. Server timestamps use the peer's clock. Snapshot upload, OAuth grants, server-side revision headers and vendor-specific idempotency remain outside this peer's contract.
 
 ### Rust Tests
 
@@ -94,7 +138,7 @@ cargo fuzz run parse_entity -- -max_total_time=60
 ```
 
 The contract under fuzz is that `parse_entity` never panics, hangs, or overflows
-on arbitrary bytes (only returns `Ok`/`Err`). `tests/malformed_input.rs` pins the
+on arbitrary bytes (only returns `Ok`/`Err`). `rust/core/tests/malformed_input.rs` pins the
 same contract for specific inputs in normal CI.
 
 ## Writing Tests
@@ -354,6 +398,44 @@ const buffer = createMinimalIfc([
   "#2=IFCWALL('wall123',$,$,$,$,$,$,$);"
 ]);
 ```
+
+### Per-Mesh Corpus Gate for Geometry Changes
+
+A change to void cutting or mesh cleanup is judged mesh by mesh, never in
+aggregate: a mesh that gains open edges is a regression, and one that gains
+slivers or raises its max aspect above 1.5x without closing an open edge is
+quality-worse. Three tools run that comparison over the fixture corpus in a
+few minutes:
+
+```bash
+# 1. Build the census once per commit and copy it out of target/ before
+#    switching commits, so base and branch binaries can sit side by side.
+#    For a base commit older than the census, copy this checkout's
+#    rust/processing/examples/mesh_census.rs into the base checkout first,
+#    so both sides measure with the same census and differ only in geometry.
+cargo build --release -p ifc-lite-processing --example mesh_census
+cp target/release/examples/mesh_census /tmp/mesh_census_branch
+
+# 2. One JSON line per mesh for every manifest .ifc up to 200 MiB, 6 at a time.
+scripts/mesh-census-corpus.sh /tmp/mesh_census_branch tests/models /tmp/branch.jsonl 200 6
+
+# 3. The per-mesh verdict (exit 1 on any regression, quality-worse, unmeasured
+#    or missing mesh; unmeasured means the thin census hit its candidate cap).
+node scripts/mesh-census-compare.mjs /tmp/base.jsonl /tmp/branch.jsonl
+```
+
+Besides open and nonmanifold edges, slivers, max aspect and area, the census
+reports thin material (anti-parallel faces under 200 um apart, facing away)
+and coincident sheets. A host sliver left between two flush openings is
+watertight and removes almost no volume, so only those two catch it. Running
+it with `CENSUS_ARGS=--no-voids` attributes thin material to the cut (in
+models with an `IfcWindow` or `IfcDoor` job only; see the example's doc).
+
+For a fast inner loop on one host, cut it out of its model with
+`scripts/ifc-extract-hosts.py [--anonymise] <model.ifc> <out.ifc> <host id>`
+(the host, its openings, the project and the site, whose placement sets the
+RTC offset), check with `mesh_census --ids <host id> <out.ifc>` that the
+extract meshes like the full model, and iterate on the extract.
 
 ## Mocking
 

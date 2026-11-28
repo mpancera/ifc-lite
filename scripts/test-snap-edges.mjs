@@ -13,6 +13,12 @@
  * straight run; the reported length is the whole run; the answer does not move
  * when triangle emission order does) rather than a magic number, so a
  * legitimate tessellation change does not turn it into a brittle snapshot.
+ *
+ * Coverage limit: since #5313 no committed sample emits a crease as several
+ * collinear triangle edges (the only such runs were a T-junction crack on
+ * slab #52), so the run MERGING itself is exercised by the unit suite, not
+ * here. This gate still catches a crease served in fragments per piece and
+ * pins the real edges' lengths and emission-order invariance.
  */
 
 import { readFileSync, existsSync } from 'node:fs';
@@ -48,6 +54,7 @@ if (!existsSync(DETECTOR_DIST)) skipUnbuilt('renderer dist (snap-detector)', 'pn
 
 const { buildGeometryCache } = await import(RENDERER_DIST);
 const { SnapDetector } = await import(DETECTOR_DIST);
+const { Raycaster } = await import(join(ROOT_DIR, 'packages/renderer/dist/raycaster.js'));
 
 initSync(readFileSync(WASM_BIN));
 const api = new IfcAPI();
@@ -57,6 +64,18 @@ function loadMeshes(name) {
   const meshes = [];
   for (let i = 0; i < collection.length; i++) meshes.push(collection.get(i));
   return meshes;
+}
+
+/** World-space AABB of a mesh. */
+function worldBounds(mesh) {
+  const [ox, oy, oz] = mesh.origin ?? [0, 0, 0];
+  const min = { x: Infinity, y: Infinity, z: Infinity }, max = { x: -Infinity, y: -Infinity, z: -Infinity };
+  for (let i = 0; i < mesh.positions.length; i += 3) {
+    const x = mesh.positions[i] + ox, y = mesh.positions[i + 1] + oy, z = mesh.positions[i + 2] + oz;
+    min.x = Math.min(min.x, x); min.y = Math.min(min.y, y); min.z = Math.min(min.z, z);
+    max.x = Math.max(max.x, x); max.y = Math.max(max.y, y); max.z = Math.max(max.z, z);
+  }
+  return { min, max };
 }
 
 /** Perpendicular distance from `p` to the line through `o` with unit direction `d`. */
@@ -160,9 +179,11 @@ for (const sample of ['hello-wall.ifc', 'building-architecture.ifc', 'infra-brid
   checks++;
 }
 
-// The measured case: IfcSlab #52 of building-architecture.ifc carries a straight
-// 2.000 m opening edge at x = 5.600, y = 0.000, z = -5.000 .. -3.000. It used to
-// arrive as 0.200 / 1.800 / 1.600 / 0.200 and no cursor on it ever read 2.000.
+// The measured case: IfcSlab #52 of building-architecture.ifc, the line
+// x = 5.600, y = 0.000, z = -5.000 .. -3.000. The authored face set is closed
+// and the faces either side of the middle 1.6 m are coplanar, so the only
+// creases on the line are two 0.200 m notch edges; each must be one cache edge
+// and a cursor on it must read its full length (#2199, #5313).
 if (existsSync(join(SAMPLES, 'building-architecture.ifc'))) {
   const meshes = loadMeshes('building-architecture.ifc');
   const meshIndex = meshes.findIndex((m) => m.expressId === 52);
@@ -170,15 +191,16 @@ if (existsSync(join(SAMPLES, 'building-architecture.ifc'))) {
   const cache = buildGeometryCache(meshes[meshIndex]);
   const onLine = (v) => Math.abs(v.x - 5.6) < 1e-3 && Math.abs(v.y) < 1e-3;
   const run = cache.edges.filter((e) => onLine(e.v0) && onLine(e.v1));
-  assert.equal(run.length, 1, `slab #52 opening edge is ${run.length} cache edges, expected 1`);
-  assert.ok(Math.abs(run[0].length - 2) < 1e-3, `slab #52 opening edge reads ${run[0].length.toFixed(4)} m`);
-  console.log(`  ok slab #52 opening edge: one run of ${run[0].length.toFixed(4)} m`);
+  const lengths = run.map((e) => e.length.toFixed(4)).sort();
+  assert.deepEqual(lengths, ['0.2000', '0.2000'], `slab #52 line x=5.6 carries edges ${lengths.join(' / ')}, expected the two 0.2000 m notch creases`);
+  console.log('  ok slab #52: the x=5.6 line carries only its two 0.2000 m notch creases');
   checks++;
 
   const camera = { position: { x: 5.62, y: 5, z: -4 }, fov: Math.PI / 4 };
   const ray = { origin: camera.position, direction: { x: 0, y: -1, z: 0 } };
   const detector = new SnapDetector();
-  for (const z of [-4.5, -4.0, -3.5]) {
+  for (const edge of run) {
+    const z = (edge.v0.z + edge.v1.z) / 2;
     const point = { x: 5.62, y: 0, z };
     const result = detector.detectMagneticSnap(
       ray, meshes,
@@ -186,10 +208,12 @@ if (existsSync(join(SAMPLES, 'building-architecture.ifc'))) {
       camera, 800, { edge: null, meshExpressId: null, lockStrength: 0 }
     );
     const [a, b] = result.snapTarget?.metadata?.vertices ?? [];
+    const same = (p, q) => p && Math.hypot(p.x - q.x, p.y - q.y, p.z - q.z) < 1e-3;
+    const hit = (same(a, edge.v0) && same(b, edge.v1)) || (same(a, edge.v1) && same(b, edge.v0));
     const reported = a && b ? Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z) : NaN;
-    assert.ok(Math.abs(reported - 2) < 1e-3, `cursor z=${z} reported ${reported.toFixed(4)} m, not 2.0000`);
+    assert.ok(hit, `cursor z=${z} snapped to a ${reported.toFixed(4)} m edge that is not the crease under it`);
   }
-  console.log('  ok slab #52: every cursor along the edge reports the full 2.0000 m');
+  console.log('  ok slab #52: a cursor on either notch crease snaps to that crease');
   checks++;
 
   // Anti-#2388: reversing triangle emission order must not move a single edge.
@@ -236,6 +260,64 @@ if (existsSync(join(SAMPLES, 'infra-bridge.ifc'))) {
   }
   assert.ok(found, 'the 3.617 degree deck crease of #723 is missing from the snap cache');
   console.log(`  ok infra-bridge #723: the 3.617 degree deck crease is a ${found.length.toFixed(3)} m snap edge`);
+  checks++;
+}
+
+// A section through real geometry (#8659): sweep rays straight down over every
+// mesh cut at mid-height. Nothing the section removed may be reported and the
+// contour must be reachable. The same rays with no clip have to report points
+// above the plane, or the first check proves nothing.
+if (existsSync(join(SAMPLES, 'building-architecture.ifc'))) {
+  const OPTIONS = { snapToVertices: true, snapToEdges: true, snapToFaces: true, screenSnapRadius: 10 };
+  const NO_LOCK = { edge: null, meshExpressId: null, lockStrength: 0 };
+  const STEPS = 12;
+  const EPS = 1e-3;
+  const raycaster = new Raycaster();
+  const detector = new SnapDetector();
+  let cuts = 0, removed = 0, contour = 0, abovePlaneUnclipped = 0, fromInside = 0, fromInsideContour = 0;
+  for (const mesh of loadMeshes('building-architecture.ifc')) {
+    const { min, max } = worldBounds(mesh);
+    if (max.y - min.y < 0.5) continue;
+    const distance = (min.y + max.y) / 2;
+    const clip = { sectionPlane: { normal: [0, 1, 0], distance, flipped: false } };
+    const accept = (hit) => hit.point.y <= distance;
+    cuts++;
+    for (let i = 0; i <= STEPS; i++) {
+      for (let j = 0; j <= STEPS; j++) {
+        const origin = {
+          x: min.x + (max.x - min.x) * (i + 0.37) / (STEPS + 1),
+          y: max.y + 50,
+          z: min.z + (max.z - min.z) * (j + 0.37) / (STEPS + 1),
+        };
+        const ray = { origin, direction: { x: 0, y: -1, z: 0 } };
+        const camera = { position: origin, fov: Math.PI / 4 };
+        const whole = raycaster.raycast(ray, [mesh]);
+        if (whole) {
+          const { snapTarget } = detector.detectMagneticSnap(ray, [mesh], whole, camera, 800, NO_LOCK, OPTIONS);
+          if (snapTarget && snapTarget.position.y > distance + EPS) abovePlaneUnclipped++;
+        }
+        const surface = raycaster.raycast(ray, [mesh], accept);
+        if (!surface) continue;
+        const { snapTarget } = detector.detectMagneticSnap(ray, [mesh], surface, camera, 800, NO_LOCK, OPTIONS, clip);
+        if (!snapTarget) continue;
+        if (snapTarget.position.y > distance + EPS) removed++;
+        const onContour = snapTarget.type !== 'face' && Math.abs(snapTarget.position.y - distance) < EPS;
+        if (onContour) contour++;
+        // The section removed the first surface and the ray went on into the solid.
+        if (whole && whole.point.y > distance + EPS && surface.point.y < distance - EPS) {
+          fromInside++;
+          if (onContour) fromInsideContour++;
+        }
+      }
+    }
+  }
+  assert.ok(cuts > 0, 'no mesh tall enough to section');
+  assert.ok(abovePlaneUnclipped > 0, 'unclipped rays never snapped above the plane, so the clip check is vacuous');
+  assert.equal(removed, 0, 'a snap target lies in the half-space the section removed');
+  assert.ok(contour > 0, 'no ray reached the cut contour');
+  assert.ok(fromInside > 0, 'no ray entered a cut solid, so the contour check below is vacuous');
+  assert.ok(fromInsideContour * 2 >= fromInside, `only ${fromInsideContour} of ${fromInside} rays into a cut solid reached its contour`);
+  console.log(`  ok section through ${cuts} meshes: 0 removed targets (${abovePlaneUnclipped} without the clip), ${contour} contour snaps (${fromInsideContour} of ${fromInside} from inside the cut)`);
   checks++;
 }
 

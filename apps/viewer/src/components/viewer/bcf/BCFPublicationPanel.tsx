@@ -1,0 +1,238 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/**
+ * Publish a reviewed draft batch to the connected BCF server (#6896): pick a
+ * project, preflight its permissions and vocabulary, publish through the
+ * durable outbox, and review per-topic receipts. Unknown outcomes are
+ * explained and resolved per entry; nothing is retried blindly. A draft topic
+ * type the server's fixed list lacks is mapped to one of the server's own
+ * types, preselected and shown before anything is sent.
+ */
+
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useAsyncRun } from '@/hooks/useAsyncRun';
+import { Button } from '@/components/ui/button';
+import { useTranslation } from '@/i18n';
+import type { BcfProjectDto } from '@ifc-lite/bcf-api';
+import { createConnectedClient, listBcfServerProjects, loadBcfServerConfig, subscribeBcfServer, type BcfServerConfig } from '@/services/bcf-server';
+import type { DraftBatch } from '@/lib/bcf-drafts/draft-types';
+import { sameTarget, type DispatchReport, type PublicationConnection } from '@/lib/bcf-publication/outbox-dispatch';
+import { draftPublicationId, planDraftPublication } from '@/lib/bcf-publication/outbox-plan';
+import { preflightPublication, type PreflightReport } from '@/lib/bcf-publication/outbox-preflight';
+import { useBcfPublicationReview, publishNativeBcfReview, noteBcfPublicationUserChoice, bcfPublicationCandidateCurrent } from '@/lib/bcf-publication/review-candidate';
+import { preselectTopicTypes, publicationRules, unknownTopicTypes, type TopicTypeChoice } from '@/lib/bcf-publication/outbox-server-rules';
+import { publicationCounts } from '@/lib/bcf-publication/outbox-state';
+import { useBcfOutbox } from '@/lib/bcf-publication/outbox-store';
+import type { PublicationTarget } from '@/lib/bcf-publication/outbox-types';
+import { BCFOutboxEntry } from './BCFOutboxEntry';
+
+export function useBcfConnection(): { config: BcfServerConfig | null; connect: () => Promise<PublicationConnection | null> } {
+  const [config, setConfig] = useState<BcfServerConfig | null>(() => loadBcfServerConfig());
+  useEffect(() => subscribeBcfServer(() => setConfig(loadBcfServerConfig())), []);
+  const connect = useCallback(async () => {
+    const current = loadBcfServerConfig();
+    return current ? { client: await createConnectedClient(), serverUrl: current.serverUrl, userId: current.userId } : null;
+  }, []);
+  return { config, connect };
+}
+
+export interface BCFPublicationPanelProps {
+  batch: DraftBatch;
+  /** Server users for assignee mapping, learned from the project's extensions at preflight. */
+  onUsers: (users: string[]) => void;
+  /** The outbox record of the selected project, so the dialog can show per-topic status. */
+  onRecordId: (id: string | null) => void;
+}
+
+const reviewKey = (batch: Pick<DraftBatch, 'id' | 'modifiedAt'>, serverUrl: string, userId: string, project: string) =>
+  JSON.stringify([batch.id, batch.modifiedAt, serverUrl, userId, project]);
+
+const assigneeKey = (serverUrl: string, userId: string, projectId: string) =>
+  JSON.stringify([serverUrl, userId, projectId]);
+
+export function BCFPublicationPanel({ batch, onUsers, onRecordId }: BCFPublicationPanelProps) {
+  const { t } = useTranslation();
+  const candidate = useBcfPublicationReview(state => state.candidate);
+  const { config, connect } = useBcfConnection();
+  const [projects, setProjects] = useState<BcfProjectDto[] | null>(null);
+  const [projectId, setProjectId] = useState('');
+  // One server action (preflight or publish) at a time (C-2): a same-tick
+  // double press is refused before it publishes twice.
+  const flight = useAsyncRun();
+  const busy = flight.busy;
+  const [error, setError] = useState<string | null>(null);
+  const [preflight, setPreflight] = useState<PreflightReport | null>(null);
+  const [report, setReport] = useState<DispatchReport | null>(null);
+  const [connection, setConnection] = useState<PublicationConnection | null>(null);
+  const [topicTypes, setTopicTypes] = useState<TopicTypeChoice>({});
+  const [stagedTypeSources, setStagedTypeSources] = useState<string[]>([]);
+  // A type choice and a preflight result belong to one batch revision and server project.
+  // Whatever moves the target (the project picker, or a reconnect to another
+  // server) drops both, so neither is applied to or shown for a project the
+  // user has not checked.
+  // The account is part of the target: switching it drops the previous account's review too.
+  const targetKey = reviewKey(batch, config?.serverUrl ?? '', config?.userId ?? '', projectId);
+  const usersKey = assigneeKey(config?.serverUrl ?? '', config?.userId ?? '', projectId);
+  const reportedUsersKey = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (reportedUsersKey.current === null || reportedUsersKey.current === usersKey) return;
+    reportedUsersKey.current = null;
+    onUsers([]);
+  }, [usersKey, onUsers]);
+  const reviewEpoch = useRef(0);
+  const adopted = useRef<{ id: string; targetKey: string } | null>(null);
+  useLayoutEffect(() => {
+    reviewEpoch.current++;
+    // Adopting a staged review can itself select its project.
+    if (adopted.current?.targetKey === targetKey) return;
+    adopted.current = null;
+    setTopicTypes({}); setPreflight(null); setReport(null);
+  }, [targetKey]);
+  useEffect(() => {
+    // Wait for the connection to load before comparing the candidate's account with it.
+    if (!candidate || !config) return;
+    // Moving to another batch or account is a user choice: the candidate never comes back for it.
+    if (candidate.batchId !== batch.id || candidate.target.serverUrl !== config?.serverUrl || candidate.target.userId !== config?.userId) { useBcfPublicationReview.setState({ candidate: null }); return; }
+    // A batch edited after staging makes the candidate's preflight, adopted or not, out of date.
+    if (candidate.modifiedAt !== batch.modifiedAt) { useBcfPublicationReview.setState({ candidate: null }); setTopicTypes({}); setPreflight(null); setReport(null); return; }
+    // A choice the user made while the agent prepared outranks the candidate and keeps the user's own state.
+    if (!bcfPublicationCandidateCurrent(candidate)) { useBcfPublicationReview.setState({ candidate: null }); return; }
+    if (adopted.current?.id === candidate.id) return;
+    // An older Check can still be in flight even when the target stays the same.
+    reviewEpoch.current++;
+    adopted.current = { id: candidate.id, targetKey: reviewKey(batch, candidate.target.serverUrl, candidate.target.userId, candidate.target.projectId) };
+    setProjectId(candidate.target.projectId); setTopicTypes(candidate.topicTypes); setPreflight(candidate.preflight);
+    setStagedTypeSources([...new Set(candidate.plan.record.entries.flatMap(entry => entry.topicTypeFrom ? [entry.topicTypeFrom] : []))]);
+    // As the native Check does, so the dialog can offer the server's assignees.
+    reportedUsersKey.current = assigneeKey(candidate.target.serverUrl, candidate.target.userId, candidate.target.projectId);
+    onUsers(candidate.preflight.extensions.user_id_type ?? []);
+  }, [candidate, batch.id, batch.modifiedAt, config?.serverUrl, config?.userId, targetKey, onUsers]);
+
+  useEffect(() => {
+    setProjects(null); setConnection(null);
+    if (!config) return;
+    let live = true;
+    void Promise.all([listBcfServerProjects(), connect()]).then(([list, connected]) => {
+      if (!live) return;
+      setProjects(list); setConnection(connected);
+      setProjectId(current => current && list.some(item => item.project_id === current) ? current : config.projectId || list[0]?.project_id || '');
+    }).catch(cause => {
+      console.warn('[BCF publication] Projects could not be listed', cause);
+      if (live) { setProjects([]); setError(cause instanceof Error ? cause.message : String(cause)); }
+    });
+    return () => { live = false; };
+  }, [config, connect]);
+
+  const target = useMemo<PublicationTarget | null>(() => config && projectId ? { serverUrl: config.serverUrl, projectId, userId: config.userId,
+    projectName: projects?.find(item => item.project_id === projectId)?.name ?? undefined } : null, [config, projectId, projects]);
+  const record = useBcfOutbox(state => target ? state.entries.find(entry => entry.id === draftPublicationId(batch.id, target)) : undefined);
+  const recordId = target ? draftPublicationId(batch.id, target) : null;
+  useEffect(() => onRecordId(recordId), [recordId, onRecordId]);
+  const live = record && connection && sameTarget(record, connection) ? connection : null;
+  const counts = record ? publicationCounts(record) : null;
+
+  const act = (work: (isCurrent: () => boolean) => Promise<void>) => flight.start(async run => {
+    const epoch = reviewEpoch.current;
+    const isCurrent = () => run.isCurrent() && reviewEpoch.current === epoch;
+    setError(null);
+    try { await work(isCurrent); }
+    catch (cause) {
+      console.warn('[BCF publication] Action failed', cause);
+      if (isCurrent()) setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  });
+  const adopt = (result: PreflightReport) => {
+    setPreflight(result);
+    setStagedTypeSources([]);
+    setTopicTypes(current => preselectTopicTypes(result, current));
+  };
+  const check = () => act(async isCurrent => {
+    if (!target || !connection) return;
+    // The user's own Check supersedes an agent-staged candidate, as editing a choice does.
+    noteBcfPublicationUserChoice();
+    const plan = await planDraftPublication(batch, record, target, undefined, { rules: publicationRules(connection), topicTypes });
+    const result = await preflightPublication(connection.client, plan.record);
+    if (!isCurrent()) return;
+    adopt(result);
+    reportedUsersKey.current = usersKey;
+    onUsers(result.extensions.user_id_type ?? []);
+  });
+  const publish = () => act(async isCurrent => {
+    if (!target || !connection) return;
+    const published = await publishNativeBcfReview(batch, target, connection, topicTypes);
+    if (!isCurrent()) return;
+    if (!published) { setError(t('bcfDrafts.publish.storageRefused')); return; }
+    setReport(published.report);
+    if (published.report.preflight) adopt(published.report.preflight);
+  });
+  const unknownTypes = unknownTopicTypes(preflight);
+  const allowedTypes = preflight?.extensions.topic_type ?? [];
+  const typeChoices = [...unknownTypes, ...stagedTypeSources
+    .filter(type => allowedTypes.length && !unknownTypes.some(unknown => unknown.type === type))
+    .map(type => ({ type, allowed: allowedTypes }))];
+  // Preflight problems other than a topic type the picker resolves.
+  const listedIssues = (preflight?.issues ?? []).filter(issue => !(issue.field === 'topic_type' && unknownTypes.some(item => item.type === issue.value)));
+
+  if (!config) return <p className="text-xs text-muted-foreground">{t('bcfDrafts.publish.notConnected')}</p>;
+  const titleOf = (guid: string) => batch.topics.find(topic => topic.guid === guid)?.title ?? t('bcfDrafts.publish.removedTopic');
+  return (
+    <section className="flex flex-col gap-2 rounded-md border border-border p-2 text-xs" aria-label={t('bcfDrafts.publish.region')}>
+      <label className="flex flex-wrap items-center gap-2">
+        {t('bcfDrafts.publish.project')}
+        <select className="h-7 min-w-32 flex-1 rounded border border-border bg-background" value={projectId}
+          disabled={!projects?.length || busy} onChange={event => { noteBcfPublicationUserChoice(); setProjectId(event.target.value); setPreflight(null); setReport(null); }}>
+          {(projects ?? []).map(project => <option key={project.project_id} value={project.project_id}>{project.name ?? project.project_id}</option>)}
+        </select>
+      </label>
+      <div className="flex flex-wrap gap-1">
+        <Button size="sm" variant="outline" className="h-7 px-2 text-xs" disabled={busy || !target || !connection} onClick={() => void check()}>{t('bcfDrafts.publish.preflight')}</Button>
+        <Button size="sm" className="h-7 px-2 text-xs" disabled={busy || !target || !connection || batch.topics.length === 0} onClick={() => void publish()}>
+          {t('bcfDrafts.publish.publish', { count: batch.topics.length })}
+        </Button>
+      </div>
+      {preflight && (
+        <output className={`block ${preflight.ok ? 'text-ok' : 'text-danger'}`}>
+          {preflight.ok ? t('bcfDrafts.preflight.ok', { warnings: preflight.warnings.filter(warning => warning.kind === 'unverified').length })
+            // The count covers only the problems listed: a type the picker below resolves is not one.
+            : listedIssues.length > 0 ? t('bcfDrafts.preflight.refused', { count: listedIssues.length }) : t('bcfDrafts.preflight.chooseType')}
+          <ul className="list-disc pl-4">
+            {[...listedIssues, ...preflight.warnings.filter(warning => warning.kind === 'withheld')].map((issue, index) =>
+              <li key={index}>{t(`bcfDrafts.preflight.${issue.kind}`, { field: issue.field ?? '', value: issue.value ?? '', type: issue.topicType ?? '',
+                topic: issue.topicGuid ? titleOf(issue.topicGuid) : '', allowed: issue.allowed?.join(', ') || t('bcfDrafts.preflight.none') })}</li>)}
+          </ul>
+        </output>
+      )}
+      {typeChoices.map(({ type, allowed }) => (
+        <label key={type} className="flex flex-wrap items-center gap-2 rounded bg-warn-surface px-2 py-1">
+          {t('bcfDrafts.publish.topicType', { type })}
+          <select className="h-7 min-w-32 flex-1 rounded border border-border bg-background" value={topicTypes[type] ?? ''} disabled={busy}
+            onChange={event => { noteBcfPublicationUserChoice(); setTopicTypes(current => ({ ...current, [type]: event.target.value })); }}>
+            {allowed.map(option => <option key={option} value={option}>{option}</option>)}
+          </select>
+        </label>
+      ))}
+      {report && <output className="block">{t('bcfDrafts.publish.result', { sent: report.sent, done: report.receipts.length, failed: report.failed.length,
+        uncertain: report.uncertain.length, waiting: report.waiting.length + report.blocked.length })}</output>}
+      {counts && (counts.uncertain > 0 || counts.blocked > 0) && (
+        <div role="alert" className="rounded bg-warn-surface px-2 py-1 text-warn">{t('bcfDrafts.publish.uncertainGuidance')}</div>
+      )}
+      {error && <p role="alert" className="text-danger">{error}</p>}
+      {record && (
+        <div>
+          <p className="text-muted-foreground">{t('bcfDrafts.publish.queue', { done: counts?.done ?? 0, total: record.entries.length })}</p>
+          {batch.topics.map(topic => {
+            const entries = record.entries.filter(entry => entry.topicGuid === topic.guid);
+            if (!entries.length) return null;
+            return <div key={topic.guid} className="mt-1">
+              <p className="font-medium">{topic.title}</p>
+              <ul>{entries.map(entry => <BCFOutboxEntry key={entry.id} record={record} entry={entry} connection={live}
+                label={entry.receipt?.remoteGuid ?? entry.subject ?? topic.title} />)}</ul>
+            </div>;
+          })}
+        </div>
+      )}
+    </section>
+  );
+}

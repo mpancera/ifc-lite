@@ -2,11 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FileSourceProvider, SourceIdentity } from '@ifc-lite/plugin-api';
 import type { SourceHost } from '@/services/sources/source-host';
 import { loadResolvedSourcePrefs } from '@/lib/sources/preferences';
 import { clearSourceCatalogCache, syncSourceCatalogCacheOwner } from '@/lib/sources/persistence';
+import type { LiveTranslationMessage } from '@/i18n/live-message';
 
 export type SourceAuthStatus =
   /** Provider does not use interactive auth. */
@@ -21,10 +22,11 @@ export type SourceAuthStatus =
 export interface SourceAuthState {
   readonly status: SourceAuthStatus;
   readonly identity: SourceIdentity | null;
-  /** A gentle prompt ("Please sign in again."), never a hard error. */
-  readonly notice: string | null;
+  /** An authored prompt key or a provider-owned runtime diagnostic. */
+  readonly notice: LiveTranslationMessage | null;
   readonly signIn: () => void;
   readonly signOut: () => void;
+  readonly cancelSignIn?: () => void;
 }
 
 /**
@@ -38,20 +40,23 @@ export function useSourceAuth(provider: FileSourceProvider, sourceHost: SourceHo
   const interactive = provider.manifest.auth === 'interactive' && provider.auth !== undefined;
   const [status, setStatus] = useState<SourceAuthStatus>(interactive ? 'restoring' : 'not-interactive');
   const [identity, setIdentity] = useState<SourceIdentity | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const generation = useRef(0);
+  const [signingIn, setSigningIn] = useState(false);
+  const [notice, setNotice] = useState<LiveTranslationMessage | null>(null);
 
   useEffect(() => {
     if (!interactive) return;
     const auth = provider.auth;
     if (!auth) return;
     let cancelled = false;
+    const owner = ++generation.current;
 
     setStatus('restoring');
     const ctx = sourceHost.createContext(provider.manifest, loadResolvedSourcePrefs(provider.manifest));
     void auth
       .restore(ctx)
       .then((restored) => {
-        if (cancelled) return;
+        if (cancelled || owner !== generation.current) return;
         // Reconcile BEFORE the identity is published to the UI: `restore()` is
         // the path a brand-new session takes, so it is the one that decides
         // whether the persisted cache belongs to whoever is signing in now.
@@ -61,18 +66,20 @@ export function useSourceAuth(provider: FileSourceProvider, sourceHost: SourceHo
         setNotice(null);
       })
       .catch((err: unknown) => {
-        if (cancelled) return;
+        if (cancelled || owner !== generation.current) return;
         // A failed silent refresh means the session is gone, not that the
         // provider is broken — degrade to signed-out with a prompt.
         console.warn(`[sources] Silent session restore failed for "${provider.manifest.name}"`, err);
         syncSourceCatalogCacheOwner(provider.manifest.name, null);
         setIdentity(null);
         setStatus('signed-out');
-        setNotice('Your session expired. Please sign in again.');
+        setNotice({ key: 'sources.sourceProviderRow.sessionExpired' });
       });
 
     return () => {
       cancelled = true;
+      generation.current++;
+      provider.auth?.cancelSignIn?.();
     };
   }, [interactive, provider, sourceHost]);
 
@@ -82,21 +89,31 @@ export function useSourceAuth(provider: FileSourceProvider, sourceHost: SourceHo
     // Everything up to `auth.signIn(ctx)` must stay synchronous: the provider
     // may open a popup, and browsers only allow that inside a user gesture.
     const ctx = sourceHost.createContext(provider.manifest, loadResolvedSourcePrefs(provider.manifest));
+    const owner = ++generation.current;
+    setSigningIn(true);
     setStatus('busy');
     setNotice(null);
     auth
       .signIn(ctx)
       .then((signedIn) => {
+        if (owner !== generation.current) return;
+        setSigningIn(false);
         syncSourceCatalogCacheOwner(provider.manifest.name, signedIn.id);
         setIdentity(signedIn);
         setStatus('signed-in');
       })
       .catch((err: unknown) => {
+        if (owner !== generation.current) return;
+        setSigningIn(false);
         console.warn(`[sources] Sign-in failed for "${provider.manifest.name}"`, err);
         syncSourceCatalogCacheOwner(provider.manifest.name, null);
         setIdentity(null);
         setStatus('signed-out');
-        setNotice(err instanceof Error ? err.message : 'Sign-in failed. Please try again.');
+        setNotice(
+          err instanceof Error
+            ? { text: err.message }
+            : { key: 'sources.sourceProviderRow.signInFailed' },
+        );
       });
   }, [provider, sourceHost]);
 
@@ -104,13 +121,13 @@ export function useSourceAuth(provider: FileSourceProvider, sourceHost: SourceHo
     const auth = provider.auth;
     if (!auth) return;
     const ctx = sourceHost.createContext(provider.manifest, loadResolvedSourcePrefs(provider.manifest));
+    const owner = ++generation.current;
+    setSigningIn(false);
     setStatus('busy');
     auth
       .signOut(ctx)
-      .catch((err: unknown) => {
-        console.warn(`[sources] Sign-out failed for "${provider.manifest.name}"`, err);
-      })
-      .finally(() => {
+      .then(() => {
+        if (owner !== generation.current) return;
         // The catalog cache is keyed by provider-defined project/file-area
         // ids, not by identity — a later identity that happens to receive
         // the same ids in this browser profile must never inherit a cache
@@ -119,8 +136,24 @@ export function useSourceAuth(provider: FileSourceProvider, sourceHost: SourceHo
         setIdentity(null);
         setStatus('signed-out');
         setNotice(null);
+      })
+      .catch((err: unknown) => {
+        if (owner !== generation.current) return;
+        console.warn(`[sources] Sign-out failed for "${provider.manifest.name}"`, err instanceof Error ? err.name : 'Unknown error');
+        setStatus(identity ? 'signed-in' : 'signed-out');
+        setNotice(err instanceof Error ? { text: err.message } : { key: 'sources.sourceProviderRow.signOutFailed' });
       });
-  }, [provider, sourceHost]);
+  }, [provider, sourceHost, identity]);
 
-  return { status, identity, notice, signIn, signOut };
+  const cancelSignIn = useCallback(() => {
+    generation.current++;
+    provider.auth?.cancelSignIn?.();
+    setSigningIn(false);
+    setStatus('signed-out');
+    setNotice(null);
+  }, [provider]);
+
+  return { status, identity, notice, signIn, signOut,
+    cancelSignIn: signingIn && provider.auth?.cancelSignIn ? cancelSignIn : undefined };
+
 }

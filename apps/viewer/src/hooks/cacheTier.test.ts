@@ -9,6 +9,7 @@ import {
   classifyCacheTier,
   planCacheWrite,
   decideMeshOnlyCacheHit,
+  decideSourceTierCacheHit,
   decideCacheLoadOutcome,
   type CacheTierOptions,
 } from './cacheTier.js';
@@ -57,24 +58,16 @@ describe('classifyCacheTier', () => {
 });
 
 describe('planCacheWrite', () => {
-  it('persists the source for the <=150MB tier (default path UNCHANGED)', () => {
-    // The source tier persists the source regardless of the mesh-only flag: the
-    // classic <=150MB behaviour must not regress when the tier is on OR off.
+  it('caches the <=150MB tier whether or not the mesh-only tier is enabled', () => {
     for (const opts of [on, off]) {
-      const plan = planCacheWrite(MAX_SOURCE, opts);
-      assert.deepEqual(plan, { tier: 'source', shouldCache: true, persistSource: true });
+      assert.deepEqual(planCacheWrite(MAX_SOURCE, opts), { tier: 'source', shouldCache: true });
     }
-    const plan = planCacheWrite(MIN, on);
-    assert.equal(plan.persistSource, true);
-    assert.equal(plan.shouldCache, true);
+    assert.deepEqual(planCacheWrite(MIN, on), { tier: 'source', shouldCache: true });
   });
 
-  it('does NOT persist the source for the mesh-only tier (150-400MB, enabled)', () => {
-    const plan = planCacheWrite(MAX_SOURCE + 1, on);
-    assert.deepEqual(plan, { tier: 'mesh-only', shouldCache: true, persistSource: false });
-    assert.deepEqual(planCacheWrite(MAX_MESH_ONLY, on), {
-      tier: 'mesh-only', shouldCache: true, persistSource: false,
-    });
+  it('caches the mesh-only tier (150-400MB) while it is enabled', () => {
+    assert.deepEqual(planCacheWrite(MAX_SOURCE + 1, on), { tier: 'mesh-only', shouldCache: true });
+    assert.deepEqual(planCacheWrite(MAX_MESH_ONLY, on), { tier: 'mesh-only', shouldCache: true });
   });
 
   it('does not cache (shouldCache=false) when too small, too big, or mesh-only disabled', () => {
@@ -82,7 +75,7 @@ describe('planCacheWrite', () => {
     assert.equal(planCacheWrite(MAX_MESH_ONLY + 1, on).shouldCache, false);
     // Kill switch: a 150-400MB file is not cached when the tier is disabled.
     const disabled = planCacheWrite(MAX_SOURCE + 1, off);
-    assert.deepEqual(disabled, { tier: 'none', shouldCache: false, persistSource: false });
+    assert.deepEqual(disabled, { tier: 'none', shouldCache: false });
   });
 });
 
@@ -120,12 +113,47 @@ describe('decideMeshOnlyCacheHit', () => {
   });
 });
 
+describe('decideSourceTierCacheHit', () => {
+  it('MISSES when the fresh mtime differs from the stored one (silent-stale reopen closed, #4269)', () => {
+    // The defect this gate closes: a byte-length-preserving in-place edit is
+    // invisible to the spread-sampled key, so before this gate the source tier
+    // served the OLD model unconditionally. Any ordinary edit bumps mtime.
+    assert.equal(
+      decideSourceTierCacheHit({ storedMtime: 1000, freshMtime: 2000 }),
+      'miss',
+    );
+  });
+
+  it('SERVES when the mtimes match (then the caller background-revalidates the full hash)', () => {
+    assert.equal(
+      decideSourceTierCacheHit({ storedMtime: 1000, freshMtime: 1000 }),
+      'serve',
+    );
+  });
+
+  it('SERVES on an unknown mtime — softer than the mesh-only rule, by design', () => {
+    // This tier serves cached geometry + cached source TOGETHER, so the worst
+    // case is stale-but-consistent (the pre-gate behavior for every hit), not
+    // the mesh-only tier's chimera — and a `miss` on unknown would
+    // mass-invalidate every legacy entry written before the mtime field.
+    // `0` counts as unknown, matching decideMeshOnlyCacheHit.
+    assert.equal(decideSourceTierCacheHit({ storedMtime: 0, freshMtime: 1000 }), 'serve');
+    assert.equal(decideSourceTierCacheHit({ storedMtime: 1000, freshMtime: 0 }), 'serve');
+    assert.equal(decideSourceTierCacheHit({ freshMtime: 1000 }), 'serve');
+    assert.equal(decideSourceTierCacheHit({}), 'serve');
+  });
+});
+
 describe('decideCacheLoadOutcome', () => {
   it('SERVES a successful hit that still owns the active model slot', () => {
     assert.equal(
       decideCacheLoadOutcome({ loadSucceeded: true, isStale: false }),
       'serve',
     );
+  });
+
+  it('#10888 r4655016554 a load the cache reports superseded (model removed mid-adoption) is STALE, never a miss that reparses', () => {
+    assert.equal(decideCacheLoadOutcome({ loadSucceeded: false, isStale: false, superseded: true }), 'stale');
   });
 
   it('reports MISS (fall through to server/WASM) for an ordinary failed hit', () => {

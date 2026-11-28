@@ -12,8 +12,9 @@
  * consumer (viewport, Cesium, basket, export) stays in lockstep.
  */
 
+import { isAnalyticalProduct } from '../lib/visibility/analytical-classes.mjs';
+import type { TypeVisibility, StructuralViewMode } from './types.js';
 import type { SpaceKind } from './spaceKind.js';
-import type { TypeVisibility } from './types.js';
 
 /** Which `typeVisibility` boolean gates each IFC class. */
 type TypeVisibilityKey = keyof Pick<
@@ -22,7 +23,7 @@ type TypeVisibilityKey = keyof Pick<
   | 'spatialZones' | 'openings' | 'virtualElements' | 'site' | 'ifcAnnotations'
 >;
 
-/** Which toggle gates each kind of `IfcSpace`. */
+/** Fork: which toggle gates each kind of `IfcSpace`. */
 const SPACE_KIND_TO_VISIBILITY_KEY: Readonly<Record<SpaceKind, TypeVisibilityKey>> = {
   room: 'rooms',
   storeySpace: 'storeySpaces',
@@ -41,6 +42,12 @@ export type TypeVisibilityGate = Pick<TypeVisibility, TypeVisibilityKey>;
  * IFC class → toggle key. When the mapped toggle is `false` the class is
  * hidden from the viewport / export.
  *
+ * Every consumer gates FLAT meshes by `ifcType`, and the GPU-instanced shard
+ * carries no class, so the wasm partition keeps these classes off the shard
+ * (`CLASS_TOGGLED_TYPES`, `rust/wasm-bindings/src/api/gpu_meshes/batch_partition.rs`).
+ * A class added here must be added there too; the wasm contract test builds
+ * its fixture from this table and fails if one reaches the shard (#5409).
+ *
  * `IfcGeographicElement` (terrain, `.TERRAIN.` etc.) rides the `site` toggle:
  * the Site row is labelled "Terrain & context" and users reasonably expect
  * modelled terrain to disappear with it (issue #1480). It renders as a normal
@@ -51,6 +58,9 @@ const IFC_TYPE_TO_VISIBILITY_KEY: Readonly<Record<string, TypeVisibilityKey>> = 
   IfcSpace: 'spaces',
   IfcSpatialZone: 'spatialZones',
   IfcOpeningElement: 'openings',
+  // IFC4's standard-case opening is an opening too; matched by exact name
+  // like every row here, so it needs its own (#5409).
+  IfcOpeningStandardCase: 'openings',
   IfcVirtualElement: 'virtualElements',
   IfcSite: 'site',
   IfcGeographicElement: 'site',
@@ -67,30 +77,46 @@ const IFC_TYPE_TO_VISIBILITY_KEY: Readonly<Record<string, TypeVisibilityKey>> = 
 export function isTypeVisible(
   ifcType: string | undefined,
   typeVisibility: TypeVisibilityGate,
+  mode: StructuralViewMode = 'both',
   spaceKind?: SpaceKind,
 ): boolean {
+  // Instanced meshes may carry no class; their owners are gated by the shared ID mask.
   if (!ifcType) return true;
-
-  // Spaces split three ways — rooms, the storey-sized gross-area volume, and
-  // parking — because they are used completely differently and one toggle for
-  // all three was useless. `spaces` remains the master switch above them, so
-  // turning it off still hides every space in one move.
-  //
-  // The KIND is passed in, already classified, rather than the raw
-  // PredefinedType: a mesh carries neither, so the caller has to consult an
-  // index either way, and classifying in one place keeps `classifySpace` the
-  // only thing that knows how the enum maps.
+  if (mode === 'analytical' && !isAnalyticalProduct(ifcType)) return false;
+  if (mode === 'physical' && isAnalyticalProduct(ifcType)) return false;
+  // Fork: spaces split three ways (rooms, storey-sized gross-area volume,
+  // parking). `spaces` stays the master switch. The KIND is classified by the
+  // caller (`spaceKind.ts`); an unresolved kind gets the coarse answer.
   if (ifcType === 'IfcSpace') {
     if (!typeVisibility.spaces) return false;
-    // A caller that cannot resolve the kind gets the coarse answer rather
-    // than a guess.
     if (spaceKind === undefined) return true;
-    return typeVisibility[SPACE_KIND_TO_VISIBILITY_KEY[spaceKind]];
+    return typeVisibility[SPACE_KIND_TO_VISIBILITY_KEY[spaceKind]] !== false;
   }
-
   const key = IFC_TYPE_TO_VISIBILITY_KEY[ifcType];
   if (key === undefined) return true;
-  return typeVisibility[key];
+  return typeVisibility[key] !== false;
+}
+
+const VISIBILITY_KEYS = [...new Set([...Object.values(IFC_TYPE_TO_VISIBILITY_KEY), ...Object.values(SPACE_KIND_TO_VISIBILITY_KEY)])];
+
+/** Whether `isTypeVisible` can drop anything: a structural mode or any class toggle off. */
+export function classFilterActive(typeVisibility: TypeVisibilityGate, mode: StructuralViewMode = 'both'): boolean {
+  return mode !== 'both' || VISIBILITY_KEYS.some((key) => typeVisibility[key] === false);
+}
+
+/** Global id to class after edits, for retyped entities (`retypedClasses`). */
+export type RetypedClasses = ReadonlyMap<number, string>;
+
+/** `isTypeVisible` for a mesh, by its entity's class after a retype, else the
+ *  class it was meshed with. `expressId` is the global id every mesh list carries (#10119). */
+export function isMeshTypeVisible(
+  mesh: { expressId: number; ifcType?: string },
+  typeVisibility: TypeVisibilityGate,
+  mode: StructuralViewMode | undefined,
+  retyped: RetypedClasses | undefined,
+  spaceKind?: SpaceKind,
+): boolean {
+  return isTypeVisible(retyped?.get(mesh.expressId) ?? mesh.ifcType, typeVisibility, mode, spaceKind);
 }
 
 /**
@@ -105,25 +131,15 @@ export function buildHiddenIfcTypes(
   for (const [ifcType, key] of Object.entries(IFC_TYPE_TO_VISIBILITY_KEY)) {
     if (!typeVisibility[key]) out.add(ifcType);
   }
-  // Rooms, storey areas and parking are all `IfcSpace`, so switching ONE of
-  // them off cannot be said at class level — dropping the class would take
-  // the other two with it. Once no kind is wanted at all, it can: the class
-  // and the kinds then agree, and the export matches the viewport instead of
-  // shipping spaces nobody can see on screen.
+  // Fork: one space kind off cannot be said at class level; all of them off can.
   if (allSpaceKindsHidden(typeVisibility)) out.add('IfcSpace');
   return out;
 }
 
-/**
- * Whether every kind of space is currently hidden.
- *
- * The GLB export drops whole classes, so it can only exclude `IfcSpace` when
- * NO kind of space is wanted — hiding just the gross-area volumes is a
- * per-entity decision the class-level export cannot express.
- */
+/** Fork: whether every kind of space is currently hidden. */
 export function allSpaceKindsHidden(
   typeVisibility: Pick<TypeVisibility, TypeVisibilityKey>,
 ): boolean {
   return !typeVisibility.spaces
-    || (!typeVisibility.rooms && !typeVisibility.storeySpaces && !typeVisibility.parking);
+    || (typeVisibility.rooms === false && typeVisibility.storeySpaces === false && typeVisibility.parking === false);
 }

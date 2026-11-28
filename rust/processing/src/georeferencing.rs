@@ -15,7 +15,9 @@
 
 use std::sync::Arc;
 
-use ifc_lite_core::{EntityDecoder, EntityIndex, EntityScanner, GeoRefExtractor, IfcType};
+use ifc_lite_core::{
+    keyword_eq, EntityDecoder, EntityIndex, EntityScanner, GeoRefExtractor, IfcType,
+};
 use serde::{Deserialize, Serialize};
 
 /// Georeferencing metadata (`IfcMapConversion` + `IfcProjectedCRS`).
@@ -23,7 +25,7 @@ use serde::{Deserialize, Serialize};
 /// Mirrors `ifc_lite_core::GeoReference` with two derived conveniences
 /// (`rotation_degrees`, `transform_matrix`) so consumers don't have to
 /// recompute the rotation or the local→map matrix.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Georeferencing {
     /// Projected CRS name from `IfcProjectedCRS.Name` (e.g. `"EPSG:32632"`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,6 +51,13 @@ pub struct Georeferencing {
     pub x_axis_ordinate: f64,
     /// Scale factor applied during the local→map transform (default `1.0`).
     pub scale: f64,
+    /// Per-axis factors from `IfcMapConversionScaled` (default `1.0`).
+    #[serde(default = "default_axis_factor")]
+    pub factor_x: f64,
+    #[serde(default = "default_axis_factor")]
+    pub factor_y: f64,
+    #[serde(default = "default_axis_factor")]
+    pub factor_z: f64,
     /// Rotation to grid north in degrees, derived from the X-axis direction.
     pub rotation_degrees: f64,
     /// Local→map transform as a column-major 4×4 matrix (16 values).
@@ -67,15 +76,53 @@ pub struct Georeferencing {
     /// millimetres); absent when no MapUnit is authored.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub map_unit_scale: Option<f64>,
-    /// Provenance: `"mapConversion"`, `"ePSetMapConversion"`, or
-    /// `"siteLocation"` — same labels as the TS parser's
-    /// `GeoreferenceInfo.source`.
+    /// Provenance: `"mapConversion"`, `"rigidOperation"`,
+    /// `"ePSetMapConversion"`, or `"siteLocation"` — same labels as the TS
+    /// parser's `GeoreferenceInfo.source`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source: Option<String>,
 }
 
+const fn default_axis_factor() -> f64 {
+    1.0
+}
+
+impl Default for Georeferencing {
+    fn default() -> Self {
+        Self {
+            crs_name: None,
+            geodetic_datum: None,
+            vertical_datum: None,
+            map_projection: None,
+            eastings: 0.0,
+            northings: 0.0,
+            orthogonal_height: 0.0,
+            x_axis_abscissa: 0.0,
+            x_axis_ordinate: 0.0,
+            scale: 0.0,
+            factor_x: 1.0,
+            factor_y: 1.0,
+            factor_z: 1.0,
+            rotation_degrees: 0.0,
+            transform_matrix: [0.0; 16],
+            crs_description: None,
+            map_zone: None,
+            map_unit: None,
+            map_unit_scale: None,
+            source: None,
+        }
+    }
+}
+
 impl Georeferencing {
-    fn from_core(geo: &ifc_lite_core::GeoReference) -> Self {
+    /// True when this came from a coordinate operation (`IfcMapConversion`,
+    /// a rigid operation, `ePSet_MapConversion`), not the legacy
+    /// `IfcSite.RefLatitude`/`RefLongitude` fallback.
+    pub fn is_map_conversion(&self) -> bool {
+        self.source.as_deref().is_some_and(|s| s != ifc_lite_core::GeoRefSource::SiteLocation.label())
+    }
+
+    fn from_core(geo: &ifc_lite_core::GeoReference, details: &ifc_lite_core::GeoReferenceDetails) -> Self {
         Self {
             crs_name: geo.crs_name.clone(),
             geodetic_datum: geo.geodetic_datum.clone(),
@@ -87,23 +134,30 @@ impl Georeferencing {
             x_axis_abscissa: geo.x_axis_abscissa,
             x_axis_ordinate: geo.x_axis_ordinate,
             scale: geo.scale,
+            factor_x: geo.factor_x,
+            factor_y: geo.factor_y,
+            factor_z: geo.factor_z,
             rotation_degrees: geo.rotation().to_degrees(),
             transform_matrix: geo.to_matrix(),
             crs_description: geo.crs_description.clone(),
             map_zone: geo.map_zone.clone(),
             map_unit: geo.map_unit.clone(),
             map_unit_scale: geo.map_unit_scale,
-            source: Some(geo.source.label().to_string()),
+            source: details.source_label(geo.source).map(str::to_string),
         }
     }
 }
 
 /// Extract georeferencing from an IFC file, returning `None` when the model
-/// carries no `IfcMapConversion` / `ePSet_MapConversion` data.
+/// carries no `IfcMapConversion`, `IfcRigidOperation`, declared CRS,
+/// `ePSet_MapConversion` or `IfcSite` lat/long data.
 ///
 /// Only the entity types the extractor needs (`IfcMapConversion`,
-/// `IfcProjectedCRS`, and `IfcPropertySet` for the IFC2x3 `ePSet_MapConversion`
-/// fallback) are collected from the scan — their `IfcType` is known from the
+/// `IfcRigidOperation`, `IfcProjectedCRS`, `IfcGeographicCRS`,
+/// `IfcWellKnownText`, `IfcProject` for the plane-angle unit, and
+/// `IfcPropertySet` for the IFC2x3 `ePSet_MapConversion` fallback) are
+/// collected from the scan; everything else the extractor reads (units,
+/// referenced CRSs) it resolves by reference — their `IfcType` is known from the
 /// entity name, so no decoding happens while building the candidate list.
 pub fn extract_georeferencing<T>(content: &T) -> Option<Georeferencing>
 where
@@ -128,27 +182,67 @@ pub fn extract_georeferencing_with_index(
     content: &[u8],
     entity_index: &Arc<EntityIndex>,
 ) -> Option<Georeferencing> {
-    let mut decoder = EntityDecoder::with_arc_index(content, entity_index.clone());
-
-    let mut entity_types: Vec<(u32, IfcType)> = Vec::new();
+    let mut entity_types = Vec::new();
     let mut scanner = EntityScanner::new(content);
-    while let Some((id, type_name, _start, _end)) = scanner.next_entity() {
-        match type_name {
-            "IFCMAPCONVERSION" => entity_types.push((id, IfcType::IfcMapConversion)),
-            "IFCPROJECTEDCRS" => entity_types.push((id, IfcType::IfcProjectedCRS)),
-            "IFCPROPERTYSET" => entity_types.push((id, IfcType::IfcPropertySet)),
-            // Legacy IfcSite RefLatitude/RefLongitude fallback (TS parity).
-            "IFCSITE" => entity_types.push((id, IfcType::IfcSite)),
-            _ => {}
+    while let Some((id, type_name, _, _)) = scanner.next_entity() {
+        if let Some(ifc_type) = georeferencing_candidate_type(type_name) {
+            entity_types.push((id, ifc_type));
         }
     }
+    extract_georeferencing_from_candidates(
+        &mut EntityDecoder::with_arc_index(content, entity_index.clone()), &entity_types)
+}
 
+/// Candidate classification shared by standalone extraction and the native
+/// geometry scan. Preserves file order, including all sites.
+///
+/// `type_name` is the STEP keyword exactly as the scanner read it, and STEP
+/// keyword case is not significant (ISO 10303-21), so the comparison is
+/// case-insensitive. A case-sensitive match silently classified every entity in
+/// a lowercase- or CamelCase-keyword file as a non-candidate, and the model then
+/// reported no georeferencing at all despite carrying complete data (#4497).
+/// `keyword_eq` rather than an uppercase copy: this runs once per entity in
+/// the scan loop, and the comparison is against fixed literals, so there is
+/// nothing an allocated canonical form would be reused for — the same shape
+/// `processor::quick_metadata::is_quick_spatial_type_ci` uses.
+pub(crate) fn georeferencing_candidate_type(type_name: &str) -> Option<IfcType> {
+    // Dispatch on length first: this runs for every scanned entity, and a
+    // non-candidate then costs one length match and at most three
+    // case-folded comparisons (no more than before IFC4X3 support).
+    let candidates: &[(&str, IfcType)] = match type_name.len() {
+        7 => &[("IFCSITE", IfcType::IfcSite)],
+        10 => &[("IFCPROJECT", IfcType::IfcProject)],
+        14 => &[("IFCPROPERTYSET", IfcType::IfcPropertySet)],
+        15 => &[("IFCPROJECTEDCRS", IfcType::IfcProjectedCRS)],
+        // Scaled's first eight attributes have the base conversion layout.
+        16 => &[
+            ("IFCMAPCONVERSION", IfcType::IfcMapConversion),
+            ("IFCGEOGRAPHICCRS", IfcType::IfcGeographicCRS),
+            ("IFCWELLKNOWNTEXT", IfcType::IfcWellKnownText),
+        ],
+        17 => &[("IFCRIGIDOPERATION", IfcType::IfcRigidOperation)],
+        22 => &[("IFCMAPCONVERSIONSCALED", IfcType::IfcMapConversion)],
+        _ => return None,
+    };
+    candidates
+        .iter()
+        .find(|(keyword, _)| keyword_eq(type_name, keyword))
+        .map(|(_, ifc_type)| ifc_type.clone())
+}
+
+/// Reuse candidates from the geometry scan, avoiding the remaining whole-file
+/// scan after index reuse. A fresh decoder preserves the standalone extractor's
+/// lookup semantics, including duplicate ids, rather than inheriting scan caches.
+pub(crate) fn extract_georeferencing_from_candidates(
+    decoder: &mut EntityDecoder<'_>,
+    entity_types: &[(u32, IfcType)],
+) -> Option<Georeferencing> {
     if entity_types.is_empty() {
         return None;
     }
 
-    match GeoRefExtractor::extract(&mut decoder, &entity_types) {
-        Ok(Some(geo)) => Some(Georeferencing::from_core(&geo)),
+    match GeoRefExtractor::extract_with_details(decoder, entity_types) {
+        Ok(Some((geo, details))) => Some(Georeferencing::from_core(&geo, &details)),
         Ok(None) => None,
         Err(e) => {
             tracing::debug!(error = %e, "Georeferencing extraction failed");

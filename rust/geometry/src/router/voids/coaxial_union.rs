@@ -17,7 +17,7 @@
 //! the removed solid is `union(footprint_i) × depth`. This module recovers it
 //! CHEAPLY and EXACTLY:
 //!   1. CLUSTER cutters by extended-AABB overlap (union-find, the SAME 1 mm pad
-//!      the batching uses so touching-but-not-overlapping cutters stay disjoint).
+//!      the batching uses, so touching and abutting cutters cluster too).
 //!   2. For a COAXIAL cluster whose members share ONE depth band along the axis,
 //!      project every cutter's cap footprint to the plane ⟂ the axis, UNION them
 //!      in ONE i_overlay pass (`union_contours_to_shapes`, NonZero fill — not
@@ -45,15 +45,22 @@
 //! env, so the default holds on both targets. All math is f64 (FMA-free,
 //! `total_cmp` ordering) before the f32 store → deterministic native==wasm.
 
+#[path = "coaxial_union3d.rs"]
+mod union3d;
+#[path = "coaxial_union_snap.rs"]
+mod snap;
+
 use nalgebra::{Matrix4, Point2, Vector3};
 
+use super::admission::{accept_cut, admit_cutter, min_opening_volume};
 use super::geom::{mesh_is_closed_exact, mesh_signed_volume, opening_mesh_thinnest_axis_dir};
-use super::sweep::cut_changed_mesh;
-use super::{OpeningType, NORMALIZE_EPSILON};
+use super::sweep::mesh_to_keep;
+use super::{CutterKind, NORMALIZE_EPSILON};
 use crate::bool2d::union_contours_to_shapes;
 use crate::csg::ClippingProcessor;
 use crate::extrusion::{apply_transform, extrude_profile_watertight};
 use crate::mesh::Mesh;
+use crate::program::openings::execute::Execution;
 use crate::router::GeometryRouter;
 
 #[cfg(test)]
@@ -73,7 +80,7 @@ pub(super) fn set_enabled_override(v: Option<bool>) {
 
 /// `IFC_LITE_VOID_UNION=0` disables the coaxial/overlap union pass (every
 /// overlapping cluster falls to the sequential exact path). Default ON; read once.
-pub(super) fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     #[cfg(test)]
     {
         if let Some(v) = ENABLED_OVERRIDE.with(|c| c.get()) {
@@ -107,7 +114,7 @@ struct Footprint {
     z_hi: f64,
 }
 
-impl GeometryRouter {
+impl Execution {
     /// Cut every OVERLAPPING opening cluster in `all_openings` from `result` via
     /// the coaxial footprint-union (or the 3D `union_many` fallback), marking the
     /// consumed openings in `consumed` and setting `host_mutated` on any real cut.
@@ -121,7 +128,7 @@ impl GeometryRouter {
     pub(super) fn coaxial_union_prepass(
         &self,
         result: &mut Mesh,
-        all_openings: &[&OpeningType],
+        all_openings: &[&CutterKind],
         consumed: &mut [bool],
         host_mutated: &mut bool,
         clipper: &ClippingProcessor,
@@ -129,45 +136,22 @@ impl GeometryRouter {
         if !enabled() || all_openings.len() < 2 {
             return;
         }
-        // 1 mm pad — identical to the disjoint batching's BATCH_PAD, so a cutter
-        // pair that the batching would treat as disjoint (touching, not
-        // overlapping) is ALSO disjoint here and never merged into a cluster.
+        // 1 mm pad (BATCH_PAD) on both boxes: cutters up to 2 mm apart DO cluster,
+        // so abutting openings reach the footprint union (#8190).
         const PAD: f64 = 1.0e-3;
 
         // Admit candidates with the same light guards the sequential loop applies
         // (valid mesh, overlaps the host, above the volume floor). The footprint /
         // watertight validation happens per cluster below.
-        let (hmn, hmx) = result.bounds();
-        let min_vol = Self::min_opening_volume(self.tessellation_quality);
+        let host_bounds = result.bounds();
+        let min_vol = min_opening_volume(self.tessellation_quality);
         let mut cands: Vec<UnionCand> = Vec::new();
         for (idx, opening) in all_openings.iter().enumerate() {
             if consumed[idx] {
                 continue;
             }
-            let (mesh, dir_hint): (&Mesh, Option<Vector3<f64>>) = match **opening {
-                OpeningType::Rectangular(..) => continue,
-                OpeningType::DiagonalRectangular(ref m, ref f) => (m, Some(f.depth)),
-                OpeningType::NonRectangular(ref m, _, _, ref d) => (m, *d),
-            };
-            let valid = !mesh.is_empty()
-                && mesh.positions.iter().all(|&v| v.is_finite())
-                && mesh.positions.len() >= 9;
-            if !valid {
-                continue;
-            }
-            let (omn, omx) = mesh.bounds();
-            let overlaps_host = !(omx.x < hmn.x
-                || omn.x > hmx.x
-                || omx.y < hmn.y
-                || omn.y > hmx.y
-                || omx.z < hmn.z
-                || omn.z > hmx.z);
-            if !overlaps_host {
-                continue;
-            }
-            let open_vol =
-                (omx.x - omn.x) as f64 * (omy_span(omn.y, omx.y)) * (omx.z - omn.z) as f64;
-            if open_vol < min_vol {
+            let Some((mesh, dir_hint)) = opening.cutter().mesh_cutter() else { continue };
+            if admit_cutter(mesh, host_bounds, min_vol).is_none() {
                 continue;
             }
             let dir = dir_hint
@@ -179,7 +163,7 @@ impl GeometryRouter {
             }
             // Extended-AABB for the overlap graph: pierce the host along `dir`
             // exactly as the cut will, so the cluster reflects the CUT footprints.
-            let ext = Self::extend_opening_mesh_through_host(mesh, result, dir);
+            let ext = GeometryRouter::extend_opening_mesh_through_host(mesh, result, dir);
             let (elo, ehi) = ext.bounds();
             cands.push(UnionCand {
                 idx,
@@ -268,7 +252,7 @@ impl GeometryRouter {
             {
                 if self.subtract_prisms(result, &prisms, multi_slab, max_removed, clipper) {
                     // Consume ONLY cutters that fed an emitted slab prism; one whose
-                    // band coalesced below `z_tol` spans no slab (removed nothing) and
+                    // band below the geometry epsilon spans no slab (removed nothing) and
                     // stays for the exact path rather than being silently dropped.
                     for &i in &contributors {
                         consumed[cands[members[i]].idx] = true;
@@ -284,7 +268,7 @@ impl GeometryRouter {
         // cutter through the host, union them in ONE N-ary arrangement, then
         // subtract the single union mesh. On failure the cluster is left unconsumed
         // for the sequential exact path.
-        if self.subtract_union3d(result, cands, members, clipper) {
+        if union3d::subtract(result, cands, members, clipper) {
             for &m in members {
                 consumed[cands[m].idx] = true;
             }
@@ -294,9 +278,9 @@ impl GeometryRouter {
 
     /// Build the pairwise-disjoint re-extruded prisms for a COAXIAL cluster via
     /// 2.5D depth-slicing along `axis`: the depth axis is cut at every cutter's
-    /// authored z-boundary, and within each depth SLAB the footprints of the
+    /// prepared z-boundary, and within each depth SLAB the footprints of the
     /// cutters that FULLY SPAN it are unioned (one i_overlay pass) and re-extruded
-    /// over exactly that slab. A cutter never contributes outside its authored
+    /// over exactly that slab. A cutter never contributes outside its prepared
     /// [z_lo, z_hi], so a partial-depth / blind cutter is cut faithfully — never
     /// stretched to a through-cut. Slabs are Z-disjoint (they share only boundary
     /// planes, which the conforming N-ary subtract dissolves). Returns `None`
@@ -304,15 +288,14 @@ impl GeometryRouter {
     /// too many distinct depths, or a re-extrude/watertight check fails.
     ///
     /// The third tuple element lists the `members`-relative indices that fed ≥ 1
-    /// emitted slab prism; a cutter whose band coalesced below `z_tol` spans no slab
+    /// emitted slab prism; a cutter below the geometry epsilon spans no slab
     /// and is absent, so the caller leaves it for the exact path (never dropped).
     ///
     /// The fourth tuple element is an UPPER BOUND on the volume this cut may remove
     /// from the host: Σ over contributing cutters of `footprint_area × depth`. Since
     /// the true removal is `union(cutters) ∩ host ≤ Σ (cutter ∩ host) ≤ Σ area·depth`,
-    /// a subtract that removes MORE than this bound (e.g. a `z_tol` depth-band that
-    /// bridged distinct bands and over-cut) is REJECTED by `subtract_prisms`, which
-    /// then defers the cluster to the exact 3D union.
+    /// A subtract removing more is rejected by `subtract_prisms`, which defers
+    /// the cluster to the exact 3D union.
     fn build_coaxial_prisms(
         &self,
         result: &Mesh,
@@ -322,25 +305,34 @@ impl GeometryRouter {
     ) -> Option<(Vec<Mesh>, bool, Vec<usize>, f64)> {
         let (u, v, d) = ortho_frame(axis)?;
         let mut fps: Vec<Footprint> = Vec::with_capacity(members.len());
+        let mut cutter_volumes = Vec::with_capacity(members.len());
         for &m in members {
-            fps.push(cutter_footprint(&cands[m].mesh, &u, &v, &d)?);
+            // Adjust only the original cutter's caps. A depth slice introduces
+            // internal seams, not authored exits/jambs: pulling those seams in
+            // independently leaves a gap inside a through opening (#6940,
+            // rvt01 #6305 at the 12 mm render/core interface).
+            let prepared = GeometryRouter::extend_opening_mesh_through_host(&cands[m].mesh, result, d);
+            fps.push(cutter_footprint(&prepared, &u, &v, &d)?);
+            cutter_volumes.push(mesh_signed_volume(&prepared).abs());
         }
 
-        // Total depth span + a tolerance for coalescing near-identical z-boundaries.
+        // Reject an invalid total depth span before constructing source slabs.
         let span_lo = fps.iter().map(|f| f.z_lo).fold(f64::INFINITY, f64::min);
         let span_hi = fps.iter().map(|f| f.z_hi).fold(f64::NEG_INFINITY, f64::max);
         if !span_lo.is_finite() || !span_hi.is_finite() || (span_hi - span_lo) <= NORMALIZE_EPSILON {
             return None;
         }
-        let z_tol = (span_hi - span_lo) * 0.01 + 1.0e-3; // 1% of span + 1 mm; the >=1mm floor is what makes the later slab-depth check defensive
 
-        // Depth breakpoints = every cutter's z_lo / z_hi, sorted and coalesced
-        // within z_tol. The intervals between consecutive breakpoints are the slabs.
+        // Preserve distinct source depths at the exact kernel's resolution.
+        // A model-span tolerance can swallow a real recess (#6940, ISSUE_126),
+        // while distinct f32 copies of one face can differ by nanometres (dental
+        // #167/#207). Those same-cell limits must not create a degenerate slab.
+        let depth_cell = |z: f64| (z / crate::kernel::mesh_bridge::SNAP_GRID).round();
         let mut breaks: Vec<f64> = fps.iter().flat_map(|f| [f.z_lo, f.z_hi]).collect();
         breaks.sort_by(f64::total_cmp);
         let mut coalesced: Vec<f64> = Vec::with_capacity(breaks.len());
         for b in breaks {
-            if coalesced.last().is_none_or(|&p| (b - p).abs() > z_tol) {
+            if coalesced.last().is_none_or(|&p| depth_cell(b) != depth_cell(p)) {
                 coalesced.push(b);
             }
         }
@@ -348,6 +340,13 @@ impl GeometryRouter {
         // fragment into a slab per depth; defer that to `union_many` rather than
         // emitting dozens of stacked prisms.
         if coalesced.len() < 2 || coalesced.len() > 9 {
+            return None;
+        }
+        // Neighbouring cells can straddle a rounding boundary only nanometres
+        // apart (#7640, review r4310799293). Do not re-extrude that thin slab
+        // or merge its distinct depths: the exact 3D union keeps both original
+        // cutters and decides their geometry on the unchanged kernel grid.
+        if coalesced.windows(2).any(|w| w[1] - w[0] < crate::kernel::mesh_bridge::SNAP_GRID) {
             return None;
         }
 
@@ -365,16 +364,15 @@ impl GeometryRouter {
         let mut contributed = vec![false; fps.len()];
         for w in coalesced.windows(2) {
             let (slab_lo, slab_hi) = (w[0], w[1]);
-            let slab_depth = slab_hi - slab_lo; // coalesced breakpoints already differ by > `z_tol`
+            let slab_depth = slab_hi - slab_lo; // distinct source breakpoints
             if slab_depth <= NORMALIZE_EPSILON {
                 continue;
             }
-            let mid = 0.5 * (slab_lo + slab_hi);
-            // Cutters that FULLY span this slab; record each as a contributor so only
-            // cutters this pass actually removed are consumed by the caller.
+            // Cutters must fully span this slab in the same kernel cells used
+            // above; record only cutters that actually contribute to a slab.
             let mut contours: Vec<Vec<Point2<f64>>> = Vec::new();
             for (i, f) in fps.iter().enumerate() {
-                if f.z_lo <= mid && f.z_hi >= mid {
+                if depth_cell(f.z_lo) <= depth_cell(slab_lo) && depth_cell(f.z_hi) >= depth_cell(slab_hi) {
                     contours.extend(f.contours.iter().cloned());
                     contributed[i] = true;
                 }
@@ -382,7 +380,9 @@ impl GeometryRouter {
             if contours.is_empty() {
                 continue; // an empty slab (a gap between depth bands) removes nothing
             }
-            // ONE i_overlay union of the slab's footprints (overlaps merge exactly).
+            // Flush footprints made to coincide first (#8190), then ONE i_overlay
+            // union of the slab's footprints (overlaps merge exactly).
+            snap::reconcile(&mut contours);
             let shapes = union_contours_to_shapes(&contours);
             if shapes.is_empty() {
                 return None;
@@ -394,15 +394,12 @@ impl GeometryRouter {
                 }
                 let mut prism = extrude_profile_watertight(shape, slab_depth, Some(base)).ok()?;
                 apply_transform(&mut prism, &m_world);
-                // Push caps a hair past any FLUSH host face along the axis so the
-                // subtract is a clean transversal crossing. A slab boundary INTERIOR
-                // to the host (no host facet there) is left untouched — the two
-                // slabs meeting at it tile the void with no gap.
-                let ext = Self::extend_opening_mesh_through_host(&prism, result, d);
-                if !mesh_is_closed_exact(&ext) {
+                // Generated seams must stay coincident so adjacent slabs tile
+                // the prepared cutter without gaps or extra removed material.
+                if !mesh_is_closed_exact(&prism) {
                     return None;
                 }
-                prisms.push(ext);
+                prisms.push(prism);
             }
         }
         if prisms.is_empty() {
@@ -414,28 +411,10 @@ impl GeometryRouter {
         // prisms that the N-ary subtract handles directly.
         let multi_slab = coalesced.len() > 2;
         let contributors: Vec<usize> = (0..fps.len()).filter(|&i| contributed[i]).collect();
-        // Removed-volume upper bound: Σ over contributing cutters of the volume of the
-        // SAME through-host extension the prisms use. The union of the reconstructed
-        // prisms equals the union of the actual cutters, so the removed (host-clipped)
-        // volume `Vol(∪prism ∩ host) = Vol(∪cutter ∩ host) ≤ Σ Vol(cutter_i ∩ host) ≤
-        // Σ Vol(extended cutter_i)` — a subtract that removes MORE (an inflated /
-        // bridged prism reconstruction) is over-cutting and is rejected downstream.
-        // Using the EXTENDED cutter (not `area × authored_depth`) is essential: a
-        // through-cut of a host THICKER than the authored opening legitimately removes
-        // more than the authored volume, and must not be mistaken for an over-cut.
-        // 2% relative slack absorbs the f32 volume-differencing noise of a large host.
-        let max_removed = 1.02
-            * contributors
-                .iter()
-                .map(|&i| {
-                    let ext = Self::extend_opening_mesh_through_host(
-                        &cands[members[i]].mesh,
-                        result,
-                        d,
-                    );
-                    mesh_signed_volume(&ext).abs()
-                })
-                .sum::<f64>();
+        // The reconstructed union cannot remove more than the sum of its
+        // prepared cutters' volumes; retain the existing 2% f32 slack. Use the
+        // same preparations as the footprints, without adjusting a seam again.
+        let max_removed = 1.02 * contributors.iter().map(|&i| cutter_volumes[i]).sum::<f64>();
         Some((prisms, multi_slab, contributors, max_removed))
     }
 
@@ -456,105 +435,30 @@ impl GeometryRouter {
         max_removed: f64,
         clipper: &ClippingProcessor,
     ) -> bool {
-        let tri_before = result.triangle_count();
-        let vol_before = mesh_signed_volume(result);
-        if !multi_slab {
-            let cutters: Vec<&Mesh> = prisms.iter().collect();
-            if let Ok(cut) = clipper.subtract_mesh_many(result, &cutters) {
-                return accept_cut(result, cut, tri_before, vol_before, max_removed);
-            }
-            return false;
-        }
-        // Multi-slab: fuse the stacked prisms so their shared boundary planes
-        // dissolve, then subtract the single closed solid.
         let cutters: Vec<&Mesh> = prisms.iter().collect();
-        let union = ClippingProcessor::consolidate_coplanar(
-            crate::kernel::mesh_bridge::union_many(&cutters),
-        );
-        if union.is_empty() || !mesh_is_closed_exact(&union) {
-            return false;
-        }
-        let Ok(cut) = clipper.subtract_mesh(result, &union) else {
+        let outcome = if !multi_slab {
+            clipper.subtract_mesh_many(result, &cutters)
+        } else {
+            // Multi-slab: fuse the stacked prisms so their shared boundary
+            // planes dissolve, then subtract the single closed solid.
+            let union = ClippingProcessor::consolidate_coplanar(
+                crate::kernel::mesh_bridge::union_many(&cutters),
+            );
+            if union.is_empty() || !mesh_is_closed_exact(&union) {
+                return false;
+            }
+            clipper.subtract_mesh(result, &union)
+        };
+        // Nothing to keep is `false`: the caller falls back to the 3D union,
+        // then defers.
+        let Some(cut) = mesh_to_keep(outcome, result) else {
             return false;
         };
-        accept_cut(result, cut, tri_before, vol_before, max_removed)
-    }
-
-    /// 3D overlap-safe fallback: extend every member cutter through the host,
-    /// union them with the exact N-ary `union_many`, and subtract the single
-    /// watertight union mesh. Returns `true` (and updates `result`) only on a real,
-    /// non-degenerate change.
-    fn subtract_union3d(
-        &self,
-        result: &mut Mesh,
-        cands: &[UnionCand],
-        members: &[usize],
-        clipper: &ClippingProcessor,
-    ) -> bool {
-        let extended: Vec<Mesh> = members
-            .iter()
-            .map(|&m| Self::extend_opening_mesh_through_host(&cands[m].mesh, result, cands[m].dir))
-            .collect();
-        let refs: Vec<&Mesh> = extended.iter().collect();
-        let union = ClippingProcessor::consolidate_coplanar(crate::kernel::mesh_bridge::union_many(
-            &refs,
-        ));
-        if union.is_empty() || !mesh_is_closed_exact(&union) {
-            return false;
-        }
-        let tri_before = result.triangle_count();
-        let vol_before = mesh_signed_volume(result);
-        let Ok(cut) = clipper.subtract_mesh(result, &union) else {
-            return false;
-        };
-        // The 3D union of the ACTUAL cutter solids is geometrically exact, so no
-        // over-cut bound applies here.
-        accept_cut(result, cut, tri_before, vol_before, f64::INFINITY)
+        accept_cut(result, cut, max_removed)
     }
 }
 
-/// f64 Y-span of two f32 bounds (kept out of the volume expression for clarity).
-#[inline]
-fn omy_span(lo: f32, hi: f32) -> f64 {
-    (hi - lo) as f64
-}
-
-/// Accept `cut` as the new `result` iff it is non-empty, retained enough
-/// triangles, and genuinely changed the host — the SAME acceptance the disjoint
-/// batching applies to its `subtract_mesh_many` output (the watertightness of the
-/// cut is guaranteed upstream: each cutter is `mesh_is_closed_exact`, and the
-/// kernel's conformity gate rejects a non-conforming arrangement). A blanket
-/// `param_cut_watertight` scan here is far too slow on the hot path.
-///
-/// `max_removed` is an OVER-CUT guard: the cut is rejected if it removed more host
-/// volume than the caller's provable upper bound (Σ contributing-cutter footprint
-/// volumes for the coaxial prism path; `f64::INFINITY` for the exact 3D union, which
-/// cannot over-cut). This catches an approximate union reconstruction — a bridged
-/// depth band, a residual projection inflation — before it is committed and consumed
-/// as if it were an exact cut, so the cluster instead defers to the exact path.
-fn accept_cut(
-    result: &mut Mesh,
-    cut: Mesh,
-    tri_before: usize,
-    vol_before: f64,
-    max_removed: f64,
-) -> bool {
-    use super::{CSG_TRIANGLE_RETENTION_DIVISOR, MIN_VALID_TRIANGLES};
-    let min_tris = (tri_before / CSG_TRIANGLE_RETENTION_DIVISOR).max(MIN_VALID_TRIANGLES);
-    let changed = cut_changed_mesh(&cut, tri_before, vol_before);
-    // Removed volume = host solid before − after (both same orientation). A cut that
-    // removed MORE than the caller's upper bound is an over-cut → reject (defer).
-    let removed = vol_before - mesh_signed_volume(&cut);
-    if !cut.is_empty() && cut.triangle_count() >= min_tris && changed && removed <= max_removed {
-        *result = cut;
-        true
-    } else {
-        false
-    }
-}
-
-/// AABB overlap on all three axes (half-open, matching the batching's disjoint
-/// test negated).
+/// AABB overlap on all three axes (the batching's disjoint test negated).
 #[inline]
 fn aabb_overlap(alo: &[f64; 3], ahi: &[f64; 3], blo: &[f64; 3], bhi: &[f64; 3]) -> bool {
     !(ahi[0] < blo[0]
@@ -630,7 +534,7 @@ fn cutter_footprint(
         z_lo = z_lo.min(s);
         z_hi = z_hi.max(s);
     }
-    if !z_lo.is_finite() || !z_hi.is_finite() || (z_hi - z_lo) <= NORMALIZE_EPSILON { // no `z_tol` here; the caller applies it when coalescing breakpoints
+    if !z_lo.is_finite() || !z_hi.is_finite() || (z_hi - z_lo) <= NORMALIZE_EPSILON { // distinct limits remain available to the slab builder
         return None;
     }
     for t in mesh.indices.chunks_exact(3) {
@@ -677,7 +581,7 @@ fn cutter_footprint(
         .sum();
     let area = 0.5 * cap_area_sum;
     let depth = z_hi - z_lo;
-    if area <= NORMALIZE_EPSILON || depth <= NORMALIZE_EPSILON { // `z_tol` bounds depth only; area guard stays separate
+    if area <= NORMALIZE_EPSILON || depth <= NORMALIZE_EPSILON { // depth and area guards stay separate
         return None;
     }
     // PRISM RECONCILIATION: a true prism along `d` satisfies `area × depth ==

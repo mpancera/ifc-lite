@@ -12,11 +12,14 @@
  */
 
 import type { EntityRef } from './types.js';
-import { useViewerStore } from './index.js';
+import { federationRegistry } from '@ifc-lite/renderer';
+import { effectiveMetadataRecord } from '@ifc-lite/parser';
+import type { ViewerState } from './index.js';
+import { getViewerState } from './viewerStoreHandle.js';
 
 /** Resolve a renderer/global ID against one consistent Viewer store snapshot. */
 function resolveEntityRefFromState(
-  state: ReturnType<typeof useViewerStore.getState>,
+  state: ViewerState,
   globalId: number,
 ): EntityRef {
   const resolved = state.resolveGlobalIdFromModels(globalId);
@@ -24,13 +27,26 @@ function resolveEntityRefFromState(
     return { modelId: resolved.modelId, expressId: resolved.expressId };
   }
 
-  // Fallback: single-model mode where offset is 0 → globalId === expressId
-  if (state.models.size > 0) {
-    const firstModelId = state.models.keys().next().value as string;
-    return { modelId: firstModelId, expressId: globalId };
+  // A #5050 streamed federation publishes one component at a time after its
+  // range has been reserved, but before its final semantic document is ready
+  // to enter `models`. Preserve store/overlay precedence above; only this
+  // short-lived, published-but-not-yet-installed window needs the registry.
+  // Without it a pick on the new component is attributed to the anchor by the
+  // single-model fallback below.
+  const progressive = federationRegistry.fromGlobalId(globalId);
+  if (progressive) return progressive;
+
+  // Fallback: single-model mode where offset is 0 → globalId === expressId,
+  // including a primary model still streaming (placeholder range). Behind a
+  // removed model the offset is not 0, and a negative or non-integer id is
+  // no model's (#11527: each became an unpublished local id the next
+  // toGlobalId refused); those take the legacy sentinel.
+  const first = state.models.entries().next();
+  if (!first.done && (first.value[1].idOffset ?? 0) === 0 && Number.isSafeInteger(globalId) && globalId >= 0) {
+    return { modelId: first.value[0], expressId: globalId };
   }
 
-  // Legacy single-model mode: no models in federation map yet.
+  // Legacy single-model mode (no models in federation map yet), or an id the fallback cannot vouch for.
   // 'legacy' is recognized by PropertiesPanel for fallback to legacy ifcDataStore.
   return { modelId: 'legacy', expressId: globalId };
 }
@@ -40,14 +56,16 @@ function resolveEntityRefFromState(
  *
  * Resolution order:
  *  1. resolveGlobalIdFromModels (offset-based range check — the canonical path)
- *  2. First loaded model as fallback (single-model, offset 0)
- *  3. 'legacy' sentinel for truly legacy single-model mode (no federation map)
+ *  2. The federation registry, for a published component not yet in `models` (#5050)
+ *  3. First loaded model as fallback when it sits at offset 0, for a non-negative id
+ *  4. 'legacy' sentinel: legacy single-model mode (no federation map), or an id
+ *     the fallback cannot vouch for (#11527)
  *
  * ALWAYS returns an EntityRef — never null.  This ensures all callers
  * (multi-select, basket, context menu) can proceed without null-guards.
  */
 export function resolveEntityRef(globalId: number): EntityRef {
-  return resolveEntityRefFromState(useViewerStore.getState(), globalId);
+  return resolveEntityRefFromState(getViewerState(), globalId);
 }
 
 /**
@@ -58,12 +76,52 @@ export function resolveEntityRef(globalId: number): EntityRef {
  * renderer ID resolution path.
  */
 export function resolveGlobalId(globalId: number): string | null {
-  const state = useViewerStore.getState();
+  const state = getViewerState();
   const entityRef = resolveEntityRefFromState(state, globalId);
-  const dataStore = state.models.get(entityRef.modelId)?.ifcDataStore ?? state.ifcDataStore;
-  const resolvedGlobalId = dataStore?.entities.getGlobalId(entityRef.expressId);
-  if (resolvedGlobalId) return resolvedGlobalId;
+  const modelGlobalId = resolveEntityRefGlobalIdFromState(state, entityRef);
+  if (modelGlobalId) return modelGlobalId;
 
-  const overlayGlobalId = state.getMutationView(entityRef.modelId)?.getNewEntity(entityRef.expressId)?.attributes[0];
-  return typeof overlayGlobalId === 'string' && overlayGlobalId.length > 0 ? overlayGlobalId : null;
+  const resolvedModel = entityRef.modelId === 'legacy' ? undefined : state.models.get(entityRef.modelId);
+  if (resolvedModel?.ifcDataStore) return null;
+
+  // Preserve the public single-store compatibility path while a registered
+  // model is still hydrating its own data store. Exact EntityRef callers must
+  // remain model-bound and therefore deliberately do not use this fallback.
+  return state.ifcDataStore?.entities.getGlobalId(entityRef.expressId) ?? null;
+}
+
+/** Resolve an exact model-space ref without losing identity to overlapping
+ * renderer-id ranges. Parsed and StoreEditor-created entities share this path. */
+export function resolveEntityRefGlobalId(entityRef: EntityRef): string | null {
+  return resolveEntityRefGlobalIdFromState(getViewerState(), entityRef);
+}
+
+/** Snapshot-aware variant for transactions that must not follow a model
+ * replacement while awaiting other work. */
+export function resolveEntityRefGlobalIdFromState(
+  state: Pick<ViewerState, 'models' | 'ifcDataStore' | 'mutationViews'>,
+  entityRef: EntityRef,
+): string | null {
+  const dataStore = entityRef.modelId === 'legacy'
+    ? state.ifcDataStore
+    : state.models.get(entityRef.modelId)?.ifcDataStore;
+  const mutationView = state.mutationViews.get(entityRef.modelId);
+  // #7282: the canonical schema record owns named/positional precedence,
+  // current Root role and tombstones. Non-Root attribute 0 is never GlobalId.
+  if (!dataStore) return null;
+  // Immutable parsed columns already enforce the schema's Root-only identity
+  // contract. Source-only/cached identity reads need no graph hydration.
+  if (!mutationView) {
+    const identity = dataStore.entities.getGlobalId(entityRef.expressId);
+    return typeof identity === 'string' && identity.length > 0 ? identity : null;
+  }
+  const record = effectiveMetadataRecord(dataStore, entityRef.expressId, mutationView);
+  if (!record || record.names[0] !== 'GlobalId') return null;
+  const nativeIdentity = mutationView?.getNewEntity(entityRef.expressId)
+    || mutationView?.getPositionalMutationsForEntity(entityRef.expressId)?.has(0)
+    || mutationView?.getAttributeMutationsForEntity(entityRef.expressId).some(row => row.name === 'GlobalId');
+  // Cached source-free columns retain known immutable identities; missing
+  // graph attributes never make those names into current geometry evidence.
+  const globalId = nativeIdentity ? record.attributes[0] : dataStore.entities.getGlobalId(entityRef.expressId);
+  return typeof globalId === 'string' && globalId.length > 0 ? globalId : null;
 }

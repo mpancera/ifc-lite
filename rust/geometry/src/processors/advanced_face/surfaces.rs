@@ -2,18 +2,18 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Surface-type tessellators: planar/boundary, B-spline, and cylindrical faces.
+//! Source admission for planar boundaries and cylindrical patches.
 
-use crate::triangulation::{calculate_polygon_normal, project_to_2d};
+use super::analytic_plan::{CylinderPlan, PlanarPlan};
+use super::edge_loop::extract_edge_loop_points_for_bounds;
+use super::plan::FaceGeometry;
+use crate::math::tol;
+use crate::placement::Axis2Placement;
 use crate::{scale_segments, Error, Point3, Result, TessellationQuality};
-use ifc_lite_core::{DecodedEntity, EntityDecoder};
+use ifc_lite_core::{slot, DecodedEntity, EntityDecoder};
 use nalgebra::Matrix4;
 
-use super::super::helpers::get_axis2_placement_transform_by_id;
-use super::bspline::{parse_control_points, parse_knot_vectors, tessellate_bspline_surface};
-use super::edge_loop::{extract_edge_loop_points, extract_edge_loop_points_for_bounds};
-
-/// Process a planar or boundary-represented face.
+/// Read a planar or boundary-represented face's loops.
 ///
 /// Per IFC 4.3 `IfcAdvancedFace`, `Bounds` is a list of `IfcFaceBound` —
 /// at most one is `IfcFaceOuterBound` (the outer ring), the rest are holes.
@@ -25,168 +25,66 @@ use super::edge_loop::{extract_edge_loop_points, extract_edge_loop_points_for_bo
 /// order varies", `packages/renderer/src/pipeline.ts`), that pair surfaced
 /// as a Z-fight on the door panel's glass cutout (issue #674 follow-up).
 ///
-/// Mirrors the FacetedBrep path in `processors/brep.rs`: pick the outer
-/// (or first) bound, project to 2D using its basis, project hole bounds
-/// using the SAME basis, and call `triangulate_polygon_with_holes` once.
-pub(super) fn process_planar_face(
-    face: &DecodedEntity,
-    decoder: &mut EntityDecoder,
-    quality: TessellationQuality,
-) -> Result<(Vec<f32>, Vec<u32>)> {
-    use crate::triangulation::{project_to_2d_with_basis, triangulate_polygon_with_holes};
-    use ifc_lite_core::IfcType;
-
-    let bounds_attr = face
-        .get(0)
-        .ok_or_else(|| Error::geometry("AdvancedFace missing Bounds".to_string()))?;
-    let bounds = bounds_attr
-        .as_list()
-        .ok_or_else(|| Error::geometry("Expected bounds list".to_string()))?;
-
-    // Collect (points, is_outer, orientation) per bound. Orientation is
-    // attribute 1 of IfcFaceBound; when .F., the loop must be reversed.
-    let mut outer_points: Option<Vec<Point3<f64>>> = None;
-    let mut hole_points: Vec<Vec<Point3<f64>>> = Vec::new();
-
-    for bound in bounds {
-        let Some(bound_id) = bound.as_entity_ref() else {
-            continue;
-        };
-        let bound_entity = decoder.decode_by_id(bound_id)?;
-
-        let loop_attr = bound_entity
-            .get(0)
-            .ok_or_else(|| Error::geometry("FaceBound missing Bound".to_string()))?;
-        let loop_entity = decoder
-            .resolve_ref(loop_attr)?
-            .ok_or_else(|| Error::geometry("Failed to resolve loop".to_string()))?;
-        if !loop_entity.ifc_type.as_str().eq_ignore_ascii_case("IFCEDGELOOP") {
-            continue;
-        }
-
-        let mut points = extract_edge_loop_points(&loop_entity, decoder, quality);
-        if points.len() < 3 {
-            continue;
-        }
-        let orientation = bound_entity
-            .get(1)
-            .and_then(|a| a.as_enum())
-            .map(|e| e == "T" || e == "TRUE")
-            .unwrap_or(true);
-        if !orientation {
-            points.reverse();
-        }
-
-        let is_outer = bound_entity.ifc_type == IfcType::IfcFaceOuterBound;
-        if is_outer || outer_points.is_none() {
-            if is_outer {
-                if let Some(prev_outer) = outer_points.take() {
-                    hole_points.push(prev_outer);
-                }
-            }
-            outer_points = Some(points);
-        } else {
-            hole_points.push(points);
-        }
-    }
-
-    let Some(outer) = outer_points else {
-        return Ok((Vec::new(), Vec::new()));
-    };
-
-    let normal = calculate_polygon_normal(&outer);
-    let (outer_2d, u_axis, v_axis, origin) = project_to_2d(&outer, &normal);
-    let holes_2d: Vec<Vec<nalgebra::Point2<f64>>> = hole_points
-        .iter()
-        .map(|h| project_to_2d_with_basis(h, &u_axis, &v_axis, &origin))
-        .collect();
-
-    let mut positions = Vec::with_capacity((outer.len() + hole_points.iter().map(|h| h.len()).sum::<usize>()) * 3);
-    for p in outer.iter().chain(hole_points.iter().flat_map(|h| h.iter())) {
-        positions.push(p.x as f32);
-        positions.push(p.y as f32);
-        positions.push(p.z as f32);
-    }
-
-    let indices = match triangulate_polygon_with_holes(&outer_2d, &holes_2d) {
-        Ok(idx) => idx.into_iter().map(|i| i as u32).collect(),
-        Err(_) => {
-            // Outer-only fan fallback. Drops holes — same behaviour as the
-            // pre-fix code on a no-hole face, so worst case matches the old
-            // legacy path rather than emitting nothing.
-            let mut idx = Vec::with_capacity((outer.len() - 2) * 3);
-            for i in 1..outer.len() - 1 {
-                idx.push(0u32);
-                idx.push(i as u32);
-                idx.push(i as u32 + 1);
-            }
-            idx
-        }
-    };
-
-    Ok((positions, indices))
+/// The plan shares `triangulate_planar_face` with the FacetedBrep path: the
+/// outer (or first) bound and the hole bounds are projected on one basis and
+/// triangulated once.
+pub(super) fn lower_planar(face: &DecodedEntity, decoder: &mut EntityDecoder,
+    quality: TessellationQuality, rtc_file_units: Option<(f64, f64, f64)>) -> Result<FaceGeometry> {
+    let mut plans = planar_plans(face, decoder, quality, rtc_file_units)?;
+    // One region is the face as before; several are the disjoint outer bounds of one face (#9945).
+    Ok(match plans.len() {
+        0 => FaceGeometry::Empty,
+        1 => FaceGeometry::Planar(plans.remove(0)),
+        _ => FaceGeometry::PlanarRegions(plans),
+    })
 }
 
-/// Process a B-spline surface face.
-/// When `weights` is `Some`, rational (NURBS) evaluation is used.
-pub(crate) fn process_bspline_face(
-    bspline: &DecodedEntity,
-    decoder: &mut EntityDecoder,
-    weights: Option<&[Vec<f64>]>,
-    quality: TessellationQuality,
-) -> Result<(Vec<f32>, Vec<u32>)> {
-    // Get degrees
-    let u_degree = bspline.get_float(0).unwrap_or(3.0) as usize;
-    let v_degree = bspline.get_float(1).unwrap_or(1.0) as usize;
-
-    // Parse control points
-    let control_points = parse_control_points(bspline, decoder)?;
-
-    // Parse knot vectors
-    let (u_knots, v_knots) = parse_knot_vectors(bspline)?;
-
-    // Determine tessellation resolution based on surface complexity; scaled by quality.
-    let u_segments = scale_segments(control_points.len() * 3, 8, 24, quality);
-    let v_segments = if !control_points.is_empty() {
-        scale_segments(control_points[0].len() * 3, 4, 24, quality)
-    } else {
-        scale_segments(4, 4, 24, quality)
-    };
-
-    // Tessellate the surface (returns None if knot data is inconsistent)
-    match tessellate_bspline_surface(
-        u_degree,
-        v_degree,
-        &control_points,
-        &u_knots,
-        &v_knots,
-        weights,
-        u_segments,
-        v_segments,
-    ) {
-        Some((positions, indices)) => Ok((positions, indices)),
-        None => Ok((Vec::new(), Vec::new())),
-    }
+/// A planar face as one plan per region ([`super::bounds::face_regions`]); regions with no outer ring are dropped.
+fn planar_plans(face: &DecodedEntity, decoder: &mut EntityDecoder, quality: TessellationQuality,
+    rtc_file_units: Option<(f64, f64, f64)>) -> Result<Vec<PlanarPlan>> {
+    let rtc = rtc_file_units.unwrap_or((0.0, 0.0, 0.0));
+    Ok(super::bounds::face_regions(face, decoder, quality)?
+        .into_iter()
+        .filter_map(|bounds| bounds.outer.map(|outer| PlanarPlan { outer, hole_points: bounds.holes, rtc }))
+        .collect())
 }
 
-/// Process a cylindrical surface face
-pub(super) fn process_cylindrical_face(
+/// A planar face as one plan per region, an empty plan for a region with no outer ring.
+pub(super) fn lower_planar_regions(face: &DecodedEntity, decoder: &mut EntityDecoder,
+    quality: TessellationQuality, rtc_file_units: Option<(f64, f64, f64)>) -> Result<Vec<FaceGeometry>> {
+    Ok(planar_plans(face, decoder, quality, rtc_file_units)?.into_iter().map(FaceGeometry::Planar).collect())
+}
+
+#[cfg(test)]
+pub(super) fn process_planar_face_rebased(face: &DecodedEntity, decoder: &mut EntityDecoder,
+    quality: TessellationQuality, rtc_file_units: Option<(f64, f64, f64)>) -> Result<(Vec<f32>, Vec<u32>)> {
+    lower_planar(face, decoder, quality, rtc_file_units)?.evaluate()
+}
+
+#[cfg(test)]
+pub(crate) fn process_bspline_face(bspline: &DecodedEntity, decoder: &mut EntityDecoder,
+    weights: Option<&[Vec<f64>]>, quality: TessellationQuality, rtc: (f64, f64, f64)) -> Result<(Vec<f32>, Vec<u32>)> {
+    super::bspline_plan::lower_bspline(bspline, decoder, weights.map(<[Vec<f64>]>::to_vec), quality, rtc)?.evaluate()
+}
+
+pub(super) fn lower_cylindrical(
     face: &DecodedEntity,
     surface: &DecodedEntity,
     decoder: &mut EntityDecoder,
     quality: TessellationQuality,
-) -> Result<(Vec<f32>, Vec<u32>)> {
+    rtc: (f64, f64, f64),
+) -> Result<Option<CylinderPlan>> {
     // Get the radius from IfcCylindricalSurface (attribute 1)
     let radius = surface
-        .get(1)
+        .attr(slot::IfcCylindricalSurface::RADIUS)
         .and_then(|v| v.as_float())
         .ok_or_else(|| Error::geometry("CylindricalSurface missing Radius".to_string()))?;
 
     // Get position/axis from IfcCylindricalSurface (attribute 0)
-    let position_attr = surface.get(0);
+    let position_attr = surface.attr(slot::IfcCylindricalSurface::POSITION);
     let axis_transform = if let Some(attr) = position_attr {
         if let Some(pos_id) = attr.as_entity_ref() {
-            get_axis2_placement_transform_by_id(pos_id, decoder)?
+            Axis2Placement::read_id(pos_id, decoder)?.matrix()
         } else {
             Matrix4::identity()
         }
@@ -200,10 +98,10 @@ pub(super) fn process_cylindrical_face(
     // glazing-mullion fillet faces in IFC4 door exports, where each
     // cylindrical face has B-spline edge curves running along the surface.
     let boundary_points: Vec<Point3<f64>> =
-        extract_edge_loop_points_for_bounds(face, decoder, quality);
+        extract_edge_loop_points_for_bounds(face, decoder, quality)?;
 
     if boundary_points.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(None);
     }
 
     // Transform boundary points to local cylinder coordinates
@@ -230,8 +128,8 @@ pub(super) fn process_cylindrical_face(
             a
         })
         .collect();
-    angles.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    angles.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    angles.sort_by(|a, b| crate::cmp_f64_nan_last(*a, *b)); // #7674
+    angles.dedup_by(|a, b| (*a - *b).abs() < tol::ANGLE_EPS);
 
     let (min_angle, max_angle) = if angles.len() < 2 {
         (0.0, std::f64::consts::TAU)
@@ -259,7 +157,7 @@ pub(super) fn process_cylindrical_face(
             end_raw
         };
         let span = end - start;
-        if span < 1e-6 || span > std::f64::consts::TAU - 1e-6 {
+        if span < tol::ANGLE_EPS || span > std::f64::consts::TAU - tol::ANGLE_EPS {
             (0.0, std::f64::consts::TAU)
         } else {
             (start, end)
@@ -285,44 +183,10 @@ pub(super) fn process_cylindrical_face(
     let height_base = (height / (radius * 2.0)).ceil() as usize;
     let height_segments = scale_segments(height_base, 1, 8, quality);
 
-    let mut positions = Vec::new();
-    let mut indices = Vec::new();
-
-    // Generate cylinder patch vertices
-    for h in 0..=height_segments {
-        let z = min_z + (height * h as f64 / height_segments as f64);
-        for a in 0..=angle_segments {
-            let angle = min_angle + (angle_span * a as f64 / angle_segments as f64);
-            let x = radius * angle.cos();
-            let y = radius * angle.sin();
-
-            // Transform back to world coordinates
-            let local_point = Point3::new(x, y, z);
-            let world_point = axis_transform.transform_point(&local_point);
-
-            positions.push(world_point.x as f32);
-            positions.push(world_point.y as f32);
-            positions.push(world_point.z as f32);
-        }
-    }
-
-    // Generate indices for quad strip
-    let cols = angle_segments + 1;
-    for h in 0..height_segments {
-        for a in 0..angle_segments {
-            let base = (h * cols + a) as u32;
-            let next_row = base + cols as u32;
-
-            // Two triangles per quad
-            indices.push(base);
-            indices.push(base + 1);
-            indices.push(next_row + 1);
-
-            indices.push(base);
-            indices.push(next_row + 1);
-            indices.push(next_row);
-        }
-    }
-
-    Ok((positions, indices))
+    Ok(Some(CylinderPlan { radius, axis_transform, min_angle, angle_span,
+        min_z, height, angle_segments, height_segments, rtc }))
 }
+
+#[cfg(test)]
+#[path = "surfaces_tests.rs"]
+mod tests;

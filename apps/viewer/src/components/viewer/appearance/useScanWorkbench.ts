@@ -1,0 +1,166 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+import { nativeAppearanceScanSources } from '@/lib/appearance/appearance-native-scan-sources';
+import { appendNativeScanPair, registerNativeScanSession, refreshNativeScanBinding, changeNativeScanPartition } from '@/lib/appearance/appearance-native-scan';
+
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useAsyncRun } from '@/hooks/useAsyncRun';
+import { useViewerStore } from '@/store';
+import { getGlobalRenderer } from '@/hooks/useBCF';
+import { createAppearancePlanner } from '@/lib/appearance/planner-worker-client';
+import { prepareScanSession, type ScanSession, type ScanSourceSelector } from '@/lib/appearance/scan/session';
+import { targetLandmark } from '@/lib/appearance/scan/landmarks';
+import type { TranslationKey, TranslationParameters } from '@/i18n';
+import type { ScanLandmark, ScanPair, ScanRegistrationRequest, ScanRegistrationReport } from '@/lib/appearance/scan/types';
+import { ScanValidationError, scanFailureMessage } from './scan-validation-message';
+const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+export type ScanWorkflowMessage =
+  | { kind: 'translated'; key: TranslationKey; params?: TranslationParameters }
+  | { kind: 'raw'; text: string };
+const translated = (key: TranslationKey, params?: TranslationParameters): ScanWorkflowMessage => ({ kind: 'translated', key, params });
+const raw = (text: string): ScanWorkflowMessage => ({ kind: 'raw', text });
+export interface ScanSourceOption {
+  id: string;
+  modelId: string;
+  selector: ScanSourceSelector;
+  modelName: string;
+  kind: 'surface' | 'points';
+  surfaceNumber?: number;
+  retainedCount?: number;
+  seenCount?: number;
+}
+
+export function useScanWorkbench() {
+  const models = useViewerStore(s => s.models), mutationVersion = useViewerStore(s => s.mutationVersion);
+  const mutationViews = useViewerStore(s => s.mutationViews);
+  const section = useViewerStore(s => s.sectionPlane), terrain = useViewerStore(s => s.cesiumTerrainClipY), cesium = useViewerStore(s => s.cesiumEnabled);
+  const placement = useViewerStore(s => s.modelPlacement), room = useViewerStore(s => s.collabRoomId);
+  // Textured GLB surfaces, then completely streamed point clouds whose retained sample can be aligned (#4381).
+  const sources = useMemo(() => nativeAppearanceScanSources(models), [models]);
+  const targets = useMemo(() => [...models.values()].filter(model => model.ifcDataStore && !/\.glb$/i.test(model.sourceFile?.name ?? '')), [models]);
+  const [sourceId, setSourceId] = useState(''), [targetId, setTargetId] = useState(''), [restart, setRestart] = useState(0);
+  const [session, setSession] = useState<ScanSession | null>(null), [pairs, setPairs] = useState<ScanPair[]>([]);
+  const [partition, setPartition] = useState<'fit' | 'check'>('fit');
+  const [pending, setPending] = useState<{ point: ScanLandmark; partition: 'fit' | 'check' } | null>(null);
+  const [result, setResult] = useState<{ request: ScanRegistrationRequest; report: ScanRegistrationReport } | null>(null);
+  const [taskBusy, setBusy] = useState(false), [stale, setStale] = useState(false), [previewReady, setPreviewReady] = useState(false);
+  const [status, setStatus] = useState<ScanWorkflowMessage>(() => translated('appearance.scan.status.openModels')), [error, setError] = useState(false), [aligned, setAligned] = useState(false);
+  const appearanceRun = useAsyncRun();
+  const busy = taskBusy || appearanceRun.busy;
+  const planner = useRef<ReturnType<typeof createAppearancePlanner> | null>(null), operation = useRef<AbortController | null>(null);
+  const ownAppearance = useRef(false);
+  const recovery = useRef<{ request: ScanRegistrationRequest; rebind: (next: ScanSession) => void } | null>(null);
+  const rows = useRef(pairs); rows.current = pairs;
+  useEffect(() => { const p = createAppearancePlanner(); planner.current = p; return () => { operation.current?.abort(); p.dispose(); planner.current = null; }; }, []);
+  useEffect(() => { if (!sourceId && sources[0]) setSourceId(sources[0].id); if (!targetId && targets[0]) setTargetId(targets[0].id); }, [sources, targets, sourceId, targetId]);
+  useEffect(() => {
+    appearanceRun.reset(); ownAppearance.current = false;
+    const source = sources.find(item => item.id === sourceId);
+    const controller = new AbortController(); operation.current?.abort(); planner.current?.cancel(); operation.current = controller;
+    recovery.current = null; setSession(null); setPending(null); setPairs([]); setResult(null); setAligned(false); setStale(false); setError(false);
+    if (!source || !models.has(targetId)) { setBusy(false); setStatus(translated('appearance.scan.status.chooseModels')); return () => controller.abort(); }
+    setBusy(true); setStatus(translated('appearance.scan.status.preparingFrames'));
+    void prepareScanSession(source.modelId, source.selector, targetId, controller.signal).then(prepared => {
+      if (controller.signal.aborted) return; setSession(prepared); setStatus(translated('appearance.scan.status.pickLandmark'));
+    }).catch(failure => { if (!controller.signal.aborted) { setError(true); setStatus(raw(message(failure))); } }).finally(() => { if (!controller.signal.aborted) setBusy(false); if (operation.current === controller) operation.current = null; });
+    return () => controller.abort();
+    // Model/frame changes invalidate the pinned session below; they never replace its source silently.
+  }, [sourceId, targetId, restart, appearanceRun.reset]);
+  useEffect(() => {
+    if (!session || ownAppearance.current || appearanceRun.busy) return;
+    try { session.validate(); } catch (failure) { operation.current?.abort(); planner.current?.cancel(); setBusy(false); setStale(true); setPending(null); setResult(null); setAligned(false); setError(true); setStatus(raw(message(failure))); }
+  }, [session, models, mutationViews, mutationVersion, placement, room, section, terrain, cesium, appearanceRun.busy]);
+  useEffect(() => {
+    if (!pending || !session || stale) return;
+    const renderer = getGlobalRenderer(); if (!renderer) { setError(true); setStatus(translated('appearance.scan.status.viewNotReady')); return; }
+    const canvas = renderer.getCanvas();
+    let down: { x: number; y: number; id: number } | null = null;
+    const start = (event: PointerEvent) => { if (event.button !== 0) return; down = { x: event.clientX, y: event.clientY, id: event.pointerId }; };
+    const pick = (event: PointerEvent) => {
+      if (!down || down.id !== event.pointerId || Math.hypot(event.clientX - down.x, event.clientY - down.y) > 4) return;
+      down = null; event.preventDefault(); event.stopImmediatePropagation();
+      try {
+        const rect = canvas.getBoundingClientRect(), target = targetLandmark(session, renderer, event.clientX - rect.left, event.clientY - rect.top);
+        if (!target) return;
+        setPairs(appendNativeScanPair(rows.current,pending,target)); setPending(null); setResult(null); setAligned(false); setError(false); setStatus(translated('appearance.scan.status.pairAdded'));
+      } catch (failure) { setError(true); setStatus(scanFailureMessage(failure)); }
+    };
+    canvas.addEventListener('pointerdown', start, true); canvas.addEventListener('pointerup', pick, true);
+    return () => { canvas.removeEventListener('pointerdown', start, true); canvas.removeEventListener('pointerup', pick, true); };
+  }, [pending, session, stale]);
+  /** The preview resolves its own pick (triangle barycentrics or a retained point) into a native-frame landmark. */
+  function pickSource(landmark: ScanLandmark) {
+    if (!session || stale || busy || aligned) return;
+    try { session.validate(); setPending({ point: landmark, partition }); setError(false); setStatus(translated('appearance.scan.status.pickIfcPoint')); }
+    catch (failure) { setError(true); setStatus(raw(message(failure))); }
+  }
+  async function calculate() {
+    if (!session || !planner.current || busy || stale) return;
+    const controller = new AbortController(); operation.current = controller;
+    setBusy(true); setError(false); setStatus(translated('appearance.scan.status.calculating')); setPending(null);
+    try {
+      const registered=await registerNativeScanSession(session,pairs,planner.current,controller.signal);
+      setResult(registered); setStatus(translated('appearance.scan.status.reviewFit'));
+    } catch (failure) { if (!controller.signal.aborted) { setError(true); setStatus(raw(message(failure))); } }
+    finally { if (operation.current === controller) { operation.current = null; setBusy(false); } }
+  }
+  async function refreshAppearanceBinding(signal: AbortSignal) {
+    const saved = recovery.current;
+    if (!session || !saved || !planner.current) throw new ScanValidationError('appearance.scan.error.noRetainedBinding');
+    setResult(null); setAligned(false); setStatus(translated('appearance.scan.status.refreshing'));
+    const refreshed=await refreshNativeScanBinding(session,saved,planner.current,signal);
+    recovery.current=refreshed.recovery;setSession(refreshed.session);setResult(refreshed.result);setStale(false);setError(false);
+    setStatus(translated('appearance.scan.status.refreshed'));
+  }
+  async function revalidateAppearance() {
+    if (!recovery.current || busy) return;
+    const controller = new AbortController(); operation.current = controller; ownAppearance.current = true; setBusy(true);
+    try { await refreshAppearanceBinding(controller.signal); }
+    catch (failure) { setStale(true); setError(true); setStatus(controller.signal.aborted
+      ? translated('appearance.scan.status.revalidationCancelled') : scanFailureMessage(failure)); }
+    finally { ownAppearance.current = false; if (operation.current === controller) { operation.current = null; setBusy(false); } }
+  }
+  async function applyAppearance(action: (signal: AbortSignal) => Promise<void>) {
+    if (!session || !result || taskBusy || stale || !planner.current) return;
+    await appearanceRun.start(async ({ signal, isCurrent }) => {
+      recovery.current = { rebind: session.afterAppearance(), request: result.request };
+      let applied = false; setError(false); setStatus(translated('appearance.scan.status.applying'));
+      try {
+        await action(signal); applied = true;
+        signal.throwIfAborted();
+        await refreshAppearanceBinding(signal);
+      } catch (failure) {
+        if (!isCurrent()) return;
+        let valid = false;
+        if (!applied) try { session.validate(); valid = true; recovery.current = null; } catch (invalid) { console.info('The previous scan binding needs explicit revalidation after appearance rollback.', invalid); }
+        if (!valid) { setResult(null); setAligned(false); setStale(true); }
+        setError(true); setStatus(raw(message(failure)));
+      }
+    });
+  }
+  function cancel() {
+    const applying = appearanceRun.busy;
+    appearanceRun.cancel();
+    if (applying) { setResult(null); setAligned(false); setStale(true); }
+    if (!session) setStale(true);
+    operation.current?.abort(); planner.current?.cancel(); setPending(null);
+    if (!ownAppearance.current) setBusy(false);
+    setStatus(translated(applying ? 'appearance.scan.status.appearanceCancelled'
+      : ownAppearance.current ? 'appearance.scan.status.cancellingAppearance' : 'appearance.scan.status.alignmentCancelled'));
+  }
+
+  return { sources, targets, sourceId, targetId, setSourceId, setTargetId, session, pairs, partition, setPartition, pending, result,
+    busy, stale, applyAppearance, revalidateAppearance, canRevalidateAppearance: stale && recovery.current !== null, previewReady, setPreviewReady, status, error, aligned, setAligned, pickSource, calculate, cancel,
+    restart() { setRestart(value => value + 1); },
+    remove(id: string) { setPairs(previous => previous.filter(p => p.correspondence.id !== id)); setResult(null); setAligned(false); },
+    changePartition(id: string, value: 'fit' | 'check') {
+      try { setPairs(changeNativeScanPartition(pairs, id, value)); setResult(null); setAligned(false); }
+      catch (error) {
+        if (!(error instanceof ScanValidationError)) throw error;
+        setError(true); setStatus(translated(error.key));
+      }
+    },
+    previewError(value: string) { setError(true); setStatus(raw(value)); setPreviewReady(false); },
+  };
+}

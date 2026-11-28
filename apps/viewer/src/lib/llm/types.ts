@@ -6,6 +6,7 @@
  * Types for the LLM chat integration.
  */
 
+import type { ScriptResult } from '@ifc-lite/sandbox';
 import type { RepairScope, ScriptDiagnostic } from './script-diagnostics.js';
 
 export type MessageRole = 'user' | 'assistant' | 'system';
@@ -22,6 +23,20 @@ export interface ChatMessage {
   execResults?: Map<number, CodeExecResult>;
   /** Attached files (user messages only) */
   attachments?: FileAttachment[];
+  /** A2UI surfaces this assistant message carried, recorded for replay on reload. */
+  a2ui?: PersistedA2ui;
+}
+
+/**
+ * One assistant message's parsed reply: prose, A2UI messages and rejected
+ * blocks in order. A reload replays the messages into a fresh renderer instead
+ * of re-parsing the text, so a surface comes back exactly as it was shown.
+ */
+export type PersistedA2uiSegment = { text: string } | { messages: unknown[] } | { error: string };
+
+export interface PersistedA2ui {
+  v: 1;
+  segments: PersistedA2uiSegment[];
 }
 
 export interface CodeBlock {
@@ -33,7 +48,7 @@ export interface CodeBlock {
   code: string;
 }
 
-export interface CodeExecResult {
+export interface CodeExecResult extends Pick<ScriptResult, 'surfaces'> {
   status: 'running' | 'success' | 'error';
   logs?: Array<{ level: string; args: unknown[] }>;
   value?: unknown;
@@ -135,10 +150,6 @@ export interface FileAttachment {
   imageBase64?: string;
   /** Whether this is an image attachment */
   isImage?: boolean;
-  /** Base64-encoded PDF data (for PDF attachments — Anthropic native document blocks) */
-  pdfBase64?: string;
-  /** Whether this is a PDF attachment */
-  isPdf?: boolean;
   /** Whether this is a binary spreadsheet (xlsx/xls/ods) that we can't parse here yet. */
   isSpreadsheetBinary?: boolean;
 }
@@ -176,10 +187,12 @@ export interface LLMModel {
   openaiApi?: 'chat' | 'responses';
   /**
    * Whether the model accepts the classic sampling parameters (`temperature`,
-   * `top_p`, `top_k`). Default: true. Set to `false` for models that reject
-   * them (Anthropic Claude Opus 4.7 and later — see
-   * https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7).
-   * When `false`, the stream client omits these params from the request body.
+   * `top_p`, `top_k`). Defaults to false, because every current frontier model
+   * rejects them with a 400: Claude from Opus 4.7 on (see
+   * https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7)
+   * and the GPT-5 reasoning family. Set it to `true` for a model that still
+   * takes a tuned temperature, and the stream client will send the params.
+   * Forgetting it costs a default temperature, not a failed request.
    */
   acceptsSamplingParams?: boolean;
 }

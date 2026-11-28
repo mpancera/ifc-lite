@@ -185,7 +185,7 @@ const DEVICE_LIST: ListDefinition = {
   createdAt: 0,
   updatedAt: 0,
   entityTypes: [IfcTypeEnum.IfcSensor, IfcTypeEnum.IfcAlarm],
-  conditions: [],
+  groups: [],
   columns: [
     { id: 'attr-name', source: 'attribute', propertyName: 'Name' },
     { id: 'attr-objecttype', source: 'attribute', propertyName: 'ObjectType' },
@@ -237,7 +237,7 @@ export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
         // switched it off (this clip does, before the lens) leaves the next
         // one generating three rooms nobody can see. A clip has to start from
         // a state it set, not from whatever the last one left behind.
-        if (!store.getState().typeVisibility.rooms) store.getState().toggleTypeVisibility('rooms');
+        if (store.getState().typeVisibility.rooms === false) store.getState().toggleTypeVisibility('rooms');
         // Named the way a real project is, because the asset identifier is
         // assembled out of these very names: `A.01.03_FST.RM.001`. A building
         // called "Building" on a storey called "Level 1" produces an
@@ -252,7 +252,7 @@ export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
           }),
         }));
       },
-      settled: (s) => modelsSettled(s, 1) && s.typeVisibility.rooms,
+      settled: (s) => modelsSettled(s, 1) && s.typeVisibility.rooms !== false,
       settleTimeoutMs: 60_000,
     },
     {
@@ -539,9 +539,9 @@ export const STRAND_01_FROM_A_DRAWING: ScreenflowClip = {
       captionDe: 'Die Raumvolumen weg – sonst verdecken sie genau das, worum es gleich geht.',
       captionEn: 'Room volumes out of the way - they hide exactly what comes next.',
       perform: (store) => {
-        if (store.getState().typeVisibility.rooms) store.getState().toggleTypeVisibility('rooms');
+        if (store.getState().typeVisibility.rooms !== false) store.getState().toggleTypeVisibility('rooms');
       },
-      settled: (s) => !s.typeVisibility.rooms,
+      settled: (s) => s.typeVisibility.rooms === false,
       settleTimeoutMs: 6000,
       holdMs: 2800,
     },

@@ -18,7 +18,7 @@
 
 use ifc_lite_geometry::kernel::budget;
 use ifc_lite_geometry::mesh::Mesh;
-use ifc_lite_geometry::ClippingProcessor;
+use ifc_lite_geometry::{ClippingProcessor, GroupCut};
 
 /// Axis-aligned box [min,max] as a 12-triangle `Mesh`.
 fn box_mesh(min: [f32; 3], max: [f32; 3]) -> Mesh {
@@ -46,6 +46,8 @@ fn box_mesh(min: [f32; 3], max: [f32; 3]) -> Mesh {
         indices,
         rtc_applied: false,
         origin: [0.0; 3],
+        welded_in_object_frame: false,
+        plane_tags: None,
     instance_meta: None, local_bounds: None, local_to_world: None }
 }
 
@@ -102,6 +104,8 @@ fn faceted_slab(min: [f32; 3], max: [f32; 3], n: usize, z_top: f32) -> Mesh {
         indices,
         rtc_applied: false,
         origin: [0.0; 3],
+        welded_in_object_frame: false,
+        plane_tags: None,
     instance_meta: None, local_bounds: None, local_to_world: None }
 }
 
@@ -116,7 +120,7 @@ fn element_escalations(host: &Mesh, cutters: &[Mesh]) -> (u64, Mesh) {
     budget::begin_element();
     let mut result = host.clone();
     for c in cutters {
-        if let Ok(m) = proc.subtract_mesh(&result, c) {
+        if let GroupCut::Cut(m) = proc.subtract_mesh(&result, c) {
             result = m;
         }
     }
@@ -127,11 +131,14 @@ fn element_escalations(host: &Mesh, cutters: &[Mesh]) -> (u64, Mesh) {
 fn issue_1109_per_element_budget_bounds_pathological_csg() {
     // A host slab cut by several coplanar-fragment slabs at staggered internal
     // heights — the dense-coplanar-cut pattern that hung the exact kernel.
+    // #7292's proper-crossing short circuit skips irrelevant exact predicates.
+    // Keep enough real facets to exercise the unchanged work cap; a dyadic
+    // grid also keeps the host boundaries off the cutter's subdivision edges.
     let host = box_mesh([0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
     let cutters: Vec<Mesh> = (0..5)
         .map(|k| {
             let z = 1.0 + k as f32 * 1.5;
-            faceted_slab([-1.0, -1.0, -1.0], [11.0, 11.0, z], 40, z)
+            faceted_slab([-1.0, -1.0, -1.0], [11.0, 11.0, z], 64, z)
         })
         .collect();
 

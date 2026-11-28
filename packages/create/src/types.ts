@@ -23,7 +23,7 @@ export type Point2D = [number, number];
 export interface Placement3D {
   Location: Point3D;
   Axis?: Point3D;        // Z direction, default [0,0,1]
-  RefDirection?: Point3D; // X direction, default [1,0,0]
+  RefDirection?: Point3D; // X direction, default world X projected normal to Axis (IfcFirstProjAxis)
 }
 
 /** 2D rectangle profile (width along X, depth along Y, centered at origin) */
@@ -187,6 +187,14 @@ export interface WallParams extends ElementAttributes {
   Height: number;
   /** Rectangular openings in the wall */
   Openings?: RectangularOpening[];
+  /**
+   * `IfcWallTypeEnum` value (IFC4/IFC4X3; IFC2X3 `IfcWall` has no PredefinedType, so passing one
+   * there throws). Default `NOTDEFINED`. Checked against the target schema at runtime: RETAININGWALL
+   * and WAVEWALL are IFC4X3-only, ELEMENTEDWALL is deprecated in IFC4, and the deprecated STANDARD
+   * and POLYGONAL are refused. USERDEFINED requires `ObjectType`.
+   */
+  PredefinedType?: 'MOVABLE' | 'PARAPET' | 'PARTITIONING' | 'PLUMBINGWALL' | 'SHEAR' | 'SOLIDWALL'
+    | 'ELEMENTEDWALL' | 'RETAININGWALL' | 'WAVEWALL' | 'USERDEFINED' | 'NOTDEFINED';
 }
 
 /** Slab: extruded rectangle or arbitrary profile */
@@ -203,6 +211,8 @@ export interface SlabParams extends ElementAttributes {
   Profile?: Point2D[];
   /** Rectangular openings in the slab */
   Openings?: RectangularOpening[];
+  /** `IfcSlabTypeEnum` value, checked against the target schema. Default `FLOOR`. */
+  PredefinedType?: string;
 }
 
 /** Column: extruded rectangle profile */
@@ -215,6 +225,8 @@ export interface ColumnParams extends ElementAttributes {
   Depth: number;
   /** Column height (Z) */
   Height: number;
+  /** `IfcColumnTypeEnum` value (IFC4/IFC4X3 only), checked against the target schema. Default `COLUMN`. */
+  PredefinedType?: string;
 }
 
 /** Beam: extruded rectangle profile along an axis */
@@ -227,6 +239,8 @@ export interface BeamParams extends ElementAttributes {
   Width: number;
   /** Beam height (depth of section) */
   Height: number;
+  /** `IfcBeamTypeEnum` value (IFC4/IFC4X3 only), checked against the target schema. Default `BEAM`. */
+  PredefinedType?: string;
 }
 
 /** Stair: simplified parametric stair (straight run) */
@@ -429,6 +443,12 @@ export interface SpaceParams extends ElementAttributes {
   LongName?: string;
   /** Custom profile outline (overrides Width/Depth) */
   Profile?: Point2D[];
+  /**
+   * `IfcSpaceTypeEnum` value (IFC2X3: the `IfcInternalOrExternalEnum` of `InteriorOrExteriorSpace`),
+   * checked against the target schema. Default `INTERNAL`, except IFC4X3, which deprecates INTERNAL
+   * and EXTERNAL (use `Pset_SpaceCommon.IsExternal`) and so defaults to `NOTDEFINED`.
+   */
+  PredefinedType?: string;
 }
 
 /** Curtain wall: planar curtain wall panel */
@@ -478,13 +498,27 @@ export interface ProxyParams extends ElementAttributes {
 // ============================================================================
 
 /** IFC property value types */
-export type PropertyType = 'IfcLabel' | 'IfcText' | 'IfcIdentifier' | 'IfcReal' | 'IfcInteger' | 'IfcBoolean' | 'IfcLogical';
+/**
+ * A numeric measure type -- `IfcThermalTransmittanceMeasure`,
+ * `IfcPositiveLengthMeasure`, `IfcCountMeasure`, `IfcPlaneAngleMeasure`, ...
+ * Standard property sets declare their values in these (Pset_WallCommon's
+ * ThermalTransmittance is an IfcThermalTransmittanceMeasure, not an IfcReal),
+ * and an IDS check on the data type fails a value written as the wrong one.
+ */
+export type PropertyMeasureType = `Ifc${string}Measure`;
+
+export type PropertyType =
+  | 'IfcLabel' | 'IfcText' | 'IfcIdentifier' | 'IfcReal' | 'IfcInteger' | 'IfcBoolean' | 'IfcLogical'
+  | PropertyMeasureType;
 
 /** Single property definition */
 export interface PropertyDef {
   Name: string;
   NominalValue: string | number | boolean;
-  /** Defaults to IfcLabel for strings, IfcReal for numbers, IfcBoolean for booleans */
+  /**
+   * Defaults to IfcLabel for strings, IfcInteger/IfcReal for numbers, IfcBoolean
+   * for booleans. A numeric value may declare any measure type and is written as it.
+   */
   Type?: PropertyType;
 }
 
@@ -557,8 +591,27 @@ export interface ProjectParams {
   Schema?: 'IFC2X3' | 'IFC4' | 'IFC4X3';
   /** Length unit: 'METRE' (default), 'MILLIMETRE', 'FOOT' */
   LengthUnit?: string;
+  /**
+   * Project currency (e.g. 'CHF'), written as an IfcMonetaryUnit in the
+   * IfcUnitAssignment. THERE IS NO DEFAULT: leave it out and the file states no
+   * currency, which is a different answer from a guessed one and is the answer
+   * the cost read model gives back.
+   */
+  Currency?: string;
   Author?: string;
   Organization?: string;
+  /**
+   * STEP header `FILE_NAME.name`, e.g. `'tiny-house.ifc'`. Defaults to
+   * `'created.ifc'`. At most 256 characters (ISO 10303-21 `STRING (256)`).
+   */
+  FileName?: string;
+  /**
+   * STEP header `FILE_DESCRIPTION.description`: one string, or several for
+   * several list entries (e.g. a `ViewDefinition [...]` entry plus free text).
+   * Defaults to `'Created by ifc-lite'`. Each entry at most 256 characters; an
+   * empty array is rejected, because the attribute is `LIST [1:?]`.
+   */
+  FileDescription?: string | string[];
   /**
    * Fixed creation instant (epoch milliseconds or Date) used for the FILE_NAME
    * header timestamp, IfcOwnerHistory.CreationDate, and the default
@@ -609,125 +662,19 @@ export interface StoreyParams {
 // Scheduling / 4D (IfcWorkSchedule, IfcTask, IfcRelSequence)
 // ============================================================================
 
-export type WorkScheduleType =
-  | 'ACTUAL' | 'BASELINE' | 'PLANNED'
-  | 'USERDEFINED' | 'NOTDEFINED';
-
-/**
- * IFC task-type enum — union of IFC4 and IFC4X3 `IfcTaskTypeEnum` values.
- *
- * IFC4 introduced the first 14. IFC4X3 added 9 more to cover the
- * operations/maintenance lifecycle (ADJUSTMENT through TROUBLESHOOTING).
- * The superset is exposed here so scripts can author schedules for
- * either schema; IFC4 files that try to round-trip the newer values
- * may fail validation on strict toolchains — caller's responsibility.
- */
-export type TaskPredefinedType =
-  // IFC4 values
-  | 'ATTENDANCE' | 'CONSTRUCTION' | 'DEMOLITION' | 'DISMANTLE'
-  | 'DISPOSAL' | 'INSTALLATION' | 'LOGISTIC' | 'MAINTENANCE'
-  | 'MOVE' | 'OPERATION' | 'REMOVAL' | 'RENOVATION'
-  | 'USERDEFINED' | 'NOTDEFINED'
-  // IFC4X3 additions (operations / maintenance lifecycle)
-  | 'ADJUSTMENT' | 'CALIBRATION' | 'EMERGENCY' | 'INSPECTION'
-  | 'SAFETY' | 'SHUTDOWN' | 'STARTUP' | 'TESTING' | 'TROUBLESHOOTING';
-
-export type TaskDurationType =
-  | 'WORKTIME' | 'ELAPSEDTIME' | 'NOTDEFINED';
-
-export type SequenceType =
-  | 'START_START' | 'START_FINISH' | 'FINISH_START' | 'FINISH_FINISH'
-  | 'USERDEFINED' | 'NOTDEFINED';
-
-/**
- * IfcWorkSchedule parameters.
- *
- * Timestamps are ISO 8601 datetimes (e.g. "2024-05-01T08:00:00").
- * `Duration` / `TotalFloat` use ISO 8601 durations (e.g. "P30D", "PT8H").
- */
-export interface WorkScheduleParams {
-  Name: string;
-  Description?: string;
-  Identification?: string;
-  CreationDate?: string;
-  StartTime: string;
-  FinishTime?: string;
-  Purpose?: string;
-  Duration?: string;
-  TotalFloat?: string;
-  PredefinedType?: WorkScheduleType;
-}
-
-/** IfcWorkPlan parameters — identical shape to IfcWorkSchedule. */
-export interface WorkPlanParams extends WorkScheduleParams {}
-
-/** Canonical IFC-prefixed alias for {@link WorkScheduleParams}. */
-export type IfcWorkScheduleParams = WorkScheduleParams;
-/** Canonical IFC-prefixed alias for {@link WorkPlanParams}. */
-export type IfcWorkPlanParams = WorkPlanParams;
-/** Canonical IFC-prefixed alias for {@link WorkScheduleType}. */
-export type IfcWorkScheduleType = WorkScheduleType;
-/** Canonical IFC-prefixed alias for {@link TaskPredefinedType}. */
-export type IfcTaskPredefinedType = TaskPredefinedType;
-/** Canonical IFC-prefixed alias for {@link TaskDurationType}. */
-export type IfcTaskDurationType = TaskDurationType;
-
-/**
- * IfcTask parameters.
- *
- * When any of the *Start / *Finish / *Duration / IsCritical / Completion
- * fields is supplied, an IfcTaskTime is created and linked.
- */
-export interface TaskParams {
-  Name: string;
-  Description?: string;
-  ObjectType?: string;
-  Identification?: string;
-  LongDescription?: string;
-  Status?: string;
-  WorkMethod?: string;
-  IsMilestone?: boolean;
-  Priority?: number;
-  PredefinedType?: TaskPredefinedType;
-  /** ISO 8601 datetime */
-  ScheduleStart?: string;
-  ScheduleFinish?: string;
-  ScheduleDuration?: string;
-  ActualStart?: string;
-  ActualFinish?: string;
-  ActualDuration?: string;
-  EarlyStart?: string;
-  EarlyFinish?: string;
-  LateStart?: string;
-  LateFinish?: string;
-  FreeFloat?: string;
-  TotalFloat?: string;
-  RemainingTime?: string;
-  StatusTime?: string;
-  IsCritical?: boolean;
-  DurationType?: TaskDurationType;
-  /** Percent complete 0..100 */
-  Completion?: number;
-}
-
-/** Canonical IFC-prefixed alias for {@link TaskParams}. */
-export type IfcTaskParams = TaskParams;
-
-/** IfcRelSequence parameters (predecessor → successor edge). */
-export interface IfcRelSequenceParams {
-  SequenceType?: IfcRelSequenceType;
-  /** ISO 8601 duration (e.g. "P2D"). Negative durations indicate leads. */
-  TimeLag?: string;
-  /** Duration type applied to the lag (default WORKTIME). */
-  LagDurationType?: TaskDurationType;
-  UserDefinedSequenceType?: string;
-}
-
-/** @deprecated Use {@link IfcRelSequenceParams}. */
-export type SequenceParams = IfcRelSequenceParams;
-
-/** Canonical alias using the IFC EXPRESS enum name. */
-export type IfcRelSequenceType = SequenceType;
+// The shapes themselves live in `types-scheduling.ts` — a sibling split for
+// module size, re-exported here so `./types.js` stays the one import path.
+export type {
+  WorkScheduleType, TaskPredefinedType, TaskDurationType, SequenceType,
+  WorkCalendarType, RecurrenceType,
+  WorkScheduleParams, WorkPlanParams, TaskParams,
+  IfcRelSequenceParams, SequenceParams,
+  WorkCalendarParams, WorkTimeParams, RecurrencePatternParams, TimePeriodParams,
+  IfcWorkScheduleParams, IfcWorkPlanParams, IfcTaskParams,
+  IfcWorkScheduleType, IfcTaskPredefinedType, IfcTaskDurationType, IfcRelSequenceType,
+  IfcWorkCalendarParams, IfcWorkTimeParams, IfcRecurrencePatternParams, IfcTimePeriodParams,
+  IfcWorkCalendarType, IfcRecurrenceType,
+} from './types-scheduling.js';
 
 // ============================================================================
 // Creation result
@@ -775,8 +722,8 @@ export interface GenericElementParams extends ElementAttributes {
    * IFC entity type name in UPPERCASE (e.g. 'IFCFLOWSEGMENT', 'IFCFLOWFITTING',
    * 'IFCELECTRICALAPPLIANCE', 'IFCWALLSTANDARDCASE', etc.).
    *
-   * Any IFC product type can be used. The only requirement is that it extends
-   * IfcProduct in the IFC schema (i.e. it can have a placement and representation).
+   * Any concrete IFC product a storey can hold: an IfcElement or another
+   * product (contained), or an IfcSpace (aggregated). Groups and other spatial elements throw.
    */
   IfcType: string;
 

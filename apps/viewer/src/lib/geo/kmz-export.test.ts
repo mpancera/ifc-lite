@@ -11,9 +11,93 @@ import type { CoordinateInfo, GeometryResult, MeshData } from '@ifc-lite/geometr
 import type { MapConversion, ProjectedCRS } from '@ifc-lite/parser';
 import type { Renderer } from '@ifc-lite/renderer';
 
+import { StepTokenizer, ColumnarParser, type IfcDataStore } from '@ifc-lite/parser';
+
 import { setGlobalRendererRef } from '../../hooks/useBCF.js';
 import type { KmzProcessor } from './kmz-exporter.js';
-import { buildKmzForResolvedGeoref, computeKmzAltitude, resolveKmzHeading } from './kmz-export.js';
+import {
+  buildKmzForResolvedGeoref,
+  computeKmzAltitude,
+  kmzSuggestsAbsoluteAltitude,
+  resolveKmzAltitude,
+  resolveKmzHeading,
+} from './kmz-export.js';
+
+/** Builds a real `IfcDataStore` from raw STEP text (mirrors the parser
+ *  package's `on-demand-georef-epset.test.ts` fixture harness) so the ePset
+ *  MapUnit correction is exercised through the actual extractor, not a mock. */
+async function storeFromIfc(ifc: string): Promise<IfcDataStore> {
+  const source = new TextEncoder().encode(ifc);
+  const tokenizer = new StepTokenizer(source);
+  const entityRefs: Array<{
+    expressId: number;
+    type: string;
+    byteOffset: number;
+    byteLength: number;
+    lineNumber: number;
+  }> = [];
+  for (const ref of tokenizer.scanEntitiesFast()) {
+    entityRefs.push({
+      expressId: ref.expressId,
+      type: ref.type,
+      byteOffset: ref.offset,
+      byteLength: ref.length,
+      lineNumber: ref.line,
+    });
+  }
+  const parser = new ColumnarParser();
+  return parser.parseLite(source.buffer.slice(0), entityRefs, {}) as unknown as Promise<IfcDataStore>;
+}
+
+/**
+ * A millimetre-unit IFC2x3 file whose only georeference is an
+ * `ePset_MapConversion` property set — no `IfcMapConversion`/`IfcProjectedCRS`
+ * entities, and (per the buildingSMART ePset convention) no MapUnit property
+ * either. `OrthogonalHeight` is authored `500` — 500 *millimetres*, i.e. 0.5 m
+ * — and the geometry's minimum Z is 500 IFC-world *metres*, well above
+ * `BAKED_MIN_Z_THRESHOLD_METERS` (100 m), so a correctly-scaled 0.5 m
+ * OrthogonalHeight is "no elevation in the georef" and the model should hint
+ * "True elevation (MSL)".
+ */
+const EPSET_MM_IFC = `#1=IFCPROJECT('1mj5Hja8yfJfRTJSXP39EZ',$,'P',$,$,$,$,$,#2);
+#2=IFCUNITASSIGNMENT((#3));
+#3=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);
+#30=IFCSITE('06pHC0eJnCHlVXWW2sVoPO',$,'Site',$,$,$,$,$,.ELEMENT.,$,$,$,$,$);
+#1357=IFCPROPERTYSINGLEVALUE('Name',$,IFCLABEL('EPSG:7415'),$);
+#1358=IFCPROPERTYSET('27AKTMp8j58fBEhvkJkcNJ',$,'ePset_ProjectedCRS',$,(#1357));
+#1359=IFCRELDEFINESBYPROPERTIES('3eMryiQHj84vNzfI1G88R1',$,$,$,(#30),#1358);
+#1360=IFCPROPERTYSINGLEVALUE('TargetCRS',$,IFCLABEL('EPSG:7415'),$);
+#1361=IFCPROPERTYSINGLEVALUE('Eastings',$,IFCLENGTHMEASURE(160073528.13858587),$);
+#1362=IFCPROPERTYSINGLEVALUE('Northings',$,IFCLENGTHMEASURE(384153306.2191765),$);
+#1363=IFCPROPERTYSINGLEVALUE('OrthogonalHeight',$,IFCLENGTHMEASURE(500.),$);
+#1364=IFCPROPERTYSINGLEVALUE('XAxisAbscissa',$,IFCREAL(1.),$);
+#1365=IFCPROPERTYSINGLEVALUE('XAxisOrdinate',$,IFCREAL(0.),$);
+#1366=IFCPROPERTYSINGLEVALUE('Scale',$,IFCREAL(1.),$);
+#1367=IFCPROPERTYSET('2If4Y3Lpv6dgTDkC5x_dnr',$,'ePset_MapConversion',$,(#1360,#1361,#1362,#1363,#1364,#1365,#1366));
+#1368=IFCRELDEFINESBYPROPERTIES('0AUnylrXbCLgALz5UN_kQ2',$,$,$,(#30),#1367);`;
+
+describe('kmzSuggestsAbsoluteAltitude — ePset_MapConversion MapUnit scaling (#2859 shape)', () => {
+  it('scales OrthogonalHeight by the project length unit, not 1, for an unset ePset MapUnit', async () => {
+    const dataStore = await storeFromIfc(EPSET_MM_IFC);
+    const geometryResult = {
+      coordinateInfo: {
+        originalBounds: { min: { x: 0, y: 500, z: 0 }, max: { x: 10, y: 510, z: 10 } },
+        shiftedBounds: { min: { x: 0, y: 500, z: 0 }, max: { x: 10, y: 510, z: 10 } },
+        originShift: { x: 0, y: 0, z: 0 },
+      },
+    } as unknown as GeometryResult;
+
+    const suggests = kmzSuggestsAbsoluteAltitude({ geometryResult, dataStore, mutations: undefined });
+
+    // OrthogonalHeight=500 authored in the project length unit (mm, per the
+    // ePset convention) is 0.5 m — "near-zero" — so with geometry sitting at
+    // 500 m Z (baked-in elevation), the dialog must hint absolute altitude.
+    // Pre-fix, the unresolved `mapUnitScale` read 500 as 500 metres (not
+    // near-zero), so this returned false — silently keeping clampToGround,
+    // which floats the model 500 m above the terrain in Google Earth.
+    assert.strictEqual(suggests, true);
+  });
+});
 
 describe('computeKmzAltitude', () => {
   it('scales OrthogonalHeight from map units to metres (mm-CRS file is not 1000x off)', () => {
@@ -24,6 +108,12 @@ describe('computeKmzAltitude', () => {
   it('folds the wasm RTC Z offset back in (RTC-rebased models are not placed rtc.z too low)', () => {
     // The COLLADA exporter bakes post-RTC mesh Z; the KML altitude must restore it.
     const coordinateInfo = { wasmRtcOffset: { x: 0, y: 0, z: 417 } } as CoordinateInfo;
+    assert.strictEqual(computeKmzAltitude(100, undefined, 1, coordinateInfo), 517);
+  });
+
+  it('folds a Y-up originShift back in too (server-loaded RTC models, #7734)', () => {
+    // The server's Z-up origin_shift (x, y, 417) arrives as Y-up originShift.y = 417.
+    const coordinateInfo = { originShift: { x: 2_600_000, y: 417, z: -1_200_000 } } as CoordinateInfo;
     assert.strictEqual(computeKmzAltitude(100, undefined, 1, coordinateInfo), 517);
   });
 
@@ -142,7 +232,7 @@ describe('buildKmzForResolvedGeoref — the model is not the flat mesh list', ()
     coordinateInfo: undefined,
     lengthUnitScale: 1,
     geometryResult: { meshes } as GeometryResult,
-    isPrimaryModel: true,
+    instancedModelRange: { idOffset: 0, maxExpressId: 1000 },
     name: 'IFC Model',
   }, () => gp);
 
@@ -164,9 +254,14 @@ describe('buildKmzForResolvedGeoref — the model is not the flat mesh list', ()
     assert.strictEqual(seen.length, 0, 'the exporter must not be driven with nothing');
   });
 
-  it('does not adopt instanced occurrences for a federated (non-primary) model', async () => {
-    // Shard occurrences live in the primary model's id space.
-    setInstancedScene([occurrence(42)]);
+  it('adopts only THIS federated model\'s own instanced occurrences, not another loaded model\'s', async () => {
+    // GPU instancing stopped being primary-only on 2026-08-06 (#2255) — a
+    // federated model at idOffset 100 can carry its own instanced shard,
+    // re-homed onto its own global id space (100 + local id). The scene also
+    // holds instanced entity 42, which belongs to a DIFFERENT model (e.g. the
+    // primary, idOffset 0) — `withInstancedMeshes` must include the former and
+    // exclude the latter (#2865/#2878 follow-up).
+    setInstancedScene([occurrence(42), occurrence(142)]);
     const { gp, seen } = stub();
 
     const out = await buildKmzForResolvedGeoref({
@@ -174,12 +269,59 @@ describe('buildKmzForResolvedGeoref — the model is not the flat mesh list', ()
       crs: CRS,
       coordinateInfo: undefined,
       lengthUnitScale: 1,
-      geometryResult: { meshes: [occurrence(7)] } as GeometryResult,
-      isPrimaryModel: false,
+      geometryResult: { meshes: [occurrence(107)] } as GeometryResult,
+      instancedModelRange: { idOffset: 100, maxExpressId: 100 },
       name: 'IFC Model',
     }, () => gp);
 
     assert.ok(out instanceof Uint8Array);
+    assert.deepStrictEqual(
+      seen[0].map((m) => m.expressId).sort((a, b) => a - b),
+      [107, 142],
+      'the federated model\'s own instanced occurrence (142) is adopted; the other model\'s (42) is not',
+    );
+  });
+});
+
+describe('buildKmzForResolvedGeoref with release off (#10887)', () => {
+  afterEach(() => setGlobalRendererRef({ current: null } as RefObject<Renderer | null>));
+  it('r4653239436 a range naming a model the store does not know exports its resident geometry, never a readback refusal', async () => {
+    const tri = { expressId: 7, positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]), normals: new Float32Array(9),
+      indices: new Uint32Array([0, 1, 2]), color: [1, 1, 1, 1] } as unknown as MeshData;
+    const scene = { getAllInstancedMeshData: () => [] as MeshData[], getInstancedEntityCount: () => 0, isGeometryDataReleased: () => false };
+    setGlobalRendererRef({ current: { getScene: () => scene } as unknown as Renderer } as RefObject<Renderer | null>);
+    const seen: MeshData[][] = [];
+    const gp: KmzProcessor = { async init() {}, exportKmzFromMeshes(meshes) { seen.push(meshes as MeshData[]); return new Uint8Array([0x50, 0x4b]); }, dispose() {} };
+    const out = await buildKmzForResolvedGeoref({
+      conversion: { id: 1, sourceCRS: 0, targetCRS: 0, eastings: 311_988.181, northings: 5_996_148.565, orthogonalHeight: 0,
+        xAxisAbscissa: 1, xAxisOrdinate: 0, scale: 1 },
+      crs: { id: 2, name: 'EPSG:25833', mapUnitScale: 1 } as ProjectedCRS,
+      coordinateInfo: undefined, lengthUnitScale: 1,
+      geometryResult: { meshes: [tri] } as GeometryResult,
+      instancedModelRange: { modelId: 'not-in-store', idOffset: 0, maxExpressId: 100 },
+      name: 'IFC Model',
+    }, () => gp);
+    assert.ok(out instanceof Uint8Array, 'the resident export is produced, as before this layer');
     assert.deepStrictEqual(seen[0].map((m) => m.expressId), [7]);
+  });
+});
+
+describe('resolveKmzAltitude (#9480)', () => {
+  it('writes the site height the World view uses for a unit-slipped site', () => {
+    // Millimetre file, site at the UTM anchor's metre numbers, Z 14 read as 0.014 m.
+    const bounds = { min: { x: -1, y: 0, z: -1 }, max: { x: 1, y: 0, z: 1 } };
+    const coordinateInfo: CoordinateInfo = {
+      originShift: { x: 0, y: 0, z: 0 }, originalBounds: bounds, shiftedBounds: bounds, hasLargeCoordinates: false,
+      wasmRtcOffset: { x: 311.98818054, y: 5996.14856499, z: 0.014 }, lengthUnitScale: 0.001,
+      siteOrigin: { x: 311.98818054, y: 5996.14856499, z: 0.014 },
+    };
+    const conversion: MapConversion = {
+      id: 60, sourceCRS: 41, targetCRS: 58, eastings: 311988.181, northings: 5996148.565,
+      orthogonalHeight: 0, xAxisAbscissa: 0, xAxisOrdinate: 1,
+    };
+    const crs = { mapUnitScale: 1 };
+    assert.ok(Math.abs(resolveKmzAltitude(conversion, crs, 0.001, coordinateInfo) - 14) < 1e-9);
+    const { siteOrigin: _drop, ...withoutSite } = coordinateInfo;
+    assert.ok(Math.abs(resolveKmzAltitude(conversion, crs, 0.001, withoutSite) - 0.014) < 1e-9);
   });
 });

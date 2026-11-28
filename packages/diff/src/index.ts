@@ -12,20 +12,42 @@
  * (`MeshCollection.geometryHashValues`).
  */
 
-export { diffModels } from './diff.js';
+export { compareWithWasm as diffModels } from './wasm-diff.js';
+export { DiffModelHandle, prepareDiffModel } from './prepared-model.js';
+export { initDiff, initDiffSync } from './wasm-runtime.js';
 export {
   buildComponentFingerprints,
   buildDataFingerprint,
   normalizeValue,
   stableHash,
-} from './fingerprint.js';
+} from './wasm-fingerprint.js';
 export {
+  ACCEPTED_AMBIGUOUS_REASON,
   CONTENT_MATCH_REASON_PREFIX,
-  identityMapFromContentMatches,
+  SUCCESSOR_REASON_PREFIX,
 } from './identity-map.js';
+export { identityMapFromContentMatches, identityMapFromSuccessors, lineageOfDiff, lineageFromDiff } from './wasm-provenance.js';
 export type { IdentityMapEntry } from './identity-map.js';
 export {
+  keyAliasesFromLineage,
+  lineageConflicts,
+  rekeyByLineage,
+} from './wasm-lineage.js';
+export type { Lineage, LineageEntry, LineageFromDiffOptions, LineageRelation, RekeyPolicy, RekeyResult } from './lineage.js';
+export {
+  LINEAGE_SIDECAR_FORMAT,
+  LINEAGE_SIDECAR_VERSION,
+  createLineageSidecar,
+  lineageSidecarMismatches,
+  parseLineageSidecar,
+  serializeLineageSidecar,
+  validateLineageSidecar,
+  type LineageSidecar,
+  type LineageSidecarInit,
+} from './wasm-lineage-sidecar.js';
+export {
   IDENTITY_MAP_SIDECAR_FORMAT,
+  IDENTITY_MAP_SIDECAR_KEYED_VERSION,
   IDENTITY_MAP_SIDECAR_VERSION,
   createIdentityMapSidecar,
   identityMapSidecarMismatches,
@@ -33,7 +55,7 @@ export {
   parseIdentityMapSidecar,
   serializeIdentityMapSidecar,
   validateIdentityMapSidecar,
-} from './identity-sidecar.js';
+} from './wasm-identity-sidecar.js';
 export type {
   IdentityMapSidecar,
   IdentityMapSidecarInit,
@@ -53,6 +75,8 @@ export type {
   SplitMergeClaim,
   SplitMergeConfidence,
   SplitMergeKind,
+  SuccessorClaim,
+  SuccessorConfidence,
   ContentMatchTier,
   EntityAabb,
   DiffChangeKind,

@@ -26,7 +26,10 @@
 import type { SectionPlaneRenderer } from './section-plane.js';
 import type { Section2DOverlayRenderer } from './section-2d-overlay.js';
 import { DEFAULT_CAP_STYLE, HATCH_PATTERN_IDS } from './section-cap-style.js';
+import type { RelativeToEyeFrame } from './relative-to-eye.js';
 import type { RenderOptions } from './types.js';
+import type { ExtraClipPlane } from './clip-types.js';
+import { sectionBoxCapDraws, sectionBoxClipPlanes } from './section-box-caps.js';
 
 /** World-space AABB in the renderer's Y-up frame. */
 export type ModelBounds = {
@@ -38,8 +41,22 @@ export type ModelBounds = {
 export interface SectionDrawContext {
     options: RenderOptions;
     viewProj: Float32Array;
+    /** The camera-owned f64/RTE frame used by the preview gizmo. */
+    relativeToEyeFrame?: RelativeToEyeFrame;
+    rteViewProj?: Float32Array;
+    rteCamera?: readonly [number, number, number];
     /** The bounds this frame resolved the section slider against. */
     modelBounds: ModelBounds | null;
+    /**
+     * Drawing-buffer px per CSS px (default 1). The cap hatch is laid out in
+     * fragment coordinates, so its CSS-px spacing and width scale by this to
+     * look the same on a HiDPI buffer (#5383).
+     */
+    pixelRatio?: number;
+    /** The cutting planes beyond the first, resolved (#7545): each clips every cap but its own. */
+    extraPlanes?: readonly ExtraClipPlane[];
+    /** The primary plane as a clip, while it is cutting: it clips the extra planes' caps. */
+    primaryPlane?: ExtraClipPlane | null;
 }
 
 /**
@@ -55,16 +72,26 @@ export function drawSectionOverlays(
     ctx: SectionDrawContext,
 ): void {
     const { options, viewProj, modelBounds } = ctx;
+    const extras = ctx.extraPlanes ?? [];
+    // The section box clips every cap like it clips the model, and has a cap per face (#8696).
+    const clipBox = options.clipBox?.enabled ? options.clipBox : null;
+    const boxPlanes = clipBox ? sectionBoxClipPlanes(clipBox) : [];
+
+    // The selected / hovered elements' cap polygons take their highlight colour (a
+    // no-op while unchanged), so the cut face reads as part of the element.
+    cap?.setCapHighlight(options.capHighlight ?? null);
 
     // Draw section plane visual BEFORE pass.end() (within same MSAA render pass)
     // Always show plane when sectionPlane options are provided (as preview or active)
     if (options.sectionPlane && gizmo && modelBounds) {
-        gizmo.draw(
+        // `showGizmo: false` hides only the preview quad: the plane still clips and caps (#7545).
+        if (options.sectionPlane.showGizmo !== false) gizmo.draw(
             pass,
             {
                 axis: options.sectionPlane.axis,
                 position: options.sectionPlane.position,
                 bounds: modelBounds,
+                relativeToEyeFrame: ctx.relativeToEyeFrame,
                 viewProj,
                 isPreview: !options.sectionPlane.enabled, // Preview mode when not enabled
                 min: options.sectionPlane.min,
@@ -90,7 +117,7 @@ export function drawSectionOverlays(
             const o = options.sectionPlane;
             const showFills    = o.showCap !== false;
             const showOutlines = o.showOutlines !== false;
-            const style = { ...DEFAULT_CAP_STYLE, ...(o.capStyle ?? {}) };
+            const style = { ...DEFAULT_CAP_STYLE, ...o.capStyle };
             cap.draw(
                 pass,
                 {
@@ -98,22 +125,83 @@ export function drawSectionOverlays(
                     position: o.position,
                     bounds: modelBounds,
                     viewProj,
+                    rteViewProj: ctx.rteViewProj,
+                    rteCamera: ctx.rteCamera,
                     min: o.min,
                     max: o.max,
+                    sectionExcludedIds: options.sectionExcludedIds,
                     showFills,
                     showOutlines,
-                    capStyle: showFills ? {
-                        fillColor:   style.fillColor,
-                        strokeColor: style.strokeColor,
-                        patternId:   HATCH_PATTERN_IDS[style.pattern],
-                        spacingPx:   style.spacingPx,
-                        angleRad:    style.angleRad,
-                        widthPx:     style.widthPx,
-                        secondaryAngleRad: style.secondaryAngleRad,
-                    } : undefined,
-                }
+                    capStyle: showFills ? capDrawStyle(style, ctx.pixelRatio) : undefined,
+                },
+                [...extras, ...boxPlanes],
             );
         }
 
     }
+
+    // The caps of the cutting planes beyond the first (#7545). They share the primary
+    // plane's cap style (one user preference), and each is clipped by every OTHER plane.
+    if (cap?.hasExtraGeometry() && modelBounds) {
+        const o = options.sectionPlane;
+        const showFills = o?.showCap !== false;
+        const style = { ...DEFAULT_CAP_STYLE, ...o?.capStyle };
+        const primary = ctx.primaryPlane ?? null;
+        cap.drawExtras(
+            pass,
+            {
+                axis: o?.axis ?? 'down',
+                position: o?.position ?? 0,
+                bounds: modelBounds,
+                viewProj,
+                rteViewProj: ctx.rteViewProj,
+                rteCamera: ctx.rteCamera,
+                sectionExcludedIds: options.sectionExcludedIds,
+                showFills,
+                showOutlines: o?.showOutlines !== false,
+                capStyle: showFills ? capDrawStyle(style, ctx.pixelRatio) : undefined,
+            },
+            extras.flatMap((plane) => plane.id === undefined ? [] : [{
+                key: plane.id,
+                clippedBy: [...(primary ? [primary] : []), ...extras.filter((other) => other !== plane), ...boxPlanes],
+            }]),
+        );
+    }
+
+    // The box faces' caps, in the box's own cap style, each clipped by the faces around it and
+    // by every cutting plane.
+    if (clipBox && cap?.hasExtraGeometry() && modelBounds) {
+        const showFills = clipBox.showCap !== false;
+        const style = { ...DEFAULT_CAP_STYLE, ...clipBox.capStyle };
+        const primary = ctx.primaryPlane ?? null;
+        cap.drawExtras(
+            pass,
+            {
+                axis: 'down',
+                position: 0,
+                bounds: modelBounds,
+                viewProj,
+                rteViewProj: ctx.rteViewProj,
+                rteCamera: ctx.rteCamera,
+                sectionExcludedIds: options.sectionExcludedIds,
+                showFills,
+                showOutlines: clipBox.showOutlines !== false,
+                capStyle: showFills ? capDrawStyle(style, ctx.pixelRatio) : undefined,
+            },
+            sectionBoxCapDraws(clipBox, [...(primary ? [primary] : []), ...extras]),
+        );
+    }
+}
+
+/** The cap style as the overlay shader takes it: pattern id and pixel sizes scaled to the buffer. */
+function capDrawStyle(style: typeof DEFAULT_CAP_STYLE, pixelRatio = 1) {
+    return {
+        fillColor:   style.fillColor,
+        strokeColor: style.strokeColor,
+        patternId:   HATCH_PATTERN_IDS[style.pattern],
+        spacingPx:   style.spacingPx * pixelRatio,
+        angleRad:    style.angleRad,
+        widthPx:     style.widthPx * pixelRatio,
+        secondaryAngleRad: style.secondaryAngleRad,
+    };
 }

@@ -12,8 +12,10 @@
 
 import type { PointCloudAsset } from '@ifc-lite/geometry';
 import type { PointRenderPipeline } from './point-pipeline.js';
-import { POINT_VERTEX_BYTES } from './point-pipeline.js';
+import { POINT_VERTEX_BYTES } from './point-vertex-layout.js';
 import { PointCloudSpatialIndex } from './point-cloud-spatial-index.js';
+import { disposeKeyedIndexes, keyedSpatialIndex } from './point-cloud-keyed-chunks.js';
+import { isUsableModelMatrix } from './point-cloud-model-matrix.js';
 
 export interface PointCloudGpuChunk {
   vertexBuffer: GPUBuffer;
@@ -26,6 +28,8 @@ export interface PointCloudGpuChunk {
   deviationBuffer: GPUBuffer;
   pointCount: number;
   bbox: { min: [number, number, number]; max: [number, number, number] };
+  /** Set when appended under a removable key (one COPC octree node, #6869). */
+  key?: string;
 }
 
 /** Inputs to a single chunk upload. */
@@ -61,15 +65,28 @@ export interface PointCloudNode {
    * `appendChunkToNode`, alongside the GPU upload.
    */
   spatialIndex: PointCloudSpatialIndex;
+  /** One snap index per removable key, so removing a key drops its points (#6869). */
+  keyedIndexes?: Map<string, PointCloudSpatialIndex>;
   /**
    * Optional per-asset GPU model matrix (column-major, 16 floats),
-   * applied in the vertex shader as `uniforms.model * vec4(position, 1)`
-   * before `viewProj` (issue #1804: aligns a georeferenced point cloud
-   * with the IFC model's `IfcMapConversion`). `undefined` → identity,
-   * written by `writePointCloudUniforms`.
+   * Its linear part is applied in the vertex shader; the translation is
+   * separately retained as `rteOrigin` and split against the camera before
+   * projection. That keeps a georeferenced cloud aligned without rounding a
+   * map-grid origin into an f32 matrix (issue #1804, #5049).
    */
   model?: Float32Array;
+  /** Exact model translation retained until the RTE upload boundary. */
+  rteOrigin?: [number, number, number];
+  /**
+   * Canonical f64 placement for CPU work (bounds, ray snap and measurement).
+   * `model` is deliberately a GPU-only f32 linear transform: its translation
+   * is not authoritative at map-grid offsets.
+   */
+  placement?: Float64Array;
 }
+
+// Single-sourced in point-cloud-model-matrix.ts; re-exported for existing importers.
+export { isUsableModelMatrix };
 
 /**
  * Transform an AABB through a column-major 4x4 model matrix and return
@@ -81,31 +98,10 @@ export interface PointCloudNode {
  * Returns the input box unchanged for a missing/malformed matrix
  * (mirrors `writePointCloudUniforms`' identity fallback).
  */
-/**
- * True when `model` is a usable 4x4: exactly 16 entries, all finite.
- *
- * Single-sourced so the two consumers of `PointCloudNode.model` — the AABB
- * fold below and `writePointCloudUniforms`' GPU write — accept exactly the
- * same matrices. When they disagree, a matrix one accepts and the other
- * rejects puts the reported bounds in a different frame from the rendered
- * points, which is the precise failure this transform exists to prevent.
- * The finiteness check matters because a single NaN propagates to every
- * corner of the box (and to every point on the GPU), so a degenerate matrix
- * must fall back to identity rather than poison the result.
- */
-export function isUsableModelMatrix(
-  model: Float32Array | undefined,
-): model is Float32Array {
-  if (!model || model.length !== 16) return false;
-  for (let i = 0; i < 16; i++) {
-    if (!Number.isFinite(model[i])) return false;
-  }
-  return true;
-}
 
 export function transformAabb(
   bounds: { min: [number, number, number]; max: [number, number, number] },
-  model: Float32Array | undefined,
+  model: Float32Array | Float64Array | undefined,
 ): { min: [number, number, number]; max: [number, number, number] } {
   if (!isUsableModelMatrix(model)) return bounds;
   const min: [number, number, number] = [Infinity, Infinity, Infinity];
@@ -176,16 +172,18 @@ export function appendChunkToNode(
   device: GPUDevice,
   node: PointCloudNode,
   chunk: PointCloudChunkInput,
+  key?: string,
 ): void {
   const total = chunk.pointCount;
   if (total <= 0) return;
+  const index = key === undefined ? node.spatialIndex : keyedSpatialIndex(node, key);
   // Index the whole chunk's points for measure-tool snapping (#1860),
   // independent of how the GPU sub-buffer split below divides it up —
   // the index doesn't care about buffer size limits, only world
   // positions. Retains `chunk.positions` (and classifications, so the
   // query can honour the class visibility mask #1783) by reference; see
   // spatial index class docs. No-ops past the index's point cap.
-  node.spatialIndex.insertRange(chunk.positions, total, chunk.classifications ?? null);
+  index.insertRange(chunk.positions, total, chunk.classifications ?? null);
   // Honour BOTH the raw buffer cap and the storage-binding cap, with a 5%
   // margin for safety against driver rounding.
   const maxBytes = Math.min(
@@ -202,7 +200,7 @@ export function appendChunkToNode(
   const dispatchPointCap = device.limits.maxComputeWorkgroupsPerDimension * 64;
   const maxPerBuffer = Math.max(1, Math.min(bufferPointCap, dispatchPointCap));
   for (let start = 0; start < total; start += maxPerBuffer) {
-    appendPointSubBuffer(device, node, chunk, start, Math.min(maxPerBuffer, total - start));
+    appendPointSubBuffer(device, node, chunk, start, Math.min(maxPerBuffer, total - start), key);
   }
 }
 
@@ -213,6 +211,7 @@ function appendPointSubBuffer(
   chunk: PointCloudChunkInput,
   start: number,
   count: number,
+  key: string | undefined,
 ): void {
   const bytes = new ArrayBuffer(count * POINT_VERTEX_BYTES);
   const f32 = new Float32Array(bytes);
@@ -286,7 +285,7 @@ function appendPointSubBuffer(
   try {
     deviationBuffer = device.createBuffer({
       size: count * 4,
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
   } catch (err) {
     try {
@@ -307,6 +306,7 @@ function appendPointSubBuffer(
     deviationBuffer,
     pointCount: count,
     bbox: chunk.bbox,
+    ...(key === undefined ? {} : { key }),
   });
   node.pointCount += count;
   growBounds(node.bounds, chunk.bbox);
@@ -346,6 +346,7 @@ export function destroyNode(node: PointCloudNode): void {
   // this the spatial index would keep every chunk's Float32Array alive
   // for the rest of the session even after the GPU buffers are freed.
   node.spatialIndex.dispose();
+  disposeKeyedIndexes(node);
 }
 
 function growBounds(
@@ -362,4 +363,17 @@ function growBounds(
 
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/** Destroy all nodes, or only assets belonging to one ingestion owner. */
+export function clearOwnedPointCloudNodes<Owner extends string>(
+  nodes: Map<number, PointCloudNode>, owners: Map<number, Owner>, owner?: Owner,
+): void {
+  for (const [id, node] of nodes) {
+    if (owner !== undefined && owners.get(id) !== owner) continue;
+    destroyNode(node);
+    nodes.delete(id);
+    owners.delete(id);
+  }
+  if (owner === undefined) owners.clear();
 }

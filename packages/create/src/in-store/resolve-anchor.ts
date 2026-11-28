@@ -3,7 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * Resolve a `SpatialAnchor` from a parsed `IfcDataStore`.
+ * Resolve a `SpatialAnchor` from a parsed `IfcDataStore` and optional live
+ * mutation view.
  *
  * Walks the entity index for the IfcOwnerHistory, the 'Body'
  * IfcGeometricRepresentationSubContext (falling back to the model's
@@ -11,29 +12,35 @@
  * IfcLocalPlacement.
  */
 
-import {
-  EntityExtractor, extractLengthUnitScale, extractProjectUnits, getAttributeNames,
-  type IfcDataStore,
-} from '@ifc-lite/parser';
+import { createSchemaEntityNameSnapshot, EntityExtractor, getSchemaRegistryForVersion, resolveEffectiveEntityRecord, type EffectiveEntityRecord, type IfcDataStore, type SchemaEntityNameSnapshot } from '@ifc-lite/parser';
+import { iterateEffectiveEntityIds, type MutablePropertyView } from '@ifc-lite/mutations';
 import type { SpatialAnchor, SpatialAnchorSchema } from './anchor.js';
+import { projectMeasureScales } from './project-measure-scales.js';
+import { safeLengthUnitScale } from './length-unit-scale.js';
 
-export function resolveSpatialAnchor(store: IfcDataStore, storeyExpressId: number): SpatialAnchor {
+export function resolveSpatialAnchor(
+  store: IfcDataStore,
+  storeyExpressId: number,
+  view?: MutablePropertyView | null,
+): SpatialAnchor {
+  const reader = new AnchorEntityReader(store, view);
   // OwnerHistory is OPTIONAL from IFC4 onward — minimal files (including
   // ifc-lite's own exports) legitimately omit it. Builders emit `$` then.
-  const ownerHistoryId = findOwnerHistoryId(store);
+  const ownerHistoryId = reader.firstId('IFCOWNERHISTORY');
 
-  const bodyContextId = findBodyContextId(store);
+  const rootContextId = reader.rootContextId();
+  const bodyContextId = reader.contextId('body', rootContextId);
   if (bodyContextId === null) {
     throw new Error('resolveSpatialAnchor: no IfcGeometricRepresentationContext (or Body subcontext) found in store');
   }
 
-  const axisContextId = findAxisContextId(store);
+  const axisContextId = reader.contextId('axis', rootContextId);
   if (axisContextId === null) {
     throw new Error('resolveSpatialAnchor: no IfcGeometricRepresentationContext (or Axis subcontext) found in store');
   }
 
 
-  const storeyPlacementId = findStoreyPlacementId(store, storeyExpressId);
+  const storeyPlacementId = reader.storeyPlacementId(storeyExpressId);
   if (storeyPlacementId === null) {
     throw new Error(`resolveSpatialAnchor: storey #${storeyExpressId} has no resolvable IfcLocalPlacement`);
   }
@@ -57,56 +64,13 @@ export function resolveSpatialAnchor(store: IfcDataStore, storeyExpressId: numbe
   // exports). Resolve the length-unit scale here so builders can emit
   // coordinates in the file's native unit — mirrors the read-side
   // conversion in extract-walls.ts.
-  let lengthUnitScale = 1.0;
-  try {
-    if (store.source.byteLength > 0) {
-      const s = extractLengthUnitScale(store.source, store.entityIndex);
-      if (Number.isFinite(s) && s > 0) lengthUnitScale = s;
-    }
-  } catch (error) {
-    // Keep the metre fallback, but don't hide the failure — a wrong scale
-    // emits silently mis-sized geometry.
-    console.warn('resolveSpatialAnchor: failed to extract length unit scale; defaulting to metres', error);
-  }
+  // Keep the metre fallback on a failed lookup, but don't hide it — a wrong
+  // scale emits silently mis-sized geometry. `safeLengthUnitScale` warns.
+  const lengthUnitScale = store.source.byteLength > 0
+    ? safeLengthUnitScale(store.source, store.entityIndex, 'resolveSpatialAnchor') ?? 1.0
+    : 1.0;
 
-  // AREA and VOLUME are declared separately from LENGTH, so they are resolved
-  // separately — see `SpatialAnchor.areaUnitScale` for why squaring the length
-  // scale is wrong rather than merely redundant. One extraction covers both.
-  const { areaUnitScale, volumeUnitScale } = resolveMeasureScales(store);
-
-  return {
-    ownerHistoryId, bodyContextId, axisContextId, storeyId: storeyExpressId,
-    storeyPlacementId, schema, lengthUnitScale, areaUnitScale, volumeUnitScale,
-  };
-}
-
-/**
- * The file's declared AREAUNIT / VOLUMEUNIT as SI-per-native scales.
- *
- * Both default to 1: a project that declares no area unit means the SI square
- * metre, and inventing a scale from the length unit instead would mis-size
- * every quantity in the metric millimetre files that are the common case.
- */
-function resolveMeasureScales(store: IfcDataStore): {
-  areaUnitScale: number;
-  volumeUnitScale: number;
-} {
-  let areaUnitScale = 1.0;
-  let volumeUnitScale = 1.0;
-  try {
-    if (store.source.byteLength > 0) {
-      const units = extractProjectUnits(store.source, store.entityIndex);
-      const area = units.resolvedForUnitType('AREAUNIT')?.siScale;
-      const volume = units.resolvedForUnitType('VOLUMEUNIT')?.siScale;
-      if (Number.isFinite(area) && (area as number) > 0) areaUnitScale = area as number;
-      if (Number.isFinite(volume) && (volume as number) > 0) volumeUnitScale = volume as number;
-    }
-  } catch (error) {
-    // Same reasoning as the length scale: keep the SI fallback, but say so —
-    // a wrong scale writes a quantity that is silently off by a factor.
-    console.warn('resolveSpatialAnchor: failed to extract area/volume units; defaulting to SI', error);
-  }
-  return { areaUnitScale, volumeUnitScale };
+  return { ownerHistoryId, bodyContextId, axisContextId, rootContextId, storeyId: storeyExpressId, storeyPlacementId, schema, lengthUnitScale, getMeasureUnitScales: () => projectMeasureScales(store) };
 }
 
 /**
@@ -123,90 +87,90 @@ export function findOwnerHistoryId(store: IfcDataStore): number | null {
 }
 
 /**
- * Prefer an IfcGeometricRepresentationSubContext with ContextIdentifier='Body';
- * otherwise fall back to the first 3D IfcGeometricRepresentationContext.
+ * Read source and overlay entities through the same effective ID boundary.
+ * Shared with `resolve-host.ts`, whose host-geometry walk needs the same
+ * overlay-aware point lookups.
  */
-function findBodyContextId(store: IfcDataStore): number | null {
-  if (store.source.byteLength <= 0) return null;
-  const extractor = new EntityExtractor(store.source);
-  const subIds = store.entityIndex.byType.get('IFCGEOMETRICREPRESENTATIONSUBCONTEXT') ?? [];
-  for (const id of subIds) {
-    const ref = store.entityIndex.byId.get(id);
-    if (!ref) continue;
-    const entity = extractor.extractEntity(ref);
-    const identifier = entity?.attributes?.[1];
-    if (typeof identifier === 'string' && identifier.toLowerCase() === 'body') {
-      return id;
-    }
-  }
-
-  const ctxIds = store.entityIndex.byType.get('IFCGEOMETRICREPRESENTATIONCONTEXT') ?? [];
-  for (const id of ctxIds) {
-    const ref = store.entityIndex.byId.get(id);
-    if (!ref) continue;
-    const entity = extractor.extractEntity(ref);
-    const dimension = entity?.attributes?.[2];
-    if (typeof dimension === 'number' && dimension === 3) {
-      return id;
-    }
-  }
-
-  return ctxIds[0] ?? null;
+/** The live Body subcontext (or root 3D context) a style or shape is drawn in, or null when the model has none. */
+export function resolveBodyContextId(store: IfcDataStore, view?: MutablePropertyView | null): number | null {
+  const reader = new AnchorEntityReader(store, view);
+  return reader.contextId('body', reader.rootContextId());
 }
 
-/**
- * Prefer an IfcGeometricRepresentationSubContext with ContextIdentifier='Axis';
- * otherwise fall back to the first 3D IfcGeometricRepresentationContext.
- */
-function findAxisContextId(store: IfcDataStore): number | null {
-  if (store.source.byteLength <= 0) return null;
-  const extractor = new EntityExtractor(store.source);
+export class AnchorEntityReader {
+  private readonly extractor: EntityExtractor | null;
 
-  const subIds = store.entityIndex.byType.get('IFCGEOMETRICREPRESENTATIONSUBCONTEXT') ?? [];
-  for (const id of subIds) {
-    const ref = store.entityIndex.byId.get(id);
-    if (!ref) continue;
-    const entity = extractor.extractEntity(ref);
-    const identifier = entity?.attributes?.[1];
-    if (typeof identifier === 'string' && identifier.toLowerCase() === 'axis') {
-      return id;
+  constructor(
+    private readonly store: IfcDataStore | null,
+    private readonly view: MutablePropertyView | null | undefined,
+    private schemaNames?: SchemaEntityNameSnapshot,
+  ) {
+    this.extractor = store && store.source.byteLength > 0 ? new EntityExtractor(store.source) : null;
+  }
+
+  *ids(type: string): IterableIterator<number> {
+    for (const { expressId } of iterateEffectiveEntityIds(this.store ?? { entityIndex: { byType: new Map(), byId: new Map() } }, this.view, [type])) {
+      yield expressId;
     }
   }
 
-  const ctxIds = store.entityIndex.byType.get('IFCGEOMETRICREPRESENTATIONCONTEXT') ?? [];
-  for (const id of ctxIds) {
-    const ref = store.entityIndex.byId.get(id);
-    if (!ref) continue;
-    const entity = extractor.extractEntity(ref);
-    const dimension = entity?.attributes?.[2];
-    if (typeof dimension === 'number' && dimension === 3) {
-      return id;
-    }
+  firstId(type: string): number | null {
+    return this.ids(type).next().value ?? null;
   }
-  return ctxIds[0] ?? null;
-}
 
+  /** Prefer the named subcontext, then the root 3D context. */
+  contextId(identifier: 'body' | 'axis', rootContextId: number | null): number | null {
+    for (const id of this.ids('IFCGEOMETRICREPRESENTATIONSUBCONTEXT')) {
+      const value = this.entity(id)?.attributes[1];
+      if (typeof value === 'string' && value.toLowerCase() === identifier) return id;
+    }
 
-/**
- * Resolve the target storey's `ObjectPlacement` (an IfcLocalPlacement).
- *
- * The attribute lives at the same positional index across IFC2X3 and IFC4
- * (inherited from IfcProduct), but rather than hard-code an offset we walk
- * the schema-resolved attribute name list — that way the lookup keeps
- * working if the schema gen ever shifts inheritance.
- */
-function findStoreyPlacementId(store: IfcDataStore, storeyExpressId: number): number | null {
-  if (store.source.byteLength <= 0) return null;
-  const ref = store.entityIndex.byId.get(storeyExpressId);
-  if (!ref) return null;
-  const extractor = new EntityExtractor(store.source);
-  const entity = extractor.extractEntity(ref);
-  if (!entity) return null;
+    return rootContextId;
+  }
 
-  const attrNames = getAttributeNames(entity.type);
-  const placementIndex = attrNames.indexOf('ObjectPlacement');
-  const idx = placementIndex >= 0 ? placementIndex : 5;
+  /** The model's root 3D context, never a subcontext. */
+  rootContextId(): number | null {
+    let fallback: number | null = null;
+    for (const id of this.ids('IFCGEOMETRICREPRESENTATIONCONTEXT')) {
+      const entity = this.entity(id);
+      if (!entity) continue;
+      fallback ??= id;
+      if (entity.attributes[2] === 3) return id;
+    }
+    return fallback;
+  }
 
-  const placement = entity.attributes?.[idx];
-  return typeof placement === 'number' ? placement : null;
+  /** The effective storey's live IfcLocalPlacement, including overlay refs. */
+  storeyPlacementId(storeyId: number): number | null {
+    const storey = this.entity(storeyId);
+    if (storey?.type.toUpperCase() !== 'IFCBUILDINGSTOREY') return null;
+    const index = storey.names.indexOf('ObjectPlacement');
+    const raw = storey.attributes[index >= 0 ? index : 5];
+    const placementId = typeof raw === 'number' && Number.isInteger(raw) && raw > 0
+      ? raw
+      : typeof raw === 'string' && /^#[1-9][0-9]*$/.test(raw)
+        ? Number(raw.slice(1))
+        : null;
+    if (placementId === null) return null;
+    return this.entity(placementId)?.type.toUpperCase() === 'IFCLOCALPLACEMENT'
+      ? placementId
+      : null;
+  }
+
+  entity(id: number): EffectiveEntityRecord | null {
+    if (this.view?.isDeleted(id)) return null;
+    const created = this.view?.readNewEntity?.(id) ?? this.view?.getNewEntity(id);
+    // @raw-entity-enumeration-ok point lookup after effective enumeration; source bytes are needed only for this candidate's attributes
+    const ref = created ? undefined : this.store?.entityIndex.byId.get(id);
+    const source = ref && this.extractor ? this.extractor.extractEntity(ref) : null;
+    const entity = created ?? source;
+    if (!entity) return null;
+    const schema = this.store?.schemaVersion;
+    this.schemaNames ??= createSchemaEntityNameSnapshot(getSchemaRegistryForVersion(schema === 'IFC2X3' ? schema : schema === 'IFC4X3' || schema === 'IFC5' ? 'IFC4X3' : 'IFC4'));
+    return resolveEffectiveEntityRecord(entity, {
+      retype: this.view?.getEntityTypeMutation(id)?.newType,
+      named: this.view?.getAttributeMutationsForEntity(id).map(({ name, value }) => [name, value] as const) ?? [],
+      positional: this.view?.getPositionalMutationsForEntity(id) ?? [],
+    }, this.store?.schemaVersion, this.schemaNames);
+  }
 }

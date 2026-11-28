@@ -3,8 +3,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * `StepExporter.entityLineText` — the byte range the incidental line readers
- * (`getPropertySetName`, `getPropertyIdsInSet`, …) decode.
+ * `step-property-set-readers.ts:entityLineText` — the byte range the
+ * incidental line readers (`getPropertySetName`, `getPropertyIdsInSet`, …)
+ * decode.
  *
  * Two things were unpinned here, and they are different failures:
  *
@@ -33,12 +34,18 @@ import {
   CompactEntityIndexBuilder,
   type IfcDataStore,
 } from '@ifc-lite/parser';
-import { StepExporter } from './step-exporter.js';
+import { createSourceRefReader } from './source-ref-bounds.js';
+import {
+  entityLineText,
+  getPropertyIdsInSet,
+  getPropertySetName,
+  type PropertySetContext,
+} from './step-property-set-readers.js';
 
 /**
- * The private line readers, named. These are the unit under test: no PUBLIC
- * path is sensitive to the range's start (that is finding 1 above), so a
- * behavioural test alone cannot pin it.
+ * The line readers, named. These are the unit under test: no PUBLIC path is
+ * sensitive to the range's start (that is finding 1 above), so a behavioural
+ * test alone cannot pin it.
  */
 type LineReaders = {
   entityLineText(entityId: number): string | null;
@@ -90,8 +97,27 @@ function storeOf(ranges?: Map<number, [number, number]>): IfcDataStore {
   } as unknown as IfcDataStore;
 }
 
-function readersOf(ranges?: Map<number, [number, number]>): LineReaders {
-  return new StepExporter(storeOf(ranges)) as unknown as LineReaders;
+/**
+ * The readers take a {@link PropertySetContext} rather than an exporter. Only
+ * the two fields the byte path reads are real; the rest would be a defect in
+ * the reader if it were touched, so they throw rather than answer.
+ */
+function readersOf(ranges?: Map<number, [number, number]>, dataStore = storeOf(ranges)): LineReaders {
+  const unused = (): never => { throw new Error('not reachable from a line reader'); };
+  const ctx: PropertySetContext = {
+    dataStore,
+    entityExtractor: null,
+    mutationView: null,
+    isReadableSourceRef: createSourceRefReader(dataStore.source),
+    allocateExpressId: unused,
+    ownerHistory: { fallbackRef: undefined, byEntity: new Map() },
+    applySourceLineMutations: unused,
+  };
+  return {
+    entityLineText: (entityId) => entityLineText(ctx, entityId),
+    getPropertySetName: (psetId) => getPropertySetName(ctx, psetId),
+    getPropertyIdsInSet: (psetId) => getPropertyIdsInSet(ctx, psetId),
+  };
 }
 
 describe('entityLineText byte range', () => {
@@ -143,20 +169,26 @@ describe('entityLineText byte range', () => {
     expect(readers.getPropertyIdsInSet(2)).toEqual([]);
   });
 
-  /**
-   * A ref starting before the source. This one is green on `main` too, and
-   * for a reason worth recording rather than for the gate: `CompactEntityIndex`
-   * keeps offsets in a `Uint32Array`, so `-2` comes back out as 4294967294 and
-   * is out of range at the far end instead. A negative offset is not
-   * representable through the index these readers consult — which is why the
-   * REACHABLE bad shape is the overrun above, not this one. Over a plain-`Map`
-   * index (the test doubles in `sourceless-store-export.test.ts`) `-2` survives
-   * as `-2`, floors to 0, and used to name `#2` `'SetA'`; the gate rejects that
-   * too.
-   */
-  it('answers nothing for a ref that starts before the source', () => {
-    const readers = readersOf(new Map([[2, [-2, SET_A.length]]]));
-    expect(readers.getPropertySetName(2)).toBeNull();
+  // #9617: a negative offset must fail at insertion, before uint32 wrapping
+  // could turn it into an unrelated far-end ref. Reader overrun handling is
+  // exercised above with representable offsets that exceed the source bounds.
+  it('refuses a negative source offset before constructing a corrupt index (#9617)', () => {
+    expect(() => storeOf(new Map([[2, [-2, SET_A.length]]]))).toThrow(RangeError);
+  });
+
+  // #9617: Map-backed and overlay refs can retain negative offsets even
+  // though compact source indexes cannot. Keep the reader's rejection too.
+  it('answers nothing for a negative ref and an overlay sentinel outside a compact index', () => {
+    for (const [byteOffset, byteLength] of [[-2, SET_A.length], [-1, 0]]) {
+      const store = storeOf();
+      const byId = new Map(store.entityIndex.byId);
+      const ref = byId.get(2)!;
+      byId.set(2, { ...ref, byteOffset, byteLength });
+      const readers = readersOf(undefined, { ...store, entityIndex: { ...store.entityIndex, byId } });
+      expect(readers.getPropertySetName(2)).toBeNull();
+      expect(readers.getPropertyIdsInSet(2)).toEqual([]);
+      expect(readers.entityLineText(2)).toBeNull();
+    }
   });
 
   /** A zero-length ref is the canonical "no source line" marker. */

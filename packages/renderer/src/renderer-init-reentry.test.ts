@@ -9,9 +9,9 @@ import { Renderer } from './index.js';
 /**
  * `Renderer.init()` must release what a previous `init()` created (issue #2448).
  *
- * `init()` assigns a fresh `RenderPipeline`, `Picker`, `PostProcessor`,
- * `PointCloudRenderer`, `DeviationComputer`, `EdlPass` and overlay layer over
- * whatever the fields already hold. Its own comment advertises a
+ * `init()` assigns a fresh `RenderPipeline`, `Picker`, `PointCloudRenderer`,
+ * `DeviationComputer` and overlay layer over whatever the fields already hold
+ * (and the frame after it builds a fresh post-pass chain). Its own comment advertises a
  * `destroy()` + `init()` re-init flow, so the obvious device-loss auto-recovery
  * — call `init()` on the live instance — orphans every one of them, two GPU
  * pipelines and a glyph-atlas texture at a time.
@@ -63,8 +63,7 @@ function makeInitialisedRenderer(): { renderer: Renderer; tomb: Tomb } {
 
     poke(renderer, 'pipeline', stub('pipeline'));
     poke(renderer, 'picker', stub('picker'));
-    poke(renderer, 'postProcessor', stub('postProcessor'));
-    poke(renderer, 'edlPass', stub('edlPass'));
+    poke(renderer, 'postPasses', stub('postPasses'));
     poke(renderer, 'skyPass', stub('skyPass'));
     poke(renderer, 'pointCloudRenderer', stub('pointCloudRenderer'));
     // `deviationComputer` is the `DeviationComputer` collaborator (#2425)
@@ -174,8 +173,7 @@ describe('a second init() releases the first init()\'s GPU objects (#2448)', () 
         for (const name of [
             'pipeline',
             'picker',
-            'postProcessor',
-            'edlPass',
+            'postPasses',
             'skyPass',
             'pointCloudRenderer',
             'deviationComputer',
@@ -318,7 +316,11 @@ describe('init() revokes readiness before it queues its body (#2448)', () => {
             'precondition: the harness is a fully initialised renderer, or the assertion below is vacuous',
         );
 
+        const gaussianGeneration = renderer.getGaussianReadiness().generation;
         void renderer.init();
+        // #8564: canonical ingestion observes the same synchronous revocation.
+        assert.strictEqual(renderer.getGaussianReadiness().state, 'initializing');
+        assert.ok(renderer.getGaussianReadiness().generation > gaussianGeneration);
 
         assert.strictEqual(
             renderer.isReady(),
@@ -354,6 +356,7 @@ describe('init() revokes readiness before it queues its body (#2448)', () => {
         assert.strictEqual(await whenReadyResolves(renderer), true, 'precondition: ready before destroy()');
 
         renderer.destroy();
+        assert.strictEqual(renderer.getGaussianReadiness().state, 'disposed', '#8564: teardown revokes Gaussian access');
 
         assert.strictEqual(
             await whenReadyResolves(renderer),
@@ -859,6 +862,21 @@ describe('a device loss revokes readiness (#2464 review)', () => {
         assert.strictEqual((outcome as Error).name, 'RendererDeviceLostError');
     });
 
+    it('ignores a delayed loss signal from a superseded device wrapper', async () => {
+        const renderer = new Renderer(makeCanvas());
+        const oldDevice = pokeLosableDevice(renderer);
+        await initExpectingNoWebGPU(renderer);
+
+        poke(renderer, 'device', { replacement: true });
+        oldDevice.lose();
+
+        assert.strictEqual(
+            renderer.isDeviceLost(),
+            false,
+            'an abandoned device wrapper poisoned the replacement device',
+        );
+    });
+
     it('re-arms whenReady() the instant init() is called, with no second reset', async () => {
         // The recovery shape `init()` already revokes readiness synchronously
         // for: `renderer.init(); await renderer.whenReady();`. The queued body
@@ -941,4 +959,27 @@ describe('a device loss revokes readiness (#2464 review)', () => {
         assert.strictEqual(await settleWhenReady(renderer), 'resolved', 'an ordinary ready renderer must resolve');
         assert.strictEqual(renderer.isReady(), true, 'and must still report itself ready');
     });
+});
+
+it('re-arms canvas size observation after destroy and init (lifecycle audit)', async () => {
+    const original = globalThis.ResizeObserver;
+    let observations = 0;
+    globalThis.ResizeObserver = class {
+        observe() { observations++; }
+        disconnect() {}
+        unobserve() {}
+    } as unknown as typeof ResizeObserver;
+    try {
+        const renderer = new Renderer(makeCanvas());
+        renderer['initOnce'] = async () => undefined;
+        renderer.destroy();
+        const before = observations;
+        await renderer.init();
+        assert.strictEqual(observations, before + 1);
+        await renderer.init();
+        assert.strictEqual(observations, before + 1, 'live re-init must not duplicate the observer');
+        renderer.destroy();
+    } finally {
+        globalThis.ResizeObserver = original;
+    }
 });

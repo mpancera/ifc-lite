@@ -66,6 +66,26 @@ describe('generateLod0', () => {
   });
 });
 
+// #5922: an Axis of exactly -X with a `$` RefDirection. The renderer fills
+// that RefDirection with (0,0,1) x Axis = (0,-1,0), so local Y is (0,0,1) and
+// the 2 x 3 x 4 box spans world X [-4,0], Y [-2,0], Z [0,3].
+const IFC_NEG_X_AXIS = IFC_WITH_BOUNDING_BOX
+  .replace('#11=IFCAXIS2PLACEMENT3D(#12,$,$);', '#11=IFCAXIS2PLACEMENT3D(#12,#13,$);\n#13=IFCDIRECTION((-1.,0.,0.));')
+  .replace('#12=IFCCARTESIANPOINT((10.,20.,30.));', '#12=IFCCARTESIANPOINT((0.,0.,0.));');
+
+describe('generateLod0 - absent RefDirection (#5922)', () => {
+  it('places a -X Axis box in the frame the renderer draws', async () => {
+    const lod0 = await generateLod0(new TextEncoder().encode(IFC_NEG_X_AXIS));
+    expect(lod0.elements).toHaveLength(1);
+    const { min, max } = lod0.elements[0].bbox;
+    const expected = { min: [-4, -2, 0], max: [0, 0, 3] };
+    for (let i = 0; i < 3; i++) {
+      expect(min[i]).toBeCloseTo(expected.min[i]!, 9);
+      expect(max[i]).toBeCloseTo(expected.max[i]!, 9);
+    }
+  });
+});
+
 /**
  * Every fixture above is METRE-scaled with its bounding-box corner at the local
  * origin — two constants that make the unit multiply and the corner offset
@@ -138,5 +158,38 @@ describe('generateLod0 — millimetre model with an off-origin bounding box', ()
     expect(bare.bbox_source).toBe('fallback');
     expect(bare.bbox.min.map((v) => Number(v.toFixed(6)))).toEqual([9.9, 19.9, 29.9]);
     expect(bare.bbox.max.map((v) => Number(v.toFixed(6)))).toEqual([10.1, 20.1, 30.1]);
+  });
+});
+
+// #7790: a placement chain with a PlacementRelTo cycle overflowed the stack.
+describe('generateLod0 - PlacementRelTo cycles (#7790)', () => {
+  const withPlacement = (placements: string) =>
+    IFC_WITH_BOUNDING_BOX.replace('#10=IFCLOCALPLACEMENT($,#11);', placements);
+
+  it('refuses and reports an element whose placement references itself', async () => {
+    const ifc = withPlacement('#10=IFCLOCALPLACEMENT(#10,#11);');
+    const lod0 = await generateLod0(new TextEncoder().encode(ifc));
+    expect(lod0.elements).toHaveLength(0);
+    expect(lod0.skipped).toEqual([
+      { expressID: 40, reason: expect.stringContaining('PlacementRelTo cycle') },
+    ]);
+  });
+
+  it('refuses a two-placement cycle and an element chained into it', async () => {
+    const ifc = withPlacement('#10=IFCLOCALPLACEMENT(#50,#11);\n#50=IFCLOCALPLACEMENT(#10,#11);')
+      .replace('#10=IFCLOCALPLACEMENT(#50,#11);', '#10=IFCLOCALPLACEMENT(#50,#11);\n#41=IFCWALL(\'w2\',$,\'Other\',$,$,#10,#30,$,.NOTDEFINED.);');
+    const lod0 = await generateLod0(new TextEncoder().encode(ifc));
+    expect(lod0.elements).toHaveLength(0);
+    expect(lod0.skipped?.map((s) => s.expressID).sort()).toEqual([40, 41]);
+  });
+
+  it('a long acyclic chain composes iteratively (no recursion limit)', async () => {
+    const n = 20000;
+    // #10 sits at the end of a chain of n placements rooted at #1000.
+    let chain = `#10=IFCLOCALPLACEMENT(#${1000 + n - 1},#11);\n#1000=IFCLOCALPLACEMENT($,#11);`;
+    for (let i = 1; i < n; i++) chain += `\n#${1000 + i}=IFCLOCALPLACEMENT(#${1000 + i - 1},#11);`;
+    const lod0 = await generateLod0(new TextEncoder().encode(withPlacement(chain)));
+    expect(lod0.elements).toHaveLength(1);
+    expect(lod0.skipped).toBeUndefined();
   });
 });

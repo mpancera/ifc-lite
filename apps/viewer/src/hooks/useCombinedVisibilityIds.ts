@@ -13,9 +13,7 @@
  * eventually disagree about whether a hidden element is drawn.
  */
 
-import { useMemo } from 'react';
 import { useViewerStore } from '@/store';
-import { toGlobalIdFromModels } from '@/store/globalId';
 
 export interface CombinedVisibilityIds {
   /** Hidden elements, as global ids. Empty when nothing is hidden. */
@@ -31,42 +29,11 @@ export interface CombinedVisibilityIds {
 }
 
 export function useCombinedVisibilityIds(): CombinedVisibilityIds {
-  const models = useViewerStore((s) => s.models);
+  // Since the 2026-11 upstream sync, hiding and isolation hold global ids for
+  // every federated model in one set (the drawing panel reads them as-is).
   const hiddenEntities = useViewerStore((s) => s.hiddenEntities);
   const isolatedEntities = useViewerStore((s) => s.isolatedEntities);
-  const hiddenEntitiesByModel = useViewerStore((s) => s.hiddenEntitiesByModel);
-  const isolatedEntitiesByModel = useViewerStore((s) => s.isolatedEntitiesByModel);
-
-  const combinedHiddenIds = useMemo(() => {
-    const globalHiddenIds = new Set<number>(hiddenEntities); // legacy ids are already global
-    for (const [modelId, localHiddenIds] of hiddenEntitiesByModel) {
-      const model = models.get(modelId);
-      if (model && model.idOffset !== undefined) {
-        for (const localId of localHiddenIds) {
-          globalHiddenIds.add(toGlobalIdFromModels(models, model.id, localId));
-        }
-      }
-    }
-    return globalHiddenIds;
-  }, [hiddenEntities, hiddenEntitiesByModel, models]);
-
-  const combinedIsolatedIds = useMemo(() => {
-    // Legacy isolation wins outright and already holds global ids.
-    if (isolatedEntities !== null) return isolatedEntities;
-
-    const globalIsolatedIds = new Set<number>();
-    for (const [modelId, localIsolatedIds] of isolatedEntitiesByModel) {
-      const model = models.get(modelId);
-      if (model && model.idOffset !== undefined) {
-        for (const localId of localIsolatedIds) {
-          globalIsolatedIds.add(toGlobalIdFromModels(models, model.id, localId));
-        }
-      }
-    }
-    return globalIsolatedIds.size > 0 ? globalIsolatedIds : null;
-  }, [isolatedEntities, isolatedEntitiesByModel, models]);
-
+  const combinedHiddenIds = hiddenEntities;
+  const combinedIsolatedIds = isolatedEntities;
   return { combinedHiddenIds, combinedIsolatedIds };
 }
-
-export default useCombinedVisibilityIds;

@@ -2,6 +2,10 @@
 
 IFClite can generate 2D architectural drawings from 3D IFC models, including section cuts, floor plans, and elevations. The `@ifc-lite/drawing-2d` package produces vector SVG output with proper architectural conventions.
 
+Direct annotation fills with a matching 3D mesh render once in the viewer's
+registered plane. Their symbolic fill data remains available to 2D drawings;
+the 3D overlay routing does not delete or flatten the authored geometry.
+
 ## What It Generates
 
 From any 3D IFC model, you can produce:
@@ -21,15 +25,149 @@ Each drawing includes:
 | **Architectural symbols** | Door swings, window frames, stair arrows |
 | **Annotations** | Dimensions and labels |
 
+IFC export includes the active model's Distance measurements, linear dimensions
+and entity-bound tags as `IfcAnnotation` curves and text. Tags retain a relationship
+to their element. Reopening the IFC restores these editable markups; an unchanged
+re-export preserves their STEP records. This applies to IFC2X3, IFC4 and IFC4X3.
+IFC export refuses a project length-unit change while annotations outside the current drawing would be retained; keep the original project units to preserve those frames without altering their geometry.
+
+## Element tags in the viewer
+
+In a plan or section drawing, choose **Tag** and click a door, window or space.
+Door and window tags show the IFC `Tag` (or a `Mark` property), falling back to
+`Name`. Space tags show `Name` and, when available,
+`Qto_SpaceBaseQuantities.NetFloorArea` in m². Labels read the current model data,
+so property edits update them. Regenerated drawings anchor tags to the element's
+cut centroid. Use **Select** to drag a tag's offset, or select it and press Delete.
+Tags are saved with the drawing markup and included in SVG, DXF, scaled PDF and
+sheet PDF exports. Scaled PDF uses `~` for the approximate-area symbol because
+its built-in font does not contain `≈`.
+
+## Construction profiles
+
+Construction projection extracts constant `IfcExtrudedAreaSolid` profiles from
+representations selected by the mesh path, including mapped geometry. It excludes
+mapped duplicates of direct geometry and follows up to 32 mapped levels; a solid
+at level 32 remains eligible. Placement and mapping transforms use the mesh
+router's unit and coordinate services, with world translations kept in f64.
+
+Before extraction or product meshing, a private source pass admits selected
+`Items` lists and mapped occurrences across the whole product. Repeated roots and
+shared DAG occurrences pay again, regardless of mesh caches or instancing. Each
+raw list, including ignored non-reference slots, is charged before its members
+are decoded. The independent default allowances are 65,536 mapped attempts and
+65,536 list members. Exhaustion withholds the entire current root and later
+roots, retaining completed roots and reporting one logical refusal. Existing
+per-controller guards separately bound actual rendering work. The dedicated
+`IfcAlignment` directrix route retains its existing behavior; ordinary
+representation fallback uses product admission.
+
+A later malformed representation retains earlier drawing profiles; strict mesh
+entrypoints return the shape error before rendering any root. A terminal resource
+stop instead ends the entire extraction scan, retaining completed profiles and
+the sticky execution stop. Rust's existing diagnostics tuple has no result-level
+typed stop: a known affected product receives an `execution-stop:` reason, while
+no product ID is invented when the stop precedes a known product. WASM currently
+exposes only skipped product IDs. Neither surface certifies completeness of a
+partial drawing.
+
+## Drawings After Repositioning
+
+In the viewer, section cuts and construction projection use the model's current
+workspace placement. After [repositioning a model](federation.md#repositioning-models-and-pointclouds),
+the floor and ceiling limits used for construction projection refresh with its
+displayed geometry and storey membership.
+
+To compare the same floor plan before and after a vertical move, move the
+section plane by the same amount, or use the same section percentage for the
+same model bounds. Once drawing generation finishes, the equivalent cut keeps
+the same projection geometry and floor/ceiling bands. Moving only the model
+while keeping an absolute section elevation fixed produces a different cut.
+
+This is a viewer workspace adjustment: it does not rewrite the source IFC
+placements. Existing measurements retain their recorded workspace points and
+are marked stale after movement; remeasure them in the new arrangement.
+
+## Projection Depth
+
+A plan (Down) cut opens with **Projection** on, so the floor, furniture and
+openings below the cut height are drawn under the cut walls. Front and Side
+sections open cut-only. Once you toggle **Projection**, your choice holds on
+every cut until you toggle it again, and a saved drawing keeps the setting it
+was saved with.
+
+Enable **Projection** to show geometry beyond the section cut, then open its
+settings button. **Auto** uses the existing model and floor/ceiling bands.
+Turn Auto off to enter a finite background depth in the selected display length
+unit. The setting is stored in metres and remembered with the drawing options.
+Zero removes background projection while keeping the cut; Down plan views retain
+their separate overhead band. Flipping the section reverses the viewed side, and
+depth is still measured behind the cut. Negative or non-finite
+input does not replace the last valid setting.
+
+Manual depth clips triangles and edges at the depth boundary before creating
+projected outlines. Hidden-line occluders use the same clipped band, so geometry
+outside the selected range cannot hide geometry inside it. Cardinal Down, Front
+and Side sections support this control; arbitrary-plane placement has no manual
+projection-depth control in this viewer workflow.
+
+For SDK callers, set `SectionConfig.clipProjectionBands` to `true` alongside
+`projectionBelowDepth` and `projectionAboveDepth` to request this bounded
+projection behavior. Omitting the flag preserves the existing outline behavior.
+For bounded projections, `includeHiddenLines: false` excludes occluded lines
+behind the section while keeping dashed overhead outlines.
+
+## Saved Sheet Setup
+
+The viewer remembers each model's sheet setup in this browser: paper size,
+frame, title-block fields and logo, revisions, drawing scale, scale bar, and
+north arrow. Reopening the same file restores its setup; switching between
+loaded models switches their sheets. File identity uses the complete file
+contents, so a renamed copy shares its saved setup and changed contents start
+with a separate setup.
+
+Saved sheet templates form a reusable library across models. Clearing the
+current sheet does not remove templates. Panel visibility and the sheet-enable
+toggle are not restored after a browser reload.
+
+Clearing a model's sheet is remembered too, including when older drawing
+data is migrated. The browser keeps the 20 most recently saved model choices; templates are not
+part of that limit. This is local browser storage, not a backup or an IFC file
+edit. Clearing site data removes it. Large embedded logos can exhaust browser
+storage: a failed save logs a warning and retains the previous saved version.
+Models without source bytes remain usable but cannot restore a sheet by file
+content.
+
 ## Quick Start
 
 ### Generating a Floor Plan
 
 ```typescript
-import { generateFloorPlan } from '@ifc-lite/drawing-2d';
+import { generateFloorPlan, type StoreyCut } from '@ifc-lite/drawing-2d';
 
-// generateFloorPlan(meshes: MeshData[], elevation: number, options?)
-const drawing = await generateFloorPlan(meshData, 1.2, {
+// generateFloorPlan(meshes: MeshData[], elevation: number | StoreyCut, options?)
+// A number is a render-frame Y. A StoreyCut is a height above a storey floor:
+// the storey's Elevation is moved into the render frame with the geometry's
+// coordinateInfo (storeyCutElevation gives the same Y as a number).
+// storeyElevation is IfcBuildingStorey.Elevation in metres, measured from the
+// building placement. Take it from the storey's Elevation attribute. If that is
+// unset, resolve the storey's placement chain (PlacementRelTo) into the building
+// frame, or stop with an error: an entry in spatialHierarchy.storeyElevations
+// does not establish that frame, since its placement fallback reads only the
+// storey's own location.
+const storeyElevation = 0.5;
+// The parsed store does not carry the building placement. ASSUMPTION: the
+// building sits at its site's origin, so its local Z is 0 m. For a building
+// placed off it, set buildingZ to its local Z in metres: the Z of
+// IfcBuilding.ObjectPlacement.RelativePlacement.Location, relative to the site
+// placement, times store.lengthUnitScale.
+const buildingZ = 0;
+const cut: StoreyCut = {
+  storeyElevation,
+  cutHeight: 1.2,
+  frame: { ...geometryResult.coordinateInfo, buildingOrigin: { z: buildingZ } },
+};
+const drawing = await generateFloorPlan(geometryResult.meshes, cut, {
   includeHiddenLines: true,
   includeProjection: true,
 });
@@ -68,6 +206,11 @@ document.getElementById('drawing').innerHTML = svg;
 
 ### DXF Export
 
+Distance measurements and explicit linear dimensions share the same dimension graphics in SVG, DXF and PDF. DXF writes their segments and labels once on `IFC-DIMENSIONS`. Invalid or zero-length graphics are omitted using `isDxfDimensionExportable`, the same rule the download warning uses. Dimensions from another cut are reported separately and counted only once.
+
+For DWG delivery, export DXF and convert it with the free [ODA File Converter](https://www.opendesign.com/guestfiles/oda_file_converter) on your computer. The viewer exports DXF directly; the converter is a separate application.
+
+
 Drawings can also be exported as ASCII DXF R12 (`AC1009`) — the universal
 CAD interop baseline. Coordinates are written verbatim in the drawing's own
 unit (metres); an optional `coordinateTransform` maps every point (drawing
@@ -85,6 +228,8 @@ const dxf = exportToDXF(drawing, {
   coordinateTransform: (p) => ({ x: p.x + 2600000, y: 2007 - p.y }),
   // R12 has no $INSUNITS; the unit (and CRS, if any) goes in a leading 999 comment.
   metadataComment: 'ifc-lite section export - units: metres, CRS: EPSG:2056',
+  // Optional: extra polylines on their own layers, mapped like everything else.
+  polylineLayers: [{ name: 'SCAN-OUTLINE', color: '#0d9488', polylines: [[{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 3 }]] }],
 });
 // dxf is the full ASCII DXF document text
 ```
@@ -94,6 +239,22 @@ Lines land on per-category layers (`IFC-CUT`, `IFC-PROJECTION`,
 resolved to the nearest AutoCAD Color Index. Layer names follow the strict
 R12 symbol rules (31 chars, `A-Z a-z 0-9 $ - _`); names that collide after
 sanitizing get a numeric suffix instead of merging.
+
+The returned string declares `$DWGCODEPAGE ANSI_1252` in its HEADER — DXF
+has no UTF-8 support before R2007 (AC1021). Encode it with
+`encodeDxfCp1252` before writing it to a file or `Blob`; a plain UTF-8
+encoder mismatches that declared codepage, and any real DXF reader
+(AutoCAD, `ezdxf`, ...) then decodes non-ASCII text as mojibake:
+
+```typescript
+import { exportToDXF, encodeDxfCp1252 } from '@ifc-lite/drawing-2d';
+
+declare const dxf: ReturnType<typeof exportToDXF>;
+const { bytes, hadEscaped, hadUnmappable } = encodeDxfCp1252(dxf);
+// bytes is a Uint8Array ready to write to disk or a Blob.
+// hadEscaped reports lossless DXF Unicode escapes for BMP text outside windows-1252.
+// hadUnmappable reports replacement with '?' for unsupported characters such as emoji.
+```
 
 ## Drawing Sheets
 
@@ -105,8 +266,8 @@ import {
   createTitleBlock,
   renderFrame,
   renderTitleBlock,
-  renderScaleBar,
   DEFAULT_SCALE_BAR,
+  DEFAULT_NORTH_ARROW,
   PAPER_SIZE_REGISTRY,
 } from '@ifc-lite/drawing-2d';
 
@@ -124,9 +285,15 @@ const titleBlock = createTitleBlock('standard');
 
 // Renderers return result objects, not raw SVG strings.
 const frameResult = renderFrame(paper, frame);
-const titleBlockResult = renderTitleBlock(titleBlock, frameResult.innerBounds);
+
+// The scale bar and north arrow are drawn inside the title block; pass them
+// as the fourth `extras` argument rather than rendering them separately.
 const scale = { name: '1:100', factor: 100, useCase: 'Floor plans' };
-const scaleBarSvg = renderScaleBar(DEFAULT_SCALE_BAR, scale, { x: 20, y: 20 });
+const titleBlockResult = renderTitleBlock(titleBlock, frameResult.innerBounds, [], {
+  scaleBar: DEFAULT_SCALE_BAR,
+  northArrow: DEFAULT_NORTH_ARROW,
+  scale,
+});
 
 const frameSvg = frameResult.svgElements;
 const titleBlockSvg = titleBlockResult.svgElements;
@@ -201,17 +368,162 @@ if (isGPUComputeAvailable()) {
 }
 ```
 
+### Streamed Geometry
+
+`Drawing2DGenerator.generateFromSource(source, config, options)` draws from a
+`DrawingMeshSource` instead of one mesh array. The source yields batches in at
+most two passes, `'geometry'` (section cut and projection) and, only when
+needed, `'occlusion'` (hidden-line depth raster and the free-edge test of
+open surfaces). The generator keeps only 2D output, one depth raster and
+per-entity edge parity between batches, so its working input is one batch,
+not the model. Every pass must yield the same meshes in the same order; the
+drawing then equals `generate` over those meshes. A source error or an
+aborted `options.signal` rejects the drawing.
+
+Callers that push leased chunks instead use `generator.beginDrawing(config,
+options)`, which returns a `DrawingSession`: call `addGeometry(batch)` for each
+chunk, then `endGeometry()`. Its result says whether the hidden-line raster
+needs every chunk again (`depthRaster`), or only the meshes of
+`openSurfaceEntities`. Feed those to `addOcclusion(batch)`, then call
+`finish()` (or `cancel()`). No batch is kept, so each lease can be released
+before the next one is taken. Joins across chunks, occlusion and projection
+stay the same, because `generate` drives this same session.
+
+The viewer uses it for the Drawing panel and the 3D section overlay. Resident
+models are cut as before. A model whose CPU arrays were released (today only
+by the test-only release, #10264) is read back from its local backing one
+chunk at a time, and its instanced occurrences are expanded from the backed
+shards in bounded groups. A backing that is missing, incomplete or replaced
+while it is read fails the drawing instead of drawing partial geometry.
+GPU-instanced occurrences are cut like flat geometry in both cases; before,
+the drawing left them out.
+
 ## Viewer Integration
 
 In the IFClite viewer:
 
 1. **Activate section plane** - Position a section plane in the 3D view
-2. **Open 2D panel** - The 2D drawing panel shows the section cut
+2. **Open the Drawing panel** - The section cut appears in the **Drawing** panel, docked in the bottom strip below the 3D view (it opens with the Section tool, or from **Analyze → Drawing**, the sidebar rail or the command palette). Like the other bottom panels it can be resized, floated, or popped out onto another screen
 3. **Toggle layers** - Show/hide cut lines, projection, hidden lines, hatching
 4. **Annotate** - Add measurements, polygon areas, text boxes, and revision clouds
 5. **Select & edit** - Click annotations to select, drag to move, Delete to remove
 6. **Graphic overrides** - Apply presets to change element appearance
 7. **Export** - Download the drawing as vector SVG, or as DXF R12 (plan sections are georeferenced to true world/map coordinates when the model carries an `IfcMapConversion`)
+
+### Drawing Navigation
+
+Wheel zoom follows the pointer and uses the input magnitude, including pixel,
+line and page wheel deltas. Hold Ctrl or Cmd for fine zoom. A trackpad pinch
+zooms normally unless that modifier key is physically held. A notch eases in
+over roughly 0.2 s, as in the 3D view, and a pan or the zoom buttons stop it.
+**Settings → Display → Navigation → Wheel zoom speed** applies here too.
+
+The navigation preset also applies to the Drawing panel: Default uses vertical
+wheel movement to zoom and horizontal movement to pan; Navisworks uses vertical
+wheel movement to zoom; Trackpad pans with two-finger scrolling and zooms with a
+pinch or Ctrl/Cmd wheel. These controls also work in floating and popped-out
+Drawing panels.
+
+The drawing opens fitted to the building at the cut, and **Fit** frames the
+same extent: everything the plane cuts, plus content touching or near it.
+Small objects far from the building, such as a model's origin or
+geo-reference marker, stay drawn but do not shrink the view; zoom out to see
+them. Visible references (raster and DXF underlays) are always framed. A
+drawing that cuts nothing frames all of its content. Until you pan or
+zoom, the drawing refits when the panel is resized.
+
+### DXF and PDF/Image Underlays
+
+Open **Underlays → Import DXF...** to import DXF. Choose **Site plan (horizontal)** for CAD coordinates in IFC
+XY or map coordinates, or **Reference on current section** for a plan/elevation registered
+on the current Down, Front or Side plane. Vertical sections initially suggest
+**Reference on current section**. The suggestion follows section changes until you
+choose a mode explicitly; your choice then remains selected. Dropping a DXF onto
+the viewport or opening it through the general file picker imports a site plan,
+so use the Underlays picker for elevation references.
+
+Choose explicit units when the file has no declared units;
+automatic import uses a known DXF unit header. Drawing references with missing
+or unknown unit declarations request an explicit unit before registration; site
+plans retain the existing unitless-file heuristic. Unit conversion runs once,
+independently of placement scale.
+
+For site plans, **Align to model georeference** maps survey/map coordinates into
+the model's local frame. Its automatic setting follows the anchor model's usable
+georeference; clicking pins the setting. Turn it off for CAD already drawn in
+local model coordinates, and on for map-coordinate surveys. The unitless
+millimetre-inference path leaves alignment off; check coordinates as well as units.
+
+A drawing reference freezes its IFC world origin and two in-plane axes when
+import starts. Moving a parallel section does not move the reference; flipping
+the view projects the same placement from the other side. An incompatible view
+shows the reference as edge-on, and a changed engineering frame marks it
+unavailable. Renderer origin rebasing preserves its engineering placement.
+Existing saved DXFs remain site plans with their existing georeference behavior.
+
+Use **Center on model**, numeric offsets, rotation and positive scale to align
+the reference. Center is unavailable until the generated section contains a
+finite model extent. Plane-reference offsets are in its registered U/V axes; site-plan
+offsets retain their drawing-space convention. Visibility, opacity and CAD
+layer controls apply in compatible 2D views. The independent 3D visibility
+control puts vector paths on their registered plane. The 3D overlay currently
+shows paths without hatches/text and uses opacity as an on/off gate.
+
+**Import PDF/image...** opens the existing Appearance reference workflow
+with the current cardinal plane suggested: Down uses IFC XY, Front uses IFC XZ,
+and Side uses IFC YZ. Choose the source or PDF page, calibrate a known distance,
+then explicitly place the reference. Underlays lists the committed raster
+references with visibility, opacity, locking and removal controls. See
+[Drawing references in 2D and 3D](appearance.md#drawing-references-in-2d-and-3d)
+for calibration, editing and registration persistence.
+This entry requires a generated cardinal drawing. It is unavailable on a custom
+plane; already registered rasters can still be viewed and exported there.
+
+Visible compatible references expand Fit and sheet bounds, including drawings
+with no cut polygons. SVG, PDF and Print include the mapped DXF vectors and
+committed raster references beneath the section geometry. Raw PDFs retain
+vector section strokes while including raster reference imagery; sheet PDFs
+retain the rasterized sheet layout. Four-corner raster placement, opacity and
+CAD layer visibility agree with the display.
+
+DXF exports include the visible mapped CAD vectors. Vertical section exports use
+local section coordinates; they are not map-georeferenced IFC XY drawings. DXF
+cannot embed the PDF/image raster references in this workflow, so the export
+menu lists their omission before continuing. PDF and DXF still report visible
+markup omissions. When a sheet is active, its scale governs PDF export and the
+dialog explains why the scale cannot be changed there.
+
+### Choosing a drawing export
+
+| Output | Section geometry | Visible DXF references | Committed PDF/image references | Scale and coordinates |
+| --- | --- | --- | --- | --- |
+| SVG | Vector | Mapped vectors | Embedded raster images | Drawing or active sheet layout |
+| PDF without a sheet | Vector strokes | Mapped vectors | Raster images beneath geometry | Chosen drawing scale; page fits the drawing |
+| PDF with a sheet | Rasterized sheet | Included in the sheet image | Included in the sheet image | Active sheet scale and paper size |
+| Print | Drawing/sheet SVG sent to the browser | Mapped vectors | Embedded raster images | Check the browser's paper size and scaling |
+| DXF R12 | Vector, plus the scan outline on `SCAN-OUTLINE` when shown | Mapped vectors on export layers | Omitted, with confirmation | Metres; Down plans can use model/map coordinates, vertical sections use local section coordinates |
+
+Only visible, compatible references are included. DXF layer visibility and raster
+opacity follow the displayed drawing. Exporting a drawing does not embed workspace
+registration recipes into IFC; see [reference sharing and persistence](appearance.md#drawing-references-in-2d-and-3d).
+
+### Scan section outlines
+
+With a point cloud loaded, the **Scan** tab of the drawing inspector overlays the scan points within a band around the section plane. Turn on **Vector outline** to trace them into closed rings: the boundary of what the scan shows as solid at the cut. The rings are drawn as lines over the cut and written to the DXF export on their own `SCAN-OUTLINE` layer, through the same coordinate transform as the cut, so a georeferenced plan puts them at map coordinates too.
+
+**Bridge gaps up to** sets the widest gap the trace closes, about one wall thickness (5–50 cm, default 30 cm). It is what merges the two scanned faces of a wall into one solid band and closes scan shadows. Openings wider than it, such as doors, stay open. The trace uses every point in the band, not the decimated dots on screen. It runs in a worker, and only the latest plane or slider position is traced. The dots and the rings update together. The status line reports the ring count and the cell size. It also warns when the scan was too large for the cell budget and coarser cells were used. The engine is the wasm `traceScanOutline`; see [the WASM API](../api/wasm.md#scan-section-outlines).
+
+### Troubleshooting section references
+
+| Symptom | Check |
+| --- | --- |
+| DXF import requests units | Select the source units under **DXF units**, then import again. Placement scale does not replace unit conversion. |
+| Reference disappears after changing the section | Check visibility and the registered plane. An edge-on reference has no projected area; return to a parallel section. A reference from another engineering frame needs registration in the current frame. |
+| **Center on model** is disabled | Wait for a generated section with finite model geometry, and use a compatible reference plane. Reference-only bounds cannot supply a model center. |
+| PDF appears in Appearance but not Underlays | Finish calibration and click **Place reference**. Choosing a source or previewing it does not commit a workspace reference. |
+| Background edges remain at depth zero in Down | The plan's separate overhead band remains. Manual depth controls the background band. |
+| Zoom changes but the PDF scale does not | Canvas zoom is a viewing control. Choose the PDF scale, or change the active sheet scale. |
+| Raster reference is missing after importing registration JSON | Relink the exact original raster. Registration JSON contains placement and digests, not image bytes. |
 
 ### Annotation Tools
 
@@ -243,3 +555,12 @@ When using the Select / Pan tool (or after pressing Escape to exit a creation to
 | 3D overlay | On | Show section plane position in 3D view |
 | Scale | 1:100 | Drawing scale for dimensions |
 | Symbolic representations | Off | Use authored Plan/Annotation representations when available |
+| Scan → Vector outline | Off | Trace closed outlines from the scan points in the section band (see below) |
+
+### Selective section cutting
+
+`SectionPlaneConfig.sectionExcludedIds` accepts a `ReadonlySet<number>` of mesh `expressId` values to keep whole. `SectionCutter`, `cutMeshesStreaming` and `GPUSectionCutter` omit those meshes before producing segments and polygons, so they contribute neither caps, hatch regions nor cut outlines. Pass the renderer's same full scene-ID set when producing its primary and extra-plane caps. An absent or empty set cuts every mesh as usual.
+
+### Material identity on section polygons
+
+`DrawingPolygon.materialId` carries the source mesh’s `IfcMaterial` ID when available. Layers with different material IDs remain separate polygons even when their colours match. The ID uses the same model/federation ID space as `entityId`; resolve both through the host’s model resolver. It is absent for meshes without material identity and for combined opaque base polygons spanning several layers. CPU and GPU section cutters carry it through to polygon reconstruction.

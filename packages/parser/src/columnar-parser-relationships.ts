@@ -10,17 +10,61 @@
  */
 
 import { skipCommas, readRefId, readRefList } from './columnar-parser-attributes.js';
+import { readPropertyDefinitionValue } from './property-definition-refs.js';
+import { getRelationshipReadPlan } from './relationship-schema-slots.js';
+import { skipGap } from './step-lexing.js';
+import type { IfcDataStore } from './columnar-parser.js';
 
 /**
- * Extract relatingObject and relatedObjects from a relationship entity using byte-level scanning.
- * No TextDecoder needed - only extracts numeric entity IDs.
+ * True when the slot value that ended at `next` is followed by what the class
+ * declares there: the next attribute's `,`, or the record's own closing `)`.
+ * The last declared attribute admits only the closing `)`.
+ *
+ * This is where a misread record shows (#9192). A related list that stopped
+ * at a nested or typed value has `next` -1, as does one whose members are not
+ * `#id` or `$` one comma apart: `(#10 #11)` decodes as `[#10]` while the byte
+ * reader took both, and a string or number member (`'#12'`, `12`) decodes as
+ * a reference the byte reader skipped. A value followed by a stray `)`,
+ * as in `(#10),#14),#40`, is not at the record's end. And a related value
+ * missing its parentheses, `#10,#11,#40`, leaves the relating slot followed
+ * by another value. In each case the graph would not list exactly the
+ * references the record holds, so the caller records no edge for the record,
+ * and its readers treat it as unreadable.
+ */
+function endsSlot(buffer: Uint8Array, next: number, end: number, last: boolean): boolean {
+    if (next < 0) return false;
+    let pos = skipGap(buffer, next, end);
+    if (pos < 0 || pos >= end) return false;
+    if (buffer[pos] === 0x2C) return !last;
+    if (buffer[pos] !== 0x29) return false;
+    pos = skipGap(buffer, pos + 1, end);
+    // The record's range may or may not include its `;`.
+    return pos >= end || buffer[pos] === 0x3B;
+}
+
+/**
+ * Extract relatingObject and relatedObjects from a relationship entity using
+ * byte-level scanning. No TextDecoder needed — only extracts numeric entity
+ * IDs.
+ *
+ * The attribute positions come from {@link getRelationshipSlotPlan}
+ * (schema-derived, per #4205) rather than a hand-written branch per STEP
+ * keyword. `readRefList` accepts both a bare `#id` and a `(...)` list, so a
+ * single read path serves the "relating" slot (always one reference) and the
+ * "related" slot (one reference or a list) alike — the plan's `isList` flag
+ * only documents which shape a class uses, it does not gate how the value is
+ * read.
  */
 export function extractRelFast(
     buffer: Uint8Array,
     byteOffset: number,
     byteLength: number,
     typeUpper: string,
+    schemaVersion?: IfcDataStore['schemaVersion'],
 ): { relatingObject: number; relatedObjects: number[] } | null {
+    const plan = getRelationshipReadPlan(typeUpper, schemaVersion);
+    if (!plan) return null;
+
     const end = byteOffset + byteLength;
     let pos = byteOffset;
 
@@ -28,79 +72,68 @@ export function extractRelFast(
     if (pos >= end) return null;
     pos++;
 
-    // Skip to attr[4] (all IfcRelationship subtypes have 4 shared IfcRoot+IfcRelationship attrs)
+    // Skip to post-root attr[0] (all IfcRelationship subtypes share 4
+    // IfcRoot+IfcRelationship attrs: GlobalId, OwnerHistory, Name, Description).
     pos = skipCommas(buffer, pos, end, 4);
 
-    if (typeUpper === 'IFCRELCONTAINEDINSPATIALSTRUCTURE'
-        || typeUpper === 'IFCRELREFERENCEDINSPATIALSTRUCTURE'
-        || typeUpper === 'IFCRELDEFINESBYPROPERTIES'
-        || typeUpper === 'IFCRELDEFINESBYTYPE') {
-        // attr[4]=RelatedObjects, attr[5]=RelatingObject
-        const [related, rp] = readRefList(buffer, pos, end);
-        pos = rp;
-        while (pos < end && buffer[pos] !== 0x2C) pos++;
-        pos++;
-        const [relating, _] = readRefId(buffer, pos, end);
-        if (relating < 0 || related.length === 0) return null;
-        return { relatingObject: relating, relatedObjects: related };
-    } else if (typeUpper === 'IFCRELASSIGNSTOGROUP' || typeUpper === 'IFCRELASSIGNSTOPRODUCT') {
-        const [related, rp] = readRefList(buffer, pos, end);
-        // `readRefList` returns `rp` pointing AT the closing `)` of
-        // the list. `skipCommas` tracks paren depth, so leaving `rp`
-        // there makes that `)` cancel the implicit depth-0 baseline
-        // and subsequent commas don't count. Advance past it first.
-        let after = rp;
-        if (after < end && buffer[after] === 0x29) after++;
-        pos = skipCommas(buffer, after, end, 2);
-        const [relating, _] = readRefId(buffer, pos, end);
-        if (relating < 0 || related.length === 0) return null;
-        return { relatingObject: relating, relatedObjects: related };
-    } else if (typeUpper === 'IFCRELCONNECTSPORTTOELEMENT' || typeUpper === 'IFCRELCONNECTSPORTS') {
-        // attr[4]=RelatingPort, attr[5]=RelatedElement / RelatedPort — both
-        // SINGLE references, and both at the front of the attribute list.
-        //
-        // Neither existing branch fits: the default one reads attr[5] as a
-        // LIST, and the ConnectsElements branch skips one attribute first
-        // because that entity carries an optional ConnectionGeometry at [4].
-        // These two carry the port straight away. (`IfcRelConnectsPorts` also
-        // has an optional RealizingElement at [6] — the element that realises
-        // the connection, e.g. a piece of duct. Not read: it is a third party
-        // to the connection, not one of its two ends, and an edge has two.)
-        const [relating, rp] = readRefId(buffer, pos, end);
-        if (relating < 0) return null;
-        pos = skipCommas(buffer, rp, end, 1);
-        const [related, _] = readRefId(buffer, pos, end);
-        if (related < 0) return null;
-        return { relatingObject: relating, relatedObjects: [related] };
-    } else if (typeUpper === 'IFCRELCONNECTSELEMENTS' || typeUpper === 'IFCRELCONNECTSPATHELEMENTS') {
-        pos = skipCommas(buffer, pos, end, 1);
-        const [relating, rp2] = readRefId(buffer, pos, end);
-        pos = skipCommas(buffer, rp2, end, 1);
-        const [related, _] = readRefId(buffer, pos, end);
-        if (relating < 0 || related < 0) return null;
-        return { relatingObject: relating, relatedObjects: [related] };
-    } else {
-        // Default: attr[4]=RelatingObject, attr[5]=RelatedObject(s)
-        const [relating, rp] = readRefId(buffer, pos, end);
-        if (relating < 0) return null;
-        pos = rp;
-        while (pos < end && buffer[pos] !== 0x2C) pos++;
-        pos++;
-        const [related, _] = readRefList(buffer, pos, end);
-        if (related.length === 0) return null;
-        return { relatingObject: relating, relatedObjects: related };
+    let relatingObject = -1;
+    let relatedIds: number[] = [];
+    let cursor = 0;
+    for (const slot of plan.order) {
+        pos = skipCommas(buffer, pos, end, slot.index - cursor);
+        cursor = slot.index;
+        const [ids, , next] = readRefList(buffer, pos, end);
+        if (!endsSlot(buffer, next, end, slot.index === plan.lastIndex)) return null;
+        if (slot.relating) {
+            // A relating attribute names one entity. `(#40,#41)` would give
+            // an edge from #40 alone and hide that the record names #41.
+            if (ids.length !== 1) return null;
+            relatingObject = ids[0];
+        } else {
+            relatedIds = ids;
+        }
+        // `next` is past a list's closing `)`: `skipCommas` tracks paren depth
+        // from its start position, so starting AT that `)` would count it as
+        // an unmatched close and miscount every comma after it.
+        pos = next;
     }
+
+    if (relatingObject < 0 || relatedIds.length === 0) return null;
+    return { relatingObject, relatedObjects: relatedIds };
 }
 
 /**
- * Extract property rel data: attr[4]=relatedObjects, attr[5]=relatingDef.
+ * Extract property rel data: attr[4]=relatedObjects, attr[5]=relatingDef(s).
  * Numbers only, no TextDecoder.
+ *
+ * attr[5] is read as a ref LIST, not a single ref: it is reused for both
+ * `IfcRelDefinesByProperties.RelatingPropertyDefinition` (typed
+ * `IfcPropertySetDefinitionSelect`, whose second alternative
+ * `IfcPropertySetDefinitionSet` is a `SET [1:?] OF IfcPropertySetDefinition`
+ * and is written as a parenthesised list, e.g. `(#20,#21)`, not `#20`) and
+ * the single-ref `IfcRelAssociates*` selects (`IfcMaterialSelect` /
+ * `IfcClassificationSelect` / `IfcDocumentSelect`, always one ref).
+ * `readRefList` already accepts both a bare `#id` and a `(...)` list, so one
+ * call handles both callers; the single-ref case is a length-1 list. A prior
+ * version used `readRefId` here, which only recognises a bare `#id` — for a
+ * schema-legal grouped `IfcPropertySetDefinitionSet` (`(#20,#21)`) it saw the
+ * list's opening `(` instead of `#`, returned -1, and this function returned
+ * null, silently dropping the WHOLE `IfcRelDefinesByProperties` relationship:
+ * every related object lost all properties/quantities from that pset group.
+ *
+ * As in {@link extractRelFast}, a record gets no edges unless its relating
+ * value holds only references (and empty `$` members): `((#24),#41)`,
+ * `(#24,'x')` and `IFCPROPERTYSETDEFINITIONSET((#24),#41)` are skipped, not
+ * read as `[#41]` or `[#24]` (#9192). `singleRelating` is for the
+ * `IfcRelAssociates*` classes, whose relating attribute names one entity:
+ * `(#40,#41)` is skipped there rather than read as #40 alone.
  */
 export function extractPropertyRelFast(
     buffer: Uint8Array,
     byteOffset: number,
     byteLength: number,
-): { relatedObjects: number[]; relatingDef: number } | null {
+    singleRelating = false,
+): { relatedObjects: number[]; relatingDefs: number[] } | null {
     const end = byteOffset + byteLength;
     let pos = byteOffset;
 
@@ -110,12 +143,30 @@ export function extractPropertyRelFast(
 
     pos = skipCommas(buffer, pos, end, 4);
 
-    const [relatedObjects, rp] = readRefList(buffer, pos, end);
-    pos = rp;
-    while (pos < end && buffer[pos] !== 0x2C) pos++;
+    // RelatedObjects, then the relating attribute, which every class read
+    // here declares last (#9192: see endsSlot).
+    const [relatedObjects, , next] = readRefList(buffer, pos, end);
+    pos = next < 0 ? -1 : skipGap(buffer, next, end);
+    if (pos < 0 || buffer[pos] !== 0x2C) return null;
     pos++;
 
-    const [relatingDef, _] = readRefId(buffer, pos, end);
-    if (relatingDef < 0 || relatedObjects.length === 0) return null;
-    return { relatedObjects, relatingDef };
+    let relatingDefs: number[];
+    pos = skipGap(buffer, pos, end);
+    if (pos >= 0 && buffer[pos] === 0x23) {
+        // One reference, as nearly every record writes it: what the general
+        // reader below gives for it, without tokenizing a value tree.
+        const [id, after] = readRefId(buffer, pos, end);
+        if (!endsSlot(buffer, after, end, true)) return null;
+        if (id === 0) return null; // `#0` or a bare `#`: names no entity (#9192)
+        relatingDefs = id > 0 ? [id] : [];
+    } else {
+        const relating = pos < 0 ? null : readPropertyDefinitionValue(buffer, pos, end);
+        if (!relating || !relating.plain || !endsSlot(buffer, relating.next, end, true)) return null;
+        // A SET holds each member once; `(#20,#20)` must not add the edge twice.
+        const written = relating.ids;
+        if (singleRelating && written.length !== 1) return null;
+        relatingDefs = written.length > 1 ? [...new Set(written)] : written;
+    }
+    if (relatingDefs.length === 0 || relatedObjects.length === 0) return null;
+    return { relatedObjects, relatingDefs };
 }

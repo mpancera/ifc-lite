@@ -13,8 +13,10 @@
 //! input coordinates — never materialised — so downstream predicates stay exact
 //! and platform-deterministic.
 
-use super::predicates::orient3d;
+use super::predicates::orient3d_explicit;
 use super::{ImplicitPoint, Lpi, Sign};
+use num_rational::BigRational as R;
+use num_traits::Zero;
 
 #[inline]
 fn e(p: [f64; 3]) -> ImplicitPoint {
@@ -46,8 +48,9 @@ fn sub_f64(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 fn cross_f64(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
+/// Un-normalised plane normal; also the coplanar clip's, one home (#7677).
 #[inline]
-fn plane_normal(t: &[[f64; 3]; 3]) -> [f64; 3] {
+pub(super) fn plane_normal(t: &[[f64; 3]; 3]) -> [f64; 3] {
     cross_f64(sub_f64(t[1], t[0]), sub_f64(t[2], t[0]))
 }
 /// Approximate direction of the crossing line L = t1.plane ∩ t2.plane (n1 × n2),
@@ -109,9 +112,9 @@ enum PlaneInterval {
 
 fn plane_interval(tri: &[[f64; 3]; 3], plane: &[[f64; 3]; 3]) -> PlaneInterval {
     let s = [
-        orient3d(&e(plane[0]), &e(plane[1]), &e(plane[2]), &e(tri[0])),
-        orient3d(&e(plane[0]), &e(plane[1]), &e(plane[2]), &e(tri[1])),
-        orient3d(&e(plane[0]), &e(plane[1]), &e(plane[2]), &e(tri[2])),
+        orient3d_explicit(plane[0], plane[1], plane[2], tri[0]),
+        orient3d_explicit(plane[0], plane[1], plane[2], tri[1]),
+        orient3d_explicit(plane[0], plane[1], plane[2], tri[2]),
     ];
     let zeros: Vec<usize> = (0..3).filter(|&i| s[i] == Sign::Zero).collect();
     match zeros.len() {
@@ -152,20 +155,8 @@ fn plane_interval(tri: &[[f64; 3]; 3], plane: &[[f64; 3]; 3]) -> PlaneInterval {
 use super::near_band::NearBand;
 
 #[inline]
-fn ti_sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-#[inline]
-fn ti_cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-}
-#[inline]
 fn ti_dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-#[inline]
-fn ti_normal(t: &[[f64; 3]; 3]) -> [f64; 3] {
-    ti_cross(ti_sub(t[1], t[0]), ti_sub(t[2], t[0]))
 }
 
 /// Are `t1` and `t2` an INTENDED-FLUSH coplanar pair that per-axis snapping
@@ -214,15 +205,11 @@ fn ti_normal(t: &[[f64; 3]; 3]) -> [f64; 3] {
 /// sub-band-sized transversal micro-sliver CAN now qualify, but its entire
 /// geometric effect is below the import-noise floor by construction, and the
 /// coplanar overlay's degenerate-projection guards (`w0 == Zero`) handle it.
-fn near_coplanar(t1: &[[f64; 3]; 3], t2: &[[f64; 3]; 3]) -> bool {
-    let (n1, n2) = (ti_normal(t1), ti_normal(t2));
+fn near_coplanar(t1: &[[f64; 3]; 3], t2: &[[f64; 3]; 3], band: &NearBand) -> bool {
+    let (n1, n2) = (plane_normal(t1), plane_normal(t2));
     let (nn1, nn2) = (ti_dot(n1, n1), ti_dot(n2, n2));
     if nn1 <= 0.0 || nn2 <= 0.0 || !nn1.is_finite() || !nn2.is_finite() {
         return false; // a degenerate triangle is never a flush coplanar partner
-    }
-    let mut band = NearBand::default();
-    for p in t1.iter().chain(t2.iter()) {
-        band.observe_point(p);
     }
     // All three vertices of `t` within the band of `plane`'s supporting plane?
     // The band is resolved against THAT plane's own normal, so an operand far
@@ -230,11 +217,65 @@ fn near_coplanar(t1: &[[f64; 3]; 3], t2: &[[f64; 3]; 3]) -> bool {
     let in_slab = |t: &[[f64; 3]; 3], plane: &[[f64; 3]; 3], n: [f64; 3], nn: f64| {
         let band2 = band.scaled_band2(n, nn); // scaled by |n|², like `d` below
         t.iter().all(|&v| {
-            let d = ti_dot(ti_sub(v, plane[0]), n); // perp_dist · |n|
+            let d = ti_dot(sub_f64(v, plane[0]), n); // perp_dist · |n|
             d * d <= band2
         })
     };
     in_slab(t2, t1, n1, nn1) || in_slab(t1, t2, n2, nn2)
+}
+
+fn exact_vector(p: [f64; 3]) -> Option<[R; 3]> {
+    Some([R::from_float(p[0])?, R::from_float(p[1])?, R::from_float(p[2])?])
+}
+fn rational_normal([a, b, c]: [[R; 3]; 3]) -> [R; 3] {
+    let u: [R; 3] = std::array::from_fn(|k| &b[k] - &a[k]);
+    let v: [R; 3] = std::array::from_fn(|k| &c[k] - &a[k]);
+    std::array::from_fn(|k| {
+        &u[(k + 1) % 3] * &v[(k + 2) % 3] - &u[(k + 2) % 3] * &v[(k + 1) % 3]
+    })
+}
+fn exact_plane_normal(t: &[[f64; 3]; 3]) -> Option<[R; 3]> {
+    Some(rational_normal([exact_vector(t[0])?, exact_vector(t[1])?, exact_vector(t[2])?]))
+}
+fn parallel_normals(a: &[R; 3], b: &[R; 3]) -> bool {
+    a.iter().any(|x| !x.is_zero()) && b.iter().any(|x| !x.is_zero()) && (0..3).all(|k| {
+        &a[(k + 1) % 3] * &b[(k + 2) % 3] == &a[(k + 2) % 3] * &b[(k + 1) % 3]
+    })
+}
+fn charge_parallel_certificate() -> bool {
+    if super::budget::tripped() { return false; }
+    super::budget::note_escalation();
+    !super::budget::tripped()
+}
+
+/// A distant operand vertex may widen the offset allowance, but cannot erase
+/// a genuine crossing line. Rounded f64 normal equality is not a certificate.
+fn exactly_parallel_planes(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]) -> bool {
+    if !charge_parallel_certificate() { return false; }
+    let (Some(a), Some(b)) = (exact_plane_normal(a), exact_plane_normal(b)) else { return false; };
+    parallel_normals(&a, &b)
+}
+
+fn exact_symbolic_point(p: &ImplicitPoint) -> Option<[R; 3]> {
+    let finite = |p: &[f64; 3]| p.iter().all(|x| x.is_finite());
+    let valid = match p {
+        ImplicitPoint::Explicit(p) => return exact_vector(*p),
+        ImplicitPoint::Lpi(l) => [l.p, l.q, l.r, l.s, l.t].iter().all(finite),
+        ImplicitPoint::Tpi(t) => t.planes.iter().flatten().all(finite),
+    };
+    if !valid { return None; }
+    let (lambda, d) = super::rational::lambda_of(p);
+    if d.is_zero() { return None; }
+    Some(lambda.map(|x| x / &d))
+}
+
+/// Arranged faces retain their original symbolic plane, including off-grid
+/// LPI/TPI corners. Undefined constructions cannot certify parallelism.
+pub(super) fn exactly_parallel_symbolic_plane(a: [&ImplicitPoint; 3], b: &[[f64; 3]; 3]) -> bool {
+    if !charge_parallel_certificate() { return false; }
+    let Some(b) = exact_plane_normal(b) else { return false; };
+    let [Some(a), Some(c), Some(d)] = a.map(exact_symbolic_point) else { return false; };
+    parallel_normals(&rational_normal([a, c, d]), &b)
 }
 
 /// Exact triangle–triangle intersection: the overlap of each triangle's
@@ -242,12 +283,28 @@ fn near_coplanar(t1: &[[f64; 3]; 3], t2: &[[f64; 3]; 3]) -> bool {
 /// crossings AND Touches (on-plane vertices/edges). Coplanar is deferred to
 /// `coplanar.rs`; a single shared point returns `Point` (no cut).
 pub fn tri_tri_intersection(t1: &[[f64; 3]; 3], t2: &[[f64; 3]; 3]) -> TriTri {
+    tri_tri_intersection_scoped(t1, t2, None)
+}
+
+/// Arrangement overlay and classification share the complete operand context.
+/// Standalone triangle callers keep their original two-triangle context above.
+pub(crate) fn tri_tri_intersection_with_band(t1: &[[f64; 3]; 3], t2: &[[f64; 3]; 3], band: &NearBand) -> TriTri {
+    tri_tri_intersection_scoped(t1, t2, Some(band))
+}
+
+fn tri_tri_intersection_scoped(t1: &[[f64; 3]; 3], t2: &[[f64; 3]; 3], paired_band: Option<&NearBand>) -> TriTri {
     use PlaneInterval as PI;
     // Near-coplanar guard (the flush-cap fix): an intended-flush coplanar
     // interface that per-axis snapping pushed just off exact coplanarity is
     // routed to the exact coplanar handler so the footprint is carved (otherwise
     // a sliver bridges the opening). See `near_coplanar`.
-    if near_coplanar(t1, t2) {
+    let local_band = NearBand::from_operands(&[*t1], &[*t2]);
+    // Keep the legacy two-triangle slab class, including transversal microfaces.
+    // Only exact parallel planes may gain the larger operand offset allowance.
+    // The legacy local slab still admits its original tilted noise microfaces.
+    if near_coplanar(t1, t2, &local_band) || paired_band.is_some_and(|band|
+        super::arrangement::coincident_planes(plane_normal(t1), plane_normal(t2))
+            && near_coplanar(t1, t2, band) && exactly_parallel_planes(t1, t2)) {
         return TriTri::Coplanar;
     }
     let (i1, i2) = (plane_interval(t1, t2), plane_interval(t2, t1));
@@ -285,94 +342,9 @@ pub fn tri_tri_intersection(t1: &[[f64; 3]; 3], t2: &[[f64; 3]; 3]) -> TriTri {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "tritri_tests.rs"]
+mod tests;
 
-    const ZPLANE: [[f64; 3]; 3] = [[0., 0., 0.], [2., 0., 0.], [0., 2., 0.]]; // z = 0
-
-    #[test]
-    fn edge_crossing_lpi_lies_exactly_on_the_plane() {
-        // The defining property: orient3d(LPI, plane[0], plane[1], plane[2]) == 0
-        // (the edge∩plane point is coplanar with the plane). This ties the LPI
-        // construction to the exact LPI-orient3d predicate.
-        let lpi = edge_plane_lpi([0.5, 0.5, -1.], [0.5, 0.5, 3.], &ZPLANE);
-        assert_eq!(
-            orient3d(&ImplicitPoint::Lpi(lpi), &e(ZPLANE[0]), &e(ZPLANE[1]), &e(ZPLANE[2])),
-            Sign::Zero,
-            "edge∩plane LPI is not exactly on the plane"
-        );
-        // tilted plane + tilted edge
-        let tilted = [[0., 0., 1.], [3., 0., 2.], [0., 3., 2.]];
-        let lpi2 = edge_plane_lpi([1., 1., 0.], [1.5, 0.5, 5.], &tilted);
-        assert_eq!(
-            orient3d(&ImplicitPoint::Lpi(lpi2), &e(tilted[0]), &e(tilted[1]), &e(tilted[2])),
-            Sign::Zero,
-            "tilted edge∩plane LPI is not exactly on the plane"
-        );
-    }
-
-    #[test]
-    fn proper_crossing_yields_segment_on_both_planes() {
-        let t1 = [[-2., 0., -1.], [2., 0., -1.], [0., 0., 2.]]; // plane y=0
-        let t2 = [[1., -2., 1.], [1., 2., 1.], [1., 0.5, -3.]]; // plane x=1
-        match tri_tri_intersection(&t1, &t2) {
-            TriTri::Segment([a, b]) => {
-                // The two endpoints are distinct (a non-degenerate segment).
-                assert_ne!(
-                    super::cmp_along(&a, &b, super::line_direction(&t1, &t2)),
-                    Sign::Zero,
-                    "segment collapsed to a point"
-                );
-                // Every segment endpoint lies on BOTH triangles' planes (on L).
-                for ep in [&a, &b] {
-                    assert_eq!(
-                        orient3d(ep, &e(t1[0]), &e(t1[1]), &e(t1[2])),
-                        Sign::Zero,
-                        "segment endpoint off t1's plane"
-                    );
-                    assert_eq!(
-                        orient3d(ep, &e(t2[0]), &e(t2[1]), &e(t2[2])),
-                        Sign::Zero,
-                        "segment endpoint off t2's plane"
-                    );
-                }
-            }
-            other => panic!("expected a segment, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn touches_vertex_on_plane_yields_segment_with_explicit_endpoint() {
-        // t2 crosses t1's plane (y=0) but with ONE vertex EXACTLY on it.
-        let t1 = [[-2., 0., -1.], [2., 0., -1.], [0., 0., 2.]]; // plane y=0
-        let t2 = [[0., 0., 0.5], [0.5, -1., 0.5], [0.5, 1., 0.5]]; // v0 at y=0, in plane z=0.5
-        match tri_tri_intersection(&t1, &t2) {
-            TriTri::Segment([a, b]) => {
-                // exactly one endpoint is the Explicit on-plane vertex (0,0,0.5)
-                let explicits = [&a, &b]
-                    .iter()
-                    .filter(|p| matches!(p, ImplicitPoint::Explicit(_)))
-                    .count();
-                assert_eq!(explicits, 1, "expected one Explicit (on-plane vertex) endpoint");
-                // both endpoints lie on BOTH planes (on L)
-                for ep in [&a, &b] {
-                    assert_eq!(orient3d(ep, &e(t1[0]), &e(t1[1]), &e(t1[2])), Sign::Zero);
-                    assert_eq!(orient3d(ep, &e(t2[0]), &e(t2[1]), &e(t2[2])), Sign::Zero);
-                }
-            }
-            other => panic!("Touches case should yield a Segment, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn planes_cross_but_intervals_disjoint_is_none() {
-        let t1 = [[-2., 0., -1.], [2., 0., -1.], [0., 0., 2.]]; // y=0, crosses x=1 at z∈[-1,0.5]
-        let t2 = [[1., -2., 5.], [1., 2., 5.], [1., 0.5, 9.]]; // x=1, crosses y=0 at z∈[5,8.2]
-        // both planes DO cross (checked via tri_tri_intersection's own plane_interval
-        // path below); the disjoint-intervals-along-L outcome is the real assertion.
-        assert!(
-            matches!(tri_tri_intersection(&t1, &t2), TriTri::None),
-            "disjoint intervals along L should give no intersection"
-        );
-    }
-}
+#[cfg(test)]
+#[path = "tritri_band_tests.rs"]
+mod band_tests;

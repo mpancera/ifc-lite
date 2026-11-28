@@ -66,17 +66,44 @@
  * checking only "on the sync path today" is exactly the gate that stays
  * green until the next chunk reshuffle moves a latent pair onto that path.
  *
+ * The check also refuses to report success when it had nothing to inspect: a
+ * missing assets directory, a directory with no `.js` chunks, and chunks
+ * among which not one is `__tla`-wrapped each exit 1. In all three every scan
+ * below runs over an empty set, so "0 violations" would mean "0 chunks
+ * examined". Its own behaviour is pinned by check-tla-chunk-await.test.mjs.
+ *
+ * It also fails if the plugin re-printed any chunk it rewrote (every chunk
+ * that mentions `__tla`, entry and worker chunks included) unminified (see
+ * `unminified` below).
+ *
  * Run via `pnpm check:tla-chunk-await` (wired into the viewer-e2e CI job,
  * right after the viewer build it inspects). Requires a built viewer
  * (`pnpm turbo build --filter=@ifc-lite/viewer`).
  */
 
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
+import { deploymentAssetsDir } from './lib/deployment-assets-dir.mjs';
+import { chunkFormatting, MIN_PUNCTUATION, rewrittenByPlugin } from './lib/tla-chunk-prologue.mjs';
+import { checkEntryGraph } from './lib/tla-entry-graph.mjs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const ASSETS_DIR = join(ROOT, 'apps', 'viewer', 'dist', 'assets');
+// `--root <dir>` points the check at an alternative repo root, matching the
+// convention the other gate scripts use so their companion tests can drive
+// them over a synthetic tree (see check-collab-room-model-target.mjs). CI and
+// `pnpm check:tla-chunk-await` pass no argument and get the real repo.
+const rootArgIndex = process.argv.indexOf('--root');
+const ROOT =
+  rootArgIndex !== -1 && process.argv[rootArgIndex + 1]
+    ? process.argv[rootArgIndex + 1]
+    : join(dirname(fileURLToPath(import.meta.url)), '..');
+// The chunk directory is wherever THIS build wrote it: `assets/<deploymentId>`
+// on a Skew-Protected Vercel deployment (#4886), `assets` otherwise. Same env,
+// same rule as vite.config.ts, so the gate cannot inspect a stale or empty dir.
+const ASSETS_DIR = join(
+  ROOT, 'apps', 'viewer', 'dist',
+  deploymentAssetsDir(process.env.VERCEL_DEPLOYMENT_ID, process.env.VERCEL_SKEW_PROTECTION_ENABLED),
+);
 
 if (!existsSync(ASSETS_DIR)) {
   console.error(
@@ -88,6 +115,18 @@ if (!existsSync(ASSETS_DIR)) {
 }
 
 const files = readdirSync(ASSETS_DIR).filter((f) => f.endsWith('.js'));
+
+if (files.length === 0) {
+  console.error(
+    `❌ ${relative(ROOT, ASSETS_DIR)} exists but contains no .js chunks -- this is\n` +
+      `not a clean build, it is an INTERRUPTED or misconfigured one. Nothing was\n` +
+      `inspected: an empty chunk list is not the same as zero violations, and\n` +
+      `reporting "0 chunks checked" as success would silently stop guarding the\n` +
+      `moment the build tool changes where it emits chunks. Rebuild the viewer:\n\n` +
+      `    pnpm turbo build --filter=@ifc-lite/viewer\n`,
+  );
+  process.exit(1);
+}
 
 /** entry: "name" | "local as exported" -> the EXPORTED (public) name. */
 function exportedNameOf(entry) {
@@ -119,6 +158,111 @@ for (const file of files) {
     }
   }
 }
+
+// A build that emitted chunks but not one `__tla`-wrapped chunk has not been
+// checked -- it has been walked past. Every loop below is keyed off
+// `tlaExporters`, so with the set empty they iterate over nothing and
+// `violations` is empty because nothing was examined, not because nothing was
+// wrong. That is the same vacuous pass the empty-`files` guard above closes,
+// one level deeper, and the old success line advertised it in its own numbers
+// (`0 static import(s) ... (0 __tla-wrapped chunk(s) among 2 emitted
+// chunk(s))`) while exiting 0.
+//
+// Zero wrapped chunks is not a state a healthy viewer build reaches.
+// `vite-plugin-top-level-await` is registered for the worker build
+// (apps/viewer/vite.config.ts; the app build uses native top-level await, see
+// scripts/lib/tla-entry-graph.mjs), and it wraps every worker chunk it flags
+// for transformation -- which includes any chunk containing a dynamic
+// `import()`, of which the workers emit several. So an empty set means
+// the plugin is gone or renamed, its `__tla` fingerprint changed shape, or the
+// build now emits its chunks somewhere this check does not look. In all three
+// the check is inert, and an inert gate must say so rather than tick.
+//
+// Deliberately NOT extended to `staticTlaImports === 0`: a `__tla`-wrapped
+// chunk that is only ever `import()`ed dynamically is a perfectly ordinary
+// lazy route, and the plugin makes that shape safe by construction.
+if (tlaExporters.size === 0) {
+  console.error(
+    `❌ ${relative(ROOT, ASSETS_DIR)} has ${files.length} .js chunk(s) but NOT ONE of\n` +
+      `them exports a \`__tla\` binding, so this check examined nothing. Zero\n` +
+      `violations here means zero chunks inspected, not a clean bundle -- every\n` +
+      `scan in this gate is keyed off the set of __tla-wrapped chunks, and that\n` +
+      `set is empty.\n\n` +
+      `A viewer build reaches this state only if something changed underneath the\n` +
+      `check:\n\n` +
+      `  * vite-plugin-top-level-await was removed from the worker build in\n` +
+      `    apps/viewer/vite.config.ts, or is no longer applied to it;\n` +
+      `  * the plugin was upgraded and no longer emits the literal \`__tla\` export\n` +
+      `    this check fingerprints (see the header of this file);\n` +
+      `  * the build emits its chunks somewhere other than the directory above.\n\n` +
+      `If the plugin was removed ON PURPOSE, this gate guards nothing any more:\n` +
+      `delete it and its CI wiring in the same change rather than leaving it\n` +
+      `green and inert. Otherwise restore the plugin, or update this check's\n` +
+      `fingerprint to whatever the new plugin version emits, and re-run:\n\n` +
+      `    pnpm turbo build --filter=@ifc-lite/viewer\n`,
+  );
+  process.exit(1);
+}
+
+// Every chunk the plugin rewrote must have been re-printed minified. Why, and
+// how its formatting is read without a tokenizer: scripts/lib/tla-chunk-prologue.mjs.
+// Chunks the plugin rewrote are picked by structure (rewrittenByPlugin), not by
+// a `__tla` substring, which an untouched chunk can carry inside a string.
+// tlaChunks includes every exporter by construction, and tlaExporters was
+// asserted non-empty above. The
+// guard below is that same invariant stated where it is relied on: if it ever
+// broke, the scan would run over nothing and "all 0 minified" would be a pass.
+const tlaChunks = [...sources.keys()].filter(
+  (file) => tlaExporters.has(file) || rewrittenByPlugin(sources.get(file)),
+);
+if (tlaChunks.length === 0 || tlaChunks.length < tlaExporters.size) {
+  console.error(
+    `❌ Only ${tlaChunks.length} chunk(s) mention \`__tla\` but ${tlaExporters.size} export it, so the\n` +
+      `minification check below would inspect nothing (or less than the plugin\n` +
+      `rewrote). This gate's chunk discovery is broken; fix it before trusting a pass.\n`,
+  );
+  process.exit(1);
+}
+const formatting = new Map(tlaChunks.map((file) => [file, chunkFormatting(sources.get(file))]));
+// A chunk whose prologue is too short to judge is not a pass: say so.
+const unrecognised = tlaChunks.filter((file) => formatting.get(file) === 'unknown');
+if (unrecognised.length > 0) {
+  console.error(
+    `❌ ${unrecognised.length} chunk(s) rewritten by the plugin have too little leading code\n` +
+      `(under ${MIN_PUNCTUATION} punctuation marks before the first literal) for this gate to tell\n` +
+      `whether they were minified (first: ${unrecognised[0]}). See\n` +
+      `scripts/lib/tla-chunk-prologue.mjs.\n`,
+  );
+  process.exit(1);
+}
+const unminified = tlaChunks.filter((file) => formatting.get(file) === 'pretty');
+if (unminified.length > 0) {
+  console.error(
+    `❌ ${unminified.length} of ${tlaChunks.length} chunk(s) rewritten by the plugin were re-printed ` +
+      `UNMINIFIED by vite-plugin-top-level-await:\n`,
+  );
+  for (const file of unminified.slice(0, 10)) console.error(`   ${file}`);
+  if (unminified.length > 10) console.error(`   ... and ${unminified.length - 10} more`);
+  console.error(
+    `\nThe plugin re-prints every chunk it rewrites, and prints it pretty unless it\n` +
+      `sees a truthy \`build.minify\`. patches/vite-plugin-top-level-await@1.6.0.patch\n` +
+      `makes it read the RESOLVED config (configResolved), where Vite's default\n` +
+      `minifier is filled in. Check that the patch is still applied (pnpm install)\n` +
+      `and that apps/viewer/vite.config.ts does not set \`build.minify: false\`.\n`,
+  );
+  process.exit(1);
+}
+
+// The chunks evaluated at app start must not be wrapped at all:
+// scripts/lib/tla-entry-graph.mjs.
+const INDEX_HTML = join(ROOT, 'apps', 'viewer', 'dist', 'index.html');
+const entryCheck = checkEntryGraph(existsSync(INDEX_HTML) ? readFileSync(INDEX_HTML, 'utf8') : null, sources, new Set(tlaChunks), relative(ROOT, INDEX_HTML));
+if (entryCheck.error) {
+  console.error(entryCheck.error);
+  process.exit(1);
+}
+const entryPath = entryCheck.entryPath;
+if (entryCheck.warning) console.warn(entryCheck.warning);
 
 const violations = [];
 const sideEffectViolations = [];
@@ -217,7 +361,9 @@ console.log(
   `✅ 0 chunks importing a __tla chunk without awaiting it, ` +
     `${staticTlaImports} static import(s) of a __tla-wrapped chunk checked ` +
     `(${tlaExporters.size} __tla-wrapped chunk(s) among ${files.length} emitted chunk(s)); ` +
-    `${sideEffectImports} bare side-effect import(s) checked.`,
+    `${sideEffectImports} bare side-effect import(s) checked; ` +
+    `${entryPath.reached.size} chunk(s) evaluated at app start, none __tla-wrapped; ` +
+    `all ${tlaChunks.length} plugin-rewritten chunk(s) minified.`,
 );
 
 function fixHint() {

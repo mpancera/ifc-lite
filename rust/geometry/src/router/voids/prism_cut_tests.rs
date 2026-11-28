@@ -86,7 +86,7 @@ fn wall(center: [f64; 3], axes: [[f64; 3]; 3]) -> Mesh {
     framed_box_mesh(center, axes, [2.0, 0.15, 1.5])
 }
 
-fn ctx_of(openings: Vec<OpeningType>) -> VoidContext {
+fn ctx_of(openings: Vec<CutterKind>) -> VoidContext {
     VoidContext {
         merged_openings: openings.clone(),
         openings,
@@ -100,7 +100,7 @@ fn mesh_volume(m: &Mesh) -> f64 {
 }
 
 fn watertight(m: &Mesh) -> bool {
-    super::super::geom::param_cut_watertight(m)
+    crate::exact_topology::strict_closed_mesh(m)
 }
 
 /// An L-shaped (non-convex) cutter: two glued boxes sharing a face, welded to
@@ -128,7 +128,7 @@ fn box_cutter_through_wall_watertight_and_volume_exact() {
     // Window 1.0 × 1.0, penetrating the full 0.3 thickness plus slack.
     let cutter = framed_box_mesh([0.3, 0.0, 0.2], axis_frame(), [0.5, 0.4, 0.5]);
     let (mn, mx) = cutter.bounds();
-    let ctx = ctx_of(vec![OpeningType::NonRectangular(
+    let ctx = ctx_of(vec![CutterKind::NonRectangular(
         cutter,
         Point3::new(mn.x as f64, mn.y as f64, mn.z as f64),
         Point3::new(mx.x as f64, mx.y as f64, mx.z as f64),
@@ -166,7 +166,7 @@ fn rotated_prism_cutter_fires_and_reconciles() {
         [0.5, 0.4, 0.5],
     );
     let (mn, mx) = cutter.bounds();
-    let ctx = ctx_of(vec![OpeningType::NonRectangular(
+    let ctx = ctx_of(vec![CutterKind::NonRectangular(
         cutter,
         Point3::new(mn.x as f64, mn.y as f64, mn.z as f64),
         Point3::new(mx.x as f64, mx.y as f64, mx.z as f64),
@@ -175,6 +175,11 @@ fn rotated_prism_cutter_fires_and_reconciles() {
     let (cut, residual) = router
         .try_prism_cut(&host, &ctx)
         .expect("rotated box cutter must take the prism path");
+    assert_eq!(
+        dedup_cut_vertices(&cut, &host).positions,
+        cut.positions,
+        "the returned prism mesh must already contain the weld that the caller emits"
+    );
     assert!(residual.is_none());
     assert!(watertight(&cut), "rotated prism cut must be watertight");
     let removed = mesh_volume(&host) - mesh_volume(&cut);
@@ -190,7 +195,7 @@ fn non_convex_cutter_falls_back() {
     let host = wall([0.0, 0.0, 0.0], axis_frame());
     let cutter = l_shaped_cutter();
     let (mn, mx) = cutter.bounds();
-    let ctx = ctx_of(vec![OpeningType::NonRectangular(
+    let ctx = ctx_of(vec![CutterKind::NonRectangular(
         cutter,
         Point3::new(mn.x as f64, mn.y as f64, mn.z as f64),
         Point3::new(mx.x as f64, mx.y as f64, mx.z as f64),
@@ -210,7 +215,7 @@ fn open_shell_cutter_falls_back() {
     let mut cutter = framed_box_mesh([0.3, 0.0, 0.2], axis_frame(), [0.5, 0.4, 0.5]);
     cutter.indices.truncate(cutter.indices.len() - 6);
     let (mn, mx) = cutter.bounds();
-    let ctx = ctx_of(vec![OpeningType::NonRectangular(
+    let ctx = ctx_of(vec![CutterKind::NonRectangular(
         cutter,
         Point3::new(mn.x as f64, mn.y as f64, mn.z as f64),
         Point3::new(mx.x as f64, mx.y as f64, mx.z as f64),
@@ -231,7 +236,7 @@ fn multi_window_host_watertight_and_volume_exact() {
         let cx = -1.3 + i as f64 * 1.2;
         let cutter = framed_box_mesh([cx, 0.0, 0.1], axis_frame(), [0.35, 0.4, 0.45]);
         let (mn, mx) = cutter.bounds();
-        openings.push(OpeningType::NonRectangular(
+        openings.push(CutterKind::NonRectangular(
             cutter,
             Point3::new(mn.x as f64, mn.y as f64, mn.z as f64),
             Point3::new(mx.x as f64, mx.y as f64, mx.z as f64),
@@ -267,13 +272,13 @@ fn mixed_eligible_and_ineligible_returns_residual() {
     let l = l_shaped_cutter();
     let (lmn, lmx) = l.bounds();
     let ctx = ctx_of(vec![
-        OpeningType::NonRectangular(
+        CutterKind::NonRectangular(
             window,
             Point3::new(wmn.x as f64, wmn.y as f64, wmn.z as f64),
             Point3::new(wmx.x as f64, wmx.y as f64, wmx.z as f64),
             Some(Vector3::new(0.0, 1.0, 0.0)),
         ),
-        OpeningType::NonRectangular(
+        CutterKind::NonRectangular(
             l,
             Point3::new(lmn.x as f64, lmn.y as f64, lmn.z as f64),
             Point3::new(lmx.x as f64, lmx.y as f64, lmx.z as f64),
@@ -303,7 +308,7 @@ fn blind_recess_keeps_authored_depth() {
     // (front face at y = -0.15; recess bottom at y = 0.0, strictly interior).
     let cutter = framed_box_mesh([0.0, -0.1, 0.0], axis_frame(), [0.4, 0.1, 0.4]);
     let (mn, mx) = cutter.bounds();
-    let ctx = ctx_of(vec![OpeningType::NonRectangular(
+    let ctx = ctx_of(vec![CutterKind::NonRectangular(
         cutter,
         Point3::new(mn.x as f64, mn.y as f64, mn.z as f64),
         Point3::new(mx.x as f64, mx.y as f64, mx.z as f64),
@@ -341,7 +346,7 @@ fn deterministic_output() {
     );
     let (mn, mx) = cutter.bounds();
     let mk = |cutter: Mesh| {
-        ctx_of(vec![OpeningType::NonRectangular(
+        ctx_of(vec![CutterKind::NonRectangular(
             cutter,
             Point3::new(mn.x as f64, mn.y as f64, mn.z as f64),
             Point3::new(mx.x as f64, mx.y as f64, mx.z as f64),
@@ -363,7 +368,7 @@ fn engulfing_cutter_defers_to_exact_semantics() {
     // engulf/redundant-void semantics (#964), so the prism path must defer.
     let cutter = framed_box_mesh([0.0, 0.0, 0.0], axis_frame(), [3.0, 1.0, 2.0]);
     let (mn, mx) = cutter.bounds();
-    let ctx = ctx_of(vec![OpeningType::NonRectangular(
+    let ctx = ctx_of(vec![CutterKind::NonRectangular(
         cutter,
         Point3::new(mn.x as f64, mn.y as f64, mn.z as f64),
         Point3::new(mx.x as f64, mx.y as f64, mx.z as f64),
@@ -482,7 +487,7 @@ fn rebated_stepped_cutter_fires_watertight_and_volume_exact() {
         0.25,
     );
     let (mn, mx) = cutter.bounds();
-    let ctx = ctx_of(vec![OpeningType::NonRectangular(
+    let ctx = ctx_of(vec![CutterKind::NonRectangular(
         cutter,
         Point3::new(mn.x as f64, mn.y as f64, mn.z as f64),
         Point3::new(mx.x as f64, mx.y as f64, mx.z as f64),
@@ -660,6 +665,94 @@ fn hairline_true_collinear_cover_still_accepted() {
     assert!(
         closed_or_hairline(&m),
         "a near-collinear fully-covered hairline must remain accepted"
+    );
+}
+
+/// The census's undirected ±1 edge balance (#3435), reimplemented here on
+/// purpose rather than imported: the real one, `edge_stats` in
+/// `rust/geometry/tests/triangulation_invariance.rs`, lives in the
+/// integration-test binary of this crate, which a `src` unit-test module
+/// cannot depend on (it is a separate compilation target, built after the
+/// library). This mirrors only the `open` field of that struct — count an
+/// undirected edge (grid-quantized like `closed_or_hairline`'s own key, so
+/// the two predicates read the identical triangle soup) as open when its
+/// forward and reverse use counts differ — and is intentionally a second copy
+/// of the same one-line rule `edge_stats` already states; that duplication is
+/// exactly the shape #3435 is about, not an accident of this test.
+fn undirected_open_edge_count(mesh: &Mesh) -> usize {
+    type K = (i64, i64, i64);
+    let key = |i: u32| -> K {
+        let b = i as usize * 3;
+        let q = |v: f32| (v as f64 / 1.0e-4).round() as i64;
+        (
+            q(mesh.positions[b]),
+            q(mesh.positions[b + 1]),
+            q(mesh.positions[b + 2]),
+        )
+    };
+    let mut uses: std::collections::HashMap<(K, K), (u32, u32)> = std::collections::HashMap::new();
+    for tri in mesh.indices.chunks_exact(3) {
+        let (a, b, c) = (key(tri[0]), key(tri[1]), key(tri[2]));
+        if a == b || b == c || c == a {
+            continue;
+        }
+        for (x, y) in [(a, b), (b, c), (c, a)] {
+            let e = uses.entry((x.min(y), x.max(y))).or_insert((0, 0));
+            if x < y {
+                e.0 += 1;
+            } else {
+                e.1 += 1;
+            }
+        }
+    }
+    uses.values().filter(|&&(f, r)| f != r).count()
+}
+
+/// #3435: `closed_or_hairline` and the census's undirected ±1 balance are two
+/// different definitions of "closed", and this mesh is the minimal witness
+/// that they DISAGREE.
+///
+/// Three triangles, sharing points `A=(0,0,0)`, `B=(10,0,0)`, `M=(5,0,0)`
+/// (collinear) and an off-line apex `C`:
+///   - `(A, B, C)` — one face using the FULL boundary edge `A→B`.
+///   - `(M, A, C)` and `(B, M, C)` — an adjacent face using the SAME boundary,
+///     but split at `M` and wound the other way, i.e. `M→A` then `B→M`.
+///
+/// Every edge touching `C` cancels exactly (each is walked once each
+/// direction across the three triangles), so the only uncancelled directed
+/// edges are `A→B`, `M→A`, `B→M` — a T-junction: one face's full-length edge,
+/// covered by the adjacent face's two sub-edges split at an interior point.
+/// This is the exact signature #3435 measured on host `#628727` in
+/// `ISSUE_068_ARK_NUS_skolebygg.ifc` (a 336 mm pier with two openings): a
+/// full-height edge collinearly covered by two sub-edges split off-centre,
+/// read `open=3` by the census while `try_prism_cut`'s own gate passed it.
+///
+/// `closed_or_hairline` ACCEPTS this by design (own module doc: uncancelled
+/// directed edges that net to zero everywhere along their shared line). The
+/// undirected ±1 balance calls all three of `{A,B}`, `{M,A}`, `{B,M}` open,
+/// because each pair is used only once total and has no reverse partner to
+/// balance against — it has no collinear-coverage step, so it cannot see that
+/// the "reverse" is split across two edges rather than missing.
+///
+/// This test does not say which reading is right — #3435 tracks that
+/// decision — it pins that they currently disagree, so a change to either
+/// definition has to touch this assertion on purpose.
+#[test]
+fn t_junction_hairline_accepted_but_undirected_balance_reports_open() {
+    let a = [0.0, 0.0, 0.0];
+    let b = [10.0, 0.0, 0.0];
+    let m = [5.0, 0.0, 0.0];
+    let c = [0.0, 1.0, 1.0];
+    let mesh = mesh_from_tris(&[[a, b, c], [m, a, c], [b, m, c]]);
+
+    assert!(
+        closed_or_hairline(&mesh),
+        "closed_or_hairline must accept the T-junction (its own hairline contract)"
+    );
+    assert_ne!(
+        undirected_open_edge_count(&mesh),
+        0,
+        "the undirected ±1 balance must call the same mesh open (no collinear-coverage step)"
     );
 }
 
@@ -855,15 +948,21 @@ fn basis_from_depth_matches_opening_frame_seed_convention() {
 // pipeline, so they pin the ULP-scale tolerance itself rather than whatever
 // incidental scatter a corpus fixture happens to produce.
 
-/// Bare mesh with only `positions` populated — `dedup_cut_vertices` never
-/// reads `indices`/`normals`, so a topologically-meaningless point soup is a
-/// faithful, minimal input.
+/// Bare mesh used for host-only magnitude/pinning inputs. Cut fixtures must
+/// carry indices because `dedup_cut_vertices` intentionally ignores orphaned
+/// cut vertices after hygiene removes their triangles (#4754).
 fn points_mesh(points: &[[f32; 3]]) -> Mesh {
     let mut m = Mesh::new();
     for p in points {
         m.positions.extend_from_slice(p);
     }
     m
+}
+
+fn referenced_triangle(points: [[f32; 3]; 3]) -> Mesh {
+    let mut mesh = points_mesh(&points);
+    mesh.indices.extend_from_slice(&[0, 1, 2]);
+    mesh
 }
 
 /// `dental_clinic #217` reconstructed directly: the analytic cut emitted the
@@ -875,7 +974,11 @@ fn points_mesh(points: &[[f32; 3]]) -> Mesh {
 #[test]
 fn dental_clinic_217_seam_vertices_2_pow_neg19_apart_merge() {
     let host = points_mesh(&[[-20.29, 5.0, 0.0]]); // sets the coordinate-magnitude scale only
-    let cut = points_mesh(&[[-20.289_999_008, 0.0, 0.0], [-20.290_000_916, 0.0, 0.0]]);
+    let cut = referenced_triangle([
+        [-20.289_999_008, 0.0, 0.0],
+        [-20.290_000_916, 0.0, 0.0],
+        [-20.29, 1.0, 0.0],
+    ]);
     let sep = (cut.positions[0] - cut.positions[3]).abs() as f64;
     assert!(
         (sep - 2f64.powi(-19)).abs() < 1e-12,
@@ -900,7 +1003,11 @@ fn vertices_just_past_4ulp_tolerance_do_not_merge() {
     let host = points_mesh(&[[mag, 5.0, 0.0]]); // sets the same magnitude scale, far enough not to pin
     let tol = (mag as f64) * (4.0 / 8_388_608.0); // mirrors dedup_cut_vertices' own formula
     let sep = tol * 1.2; // comfortably past the boundary, not just past float noise
-    let cut = points_mesh(&[[mag, 0.0, 0.0], [(mag as f64 + sep) as f32, 0.0, 0.0]]);
+    let cut = referenced_triangle([
+        [mag, 0.0, 0.0],
+        [(mag as f64 + sep) as f32, 0.0, 0.0],
+        [mag, 1.0, 0.0],
+    ]);
     let actual_sep = (cut.positions[3] - cut.positions[0]).abs() as f64;
     assert!(
         actual_sep > tol,
@@ -915,7 +1022,27 @@ fn vertices_just_past_4ulp_tolerance_do_not_merge() {
     );
 }
 
-// --- `directed_closed` (closure_checks.rs) ---
+/// A discarded cut vertex can be arbitrarily far from the surviving mesh.
+/// It must not enlarge the magnitude-derived tolerance enough to collapse
+/// distinct referenced geometry (#4754).
+#[test]
+fn unreferenced_far_cut_vertex_cannot_inflate_weld_tolerance_4754() {
+    let mut cut = points_mesh(&[
+        [100_000_000.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.001, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+    ]);
+    cut.indices.extend_from_slice(&[1, 2, 3]);
+
+    let out = dedup_cut_vertices(&cut, &Mesh::new());
+    assert_ne!(
+        out.positions[3], out.positions[6],
+        "an unreferenced distant vertex must not inflate tolerance and merge surviving vertices"
+    );
+}
+
+// --- `directed_closed` (`mesh_check`) ---
 //
 // Unlike `dedup_cut_vertices`, this predicate has no hand-tuned numeric
 // boundary of its own — it is a fixed 0.1mm-grid edge-cancellation audit with
@@ -950,4 +1077,297 @@ fn tetrahedron_missing_face_fails_directed_closed() {
     let mut m = tetrahedron_mesh();
     m.indices.truncate(m.indices.len() - 3); // drop the last triangle
     assert!(!directed_closed(&m));
+}
+
+// #4627: exercise the complete analytic route and its final closure audit
+// before residual exact openings are applied.
+fn box_opening(mesh: Mesh) -> CutterKind {
+    let (lo, hi) = mesh.bounds();
+    CutterKind::NonRectangular(
+        mesh,
+        lo.cast(),
+        hi.cast(),
+        Some(Vector3::new(0.0, 1.0, 0.0)),
+    )
+}
+
+#[test]
+fn issue_4627_closed_partial_cut_agrees_at_origin_and_ten_km() {
+    use crate::world_frame_fixture::{placed_box_mesh, WORLD_FRAME_CASES};
+    let router = GeometryRouter::new();
+    for case in WORLD_FRAME_CASES {
+        let host = placed_box_mesh(case, [0.0; 3], [1.0; 3]);
+        let cutter = placed_box_mesh(case, [-0.01; 3], [0.75, 1.01, 1.01]);
+        let ctx = ctx_of(vec![box_opening(cutter)]);
+        let (valid, residual) = router
+            .try_prism_cut(&host, &ctx)
+            .expect("partial closed box cut");
+        assert!(residual.is_none());
+        assert!((mesh_volume(&valid) - 0.25).abs() < 1e-6);
+        assert!(watertight(&valid));
+    }
+}
+
+#[test]
+fn issue_4627_small_host_with_ten_km_cutter_remains_closed() {
+    let router = GeometryRouter::new();
+    let host = framed_box_mesh([0.5; 3], axis_frame(), [0.5; 3]);
+    for depth in [1.2, 10_000.0] {
+        let cutter = framed_box_mesh([0.5; 3], axis_frame(), [0.125, depth * 0.5, 0.125]);
+        let ctx = ctx_of(vec![box_opening(cutter)]);
+        let (cut, residual) = router
+            .try_prism_cut(&host, &ctx)
+            .expect("closed through opening");
+        assert!(residual.is_none());
+        assert!(watertight(&cut));
+        assert!((mesh_volume(&cut) - 0.9375).abs() < 1e-6);
+    }
+}
+
+/// #7633: cleaning newly emitted cut fragments must not delete an untouched
+/// authored face. These closed tetrahedra have a 12 µm-high bottom triangle:
+/// ordinary cleanup drops it, although it bounds real material. Repeating the
+/// component exceeds the bounded hairline matcher, as in the #4754 finalizer
+/// control, so partial cleanup cannot masquerade as a closed analytic result.
+#[test]
+fn issue_7633_prism_cut_preserves_untouched_thin_authored_components() {
+    let router = GeometryRouter::new();
+    let mut host = wall([0.0; 3], axis_frame());
+    let mut components = Vec::new();
+    for component in 0..22 {
+        let x = 10.0 + component as f64 * 2.0;
+        let (a, b, c, d, apex) = (
+            [x, 0.000_049, 0.0],
+            [x + 1.0, 0.000_049, 0.0],
+            [x, 1.0, 0.0],
+            [x + 0.5, 0.000_061, 0.0],
+            [x, 0.0, 1.0],
+        );
+        let faces = [[a, b, d], [a, d, c], [d, b, c], [a, apex, b],
+            [a, c, apex], [b, apex, c]];
+        let tris: Vec<_> = faces.into_iter().map(|mut p| {
+            p.swap(1, 2); // Orient each separate solid outward.
+            let normal = normalize(cross(sub(p[1], p[0]), sub(p[2], p[0]))).unwrap();
+            PTri { p, n: [normal; 3] }
+        }).collect();
+        let source = mesh_from_ptris(&tris, &Mesh::new());
+        assert!(crate::exact_topology::strict_closed_mesh(&source));
+        let mut cleaned = source.clone();
+        cleaned.clean_degenerate();
+        assert!(!crate::exact_topology::strict_closed_mesh(&cleaned),
+            "premise: this authored thin face is essential to closure");
+        host.merge(&source);
+        components.push((x, mesh_volume(&source)));
+    }
+    let cutter = framed_box_mesh([0.3, 0.0, 0.2], axis_frame(), [0.5, 0.4, 0.5]);
+    let ctx = ctx_of(vec![box_opening(cutter)]);
+    let (cut, residual) = router.try_prism_cut(&host, &ctx)
+        .expect("a genuine window cut must preserve the separate authored solids");
+    assert!(residual.is_none());
+    assert!(crate::exact_topology::strict_closed_mesh(&cut),
+        "the cut and every untouched component must remain closed");
+    assert!((mesh_volume(&host) - mesh_volume(&cut) - 0.3).abs() < 1e-4,
+        "only the 1 m² window through the 0.3 m wall removes material");
+    let result = ptris_from_mesh(&cut).expect("valid analytic result");
+    for (x, expected_volume) in components {
+        let faces: Vec<_> = result.iter().filter(|t|
+            t.p.iter().all(|p| p[0] >= x && p[0] <= x + 1.0)
+        ).cloned().collect();
+        let component = mesh_from_ptris(&faces, &Mesh::new());
+        assert!(crate::exact_topology::strict_closed_mesh(&component),
+            "untouched component at x={x} lost its boundary");
+        assert!((mesh_volume(&component) - expected_volume).abs() < 1e-8,
+            "untouched component at x={x} changed enclosed material");
+    }
+}
+
+#[test]
+fn issue_4627_small_host_leak_defers_with_short_and_ten_km_cutters() {
+    let router = GeometryRouter::new();
+    let host = framed_box_mesh([0.5; 3], axis_frame(), [0.5; 3]);
+    let mut tris = ptris_from_mesh(&host).unwrap();
+    let tri = tris.remove(0);
+    let [a, b, c] = tri.p;
+    let ab = std::array::from_fn(|k| a[k] + 0.001 * (b[k] - a[k]));
+    let ac = std::array::from_fn(|k| a[k] + 0.001 * (c[k] - a[k]));
+    tris.push(PTri {
+        p: [ab, b, c],
+        n: tri.n,
+    });
+    tris.push(PTri {
+        p: [ab, c, ac],
+        n: tri.n,
+    });
+    let leaking = mesh_from_ptris(&tris, &host);
+    for depth in [1.2, 10_000.0] {
+        let cutter = framed_box_mesh([0.5; 3], axis_frame(), [0.125, depth * 0.5, 0.125]);
+        assert!(
+            router
+                .try_prism_cut(&leaking, &ctx_of(vec![box_opening(cutter)]))
+                .is_none(),
+            "a 5e-7 m² host leak must defer before any open surface volume is read"
+        );
+    }
+}
+
+// #4627: these surface invariants exercise the exact predicates used by
+// cut_prism, independently of the fixture regressions through try_prism_cut.
+#[test]
+fn issue_4627_partition_keeps_relative_clipping_allowance_at_any_origin() {
+    for offset in [[0.0; 3], [10_000.0, -20_000.0, 30_000.0]] {
+        let mut host = ptris_from_mesh(&framed_box_mesh([0.5; 3], axis_frame(), [0.5; 3])).unwrap();
+        for t in &mut host {
+            for p in &mut t.p {
+                *p = add(*p, offset);
+            }
+        }
+        let mut fragments = host.clone();
+        let center = add([0.5; 3], offset);
+        for t in &mut fragments {
+            for p in &mut t.p {
+                *p = add(center, scale(sub(*p, center), 1.0 + 1.0e-8));
+            }
+        }
+        let bounds = host.iter().map(PTri::aabb).collect::<Vec<_>>();
+        assert!(
+            partition_consistent(&host, &fragments, &[], &bounds),
+            "closed clipping error below one part per million must remain admissible"
+        );
+    }
+}
+
+#[test]
+fn issue_4627_partition_detects_gap_flux_hidden_at_center_and_diagonal() {
+    for offset in [[0.0; 3], [10_000.0, -20_000.0, 30_000.0]] {
+        let mut host = ptris_from_mesh(&framed_box_mesh([0.5; 3], axis_frame(), [0.5; 3])).unwrap();
+        let mut fragments = host.clone();
+        // Equal patches on the centre X/Y planes have opposite area vectors.
+        // Their residual vanishes at the centre and along a diagonal probe,
+        // but varies across the host's AABB: they cannot be a partition.
+        for p in [
+            [[0.5, 0.0, 0.0], [0.5, 0.01, 0.0], [0.5, 0.0, 0.002]],
+            [[0.0, 0.5, 0.0], [0.01, 0.5, 0.0], [0.0, 0.5, 0.002]],
+        ] {
+            fragments.push(PTri {
+                p,
+                n: [[0.0, 0.0, 1.0]; 3],
+            });
+        }
+        for t in host.iter_mut().chain(&mut fragments) {
+            for p in &mut t.p {
+                *p = add(*p, offset);
+            }
+        }
+        let bounds = host.iter().map(PTri::aabb).collect::<Vec<_>>();
+        assert!(!partition_consistent(&host, &fragments, &[], &bounds));
+    }
+}
+
+#[test]
+fn issue_4627_region_envelope_distinguishes_thin_cut_from_tiny_contact() {
+    for (half, measurable) in [([0.5, 0.5, 1.0e-7], true), ([0.005, 0.005, 1.0e-7], false)] {
+        let faces = ptris_from_mesh(&framed_box_mesh([0.0; 3], axis_frame(), half)).unwrap();
+        assert_eq!(
+            has_measurable_region(&faces, &[]),
+            measurable,
+            "equal thickness does not imply equal possible removal"
+        );
+    }
+    let planar = [PTri {
+        p: [[0.0; 3], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0]],
+        n: [[0.0, 0.0, 1.0]; 3],
+    }];
+    assert!(
+        !has_measurable_region(&planar, &[]),
+        "an oblique sheet encloses nothing"
+    );
+}
+
+#[test]
+fn issue_4627_partition_absolute_floor_uses_full_host_extent() {
+    let host = ptris_from_mesh(&framed_box_mesh(
+        [5.0, 0.5, 5.0e-6],
+        axis_frame(),
+        [5.0, 0.5, 5.0e-6],
+    ))
+    .unwrap();
+    let bounds = host.iter().map(PTri::aabb).collect::<Vec<_>>();
+    // The 10 m host has a 2.331e-9 m³ absolute allowance; its tiny volume
+    // makes the relative term smaller. Probe ranges straddle that allowance.
+    for (range, accepted) in [(1.8e-9, true), (3.0e-9, false)] {
+        let mut fragments = host.clone();
+        fragments.push(PTri {
+            p: [
+                [5.0, 0.0, 0.0],
+                [5.0, 1.0, 0.0],
+                [5.0, 0.0, range * 6.0 / 10.0],
+            ],
+            n: [[1.0, 0.0, 0.0]; 3],
+        });
+        assert_eq!(
+            partition_consistent(&host, &fragments, &[], &bounds),
+            accepted
+        );
+    }
+}
+
+#[test]
+fn issue_4627_production_rejects_removal_larger_than_committed_cutter() {
+    use crate::world_frame_fixture::{placed_box_mesh, WORLD_FRAME_CASES};
+    let router = GeometryRouter::new();
+    for case in WORLD_FRAME_CASES {
+        let host = placed_box_mesh(case, [0.0; 3], [1.0; 3]);
+        let mut triangles = ptris_from_mesh(&host).unwrap();
+        // A nested outward shell passes the directed edge audit but double-counts
+        // material. Keep a disjoint component outside the cutter so this reaches
+        // the final subtraction audit rather than the engulfing-cutter preflight.
+        let insets = [0.05, 0.1, 0.15];
+        for inset in insets {
+            triangles.extend(
+                ptris_from_mesh(&placed_box_mesh(case, [inset; 3], [1.0 - inset; 3])).unwrap(),
+            );
+        }
+        triangles.extend(
+            ptris_from_mesh(&placed_box_mesh(case, [2.0, 0.25, 0.25], [2.1, 0.75, 0.75])).unwrap(),
+        );
+        let invalid_host = mesh_from_ptris(&triangles, &host);
+        assert!(directed_closed(&invalid_host));
+        let opening = box_opening(placed_box_mesh(case, [-0.01; 3], [1.01; 3]));
+        let mut prism = prepare_prism(&opening, &invalid_host).expect("fixed box prism");
+        let bounds = triangles.iter().map(PTri::aabb).collect::<Vec<_>>();
+        extend_prism_caps(&mut prism, &triangles, &bounds);
+        extend_profile_edges(&mut prism, &triangles, &bounds);
+        let removed = 1.0 + insets.iter().map(|d| (1.0 - 2.0 * d).powi(3)).sum::<f64>();
+        // The explicit shell volumes exceed the independently extended cutter
+        // by >0.68 m³. 0.001 m³ already exceeds the two surfaces' grid noise.
+        assert!(removed > prism.volume() + 0.001);
+        assert!(
+            router
+                .try_prism_cut(&invalid_host, &ctx_of(vec![opening]))
+                .is_none(),
+            "{case:?}: an audited surface cannot remove more than the committed cutter"
+        );
+    }
+}
+
+#[test]
+fn issue_4627_final_volume_bounds_reject_growth_and_host_over_removal() {
+    use crate::world_frame_fixture::{placed_box_mesh, WORLD_FRAME_CASES};
+    for case in WORLD_FRAME_CASES {
+        let host = placed_box_mesh(case, [0.0; 3], [1.0; 3]);
+        let valid = placed_box_mesh(case, [0.0; 3], [0.75, 1.0, 1.0]);
+        assert!(result_volume_within_bounds(&host, &valid, 0.25));
+        let grown = placed_box_mesh(case, [0.0; 3], [1.125, 1.0, 1.0]);
+        assert!(directed_closed(&grown));
+        assert!(!result_volume_within_bounds(&host, &grown, 0.25));
+        let mut inverted = placed_box_mesh(case, [0.0; 3], [0.5; 3]);
+        for tri in inverted.indices.chunks_exact_mut(3) {
+            tri.swap(1, 2);
+        }
+        assert!(directed_closed(&inverted));
+        assert!(
+            !result_volume_within_bounds(&host, &inverted, 10_000.0),
+            "a long cutter must not permit removal beyond the entire host"
+        );
+    }
 }

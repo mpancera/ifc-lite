@@ -99,13 +99,25 @@ fn voided_wall() -> Mesh {
 // fallback recovers most, and the volume-safe batched-difference accept keeps the
 // exact (cleaner) batched cut instead of the sequential re-jitter. Together with
 // the off-plane fix this brings the wall from ~2072 open edges (badly torn) to
-// ~108 with the removed volume unchanged. Guard against regression past that.
+// ~108 with the removed volume unchanged, and the site-frame cut (#10435) to 18.
+// Guard against regression past that.
+// #3440/#3871: the accept gates (`csg_manifold_gate`, `csg_topology_gate`)
+// used to reject this wall's exact cut and fall back to a worse result, so
+// the gated builds carried measured pins instead of the bars (224 and 702
+// unpaired edges at their last reading). Cut in the frame of its site
+// placement, the kernel results pass both checks at the accept paths (no
+// torn result, no over-used edge), so no fallback runs: 18 unpaired edges,
+// which arise after those paths as in the default build, and IfcOpenShell
+// 0.8.2's volume (31.421 m3) in every build, so the bars below apply to
+// all of them.
+
 #[test]
 fn v5c_dense_reveal_wall_not_torn() {
     let voided = voided_wall();
     let open = open_edges(&voided);
     let vol = mesh_volume(&voided);
     println!("[V5C] tris={} vol={vol:.3} openEdges={open}", voided.triangle_count());
-    assert!(open < 160, "V5C re-fragmented: {open} unpaired edges (was ~108)");
-    assert!(vol > 30.0, "V5C under-cut: volume {vol:.3} m³ collapsed (was ~33.4)");
+    assert!(open <= 18, "V5C re-fragmented: {open} unpaired edges (was 18)");
+    // IfcOpenShell 0.8.2 reads 31.421 m3 for this cut wall (41.373 uncut).
+    assert!((vol - 31.421).abs() < 31.421 * 5.0e-4, "V5C volume {vol:.3} m³, IfcOpenShell 31.421");
 }

@@ -107,21 +107,7 @@ interface BimDocument {
   confidentiality?: string;
 }
 
-/**
- * The related OBJECTS of an entity's structural relationships, never the
- * `IfcRel*` entities: `voids` holds the `IfcOpeningElement`s that void this
- * element, `fills` the `IfcOpeningElement` it fills, `groups` the `IfcZone` /
- * `IfcGroup` / `IfcSystem` it belongs to, `connections` the elements it is
- * joined to. The names are not EXPRESS names on purpose — IFC's own names
- * for these traversals are inverse attributes holding the `IfcRel*` entity,
- * which is not what these arrays contain (#2422).
- */
-interface BimRelationships {
-  voids: Array<{ id: number; name?: string; type: string }>;
-  fills: Array<{ id: number; name?: string; type: string }>;
-  groups: Array<{ id: number; name?: string }>;
-  connections: Array<{ id: number; name?: string; type: string }>;
-}
+type BimRelationships = BimSdk.EntityRelationshipsData;
 
 interface BimModelInfo {
   id: string;
@@ -140,7 +126,618 @@ interface BimFileAttachment {
   hasTextContent: boolean;
 }
 
-// ── Clash engine types ──────────────────────────────────────────────────
+// ── Script result surface types ───────────────────────────────────────
+//
+// Extracted by the generator from the sources below — these declarations are
+// the engine's own text, not a copy maintained in the generator:
+//   packages/sandbox/src/bridge-ui.ts
+//   packages/a2ui/src/builders.ts
+//   packages/a2ui/src/query.ts
+//   packages/a2ui/src/policy.ts
+//   packages/sdk/src/types.ts
+
+declare namespace BimUi {
+  export type ScriptUiSurface = Omit<SurfaceSpec, 'surfaceId' | 'sections'> & { sections: ScriptUiSection[] };
+
+  export interface SurfaceSpec {
+    surfaceId: string;
+    title?: string;
+    sections: SectionSpec[];
+    /** Wrap in a Card (default true). */
+    card?: boolean;
+  }
+
+  export type ScriptUiSection =
+    | Exclude<SectionSpec, { kind: 'table' | 'chart' | 'legend' | 'entity' | 'list' | 'actions' }>
+    | (Omit<SectionOf<'table'>, 'rows'> & { rows?: ScriptUiRow[] })
+    | (Omit<SectionOf<'chart'>, 'data'> & {
+        data?: (Omit<NonNullable<SectionOf<'chart'>['data']>[number], 'refs'> & { refs?: ScriptUiRef[] })[];
+      })
+    | (Omit<SectionOf<'legend'>, 'data'> & {
+        data?: (Omit<NonNullable<SectionOf<'legend'>['data']>[number], 'refs'> & { refs?: ScriptUiRef[] })[];
+      })
+    | (Omit<SectionOf<'entity'>, 'entity'> & { entity: ScriptUiRef })
+    | (Omit<SectionOf<'list'>, 'refs'> & { refs?: ScriptUiRef[] })
+    | (Omit<SectionOf<'actions'>, 'refs'> & { refs?: ScriptUiRef[] });
+
+  export type SectionSpec =
+    | { kind: 'text'; text: string; variant?: 'body' | 'caption' }
+    | { kind: 'callout'; text: string; tone?: Tone; title?: string }
+    | { kind: 'stats'; items: StatSpec[] }
+    | { kind: 'table'; columns: ColumnSpec[]; rows?: RowSpec[]; query?: IfcQuerySpec; title?: string; groupBy?: string; sort?: { path: string; dir?: 'asc' | 'desc' }; maxRows?: number }
+    | { kind: 'list'; refs?: string[]; query?: IfcQuerySpec; title?: string; label?: string }
+    | { kind: 'chart'; groupBy: string; data?: ChartDatum[]; query?: IfcQuerySpec; chart?: 'bar' | 'pie'; aggregate?: 'count' | 'sum'; path?: string; title?: string }
+    | { kind: 'legend'; by: string; data?: Array<{ label: string; color: string; refs?: string[] }>; query?: IfcQuerySpec; title?: string; apply?: 'manual' | 'onShow' }
+    | { kind: 'actions'; actions: ViewerAction[]; refs?: string[]; query?: IfcQuerySpec; color?: string; followUps?: { label: string; prompt: string }[] }
+    | { kind: 'entity'; entity: string; sections?: string[] };
+
+  type SectionOf<Kind extends SectionSpec['kind']> = Extract<SectionSpec, { kind: Kind }>;
+
+  export type ScriptUiRow = (Record<string, unknown> & { ref?: ScriptUiRef }) | { ref: ScriptUiRef };
+
+  export type ScriptUiRef = string | EntityRef;
+
+  export type Tone = 'neutral' | 'info' | 'success' | 'warn' | 'error';
+
+  export interface StatSpec {
+    label: string;
+    value?: number;
+    query?: IfcQuerySpec;
+    aggregate?: 'count' | 'sum' | 'avg' | 'min' | 'max';
+    path?: string;
+    unit?: string;
+    tone?: Tone;
+  }
+
+  export interface ColumnSpec {
+    path: string;
+    label?: string;
+  }
+
+  /** A script row: `ref` ("modelId:expressId") plus one value per column path. */
+  export type RowSpec = { ref?: string } & Record<string, unknown>;
+
+  export interface IfcQuerySpec {
+    /** IFC class names, case-insensitive (`IfcDoor`, `IFCWALL`). Empty or absent means every product. */
+    types?: string[];
+    where?: QueryCondition[];
+    /** Restrict to one storey, matched against the storey Name. */
+    storey?: string;
+    /** Restrict to one loaded model. */
+    modelId?: string;
+    limit?: number;
+  }
+
+  export interface ChartDatum {
+    label: string;
+    value: number;
+    refs?: string[];
+  }
+
+  export type ViewerAction = (typeof VIEWER_ACTIONS)[number];
+
+  /** Reference to a specific entity within a federated model set */
+  export interface EntityRef {
+    modelId: string;
+    expressId: number;
+  }
+
+  export interface QueryCondition {
+    /** A field path, see {@link parseFieldPath}. */
+    path: string;
+    op: QueryOperator;
+    value?: string | number | boolean;
+  }
+
+  const VIEWER_ACTIONS: readonly ['select', 'isolate', 'hide', 'show', 'colorize', 'flyTo', 'resetView', 'exportCsv'];
+
+  export type QueryOperator = (typeof QUERY_OPERATORS)[number];
+
+  const QUERY_OPERATORS: readonly ['eq', 'neq', 'contains', 'gt', 'gte', 'lt', 'lte', 'exists', 'missing'];
+}
+
+// ── Generic group lifecycle types ─────────────────────────────────────
+//
+// Extracted by the generator from the sources below — these declarations are
+// the engine's own text, not a copy maintained in the generator:
+//   packages/sdk/src/store-group-types.ts
+//   packages/sdk/src/types.ts
+//   packages/create/src/in-store/group.ts
+//   packages/create/src/in-store/group-graph.ts
+
+declare namespace BimGroup {
+  /** A current Root identity belonging to one explicit loaded source. */
+  export type GroupStoreIdentity = EntityRef & GroupRootIdentity;
+
+  export type GroupStoreSnapshot = GroupSnapshot & { modelId: string };
+
+  export type GroupStoreCreateParams = Omit<GroupInStoreParams, 'RelatedObjects'> & { RelatedObjects: readonly GroupStoreIdentity[] };
+
+  export type GroupStorePatch = Omit<GroupInStorePatch, 'RelatedObjects'> & { RelatedObjects: readonly GroupStoreIdentity[] };
+
+  /** Reference to a specific entity within a federated model set */
+  export interface EntityRef {
+    modelId: string;
+    expressId: number;
+  }
+
+  export interface GroupRootIdentity { expressId: number; GlobalId: string }
+
+  export interface GroupSnapshot extends GroupRootIdentity {
+    Name: string | null;
+    Description: string | null;
+    ObjectType: string | null;
+    memberships: GroupMembershipSnapshot[];
+  }
+
+  export interface GroupInStoreParams {
+    Name: string;
+    Description?: string | null;
+    ObjectType?: string | null;
+    GlobalId?: string;
+    RelatedObjects: readonly GroupRootIdentity[];
+  }
+
+  export interface GroupInStorePatch {
+    Name?: string | null;
+    Description?: string | null;
+    ObjectType?: string | null;
+    /** Entire intended membership, never an implicit append or subtraction. */
+    RelatedObjects: readonly GroupRootIdentity[];
+  }
+
+  export interface GroupMembershipSnapshot {
+    relationship: GroupRootIdentity;
+    RelatedObjects: GroupRootIdentity[];
+  }
+}
+
+// ── Modelling operation types ─────────────────────────────────────────
+//
+// Extracted by the generator from the sources below — these declarations are
+// the engine's own text, not a copy maintained in the generator:
+//   packages/create/src/in-store/wall-join.ts
+//   packages/create/src/in-store/wall-join-apply.ts
+//   packages/create/src/in-store/column.ts
+//   packages/create/src/in-store/beam.ts
+//   packages/create/src/in-store/align-boxes.ts
+//   packages/create/src/in-store/element-mirror.ts
+//   packages/create/src/in-store/classification.ts
+//   packages/create/src/in-store/member.ts
+//   packages/create/src/in-store/profile.ts
+//   packages/create/src/in-store/storey/storey-model.ts
+//   packages/create/src/in-store/storey/storey-add.ts
+//   packages/create/src/in-store/storey/storey-level-plan.ts
+//   packages/create/src/in-store/storey/storey-placement.ts
+//   packages/create/src/in-store/storey/storey-validation.ts
+//   packages/create/src/in-store/storey/storey-dependents.ts
+//   packages/create/src/in-store/storey/storey-delete.ts
+//   packages/create/src/in-store/storey/storey-suggest.ts
+//   packages/create/src/in-store/storey/storey-delete-bindings.ts
+//   packages/create/src/in-store/host-geometry-frame.ts
+//   packages/create/src/in-store/storey/storey-attached.ts
+//   packages/create/src/in-store/railing-stair-refit.ts
+
+declare namespace BimCreate {
+  export type AlignMode = 'left' | 'centre' | 'right' | 'top' | 'middle' | 'bottom';
+
+  export interface WallJoinApplyOptions extends WallJoinOptions {
+    /** Layer priorities for the relationship, by wall. Default empty. */
+    priorities?: { a?: readonly number[]; b?: readonly number[] };
+    /** Name for the IfcRelConnectsPathElements. */
+    Name?: string;
+  }
+
+  export interface WallJoinOptions {
+    /**
+     * How far (metres, along each axis) an axis end may sit from the crossing and
+     * still count as joined there. Default twice the larger thickness, which
+     * covers a wall drawn to the other's face.
+     */
+    tolerance?: number;
+    /**
+     * Which wall runs through at an `L` corner, and is the relating wall of a
+     * `butt` join. Default: the thicker wall, `a` on a tie. Ignored for a `T`,
+     * where the path wall always runs through.
+     */
+    priority?: 'a' | 'b';
+  }
+
+  export interface MirrorElementsParams {
+    /** Two distinct storey-local IFC XY points in metres. */
+    axis: readonly [readonly [number, number], readonly [number, number]];
+    copy?: boolean;
+  }
+
+  export interface ClassificationInStoreParams {
+    /** Classification system's IfcClassification.Name. */
+    System: string;
+    Identification: string;
+    Name?: string;
+    Source?: string;
+    Edition?: string;
+    Location?: string;
+    objects?: readonly number[];
+  }
+
+  export interface ColumnInStoreParams {
+    /** Base centre of the column, in storey-local coordinates (metres). */
+    Position: [number, number, number];
+    /** Profile width along storey-local X (metres). */
+    Width: number;
+    /** Profile depth along storey-local Y (metres). */
+    Depth: number;
+    /** Extrusion height along +Z (metres). */
+    Height: number;
+    /**
+     * The placement's `RefDirection`: where the section's local X (Width)
+     * points, in storey-local coordinates. Must be horizontal; it is
+     * normalised. Default `[1, 0, 0]`. Written explicitly either way, with
+     * `Axis` `[0, 0, 1]`, so the column can be turned later (`rotateEntity`
+     * edits the RefDirection and refuses a placement without one).
+     */
+    RefDirection?: [number, number, number];
+    /** IfcRoot Name attribute (default `'Column'`). */
+    Name?: string;
+    Description?: string;
+    ObjectType?: string;
+    Tag?: string;
+    /** Explicit GlobalId (22-char IFC GUID); generated when omitted. */
+    GlobalId?: string;
+  }
+
+  /**
+   * A column with a parameterised cross-section (I, L, T, U, C, circle, hollow;
+   * see `ProfileSection`) in place of the `Width` x `Depth` rectangle, centred
+   * on `Position`; the profile's X runs along `RefDirection`.
+   */
+  export interface ProfiledColumnInStoreParams extends Omit<ColumnInStoreParams, 'Width' | 'Depth'> {
+    Profile: ProfileSection;
+  }
+
+  export interface BeamInStoreParams {
+    Start: [number, number, number];
+    End: [number, number, number];
+    /** Cross-section width along local X (metres). */
+    Width: number;
+    /** Cross-section height along local Y (metres). */
+    Height: number;
+    Name?: string;
+    Description?: string;
+    ObjectType?: string;
+    Tag?: string;
+    /** Explicit GlobalId (22-char IFC GUID); generated when omitted. */
+    GlobalId?: string;
+  }
+
+  /**
+   * A beam with a parameterised cross-section (I, L, T, U, C, circle, hollow;
+   * see `ProfileSection`) in place of the `Width` x `Height` rectangle. The
+   * profile is centred on the axis; its Y is the beam's local Y.
+   */
+  export interface ProfiledBeamInStoreParams extends Omit<BeamInStoreParams, 'Width' | 'Height'> {
+    Profile: ProfileSection;
+  }
+
+  export interface MemberInStoreParams {
+    Start: [number, number, number];
+    End: [number, number, number];
+    Width: number;
+    Height: number;
+    PredefinedType?:
+      | 'BRACE' | 'CHORD' | 'COLLAR' | 'MEMBER' | 'MULLION' | 'PLATE'
+      | 'POST' | 'PURLIN' | 'RAFTER' | 'STRINGER' | 'STRUT' | 'STUD'
+      | 'USERDEFINED' | 'NOTDEFINED';
+    Name?: string;
+    Description?: string;
+    ObjectType?: string;
+    Tag?: string;
+    /** Explicit GlobalId (22-char IFC GUID); generated when omitted. */
+    GlobalId?: string;
+  }
+
+  /** A member with a parameterised cross-section in place of the `Width` x `Height` rectangle. */
+  export interface ProfiledMemberInStoreParams extends Omit<MemberInStoreParams, 'Width' | 'Height'> {
+    Profile: ProfileSection;
+  }
+
+  export interface StoreySummary {
+    readonly expressId: number;
+    readonly GlobalId: string;
+    readonly Name: string;
+    /** Metres. */
+    readonly elevation: number;
+    /** Metres to the storey above, or null for the top storey. */
+    readonly height: number | null;
+    readonly elementCount: number;
+  }
+
+  export interface StoreySuggestion {
+    readonly Name: string;
+    /** Metres. */
+    readonly Elevation: number;
+    /** The floor-to-floor height the suggestion assumes, metres. */
+    readonly Height: number;
+    readonly referenceStoreyId: number;
+  }
+
+  export interface AddStoreyParams {
+    readonly Name: string;
+    /** Metres, in the same frame the workspace shows storey elevations. */
+    readonly Elevation: number;
+    readonly LongName?: string;
+    readonly Description?: string;
+    readonly GlobalId?: string;
+    /** The storey whose conventions the new one copies; defaults to the nearest by elevation. */
+    readonly referenceStoreyId?: number;
+    /**
+     * The IfcBuilding the storey joins. Needed when no `referenceStoreyId` is
+     * given and the storeys do not already share one building: a model with
+     * several buildings, or with none of its storeys aggregated yet.
+     */
+    readonly buildingId?: number;
+  }
+
+  export type StoreyLevelEdit =
+    /** Move this storey to `Elevation` metres; storeys above stay where they are. */
+    | { readonly kind: 'elevation'; readonly storeyId: number; readonly Elevation: number }
+    /** Make this storey's floor-to-floor height `Height` metres; every storey above shifts. */
+    | { readonly kind: 'floorHeight'; readonly storeyId: number; readonly Height: number };
+
+  export interface StoreyLevelPlan {
+    readonly edit: StoreyLevelEdit;
+    readonly storeys: readonly StoreyMove[];
+    readonly placements: readonly PlacementWrite[];
+    /** Every product whose world position changes (for re-meshing), storeys excluded. */
+    readonly moved: readonly number[];
+    /** Products another storey owns that hang from a moved placement and are held in place. */
+    readonly held: readonly number[];
+    readonly spacing: readonly SpacingChange[];
+    /** Walls attached to a storey above (or a slab) whose height follows it. */
+    readonly walls: readonly WallHeightChange[];
+    /** Columns, beams, members and curtain walls whose top follows their attachment (#9296). */
+    readonly attached: readonly AttachedHeightChange[];
+    /** Stairs refit so the top tread still lands on their storey. */
+    readonly stairs: readonly StairRefit[];
+    /** Railings that run up a refit stair, stretched with it. */
+    readonly railings: readonly RailingRefit[];
+    /** Elements a person counts as moving: openings and aggregated parts excluded. */
+    readonly movedElementCount: number;
+    readonly refusals: readonly StoreyRefusal[];
+    readonly notices: readonly StoreyNotice[];
+    /**
+     * The reviewed state of what the writes start from: the moved storeys and
+     * every written placement's chain (points, axes, directions). An edit to
+     * any of them after review makes the plan stale.
+     */
+    readonly fingerprint: string;
+  }
+
+  export type StoreyDeleteMode =
+    | { readonly kind: 'empty' }
+    | { readonly kind: 'move'; readonly targetStoreyId: number }
+    | { readonly kind: 'deleteContents' };
+
+  export interface StoreyDeletePlan {
+    readonly storeyId: number;
+    readonly Name: string;
+    readonly mode: StoreyDeleteMode;
+    /** Everything the storey holds, openings and parts included. */
+    readonly contents: readonly number[];
+    /** The storey's direct children: what a move re-parents. */
+    readonly roots: readonly number[];
+    readonly elementCount: number;
+    /** The reviewed state of the storey and its contents (records and placement chains); a later edit to any of them makes the plan stale. */
+    readonly fingerprint: string;
+    readonly refusals: readonly StoreyRefusal[];
+    /** Relative tops that follow a different floor after deletion. */
+    readonly bindings?: readonly DeletionBinding[];
+    /** Products whose shapes changed while rebinding, filled by applyStoreyDelete. */
+    readonly reshaped?: readonly number[];
+    readonly unresizedAttachments?: readonly number[];
+  }
+
+  /** A parameterised cross-section for a beam, column or member. Metres. */
+  export type ProfileSection =
+    | RectangleSection
+    | ISection
+    | LSection
+    | TSection
+    | USection
+    | CSection
+    | CircleSection
+    | RectangleHollowSection
+    | CircleHollowSection;
+
+  export interface StoreyMove {
+    readonly expressId: number;
+    readonly Name: string;
+    /** Metres. */
+    readonly from: number;
+    readonly to: number;
+    /** IfcBuildingStorey.Elevation to write, file units. */
+    readonly elevationAttribute: number;
+  }
+
+  export interface PlacementWrite {
+    readonly leaf: PlacementLeaf;
+    /** Offset in the parent's frame, file units. */
+    readonly offset: Vec3;
+    /** The products whose ObjectPlacement this is. */
+    readonly owners: readonly number[];
+  }
+
+  /** A changed floor-to-floor gap, metres. Dependent elements (walls, stairs) read these. */
+  export interface SpacingChange {
+    readonly lowerId: number;
+    readonly upperId: number;
+    readonly from: number;
+    readonly to: number;
+  }
+
+  export interface WallHeightChange {
+    readonly wallId: number;
+    readonly storeyId: number;
+    readonly targetStoreyId: number;
+    /** Metres. */
+    readonly from: number;
+    readonly to: number;
+  }
+
+  /**
+   * A column, beam, member or curtain wall whose top follows its attachment
+   * (#9296). `from` and `to` are the kind's `top` measure (`storey-attached.ts`):
+   * the height above its base, or a beam's top end above its placement's parent.
+   */
+  export interface AttachedHeightChange {
+    readonly elementId: number;
+    readonly kind: Exclude<AttachedKind, 'wall'>;
+    readonly storeyId: number;
+    readonly targetStoreyId: number;
+    /** Metres. */
+    readonly from: number;
+    readonly to: number;
+  }
+
+  export interface StairRefit {
+    readonly stairId: number;
+    readonly flightId: number;
+    readonly storeyId: number;
+    readonly landingStoreyId: number;
+    readonly from: { readonly NumberOfRisers: number; readonly RiserHeight: number };
+    readonly to: { readonly NumberOfRisers: number; readonly RiserHeight: number };
+  }
+
+  export interface RailingRefit {
+    readonly railingId: number;
+    readonly stairId: number;
+  }
+
+  export interface StoreyRefusal {
+    readonly code: StoreyRefusalCode;
+    readonly message: string;
+    /** The elements the refusal is about, for selection and listing. */
+    readonly elementIds?: readonly number[];
+    readonly params?: Readonly<Record<string, string | number>>;
+  }
+
+  /** A non-blocking note: something the edit leaves as it is, and why. */
+  export interface StoreyNotice {
+    /** Kind-specific text for an attachment notice; omitted by older callers. */
+    readonly elementType?: 'IfcWall' | 'IfcColumn' | 'IfcBeam' | 'IfcMember' | 'IfcCurtainWall';
+    readonly code: string;
+    readonly message: string;
+    readonly elementIds: readonly number[];
+  }
+
+  export interface DeletionBinding {
+    readonly elementId: number;
+    readonly kind: AttachedKind;
+    readonly targetStoreyId: number | null;
+    readonly targetGlobalId: string;
+    /** Change in the followed floor's world Z, metres; null when there is no floor above. */
+    readonly floorDelta: number | null;
+    /** Physical target floor for a previously pending relative top. */
+    readonly targetWorldZ: number | null;
+  }
+
+  /** Centred rectangle, XDim along profile X, YDim along profile Y. */
+  export interface RectangleSection { Type: 'Rectangle'; XDim: number; YDim: number }
+
+  /** I / H section (`IfcIShapeProfileDef`). Depth along profile Y. */
+  export interface ISection {
+    Type: 'I';
+    OverallWidth: number;
+    OverallDepth: number;
+    WebThickness: number;
+    FlangeThickness: number;
+    FilletRadius?: number;
+  }
+
+  /** Angle (`IfcLShapeProfileDef`). Depth along profile Y, Width along X. */
+  export interface LSection { Type: 'L'; Depth: number; Width: number; Thickness: number; FilletRadius?: number }
+
+  /** Tee (`IfcTShapeProfileDef`). Flange at +Y. */
+  export interface TSection {
+    Type: 'T';
+    Depth: number;
+    FlangeWidth: number;
+    WebThickness: number;
+    FlangeThickness: number;
+    FilletRadius?: number;
+  }
+
+  /** Channel (`IfcUShapeProfileDef`). Web at -X, flanges towards +X. */
+  export interface USection {
+    Type: 'U';
+    Depth: number;
+    FlangeWidth: number;
+    WebThickness: number;
+    FlangeThickness: number;
+    FilletRadius?: number;
+  }
+
+  /** Cold-formed lipped channel (`IfcCShapeProfileDef`). */
+  export interface CSection {
+    Type: 'C';
+    Depth: number;
+    Width: number;
+    WallThickness: number;
+    Girth: number;
+    InternalFilletRadius?: number;
+  }
+
+  /** Solid circle (`IfcCircleProfileDef`). */
+  export interface CircleSection { Type: 'Circle'; Radius: number }
+
+  /** Rectangular hollow section / tube (`IfcRectangleHollowProfileDef`). */
+  export interface RectangleHollowSection {
+    Type: 'RectangleHollow';
+    XDim: number;
+    YDim: number;
+    WallThickness: number;
+    InnerFilletRadius?: number;
+    OuterFilletRadius?: number;
+  }
+
+  /** Circular hollow section / pipe (`IfcCircleHollowProfileDef`). */
+  export interface CircleHollowSection { Type: 'CircleHollow'; Radius: number; WallThickness: number }
+
+  export interface PlacementLeaf {
+    readonly placementId: number;
+    /** PlacementRelTo, or null for a world-rooted placement. */
+    readonly parentId: number | null;
+    readonly axisPlacementId: number;
+    /** Location in the parent's frame, file units. */
+    readonly location: Vec3;
+    readonly axis: unknown;
+    readonly refDirection: unknown;
+  }
+
+  export type Vec3 = [number, number, number];
+
+  export type AttachedKind = 'wall' | 'column' | 'linear' | 'curtainWall';
+
+  export type StoreyRefusalCode =
+    | 'notFound'
+    | 'invalidValue'
+    | 'spacing'
+    | 'crossing'
+    | 'topStorey'
+    | 'unplaced'
+    | 'unreadablePlacement'
+    | 'sharedPlacement'
+    | 'notEmpty'
+    | 'invalidTarget'
+    | 'onlyStorey'
+    | 'dependent'
+    /** A reviewed plan no longer matches the model: review the edit again. */
+    | 'stale'
+    /** The storey holds more products than one plan may write. */
+    | 'tooLarge';
+}
+
+// ── Clash engine types ────────────────────────────────────────────────
 //
 // Extracted by the generator from the sources below — these declarations are
 // the engine's own text, not a copy maintained in the generator:
@@ -187,6 +784,16 @@ declare namespace BimClash {
     a: string;
     /** Selector for set B. Omitted ⇒ self-clash within A. */
     b?: string;
+    /**
+     * Explicit membership for set A — `clashMemberKey(model, ref)` strings. When
+     * present it REPLACES the `a` selector, so a caller that can resolve a richer
+     * filter than a type name (properties, attributes, storeys) against the model
+     * can express it. An empty array means "matched nothing", never "everything".
+     * See `members.ts`.
+     */
+    membersA?: readonly string[];
+    /** Explicit membership for set B, replacing the `b` selector. See `membersA`. */
+    membersB?: readonly string[];
     mode: ClashMode;
     /** Touching band (m). Defaults to the run-level tolerance. */
     tolerance?: number;
@@ -222,6 +829,21 @@ declare namespace BimClash {
      * assignable — absent means "unknown", never "measured".
      */
     distanceKind?: ClashDistanceKind;
+    /**
+     * For a `hard` clash, the float32 noise floor of `distance` along the
+     * direction that depth was measured: the depth at or below which the engine
+     * would have classified the pair as `touch` (#5405). Derived from the
+     * elements' own coordinates on that axis and their sizes, never from their
+     * distance from the origin along other axes, so it does not change under a
+     * translation orthogonal to the depth. `isTouching` uses it for its default
+     * band (#5639).
+     *
+     * Set by the engine on every `hard` clash, absent on every other status.
+     * Optional so that a clash recorded before this field existed (or
+     * rehydrated from BCF/JSON without it) stays assignable; `isTouching` then
+     * falls back to its older coordinate-magnitude band.
+     */
+    depthFloor?: number;
     /** True contact point (hard) or closest-point midpoint (clearance/touch). */
     point: Vec3;
     /** Overlap region (hard) or closest-segment box (clearance/touch). */
@@ -248,6 +870,56 @@ declare namespace BimClash {
     rule: string;
     matchedA: number;
     matchedB: number | null;
+    /**
+     * Whether each side was resolved from explicit membership (`membersA` /
+     * `membersB`) rather than from its type selector. A caller explaining an
+     * empty side needs it and cannot recover it from `rulesRun`, which
+     * deliberately drops the resolved member lists. Absent on a result recorded
+     * before this existed — which is the same thing as "by selector".
+     */
+    fromMembersA?: boolean;
+    fromMembersB?: boolean;
+    /**
+     * The durable `key` (IfcGUID / USD prim path) of every element THIS rule
+     * matched on each side, deduplicated and sorted for determinism — not just
+     * a count. `compareClashRevisions` (revision.ts) needs this to ask "was
+     * this SPECIFIC element re-examined?", which `matchedA`/`matchedB` (counts
+     * only) cannot answer: a narrowed selector that drops one previously-
+     * matched element while keeping the total count non-zero is invisible to a
+     * count-only check. `matchedKeysB` mirrors `matchedB`'s `null` for a
+     * self-clash rule (no `b` side). Absent (not just empty) on a result
+     * recorded before this existed, or from a hand-built fixture — callers
+     * MUST treat an absent `matchedKeysA` as "cannot verify", never as "matched
+     * nothing".
+     */
+    matchedKeysA?: readonly string[];
+    matchedKeysB?: readonly string[] | null;
+    /** Model-qualified union of both matched sides, for object-based quality gates (#9259).
+     * The per-load ref distinguishes objects even when GlobalIds are repeated. */
+    matchedElements?: readonly { model: string; key: string; ref: number }[];
+    /**
+     * Broad-phase candidate pairs the geometry kernel actually narrow-phase
+     * tested for THIS rule (`RuleDetection.candidatesProcessed` in
+     * `engine-ts/kernel.ts`), surfaced here so a caller can tell "matched
+     * elements on both sides AND compared some of them" apart from "matched
+     * elements on both sides but the broad phase found nothing worth testing".
+     * `matchedA`/`matchedB` alone cannot make that distinction — they are
+     * selector-match counts taken before any geometry runs, so they read as
+     * full coverage even when the broad phase (BVH margin query) ends up
+     * empty (#4244).
+     *
+     * `0` here is NOT on its own evidence of a problem: two selected groups
+     * that are genuinely far apart (further than the rule's tolerance/
+     * clearance margin) legitimately produce zero candidate pairs and a real
+     * `'clean'` result — that is the ordinary, correct outcome for a rule
+     * whose matched elements never come close to touching. `classifyRuleCoverage`
+     * does not treat this field as a coverage signal for exactly that reason;
+     * it exists as a diagnostic a caller can inspect when a `'clean'` result
+     * looks suspicious for other reasons (e.g. a much larger selector match
+     * count than expected), not as an automatic verdict. Absent on a result
+     * recorded before this field existed, or from a hand-built fixture.
+     */
+    candidatesExamined?: number;
   }
 
   /**
@@ -274,6 +946,9 @@ declare namespace BimClash {
   export interface ClashElementRef {
     key: string;
     ref: number;
+    /** This run found distinct source objects with this key in the same model.
+     * Review/exclusion identity must include ref rather than trust the repeated key. */
+    keyAmbiguous?: true;
     model: string;
     tag: string;
     name?: string;
@@ -300,8 +975,9 @@ declare namespace BimClash {
    *   earlier "deepest crossing-triangle vertex" probe that was a sampling
    *   artifact, converging to 0 as a mesh was retessellated instead of to the
    *   true depth (PR #2536).
-   * - `'estimate'` — read off the two element AABBs: the smallest overlapping box
-   *   dimension. Reported for a hard clash whenever the narrow phase could not
+   * - `'estimate'` — an uncertified depth: the smallest overlapping dimension of
+   *   the two element AABBs, or for a box through-penetration that value capped
+   *   by the box-box minimum translation distance (see below). Reported for a hard clash whenever the narrow phase could not
    *   certify a box-box depth. That happens in four shapes, all common in real
    *   models: either element is not (confirmed) a box; surfaces that only
    *   coincide (stacked layers sharing a footprint); one solid modelled wholly
@@ -312,9 +988,314 @@ declare namespace BimClash {
    *   `'mesh'` for exactly that reason. The value is then a property of the two
    *   BOXES, not of the solids — it can equal an element's own thickness rather
    *   than how far the two actually interpenetrate. Treat it as an indication of
-   *   scale, not as a measurement.
+   *   scale, not as a measurement. For a through-penetration between two boxes
+   *   it never exceeds the box-box minimum translation distance, a distance
+   *   proven to separate them (#5742).
    */
   export type ClashDistanceKind = 'mesh' | 'estimate';
+}
+
+// ── Cost SDK types ────────────────────────────────────────────────────
+//
+// Extracted by the generator from the sources below — these declarations are
+// the engine's own text, not a copy maintained in the generator:
+//   packages/sdk/src/cost-types.ts
+//   packages/sdk/src/types.ts
+//   packages/create/src/types-cost.ts
+
+declare namespace BimCost {
+  export interface CostGraphData {
+    modelId: string;
+    source: 'loaded-source';
+    SchemaVersion: CostSchemaVersion;
+    CostSchedules: CostScheduleData[];
+    CostItems: CostItemData[];
+    CostValues: CostValueData[];
+    CostQuantities: CostQuantityData[];
+    Units: CostUnitData[];
+    MeasuresWithUnit: CostMeasureWithUnitData[];
+    ProjectUnits: Partial<Record<CostQuantityDimension, EntityRef>>;
+    Relationships: CostRelationshipData[];
+    Diagnostics: CostDiagnosticData[];
+    HasCostData: boolean;
+    Currency?: string;
+  }
+
+  export interface CostScheduleData {
+    ref: EntityRef;
+    GlobalId?: string; Name?: string; Description?: string; ObjectType?: string;
+    Identification?: string; PredefinedType?: string; Status?: string;
+    SubmittedOn?: string; UpdateDate?: string; ID?: string;
+  }
+
+  export interface CostItemData {
+    ref: EntityRef;
+    GlobalId?: string; Name?: string; Description?: string; ObjectType?: string;
+    Identification?: string; PredefinedType?: string;
+    CostValues?: EntityRef[]; CostQuantities?: EntityRef[];
+  }
+
+  export interface CostValueData {
+    ref: EntityRef;
+    Type?: 'IfcCostValue' | 'IfcAppliedValue';
+    Name?: string; Description?: string; AppliedValue?: CostAppliedValueData;
+    UnitBasis?: EntityRef; InvalidUnitBasis?: boolean; ApplicableDate?: string;
+    FixedUntilDate?: string; Category?: string; Condition?: string;
+    InvalidCondition?: boolean; ArithmeticOperator?: string; Components?: EntityRef[];
+    CostType?: string;
+  }
+
+  export interface CostEvaluationOptions {
+    /** Decimal significant-digit precision from 1 through 10,000. Defaults to 34 (decimal128). */
+    Precision?: number;
+  }
+
+  export interface CostEvaluationData {
+    ref: EntityRef; Amount?: string; Currency?: string;
+    Dimension?: CostQuantityDimension | 'ratio'; QuantityApplied?: string;
+    Diagnostics: CostDiagnosticData[];
+  }
+
+  /** IfcCostSchedule (IfcControl). */
+  export interface CostScheduleParams {
+    Name: string;
+    Description?: string;
+    ObjectType?: string;
+    Identification?: string;
+    PredefinedType?: CostSchedulePredefinedType;
+    Status?: string;
+    /** IfcDateTime, e.g. '2026-03-01T09:00:00'. */
+    SubmittedOn?: string;
+    /** IfcDateTime. */
+    UpdateDate?: string;
+  }
+
+  /** IfcCostItem. */
+  export interface CostItemParams {
+    Name: string;
+    Description?: string;
+    ObjectType?: string;
+    Identification?: string;
+    PredefinedType?: CostItemPredefinedType;
+    /**
+     * expressIds of IfcCostValue / IfcAppliedValue entities, in the order they
+     * must appear. Absent (undefined) writes `$`; an empty array is rejected.
+     */
+    CostValues?: number[];
+    /**
+     * expressIds of IfcPhysicalQuantity entities, in order. Absent writes `$`;
+     * an empty array is rejected.
+     */
+    CostQuantities?: number[];
+  }
+
+  /**
+   * IfcCostValue.
+   *
+   * `AppliedValue` and `Components` are NOT interchangeable and this builder
+   * never derives one from the other: a value that carried a literal
+   * `AppliedValue` in the source is written with that literal and no
+   * `Components`, and a value that was the sum of its `Components` is written
+   * with `Components` and an absent `AppliedValue`. Normalising either way would
+   * change what the file says about where the number came from.
+   */
+  export interface CostValueParams {
+    Name?: string;
+    Description?: string;
+    /** Literal typed value, written as a named SELECT branch. */
+    AppliedValue?: CostTypedValue;
+    /**
+     * expressId of an IfcMeasureWithUnit, the entity branch of
+     * IfcAppliedValueSelect. Mutually exclusive with `AppliedValue`.
+     */
+    AppliedValueRef?: number;
+    /**
+     * expressId of an IfcMeasureWithUnit giving the basis this rate is quoted
+     * per — a rate "per 100 m²" has a UnitBasis of 100 SQUARE_METRE. It is a
+     * divisor, not a label: dropping or inventing it moves the amount by whole
+     * orders of magnitude.
+     */
+    UnitBasis?: number;
+    /** IfcDate. */
+    ApplicableDate?: string;
+    /** IfcDate. */
+    FixedUntilDate?: string;
+    Category?: string;
+    Condition?: string;
+    ArithmeticOperator?: CostArithmeticOperator;
+    /**
+     * expressIds of the IfcAppliedValue / IfcCostValue entities this value is
+     * computed from, in order. Absent writes `$`; an empty array is rejected.
+     * Repeating an expressId shares that entity rather than copying it.
+     */
+    Components?: number[];
+  }
+
+  /** IfcPhysicalSimpleQuantity, as referenced from IfcCostItem.CostQuantities. */
+  export interface CostQuantityParams {
+    Kind: CostQuantityKind;
+    Name: string;
+    Value: number;
+    Description?: string;
+    /** expressId of the unit entity this quantity is measured in. */
+    Unit?: number;
+    Formula?: string;
+  }
+
+  export type CostSchemaVersion = 'IFC2X3' | 'IFC4' | 'IFC4X3' | 'IFC5';
+
+  export interface CostQuantityData {
+    ref: EntityRef; Type: string; Name?: string; Description?: string; Unit?: EntityRef;
+    InvalidUnit?: boolean; LengthValue?: string; AreaValue?: string; VolumeValue?: string;
+    CountValue?: string; WeightValue?: string; TimeValue?: string; NumberValue?: string;
+    Formula?: string; Dimension?: CostQuantityDimension; HasQuantities?: EntityRef[];
+    InvalidHasQuantities?: boolean;
+  }
+
+  export interface CostUnitData {
+    ref: EntityRef; Type: string; UnitType?: string; Prefix?: string; Name?: string;
+    Symbol?: string; Currency?: string; Dimension?: CostQuantityDimension; Scale?: string;
+  }
+
+  export interface CostMeasureWithUnitData {
+    ref: EntityRef; ValueComponent: string; UnitComponent: EntityRef;
+    ValueType?: string; ValueDimension?: CostQuantityDimension;
+  }
+
+  export type CostQuantityDimension = 'length' | 'area' | 'volume' | 'mass' | 'time' | 'count' | 'number';
+
+  /** Reference to a specific entity within a federated model set */
+  export interface EntityRef {
+    modelId: string;
+    expressId: number;
+  }
+
+  export interface CostRelationshipData {
+    ref: EntityRef; Type: CostRelationshipType; GlobalId?: string; Name?: string;
+    Description?: string; RelatedObjects?: EntityRef[]; InvalidRelatedObjects?: boolean;
+    InvalidReferences?: boolean; RelatedDefinitions?: EntityRef[]; RelatingControl?: EntityRef;
+    RelatingObject?: EntityRef; RelatingProduct?: EntityRef; RelatingProcess?: EntityRef;
+    RelatingContext?: EntityRef; RelatingAppliedValue?: EntityRef; ComponentOfTotal?: EntityRef;
+    Components?: EntityRef[]; ArithmeticOperator?: string;
+  }
+
+  export interface CostDiagnosticData {
+    Code: CostDiagnosticCode;
+    Message: string;
+    Severity: 'warning' | 'error';
+    ref?: EntityRef;
+    RelatedRef?: EntityRef;
+  }
+
+  export type CostAppliedValueData =
+    | { Kind: 'Typed'; Type: string; Value: string }
+    | { Kind: 'Reference'; ref: EntityRef }
+    | { Kind: 'Unsupported'; Raw: unknown; InvalidNumber?: boolean };
+
+  /** IfcCostScheduleTypeEnum (IFC4 / IFC4X3). */
+  export type CostSchedulePredefinedType =
+    | 'BUDGET' | 'COSTPLAN' | 'ESTIMATE' | 'TENDER'
+    | 'PRICEDBILLOFQUANTITIES' | 'UNPRICEDBILLOFQUANTITIES' | 'SCHEDULEOFRATES'
+    | 'USERDEFINED' | 'NOTDEFINED';
+
+  /** IfcCostItemTypeEnum (IFC4 / IFC4X3). */
+  export type CostItemPredefinedType = 'USERDEFINED' | 'NOTDEFINED';
+
+  /** A typed IFC measure: the SELECT branch plus its numeric value. */
+  export interface CostTypedValue {
+    Type: CostMeasureType;
+    Value: number;
+  }
+
+  /** IfcArithmeticOperatorEnum (MODULO is accepted only when the target schema is IFC4X3). */
+  export type CostArithmeticOperator = 'ADD' | 'DIVIDE' | 'MODULO' | 'MULTIPLY' | 'SUBTRACT';
+
+  /** The IfcPhysicalSimpleQuantity subtypes a cost item can take quantities from. */
+  export type CostQuantityKind =
+    | 'IfcQuantityLength' | 'IfcQuantityArea' | 'IfcQuantityVolume'
+    | 'IfcQuantityWeight' | 'IfcQuantityTime' | 'IfcQuantityCount'
+    | 'IfcQuantityNumber';
+
+  export type CostRelationshipType =
+    | 'IfcRelAssignsToControl' | 'IfcRelAssignsToProduct' | 'IfcRelAssignsToProcess'
+    | 'IfcRelNests' | 'IfcRelDeclares' | 'IfcRelAssociatesAppliedValue'
+    | 'IfcRelSchedulesCostItems' | 'IfcAppliedValueRelationship';
+
+  export type CostDiagnosticCode =
+    | 'IFC2X3_PARTIAL_READ' | 'UNSUPPORTED_SCHEMA' | 'MISSING_REFERENCE' | 'INVALID_LIST'
+    | 'MULTIPLE_NESTING_PARENTS' | 'NESTING_CYCLE' | 'QUANTITY_CYCLE' | 'VALUE_CYCLE'
+    | 'MISSING_VALUE' | 'INVALID_NUMBER' | 'UNSUPPORTED_APPLIED_VALUE' | 'UNSUPPORTED_CONDITION'
+    | 'UNSUPPORTED_UNIT' | 'INCOMPATIBLE_UNIT' | 'MISSING_CURRENCY' | 'MIXED_CURRENCY'
+    | 'DIVISION_BY_ZERO' | 'PENDING_EDIT_NOT_APPLIED';
+
+  /**
+   * The SELECT branch names this builder will write for a typed IFC value.
+   *
+   * `IfcCostValue.AppliedValue` is an `IfcAppliedValueSelect` and
+   * `IfcMeasureWithUnit.ValueComponent` is an `IfcValue` — both SELECTs, so STEP
+   * requires the branch to be named: `IFCMONETARYMEASURE(12.5)`, never a bare
+   * `12.5`. A bare number parses but resolves to a different SELECT branch (or
+   * to none), which is why the branch is part of the parameter rather than
+   * inferred from the number.
+   */
+  export type CostMeasureType =
+    | 'IfcMonetaryMeasure'
+    | 'IfcAreaMeasure' | 'IfcVolumeMeasure' | 'IfcLengthMeasure'
+    | 'IfcMassMeasure' | 'IfcTimeMeasure' | 'IfcCountMeasure'
+    | 'IfcNumericMeasure' | 'IfcRatioMeasure' | 'IfcReal' | 'IfcInteger';
+}
+
+// ── SDK relationship types ────────────────────────────────────────────
+//
+// Extracted by the generator from the sources below — these declarations are
+// the engine's own text, not a copy maintained in the generator:
+//   packages/sdk/src/types.ts
+
+declare namespace BimSdk {
+  /**
+   * The related **objects** of an entity's structural relationships — never the
+   * `IfcRel*` entities themselves:
+   *
+   * - `voids` — the `IfcOpeningElement`s that void this element
+   *   (`IfcRelVoidsElement`, host → opening).
+   * - `fills` — the `IfcOpeningElement` this element fills
+   *   (`IfcRelFillsElement`, filler → opening).
+   * - `groups` — the `IfcZone` / `IfcGroup` / `IfcSystem` it is assigned to.
+   * - `connections` — the elements it is joined to.
+   *
+   * The field names are deliberately not EXPRESS names, and #2422 resolved to
+   * keep them. IFC's own names for these traversals (`HasOpenings`, `FillsVoids`,
+   * `HasAssignments`, `ConnectedTo` / `ConnectedFrom`) are INVERSE attributes
+   * holding the `IfcRel*` entity, which is not what these arrays contain — so
+   * "use the exact EXPRESS name" has no name to offer here. Renaming `voids` to
+   * `openings` is not a fix either: `voids` **and** `fills` both hold
+   * `IfcOpeningElement`s, and only the voids/fills pair — buildingSMART's own
+   * vocabulary for the two directions — tells them apart. Pinned by
+   * `packages/parser/test/relationship-field-semantics-2422.test.ts`.
+   */
+  export interface EntityRelationshipsData {
+    voids: Array<{ id: number; name?: string; type: string }>;
+    fills: Array<{ id: number; name?: string; type: string }>;
+    groups: Array<{ id: number; name?: string; type?: string }>;
+    connections: Array<{ id: number; name?: string; type: string }>;
+    /** Every graph edge touching the entity, preserving its exact IfcRel* class.
+     * Optional for third-party backends compiled against the pre-#4205 shape. */
+    relations?: Array<{
+      relationshipId: number;
+      relationshipType: string;
+      direction: 'forward' | 'inverse';
+      entity: { id: number; name?: string; type: string };
+    }>;
+  }
+}
+interface BimStructuralLoad {
+  ExpressId: number; Type: string; Name?: string;
+  Components: Record<string, number>;
+  Configuration?: BimStructuralLoadConfiguration;
+}
+interface BimStructuralLoadConfiguration {
+  Entries: Array<{ Value?: BimStructuralLoad; Dropped?: 'depth' | 'cycle' | 'budget' | 'invalid-reference' | 'unresolved' | 'unreadable'; Location?: number[] }>;
+  Locations?: number[][]; Truncated: boolean;
 }
 
 // ── Sandbox globals ─────────────────────────────────────────────────────
@@ -412,8 +1393,8 @@ declare const bim: {
     select(entities: BimEntity[]): void;
     /** Fly camera to entities */
     flyTo(entities: BimEntity[]): void;
-    /** Reset all colors */
-    resetColors(): void;
+    /** Reset colors. Omit entities to reset every color override; an empty list is a no-op; pass entities to reset only theirs. */
+    resetColors(entities?: BimEntity[]): void;
     /** Reset all visibility */
     resetVisibility(): void;
   };
@@ -439,25 +1420,97 @@ declare const bim: {
     /** Edit a non-IfcRoot attribute by zero-based STEP argument index (e.g. IfcRectangleProfileDef.XDim is index 3). */
     setPositionalAttribute(entity: { modelId: string; expressId: number }, index: number, value: unknown): void;
     /** Add an IfcColumn to a parsed model anchored to an existing IfcBuildingStorey. Returns the new column entity ref. */
-    addColumn(modelId: string, storeyExpressId: number, params: { Position: [number, number, number]; Width: number; Depth: number; Height: number; Name?: string; Description?: string; ObjectType?: string; Tag?: string }): { modelId: string; expressId: number };
-    /** Add an IfcWall from Start to End anchored to an IfcBuildingStorey. Returns the new wall entity ref. */
-    addWall(modelId: string, storeyExpressId: number, params: { Start: [number, number, number]; End: [number, number, number]; Thickness: number; Height: number; Name?: string; Description?: string; ObjectType?: string; Tag?: string }): { modelId: string; expressId: number };
+    addColumn(modelId: string, storeyExpressId: number, params: BimCreate.ColumnInStoreParams | BimCreate.ProfiledColumnInStoreParams): { modelId: string; expressId: number };
+    /** Add an IfcWall from Start to End anchored to an IfcBuildingStorey. Returns the new wall entity ref, with notices for skipped implicit joins. */
+    addWall(modelId: string, storeyExpressId: number, params: { Start: [number, number, number]; End: [number, number, number]; Thickness: number; Height: number; Name?: string; Description?: string; ObjectType?: string; Tag?: string }): { modelId: string; expressId: number; notices?: string[] };
     /** Add an IfcSlab anchored to an IfcBuildingStorey. Two modes: rectangle (Position + Width + Depth) or polygon (OuterCurve = Array<[x, y]> with ≥3 points). */
     addSlab(modelId: string, storeyExpressId: number, params: { Position: [number, number, number]; Width: number; Depth: number; Thickness: number; Profile?: "rectangle"; Name?: string; Description?: string; ObjectType?: string; Tag?: string } | { Profile: "polygon"; OuterCurve: Array<[number, number]>; Position?: [number, number, number]; Thickness: number; Name?: string; Description?: string; ObjectType?: string; Tag?: string }): { modelId: string; expressId: number };
-    /** Add an IfcBeam from Start to End with a centred rectangular cross-section. */
-    addBeam(modelId: string, storeyExpressId: number, params: { Start: [number, number, number]; End: [number, number, number]; Width: number; Height: number; Name?: string; Description?: string; ObjectType?: string; Tag?: string }): { modelId: string; expressId: number };
+    /** Add an IfcBeam from Start to End with a centred rectangular or canonical parameterised cross-section. */
+    addBeam(modelId: string, storeyExpressId: number, params: BimCreate.BeamInStoreParams | BimCreate.ProfiledBeamInStoreParams): { modelId: string; expressId: number };
     /** Add a free-standing IfcDoor anchored to an IfcBuildingStorey. */
     addDoor(modelId: string, storeyExpressId: number, params: { Position: [number, number, number]; Width: number; Height: number; FrameThickness?: number; PredefinedType?: string; OperationType?: string; UserDefinedOperationType?: string; Name?: string; Description?: string; ObjectType?: string; Tag?: string }): { modelId: string; expressId: number };
     /** Add a free-standing IfcWindow anchored to an IfcBuildingStorey. */
     addWindow(modelId: string, storeyExpressId: number, params: { Position: [number, number, number]; Width: number; Height: number; FrameThickness?: number; PredefinedType?: string; PartitioningType?: string; UserDefinedPartitioningType?: string; Name?: string; Description?: string; ObjectType?: string; Tag?: string }): { modelId: string; expressId: number };
     /** Add an IfcSpace (room) — rectangle or polygon footprint extruded by Height. Aggregated under the storey via IfcRelAggregates. */
     addSpace(modelId: string, storeyExpressId: number, params: { Position: [number, number, number]; Width: number; Depth: number; Height: number; Profile?: "rectangle"; Name?: string; LongName?: string; Description?: string; ObjectType?: string } | { Profile: "polygon"; OuterCurve: Array<[number, number]>; Position?: [number, number, number]; Height: number; Name?: string; LongName?: string; Description?: string; ObjectType?: string }): { modelId: string; expressId: number };
-    /** Add an IfcRoof (flat-roof slab variant). Two modes: rectangle or polygon. */
-    addRoof(modelId: string, storeyExpressId: number, params: { Position: [number, number, number]; Width: number; Depth: number; Thickness: number; Profile?: "rectangle"; Name?: string; Description?: string; ObjectType?: string; Tag?: string } | { Profile: "polygon"; OuterCurve: Array<[number, number]>; Position?: [number, number, number]; Thickness: number; Name?: string; Description?: string; ObjectType?: string; Tag?: string }): { modelId: string; expressId: number };
+    /** Add an IfcRoof. Rectangle or polygon; flat unless EdgeSlopes/Overhang are given, then a roof by footprint: EdgeSlopes[i] (radians, 0 = gable end) slopes the edge from point i to point i+1, Overhang (metres) carries every edge out. Hip, gable, mono-pitch and L-shaped roofs. */
+    addRoof(modelId: string, storeyExpressId: number, params: { Position: [number, number, number]; Width: number; Depth: number; Thickness: number; Profile?: "rectangle"; EdgeSlopes?: number[]; Overhang?: number; Name?: string; Description?: string; ObjectType?: string; Tag?: string } | { Profile: "polygon"; OuterCurve: Array<[number, number]>; Position?: [number, number, number]; Thickness: number; EdgeSlopes?: number[]; Overhang?: number; Name?: string; Description?: string; ObjectType?: string; Tag?: string }): { modelId: string; expressId: number };
     /** Add an IfcPlate (thin flat element). Two modes: rectangle or polygon. */
     addPlate(modelId: string, storeyExpressId: number, params: { Position: [number, number, number]; Width: number; Depth: number; Thickness: number; Profile?: "rectangle"; PredefinedType?: string; Name?: string; Description?: string; ObjectType?: string; Tag?: string } | { Profile: "polygon"; OuterCurve: Array<[number, number]>; Position?: [number, number, number]; Thickness: number; PredefinedType?: string; Name?: string; Description?: string; ObjectType?: string; Tag?: string }): { modelId: string; expressId: number };
-    /** Add an IfcMember (generic structural — brace, post, strut) from Start to End with a rectangular cross-section. */
-    addMember(modelId: string, storeyExpressId: number, params: { Start: [number, number, number]; End: [number, number, number]; Width: number; Height: number; PredefinedType?: string; Name?: string; Description?: string; ObjectType?: string; Tag?: string }): { modelId: string; expressId: number };
+    /** Add an IfcMember (generic structural — brace, post, strut) from Start to End with a rectangular or canonical parameterised cross-section. */
+    addMember(modelId: string, storeyExpressId: number, params: BimCreate.MemberInStoreParams | BimCreate.ProfiledMemberInStoreParams): { modelId: string; expressId: number };
+    /** Mirror upright products about a storey-local XY axis, in place or as copies. Hosted cuts remain hosted; door handedness flips. Grids are refused atomically. */
+    mirrorElements(modelId: string, ids: readonly number[], params: BimCreate.MirrorElementsParams): { modelId: string; expressId: number }[];
+    /** Create or reuse an IfcClassification of the same name and edition, plus its reference; optionally associate objects. */
+    addClassification(modelId: string, params: BimCreate.ClassificationInStoreParams): { modelId: string; expressId: number };
+    /** Associate objects with an existing IfcClassification or IfcClassificationReference, preserving other classifications. */
+    assignClassification(modelId: string, classificationId: number, objects: readonly number[]): { modelId: string; expressId: number };
+    /** Align real native mesh edges or centres in one storey workplane. Fresh geometry and an atomic transaction preserve hosted cuts, joined neighbours and one Undo. */
+    alignElements(modelId: string, reference: number, targets: readonly number[], mode: BimCreate.AlignMode): Promise<{ modelId: string; expressId: number }[]>;
+    /** Join two straight walls in the same placement frame through IfcRelConnectsPathElements. Uses the Model workspace core, preserving readable hosted openings and refusing a cut stranded by a joined end face. */
+    joinWalls(modelId: string, aExpressId: number, bExpressId: number, options?: BimCreate.WallJoinApplyOptions): { modelId: string; expressId: number };
+    /** Cut an IfcOpeningElement (IfcRelVoidsElement) into an existing IfcWall or IfcSlab. Metres, in the host placement frame. */
+    addOpening(modelId: string, hostExpressId: number, params: { Offset: number; Sill?: number; Width: number; Height: number; CutDepth?: number; Name?: string; Description?: string; ObjectType?: string; Tag?: string; GlobalId?: string } | { Position: [number, number]; Width: number; Depth: number; CutDepth?: number; Name?: string; Description?: string; ObjectType?: string; Tag?: string; GlobalId?: string }): { modelId: string; expressId: number };
+    /** Add an IfcDoor filling a new opening in an existing IfcWall (IfcRelFillsElement). Offset is along the wall axis to the door centre. */
+    addHostedDoor(modelId: string, hostExpressId: number, params: { Offset: number; Width: number; Height: number; CutDepth?: number; FrameThickness?: number; PredefinedType?: string; Name?: string; Description?: string; ObjectType?: string; Tag?: string; GlobalId?: string; Sill?: number; OperationType?: string; UserDefinedOperationType?: string }): { modelId: string; expressId: number };
+    /** Add an IfcWindow filling a new opening in an existing IfcWall (IfcRelFillsElement). Sill is the bottom edge height. */
+    addHostedWindow(modelId: string, hostExpressId: number, params: { Offset: number; Width: number; Height: number; CutDepth?: number; FrameThickness?: number; PredefinedType?: string; Name?: string; Description?: string; ObjectType?: string; Tag?: string; GlobalId?: string; Sill: number; PartitioningType?: string; UserDefinedPartitioningType?: string }): { modelId: string; expressId: number };
+    /** Add an IfcElementType subtype (Type: 'IfcWallType', 'IfcDoorType', ...), laid out for the model's schema. Enum values without dots. */
+    addElementType(modelId: string, params: { Type: string; Name: string; Description?: string; ApplicableOccurrence?: string; Tag?: string; ElementType?: string; PredefinedType?: string; OperationType?: string; UserDefinedOperationType?: string; PartitioningType?: string; UserDefinedPartitioningType?: string; ParameterTakesPrecedence?: boolean; GlobalId?: string }): { modelId: string; expressId: number };
+    /** Type objects via IfcRelDefinesByType; an object already typed moves to this type. Returns the relationship. */
+    assignType(modelId: string, typeExpressId: number, objectExpressIds: number[]): { modelId: string; expressId: number };
+    /** Add an IfcMaterial. */
+    addMaterial(modelId: string, params: { Name: string; Description?: string; Category?: string }): { modelId: string; expressId: number };
+    /** Add an IfcMaterialLayerSet with one IfcMaterialLayer per entry (LayerThickness in metres). */
+    addMaterialLayerSet(modelId: string, params: { MaterialLayers: { Material?: number; LayerThickness: number; IsVentilated?: boolean; Name?: string; Description?: string; Category?: string; Priority?: number }[]; LayerSetName?: string; Description?: string }): { modelId: string; expressId: number };
+    /** Add an IfcMaterialLayerSetUsage (default AXIS2 / POSITIVE; OffsetFromReferenceLine in metres). */
+    addMaterialLayerSetUsage(modelId: string, params: { ForLayerSet: number; LayerSetDirection?: 'AXIS1' | 'AXIS2' | 'AXIS3'; DirectionSense?: 'POSITIVE' | 'NEGATIVE'; OffsetFromReferenceLine: number; ReferenceExtent?: number }): { modelId: string; expressId: number };
+    /** Associate a material with objects via IfcRelAssociatesMaterial, replacing their previous one. Returns the relationship. */
+    assignMaterial(modelId: string, materialExpressId: number, objectExpressIds: number[]): { modelId: string; expressId: number };
+    /** Change a roof by footprint (addRoof with EdgeSlopes/Overhang): one edge's slope, every slope (radians, 0 = gable end), Overhang or Thickness (metres). Rebuilds its planes as one undoable edit; a refusal writes nothing. */
+    editRoof(ref: { modelId: string; expressId: number }, patch: { EdgeSlopes?: number[]; Edge?: { Index: number; Slope: number }; Overhang?: number; Thickness?: number }): { modelId: string; expressId: number };
+    /** List the live storeys of a model, highest first, with elevation (m), floor-to-floor height to the storey above in the same building (m, null for the top) and element count. */
+    listStoreyLevels(modelId: string): BimCreate.StoreySummary[];
+    /** The default Name, Elevation and floor-to-floor height for a new storey above or below a storey, from its neighbours. Writes nothing. */
+    suggestStorey(modelId: string, referenceStoreyId: number, side: 'above' | 'below'): BimCreate.StoreySuggestion;
+    /** Add an IfcBuildingStorey aggregated under its building and placed like its neighbours. Refused (nothing written) for an empty name or an elevation another storey of that building occupies. One Undo. */
+    addStorey(modelId: string, params: BimCreate.AddStoreyParams): { modelId: string; expressId: number };
+    /** Rename a storey (IfcRoot.Name). One Undo. */
+    renameStorey(ref: { modelId: string; expressId: number }, Name: string): { modelId: string; expressId: number };
+    /** Dry run of editStorey: the storeys and elements that would move, the walls that resize and the stairs that refit, every refusal and the notices for elements left as they are. Writes nothing. */
+    planStoreyEdit(modelId: string, edit: BimCreate.StoreyLevelEdit): BimCreate.StoreyLevelPlan;
+    /** { kind: "elevation", storeyId, Elevation } moves that storey only; { kind: "floorHeight", storeyId, Height } shifts every storey above in its building by the same amount. Geometry follows (contents move, attached walls resize, stairs refit); refused with nothing written when planStoreyEdit reports a refusal, or when `expected` (a planStoreyEdit result) no longer matches the model. One Undo. */
+    editStorey(modelId: string, edit: BimCreate.StoreyLevelEdit, expected?: BimCreate.StoreyLevelPlan): { modelId: string; expressId: number }[];
+    /** Dry run of deleteStorey: what the storey holds and any refusal. Writes nothing. */
+    planStoreyDelete(ref: { modelId: string; expressId: number }, mode: BimCreate.StoreyDeleteMode): BimCreate.StoreyDeletePlan;
+    /** Delete a storey without orphaning anything: { kind: "empty" } (refused while it holds elements), { kind: "move", targetStoreyId } or { kind: "deleteContents" }. Pass the planStoreyDelete result as `expected` so contents added since are refused, not deleted. A model keeps one storey. One Undo. */
+    deleteStorey(ref: { modelId: string; expressId: number }, mode: BimCreate.StoreyDeleteMode, expected?: BimCreate.StoreyDeletePlan): { modelId: string; expressId: number }[];
+    /** Add an IfcCostSchedule to a parsed model. */
+    addCostSchedule(modelId: string, params: BimCost.CostScheduleParams): { modelId: string; expressId: number };
+    /** Add an IfcCostItem to a parsed model. */
+    addCostItem(modelId: string, params: BimCost.CostItemParams): { modelId: string; expressId: number };
+    /** Add an IfcCostValue to a parsed model. */
+    addCostValue(modelId: string, params: BimCost.CostValueParams): { modelId: string; expressId: number };
+    /** Add an IfcCostQuantity to a parsed model. */
+    addCostQuantity(modelId: string, params: BimCost.CostQuantityParams): { modelId: string; expressId: number };
+    /** Create or update the loaded-model cost relationship for nestCostItems. */
+    nestCostItems(modelId: string, parentExpressId: number, childExpressIds: number[]): { modelId: string; expressId: number };
+    /** Create or update the loaded-model cost relationship for assignCostItemsToSchedule. */
+    assignCostItemsToSchedule(modelId: string, scheduleExpressId: number, itemExpressIds: number[]): { modelId: string; expressId: number };
+    /** Create or update the loaded-model cost relationship for assignToCostItem. */
+    assignToCostItem(modelId: string, costItemExpressId: number, objectExpressIds: number[]): { modelId: string; expressId: number };
+    /** Replace an IfcCostItem CostValues list; pass [] to clear it. */
+    setCostItemValues(modelId: string, itemExpressId: number, valueExpressIds: number[]): void;
+    /** Safely remove an IfcCostSchedule, IfcCostItem, or IfcCostValue from a parsed model. */
+    removeCostEntity(modelId: string, expressId: number, options?: { detach?: boolean }): void;
+    /** Read the current exact IfcGroup and complete membership from its loaded source. */
+    readGroup(target: BimGroup.GroupStoreIdentity): BimGroup.GroupStoreSnapshot;
+    /** Create an exact IfcGroup with explicit source-pinned RelatedObjects in one native edit. */
+    addGroup(modelId: string, params: BimGroup.GroupStoreCreateParams): BimGroup.GroupStoreIdentity;
+    /** Preserve current group identity and replace its entire membership after verifying a complete current snapshot. */
+    updateGroup(expected: BimGroup.GroupStoreSnapshot, patch: BimGroup.GroupStorePatch): BimGroup.GroupStoreIdentity;
+    /** Remove an exact IfcGroup and its membership edges while preserving members; protected dependencies refuse the edit. */
+    removeGroup(expected: BimGroup.GroupStoreSnapshot): void;
   };
   /** Lens visualization */
   lens: {
@@ -467,7 +1520,7 @@ declare const bim: {
   /** IFC creation from scratch */
   create: {
     /** Create a new IFC project. Returns a creator handle (number). */
-    project(params: { Name?: string; Description?: string; Schema?: string; LengthUnit?: string; Author?: string; Organization?: string }): number;
+    project(params: { Name?: string; Description?: string; Schema?: string; LengthUnit?: string; Currency?: string; Author?: string; Organization?: string }): number;
     /** Generate the IFC STEP file content. Returns { content, entities, stats }. */
     toIfc(handle: number): { content: string; entities: Array<{ expressId: number; type: string; Name?: string }>; stats: { entityCount: number; fileSize: number } };
     /** Assign a named colour to an element. Call before toIfc(). */
@@ -476,6 +1529,8 @@ declare const bim: {
     addIfcWorkSchedule(handle: number, params: { Name: string; StartTime: string; FinishTime?: string; CreationDate?: string; Description?: string; Identification?: string; Purpose?: string; Duration?: string; TotalFloat?: string; PredefinedType?: 'ACTUAL' | 'BASELINE' | 'PLANNED' | 'USERDEFINED' | 'NOTDEFINED' }): number;
     /** Create an IfcWorkPlan (groups multiple schedules). Returns plan expressId. */
     addIfcWorkPlan(handle: number, params: { Name: string; StartTime: string; FinishTime?: string; CreationDate?: string; Description?: string; Identification?: string; Purpose?: string; Duration?: string; PredefinedType?: 'ACTUAL' | 'BASELINE' | 'PLANNED' | 'USERDEFINED' | 'NOTDEFINED' }): number;
+    /** Create an IfcWorkCalendar (working / non-working time calendar). Returns calendar expressId. */
+    addIfcWorkCalendar(handle: number, params: { Name: string; Description?: string; ObjectType?: string; Identification?: string; PredefinedType?: 'FIRSTSHIFT' | 'SECONDSHIFT' | 'THIRDSHIFT' | 'USERDEFINED' | 'NOTDEFINED'; WorkingTimes?: { Name?: string; DataOrigin?: string; UserDefinedDataOrigin?: string; Start?: string; Finish?: string; RecurrencePattern?: { RecurrenceType: 'DAILY' | 'WEEKLY' | 'MONTHLY_BY_DAY_OF_MONTH' | 'MONTHLY_BY_POSITION' | 'BY_DAY_COUNT' | 'BY_WEEKDAY_COUNT' | 'YEARLY_BY_DAY_OF_MONTH' | 'YEARLY_BY_POSITION'; DayComponent?: number[]; WeekdayComponent?: number[]; MonthComponent?: number[]; Position?: number; Interval?: number; Occurrences?: number; TimePeriods?: { StartTime: string; EndTime: string }[] } }[]; ExceptionTimes?: { Name?: string; DataOrigin?: string; UserDefinedDataOrigin?: string; Start?: string; Finish?: string; RecurrencePattern?: { RecurrenceType: 'DAILY' | 'WEEKLY' | 'MONTHLY_BY_DAY_OF_MONTH' | 'MONTHLY_BY_POSITION' | 'BY_DAY_COUNT' | 'BY_WEEKDAY_COUNT' | 'YEARLY_BY_DAY_OF_MONTH' | 'YEARLY_BY_POSITION'; DayComponent?: number[]; WeekdayComponent?: number[]; MonthComponent?: number[]; Position?: number; Interval?: number; Occurrences?: number; TimePeriods?: { StartTime: string; EndTime: string }[] } }[] }): number;
     /** Create an IfcTask. Provide ScheduleStart + ScheduleFinish (or ScheduleDuration) for time fields. Returns task expressId. */
     addIfcTask(handle: number, params: { Name: string; Description?: string; Identification?: string; LongDescription?: string; Status?: string; WorkMethod?: string; IsMilestone?: boolean; Priority?: number; ObjectType?: string; ScheduleStart?: string; ScheduleFinish?: string; ScheduleDuration?: string; ActualStart?: string; ActualFinish?: string; ActualDuration?: string; EarlyStart?: string; EarlyFinish?: string; LateStart?: string; LateFinish?: string; FreeFloat?: string; TotalFloat?: string; IsCritical?: boolean; DurationType?: 'WORKTIME' | 'ELAPSEDTIME' | 'NOTDEFINED'; Completion?: number; PredefinedType?: 'ATTENDANCE' | 'CONSTRUCTION' | 'DEMOLITION' | 'DISMANTLE' | 'DISPOSAL' | 'INSTALLATION' | 'LOGISTIC' | 'MAINTENANCE' | 'MOVE' | 'OPERATION' | 'REMOVAL' | 'RENOVATION' | 'USERDEFINED' | 'NOTDEFINED' | 'ADJUSTMENT' | 'CALIBRATION' | 'EMERGENCY' | 'INSPECTION' | 'SAFETY' | 'SHUTDOWN' | 'STARTUP' | 'TESTING' | 'TROUBLESHOOTING' }): number;
     /** Link predecessor → successor tasks via IfcRelSequence. Returns relationship expressId. */
@@ -490,13 +1545,39 @@ declare const bim: {
     assignTasksToWorkSchedule(handle: number, scheduleId: number, taskIds: number[]): number;
     /** Ergonomic alias for addIfcRelAssignsToControl — attach work schedules to a parent IfcWorkPlan. Returns relationship expressId. */
     assignSchedulesToWorkPlan(handle: number, planId: number, scheduleIds: number[]): number;
+    /** Ergonomic alias for addIfcRelAssignsToControl — assign an IfcWorkCalendar to tasks (or to work schedules). Returns relationship expressId. */
+    assignCalendarToTasks(handle: number, calendarId: number, taskIds: number[]): number;
     /** Ergonomic alias for addIfcRelAssignsToProcess — bind products to a task. Returns relationship expressId. */
     assignProductsToTask(handle: number, taskId: number, productIds: number[]): number;
     /** Ergonomic alias for addIfcRelNests — nest child tasks under a summary parent. Returns relationship expressId. */
     nestTasks(handle: number, parentTaskId: number, childTaskIds: number[]): number;
-    /** Create ANY IFC type extruded along a Start→End axis. Returns expressId. */
+    /** Create an IfcCostSchedule (IFC4 / IFC4X3 only). Returns schedule expressId. */
+    addIfcCostSchedule(handle: number, params: { Name: string; Description?: string; ObjectType?: string; Identification?: string; PredefinedType?: 'BUDGET' | 'COSTPLAN' | 'ESTIMATE' | 'TENDER' | 'PRICEDBILLOFQUANTITIES' | 'UNPRICEDBILLOFQUANTITIES' | 'SCHEDULEOFRATES' | 'USERDEFINED' | 'NOTDEFINED'; Status?: string; SubmittedOn?: string; UpdateDate?: string }): number;
+    /** Create an IfcCostItem (IFC4 / IFC4X3 only). Returns cost item expressId. */
+    addIfcCostItem(handle: number, params: { Name: string; Description?: string; ObjectType?: string; Identification?: string; PredefinedType?: 'USERDEFINED' | 'NOTDEFINED'; CostValues?: number[]; CostQuantities?: number[] }): number;
+    /** Create an IfcCostValue (IFC4 / IFC4X3 only). Returns cost value expressId. */
+    addIfcCostValue(handle: number, params: { Name?: string; Description?: string; AppliedValue?: { Type: 'IfcMonetaryMeasure' | 'IfcAreaMeasure' | 'IfcVolumeMeasure' | 'IfcLengthMeasure' | 'IfcMassMeasure' | 'IfcTimeMeasure' | 'IfcCountMeasure' | 'IfcNumericMeasure' | 'IfcRatioMeasure' | 'IfcReal' | 'IfcInteger'; Value: number }; AppliedValueRef?: number; UnitBasis?: number; ApplicableDate?: string; FixedUntilDate?: string; Category?: string; Condition?: string; ArithmeticOperator?: 'ADD' | 'DIVIDE' | 'MODULO' | 'MULTIPLY' | 'SUBTRACT'; Components?: number[] }): number;
+    /** Create an IfcSIUnit for use as a quantity or measure unit. Returns unit expressId. */
+    addIfcSIUnit(handle: number, params: { UnitType: 'LENGTHUNIT' | 'AREAUNIT' | 'VOLUMEUNIT' | 'MASSUNIT' | 'TIMEUNIT'; Prefix?: string; Name: string }): number;
+    /** Create an IfcPhysicalSimpleQuantity for IfcCostItem.CostQuantities. Returns quantity expressId. */
+    addIfcPhysicalQuantity(handle: number, params: { Kind: 'IfcQuantityLength' | 'IfcQuantityArea' | 'IfcQuantityVolume' | 'IfcQuantityWeight' | 'IfcQuantityTime' | 'IfcQuantityCount' | 'IfcQuantityNumber'; Name: string; Value: number; Description?: string; Unit?: number; Formula?: string }): number;
+    /** Create an IfcMonetaryUnit for a currency code. Returns unit expressId. */
+    addIfcMonetaryUnit(handle: number, currency: string): number;
+    /** Create an IfcMeasureWithUnit (a typed value paired with a unit). Returns its expressId. */
+    addIfcMeasureWithUnit(handle: number, value: { Type: 'IfcMonetaryMeasure' | 'IfcAreaMeasure' | 'IfcVolumeMeasure' | 'IfcLengthMeasure' | 'IfcMassMeasure' | 'IfcTimeMeasure' | 'IfcCountMeasure' | 'IfcNumericMeasure' | 'IfcRatioMeasure' | 'IfcReal' | 'IfcInteger'; Value: number }, unitId: number): number;
+    /** Assign cost items to an IfcCostSchedule. Returns relationship expressId. */
+    assignCostItemsToSchedule(handle: number, scheduleId: number, costItemIds: number[]): number;
+    /** Assign cost items to the product they price. Returns relationship expressId. */
+    assignCostItemsToProduct(handle: number, productId: number, costItemIds: number[]): number;
+    /** Assign tasks to a cost item (an IfcCostItem is an IfcControl). Returns relationship expressId. */
+    assignTasksToCostItem(handle: number, costItemId: number, taskIds: number[]): number;
+    /** Nest child cost items under a parent (IfcRelNests). Returns relationship expressId. */
+    nestCostItems(handle: number, parentCostItemId: number, childCostItemIds: number[]): number;
+    /** Canonical IfcRelAssignsToProduct. Prefer assignCostItemsToProduct. */
+    addIfcRelAssignsToProduct(handle: number, relatingProductId: number, relatedObjectIds: number[]): number;
+    /** Create an IFC product a storey can hold (element, other product or IfcSpace; groups and other spatial elements throw) extruded along a Start→End axis. Returns expressId. */
     addAxisElement(handle: number, storeyId: number, params: unknown): number;
-    /** Create ANY IFC type with a profile at a placement. Returns expressId. */
+    /** Create an IFC product a storey can hold (element, other product or IfcSpace; groups and other spatial elements throw) with a profile at a placement. Returns expressId. */
     addElement(handle: number, storeyId: number, params: unknown): number;
     /** Add IfcBeam. Returns expressId. */
     addIfcBeam(handle: number, storeyId: number, params: unknown): number;
@@ -578,16 +1659,48 @@ declare const bim: {
     /** Get parsed CSV column names for an uploaded attachment by file name */
     csvColumns(name: string): string[];
   };
-  /** 4D / IFC construction schedule reader (IfcTask, IfcWorkSchedule, IfcRelSequence) */
+  /** 4D / IFC construction schedule reader (IfcTask, IfcWorkSchedule, IfcRelSequence, IfcWorkCalendar) */
   schedule: {
-    /** Full schedule extraction — tasks, dependencies, and work schedules. */
-    data(modelId?: string): { HasSchedule: boolean; WorkSchedules: Array<{ GlobalId: string; ExpressId: number; Name: string; Description?: string; Identification?: string; CreationDate?: string; StartTime?: string; FinishTime?: string; Purpose?: string; Duration?: string; PredefinedType?: string; Kind: 'WorkSchedule' | 'WorkPlan'; TaskGlobalIds: string[] }>; Tasks: Array<{ GlobalId: string; ExpressId: number; Name: string; Description?: string; ObjectType?: string; Identification?: string; LongDescription?: string; Status?: string; WorkMethod?: string; IsMilestone: boolean; Priority?: number; PredefinedType?: string; ParentTaskGlobalId?: string; ChildTaskGlobalIds: string[]; AssignedProductExpressIds: number[]; AssignedProductGlobalIds: string[]; ControllingScheduleGlobalIds: string[]; TaskTime?: { ScheduleStart?: string; ScheduleFinish?: string; ScheduleDuration?: string; ActualStart?: string; ActualFinish?: string; ActualDuration?: string; EarlyStart?: string; EarlyFinish?: string; LateStart?: string; LateFinish?: string; FreeFloat?: string; TotalFloat?: string; RemainingTime?: string; StatusTime?: string; IsCritical?: boolean; Completion?: number; DurationType?: 'WORKTIME' | 'ELAPSEDTIME' | 'NOTDEFINED' } }>; Sequences: Array<{ RelatingProcessGlobalId: string; RelatedProcessGlobalId: string; SequenceType: 'START_START' | 'START_FINISH' | 'FINISH_START' | 'FINISH_FINISH' | 'USERDEFINED' | 'NOTDEFINED'; UserDefinedSequenceType?: string; TimeLagSeconds?: number; TimeLagDuration?: string }> };
+    /** Full schedule extraction — tasks, dependencies, work schedules, and work calendars. */
+    data(modelId?: string): { HasSchedule: boolean; WorkSchedules: Array<{ GlobalId: string; ExpressId: number; Name: string; Description?: string; Identification?: string; CreationDate?: string; StartTime?: string; FinishTime?: string; Purpose?: string; Duration?: string; PredefinedType?: string; Kind: 'WorkSchedule' | 'WorkPlan'; TaskGlobalIds: string[]; CalendarGlobalIds?: string[] }>; Tasks: Array<{ GlobalId: string; ExpressId: number; Name: string; Description?: string; ObjectType?: string; Identification?: string; LongDescription?: string; Status?: string; WorkMethod?: string; IsMilestone: boolean; Priority?: number; PredefinedType?: string; ParentTaskGlobalId?: string; ChildTaskGlobalIds: string[]; AssignedProductExpressIds: number[]; AssignedProductGlobalIds: string[]; OutputProductExpressIds?: number[]; OutputProductGlobalIds?: string[]; ControllingScheduleGlobalIds: string[]; CalendarGlobalIds?: string[]; TaskTime?: { ScheduleStart?: string; ScheduleFinish?: string; ScheduleDuration?: string; ActualStart?: string; ActualFinish?: string; ActualDuration?: string; EarlyStart?: string; EarlyFinish?: string; LateStart?: string; LateFinish?: string; FreeFloat?: string; TotalFloat?: string; RemainingTime?: string; StatusTime?: string; IsCritical?: boolean; Completion?: number; DurationType?: 'WORKTIME' | 'ELAPSEDTIME' | 'NOTDEFINED' } }>; Sequences: Array<{ RelatingProcessGlobalId: string; RelatedProcessGlobalId: string; SequenceType: 'START_START' | 'START_FINISH' | 'FINISH_START' | 'FINISH_FINISH' | 'USERDEFINED' | 'NOTDEFINED'; UserDefinedSequenceType?: string; TimeLagSeconds?: number; TimeLagDuration?: string }>; WorkCalendars: Array<{ GlobalId: string; ExpressId: number; Name: string; Description?: string; ObjectType?: string; Identification?: string; PredefinedType?: string; WorkingTimes: Array<{ Name?: string; DataOrigin?: string; UserDefinedDataOrigin?: string; Start?: string; Finish?: string; RecurrencePattern?: { RecurrenceType?: string; DayComponent: number[]; WeekdayComponent: number[]; MonthComponent: number[]; Position?: number; Interval?: number; Occurrences?: number; TimePeriods: { Start: string; End: string }[] } }>; ExceptionTimes: Array<{ Name?: string; DataOrigin?: string; UserDefinedDataOrigin?: string; Start?: string; Finish?: string; RecurrencePattern?: { RecurrenceType?: string; DayComponent: number[]; WeekdayComponent: number[]; MonthComponent: number[]; Position?: number; Interval?: number; Occurrences?: number; TimePeriods: { Start: string; End: string }[] } }> }> };
     /** All IfcTask entities with their times and assigned products. */
-    tasks(modelId?: string): Array<{ GlobalId: string; ExpressId: number; Name: string; Description?: string; ObjectType?: string; Identification?: string; LongDescription?: string; Status?: string; WorkMethod?: string; IsMilestone: boolean; Priority?: number; PredefinedType?: string; ParentTaskGlobalId?: string; ChildTaskGlobalIds: string[]; AssignedProductExpressIds: number[]; AssignedProductGlobalIds: string[]; ControllingScheduleGlobalIds: string[]; TaskTime?: { ScheduleStart?: string; ScheduleFinish?: string; ScheduleDuration?: string; ActualStart?: string; ActualFinish?: string; ActualDuration?: string; EarlyStart?: string; EarlyFinish?: string; LateStart?: string; LateFinish?: string; FreeFloat?: string; TotalFloat?: string; RemainingTime?: string; StatusTime?: string; IsCritical?: boolean; Completion?: number; DurationType?: 'WORKTIME' | 'ELAPSEDTIME' | 'NOTDEFINED' } }>;
+    tasks(modelId?: string): Array<{ GlobalId: string; ExpressId: number; Name: string; Description?: string; ObjectType?: string; Identification?: string; LongDescription?: string; Status?: string; WorkMethod?: string; IsMilestone: boolean; Priority?: number; PredefinedType?: string; ParentTaskGlobalId?: string; ChildTaskGlobalIds: string[]; AssignedProductExpressIds: number[]; AssignedProductGlobalIds: string[]; OutputProductExpressIds?: number[]; OutputProductGlobalIds?: string[]; ControllingScheduleGlobalIds: string[]; CalendarGlobalIds?: string[]; TaskTime?: { ScheduleStart?: string; ScheduleFinish?: string; ScheduleDuration?: string; ActualStart?: string; ActualFinish?: string; ActualDuration?: string; EarlyStart?: string; EarlyFinish?: string; LateStart?: string; LateFinish?: string; FreeFloat?: string; TotalFloat?: string; RemainingTime?: string; StatusTime?: string; IsCritical?: boolean; Completion?: number; DurationType?: 'WORKTIME' | 'ELAPSEDTIME' | 'NOTDEFINED' } }>;
     /** All IfcWorkSchedule and IfcWorkPlan containers. */
-    workSchedules(modelId?: string): Array<{ GlobalId: string; ExpressId: number; Name: string; Description?: string; Identification?: string; CreationDate?: string; StartTime?: string; FinishTime?: string; Purpose?: string; Duration?: string; PredefinedType?: string; Kind: 'WorkSchedule' | 'WorkPlan'; TaskGlobalIds: string[] }>;
+    workSchedules(modelId?: string): Array<{ GlobalId: string; ExpressId: number; Name: string; Description?: string; Identification?: string; CreationDate?: string; StartTime?: string; FinishTime?: string; Purpose?: string; Duration?: string; PredefinedType?: string; Kind: 'WorkSchedule' | 'WorkPlan'; TaskGlobalIds: string[]; CalendarGlobalIds?: string[] }>;
     /** All IfcRelSequence dependency edges (FS/SS/FF/SF, with optional IfcLagTime). */
     sequences(modelId?: string): Array<{ RelatingProcessGlobalId: string; RelatedProcessGlobalId: string; SequenceType: 'START_START' | 'START_FINISH' | 'FINISH_START' | 'FINISH_FINISH' | 'USERDEFINED' | 'NOTDEFINED'; UserDefinedSequenceType?: string; TimeLagSeconds?: number; TimeLagDuration?: string }>;
+  };
+  /** Structural analysis reader (IfcStructuralAnalysisModel, members, connections, activities, load/result groups) */
+  structural: {
+    /** Full structural extraction — analysis models, members, connections, activities, load groups, result groups. */
+    data(modelId?: string): { HasStructural: boolean; LoadsTruncated: boolean; AnalysisModels: Array<{ GlobalId: string; ExpressId: number; Name?: string; Description?: string; ObjectType?: string; PredefinedType?: string; LoadGroupGlobalIds: string[]; ResultGroupGlobalIds: string[]; ItemGlobalIds: string[] }>; Members: Array<{ GlobalId: string; ExpressId: number; Type: string; Name?: string; Description?: string; ObjectType?: string; PredefinedType?: string; Thickness?: number; ConnectionGlobalIds: string[]; ActivityGlobalIds: string[]; AnalysisModelGlobalIds: string[] }>; Connections: Array<{ GlobalId: string; ExpressId: number; Type: string; Name?: string; Description?: string; ObjectType?: string; MemberGlobalIds: string[]; ActivityGlobalIds: string[]; AnalysisModelGlobalIds: string[]; AppliedCondition?: { ExpressId: number; Type: string; Name?: string; Components: Record<string, number | boolean> } }>; Activities: Array<{ GlobalId: string; ExpressId: number; Type: string; Kind: 'Action' | 'Reaction' | 'Unknown'; Name?: string; Description?: string; ObjectType?: string; PredefinedType?: string; GlobalOrLocal?: string; DestabilizingLoad?: boolean; AppliesToGlobalId?: string; GroupGlobalIds: string[]; AppliedLoad?: BimStructuralLoad }>; LoadGroups: Array<{ GlobalId: string; ExpressId: number; Type: string; Name?: string; Description?: string; ObjectType?: string; PredefinedType?: string; ActionType?: string; ActionSource?: string; Coefficient?: number; Purpose?: string; SelfWeightCoefficients?: number[]; ActivityGlobalIds: string[] }>; ResultGroups: Array<{ GlobalId: string; ExpressId: number; Name?: string; Description?: string; ObjectType?: string; TheoryType?: string; IsLinear?: boolean; ResultForLoadGroupGlobalId?: string; ActivityGlobalIds: string[] }> };
+    /** All IfcStructuralAnalysisModel containers. */
+    analysisModels(modelId?: string): Array<{ GlobalId: string; ExpressId: number; Name?: string; Description?: string; ObjectType?: string; PredefinedType?: string; LoadGroupGlobalIds: string[]; ResultGroupGlobalIds: string[]; ItemGlobalIds: string[] }>;
+    /** All IfcStructuralMember subtype occurrences (curve, surface). */
+    members(modelId?: string): Array<{ GlobalId: string; ExpressId: number; Type: string; Name?: string; Description?: string; ObjectType?: string; PredefinedType?: string; Thickness?: number; ConnectionGlobalIds: string[]; ActivityGlobalIds: string[]; AnalysisModelGlobalIds: string[] }>;
+    /** All IfcStructuralConnection subtype occurrences, with resolved support conditions. */
+    connections(modelId?: string): Array<{ GlobalId: string; ExpressId: number; Type: string; Name?: string; Description?: string; ObjectType?: string; MemberGlobalIds: string[]; ActivityGlobalIds: string[]; AnalysisModelGlobalIds: string[]; AppliedCondition?: { ExpressId: number; Type: string; Name?: string; Components: Record<string, number | boolean> } }>;
+    /** All IfcStructuralActivity subtype occurrences — applied actions and computed reactions. */
+    activities(modelId?: string): Array<{ GlobalId: string; ExpressId: number; Type: string; Kind: 'Action' | 'Reaction' | 'Unknown'; Name?: string; Description?: string; ObjectType?: string; PredefinedType?: string; GlobalOrLocal?: string; DestabilizingLoad?: boolean; AppliesToGlobalId?: string; GroupGlobalIds: string[]; AppliedLoad?: BimStructuralLoad }>;
+    /** All IfcStructuralLoadGroup / IfcStructuralLoadCase entities. */
+    loadGroups(modelId?: string): Array<{ GlobalId: string; ExpressId: number; Type: string; Name?: string; Description?: string; ObjectType?: string; PredefinedType?: string; ActionType?: string; ActionSource?: string; Coefficient?: number; Purpose?: string; SelfWeightCoefficients?: number[]; ActivityGlobalIds: string[] }>;
+    /** All IfcStructuralResultGroup entities. */
+    resultGroups(modelId?: string): Array<{ GlobalId: string; ExpressId: number; Name?: string; Description?: string; ObjectType?: string; TheoryType?: string; IsLinear?: boolean; ResultForLoadGroupGlobalId?: string; ActivityGlobalIds: string[] }>;
+  };
+  /** IFC 5D cost graph and decimal evaluation from the loaded source snapshot */
+  cost: {
+    /** Read the complete canonical cost graph. */
+    data(modelId?: string): BimCost.CostGraphData;
+    /** List IfcCostSchedule records. */
+    schedules(modelId?: string): BimCost.CostScheduleData[];
+    /** List IfcCostItem records. */
+    items(modelId?: string): BimCost.CostItemData[];
+    /** List IfcCostValue and IfcAppliedValue records. */
+    values(modelId?: string): BimCost.CostValueData[];
+    /** Evaluate an IfcCostItem using decimal arithmetic. */
+    evaluateItem(ref: BimCost.EntityRef, options?: BimCost.CostEvaluationOptions): BimCost.CostEvaluationData;
+    /** Evaluate an IfcCostValue using decimal arithmetic. */
+    evaluateValue(ref: BimCost.EntityRef, options?: BimCost.CostEvaluationOptions): BimCost.CostEvaluationData;
   };
   /** Geometric clash / interference detection over host-meshed ClashElement[]. Read-only analysis - selectors are IFC-type globs (e.g. "IfcDuct*|IfcPipe*", "!IfcSpace"), never GlobalIds. The host meshes the model and builds the elements. */
   clash: {
@@ -608,9 +1721,35 @@ declare const bim: {
     csv(entities: BimEntity[], options: { columns: string[]; filename?: string; separator?: string }): string;
     /** Export entities to JSON array */
     json(entities: BimEntity[], columns: string[]): Record<string, unknown>[];
-    /** Export entities to IFC STEP text. Pass filename to auto-download a valid .ifc file */
-    ifc(entities: BimEntity[], options: { schema?: "IFC2X3" | "IFC4" | "IFC4X3"; filename?: string; includeMutations?: boolean; visibleOnly?: boolean }): string | Uint8Array;
+    /** Export entities to IFC STEP text. Omit `entities` for the whole model; an empty list is a filter that matched nothing and is refused. Pass filename to auto-download a valid .ifc file */
+    ifc(entities?: BimEntity[], options?: { schema?: "IFC2X3" | "IFC4" | "IFC4X3"; filename?: string; includeMutations?: boolean; visibleOnly?: boolean }): string | Uint8Array;
     /** Trigger a browser file download with the given content. mimeType defaults to text/plain. */
     download(content: string, filename: string, mimeType?: string): void;
+  };
+  /** Present computed results as A2UI surfaces and return a host-generated surface ID. Limits per run are 8 surfaces, 2000 rows per table and 256 KiB of serialized surfaces. Example: const walls = bim.query.byType("IfcWall"); bim.ui.table({ columns: [{ path: "Name" }], rows: walls }); */
+  ui: {
+    /** Show a table with columns [{path, label?}] and either computed rows or an IFC query. Pass query results directly as rows, or map them to objects keyed by column path with an optional ref. */
+    table(spec: Omit<Extract<BimUi.ScriptUiSection, { kind: 'table' }>, 'kind'>): string;
+    /** Show KPI tiles from items [{label, value?, query?, aggregate?, path?, unit?, tone?}]. Supply a computed value or a query for each item. */
+    stats(spec: Omit<Extract<BimUi.ScriptUiSection, { kind: 'stats' }>, 'kind'>): string;
+    /** Show a bar or pie chart grouped by groupBy, with a query or computed data [{label, value, refs?}]. */
+    chart(spec: Omit<Extract<BimUi.ScriptUiSection, { kind: 'chart' }>, 'kind'>): string;
+    /** Show a colour legend grouped by the field path by, with an optional IFC query. */
+    legend(spec: Omit<Extract<BimUi.ScriptUiSection, { kind: 'legend' }>, 'kind'>): string;
+    /** Show viewer actions for refs or a query. Supply actions such as select, isolate, flyTo or exportCsv, and optional followUps [{label, prompt}]. */
+    actions(spec: Omit<Extract<BimUi.ScriptUiSection, { kind: 'actions' }>, 'kind'>): string;
+    /** Show a highlighted note with text and optional title and tone. */
+    callout(spec: Omit<Extract<BimUi.ScriptUiSection, { kind: 'callout' }>, 'kind'>): string;
+    /** Show an IFC entity card for an EntityRef object or a "modelId:expressId" string. */
+    entity(ref: BimUi.ScriptUiRef): string;
+    /** Show a compact entity list from refs or an IFC query, with an optional title and label field path. */
+    list(spec: Omit<Extract<BimUi.ScriptUiSection, { kind: 'list' }>, 'kind'>): string;
+    /** Show several sections in one surface. Pass { title?, card?, sections: [{ kind, ...fields }] }. Supported kinds are text, table, stats, chart, legend, actions, callout, entity and list. */
+    show(spec: BimUi.ScriptUiSurface): string;
+  };
+  /** Outbound HTTP requests, restricted to https: hosts covered by a granted network.fetch:<host> capability. */
+  network: {
+    /** Fetch an https: URL. `options.method` is GET (default) or POST; `options.headers`/`body` are optional. Throws if the host is not granted or the response exceeds the byte cap. */
+    fetch(url: string, options?: { method?: "GET" | "POST"; headers?: Record<string, string>; body?: string; timeoutMs?: number; maxBytes?: number }): Promise<{ status: number; headers: Record<string, string>; body: string; truncated: boolean }>;
   };
 };

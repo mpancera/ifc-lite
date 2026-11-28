@@ -15,6 +15,7 @@
  * the demo never mints new content addresses.
  */
 
+import { isFeatureEnabled } from '@/lib/features';
 import type { IfcxFile, IfcxNode, ProvenanceBase } from '@ifc-lite/ifcx';
 import {
   computeLayerId,
@@ -34,8 +35,8 @@ const COMBUSTIBLE = 'bsi::ifc::v5a::Pset_FireSafety::Combustible';
 
 const SAMPLE_PATH = '/samples/hello-wall.ifcx';
 
-/** Load-a-layer-stack request; the listener lives next to the load-file
- *  one in MainToolbar and routes to `loadFederatedIfcx`. */
+/** Load-a-layer-stack request; the listener in useFileCommands routes to
+ * `loadFederatedIfcx`. */
 export const EVENT_LOAD_LAYER_STACK = 'ifc-lite:load-layer-stack';
 
 function publishable(
@@ -65,8 +66,8 @@ function publishable(
 
 /** The three demo files, strongest last (the federation loader treats the
  *  first file as weakest). Exposed for tests. */
-export async function buildDemoLayerFiles(): Promise<File[]> {
-  const res = await fetch(SAMPLE_PATH);
+export async function buildDemoLayerFiles(signal?: AbortSignal): Promise<File[]> {
+  const res = await fetch(SAMPLE_PATH, signal ? { signal } : undefined);
   if (!res.ok) throw new Error(`demo stack fetch failed: ${res.status} ${SAMPLE_PATH}`);
   const baseText = await res.text();
   const base = JSON.parse(baseText) as IfcxFile;
@@ -109,6 +110,7 @@ export async function buildDemoLayerFiles(): Promise<File[]> {
  *  window event bus (usable from panels AND the tour's demoFulfil, where
  *  no hook context exists). */
 export async function loadDemoLayerStack(): Promise<void> {
+  if (!isFeatureEnabled('files.samples')) throw new Error('Sample models are switched off in this viewer');
   const files = await buildDemoLayerFiles();
   window.dispatchEvent(new CustomEvent(EVENT_LOAD_LAYER_STACK, { detail: files }));
 }

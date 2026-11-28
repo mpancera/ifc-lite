@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import { readPerfFlag } from '../lib/perf/flags.js';
+
 /**
  * 12-byte lattice-quantized batch vertices (issue #1682, phase 6).
  *
@@ -11,14 +13,14 @@
  * including live selection (hydrated highlight meshes lattice-snap to stay
  * bit-coincident with their quantized source batch). The renderer probes its
  * quantized pipelines (async WebGPU validation) before the scene may produce
- * 12B buffers, and batches exceeding the 64 m lattice range fall back to
- * f32 per batch.
+ * 12B buffers, and batches exceeding the 64 m lattice range, or whose shapes
+ * the ~1 mm lattice would collapse (#9068), fall back to f32 per batch.
  *
  * Kill switch (read once at renderer init; benchmark env
  * VIEWER_BENCHMARK_QUANTIZED): globalThis.__IFC_LITE_QUANTIZED = 0
  */
 export function isQuantizedEnabled(): boolean {
-  const raw = (globalThis as { __IFC_LITE_QUANTIZED?: unknown }).__IFC_LITE_QUANTIZED;
+  const raw = readPerfFlag('quantized');
   if (raw === undefined || raw === null) return true;
   return raw === 1 || raw === true;
 }

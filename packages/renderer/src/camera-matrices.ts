@@ -21,9 +21,32 @@
  * and the ortho branch already returned a fresh `{near, far}` per frame.
  */
 
-import { MathUtils } from './math.js';
+import { MathUtils, viewBasis } from './math.js';
+import { MAX_RTE_SOURCE_ABS_METRES, type RelativeToEyeFrame } from './relative-to-eye.js';
 import type { CameraInternalState } from './camera-state.js';
 import { DEFAULT_ORTHO_SIZE, usableOrthoSize } from './camera-guards.js';
+
+/** Mirror lookAt's effective eye without rewriting the caller's malformed pose. */
+export function updateCameraRelativeFrame(state: CameraInternalState, frame: RelativeToEyeFrame): void {
+  const eye = viewBasis(state.camera.position, state.camera.target, state.camera.up).eye;
+  if ([eye.x, eye.y, eye.z].some(value => !Number.isFinite(value) || Math.abs(value) > MAX_RTE_SOURCE_ABS_METRES)
+    || !state.projMatrix.m.every(Number.isFinite) || !state.viewMatrix.m.every(Number.isFinite)) {
+    frame.invalidate();
+    return;
+  }
+  frame.update(eye, state.projMatrix, state.viewMatrix);
+}
+
+const NO_LENS_SHIFT: Readonly<{ x: number; y: number }> = Object.freeze({ x: 0, y: 0 });
+
+/**
+ * The lens shift the current projection actually applies (#8688): the stored
+ * shift in perspective, zero in orthographic. Every reader that rebuilds the
+ * frustum from the camera basis instead of the matrix goes through this.
+ */
+export function activeLensShift(state: CameraInternalState): Readonly<{ x: number; y: number }> {
+  return state.projectionMode === 'orthographic' ? NO_LENS_SHIFT : state.lensShift;
+}
 
 export function updateCameraMatrices(state: CameraInternalState): void {
   const dx = state.camera.position.x - state.camera.target.x;
@@ -82,6 +105,14 @@ export function updateCameraMatrices(state: CameraInternalState): void {
       state.camera.near,
       state.camera.far
     );
+    // Lens shift (#8688): clip.xy += shift * clip.w, and clip.w = -z_view
+    // (m[11] = -1), so the third column's x/y entries carry it. Only the x/y
+    // rows change, so reverse-Z depth is untouched.
+    const { x: sx, y: sy } = activeLensShift(state);
+    if (sx !== 0 || sy !== 0) {
+      state.projMatrix.m[8] = -sx;
+      state.projMatrix.m[9] = -sy;
+    }
   }
 
   state.viewProjMatrix = MathUtils.multiply(state.projMatrix, state.viewMatrix);
@@ -98,7 +129,12 @@ export function computeOrthoNearFar(
   state: CameraInternalState,
   distance: number,
 ): { near: number; far: number } {
-  const bounds = state.sceneBounds;
+  const extra = state.depthOnlyBounds;
+  const scene = state.sceneBounds;
+  const bounds = scene && extra ? {
+    min: { x: Math.min(scene.min.x, extra.min.x), y: Math.min(scene.min.y, extra.min.y), z: Math.min(scene.min.z, extra.min.z) },
+    max: { x: Math.max(scene.max.x, extra.max.x), y: Math.max(scene.max.y, extra.max.y), z: Math.max(scene.max.z, extra.max.z) },
+  } : scene ?? extra;
   if (!bounds) {
     // Fallback: generous range centered on camera
     return { near: -Math.max(distance, 500), far: Math.max(distance, 500) };

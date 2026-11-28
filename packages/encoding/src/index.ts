@@ -4,6 +4,8 @@
 
 export { decodeIfcString, encodeIfcString } from './ifc-string.js';
 export { decodeStepStringLiteral } from './step-string-literal.js';
+export { isStepPageQuoteOperand, stepStringLiteralEnd } from './step-string-end.js';
+export { splitStepTopLevel } from './step-top-level-split.js';
 export {
   uuidToIfcGuid,
   ifcGuidToUuid,
@@ -13,5 +15,8 @@ export {
   isValidUuid,
 } from './guid.js';
 export type { RandomSource } from './guid.js';
+export { uuidFromSeed } from './deterministic-uuid.js';
+export { uuidV5 } from './uuid-v5.js';
+export { isWhollyNumeric } from './numeric-literal.js';
 export { parsePropertyValue } from './property-value.js';
 export type { ParsedPropertyValue } from './property-value.js';

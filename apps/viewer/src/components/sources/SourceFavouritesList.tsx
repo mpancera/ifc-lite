@@ -16,6 +16,7 @@ import {
   type SourceFavourite,
 } from '@/lib/sources/favourites';
 import { FileBox, Folder, X } from 'lucide-react';
+import { useTranslation } from '@/i18n';
 
 interface SourceFavouritesListProps {
   sourceHost: SourceHost;
@@ -26,6 +27,7 @@ interface SourceFavouritesListProps {
    * their auth has settled. A provider absent from the map has not settled yet.
    */
   liveIdentities: ReadonlyMap<string, string | null>;
+  navigationDisabled?: boolean;
   onOpen: (favourite: SourceFavourite) => void;
   onChanged: () => void;
 }
@@ -80,11 +82,16 @@ export function SourceFavouritesList({
   liveIdentities,
   onOpen,
   onChanged,
+  navigationDisabled = false,
 }: SourceFavouritesListProps) {
+  const { t, revision: localeRevision } = useTranslation();
   const rows = useMemo<FavouriteRow[]>(() => {
     // The counter is not read directly — it exists to re-derive this list after
-    // a star press elsewhere in the panel.
+    // a star press elsewhere in the panel. `localeRevision` is read the same
+    // way, to re-derive `disabledReason` after either a locale switch or an
+    // in-place replacement of the active catalogue.
     void favouritesVersion;
+    void localeRevision;
 
     const all: FavouriteRow[] = [];
     for (const providerId of listFavouriteProviderIds()) {
@@ -99,10 +106,10 @@ export function SourceFavouritesList({
         provider === undefined ||
         isPrefsConfigured(provider.manifest, loadResolvedSourcePrefs(provider.manifest));
       const disabledReason = provider === undefined
-        ? 'Provider unavailable'
+        ? t('sources.sourceFavouritesList.providerUnavailable')
         : configured
           ? null
-          : 'Add the required settings to browse';
+          : t('sources.sourceFavouritesList.addRequiredSettings');
 
       for (const favourite of items) {
         all.push({
@@ -114,14 +121,14 @@ export function SourceFavouritesList({
       }
     }
     return all.sort((left, right) => right.favourite.addedAt - left.favourite.addedAt);
-  }, [favouritesVersion, liveIdentities, sourceHost]);
+  }, [favouritesVersion, liveIdentities, localeRevision, sourceHost, t]);
 
   if (rows.length === 0) return null;
 
   return (
     <div className="border-b px-3 py-2">
-      <div className="mb-1 text-[11px] uppercase tracking-wide text-muted-foreground">
-        Favourites
+      <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">
+        {t('sources.sourceFavouritesList.heading')}
       </div>
       <ul className="flex flex-col">
         {rows.map((row) => (
@@ -129,7 +136,7 @@ export function SourceFavouritesList({
             <button
               type="button"
               className="flex min-w-0 flex-1 items-center gap-2 rounded-sm px-1 py-1 text-left hover:bg-accent disabled:cursor-default disabled:opacity-60 disabled:hover:bg-transparent"
-              disabled={row.disabledReason !== null}
+              disabled={navigationDisabled || row.disabledReason !== null}
               title={row.disabledReason ?? undefined}
               onClick={() => onOpen(row.favourite)}
             >
@@ -151,7 +158,9 @@ export function SourceFavouritesList({
             <button
               type="button"
               className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-              aria-label={`Remove favourite: ${row.favourite.kind === 'file' ? row.favourite.fileName : row.favourite.containerName}`}
+              aria-label={t('sources.sourceFavouritesList.removeFavouriteAria', {
+                name: (row.favourite.kind === 'file' ? row.favourite.fileName : row.favourite.containerName) ?? '',
+              })}
               onClick={() => {
                 removeFavourite(row.favourite.providerId, row.key);
                 onChanged();

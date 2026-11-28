@@ -6,18 +6,20 @@
 //!
 //! Handles `IfcCsgSolid` (the solid-model wrapper around a CSG tree) and the
 //! `IfcCsgPrimitive3D` subtypes that can sit at the leaves of that tree.
-//! `IfcBlock` and `IfcSphere` are supported as standalone leaves; the rest
+//! `IfcBlock` is here; `IfcSphere` lives in the `sphere` sibling. The rest
 //! (`IfcRectangularPyramid`, `IfcRightCircularCone`, `IfcRightCircularCylinder`)
 //! are not yet implemented.
 
-use crate::extrusion::apply_transform;
-use crate::{scale_segments, Error, Mesh, Result, TessellationQuality, Vector3};
+use crate::{BoolFailure, Error, Mesh, Result, TessellationQuality, Vector3};
 use ifc_lite_core::{DecodedEntity, EntityDecoder, IfcSchema, IfcType};
 use nalgebra::Point3;
 
 use super::boolean::BooleanClippingProcessor;
-use super::helpers::parse_axis2_placement_3d;
+use super::sphere::SphereProcessor;
 use crate::router::GeometryProcessor;
+
+#[path = "primitive_plan.rs"]
+pub(crate) mod plan;
 
 /// `IfcBlock` — axis-aligned box CSG primitive.
 ///
@@ -36,6 +38,14 @@ impl BlockProcessor {
     pub fn new() -> Self {
         Self
     }
+
+    pub(crate) fn lower(
+        &self,
+        entity: &DecodedEntity,
+        decoder: &mut EntityDecoder,
+    ) -> Result<plan::BlockPlan> {
+        plan::lower_block(entity, decoder)
+    }
 }
 
 impl Default for BlockProcessor {
@@ -45,6 +55,14 @@ impl Default for BlockProcessor {
 }
 
 impl GeometryProcessor for BlockProcessor {
+    fn lower_owned(&self, entity: &DecodedEntity, decoder: &mut EntityDecoder,
+        _quality: crate::TessellationQuality, rtc_file_units: Option<(f64, f64, f64)>)
+        -> Option<crate::Result<crate::program::OwnedConstructor>> {
+        use crate::program::constructor::Constructor;
+        if rtc_file_units.is_some() { return None; }
+        Some(self.lower(entity, decoder).map(|plan| crate::program::OwnedConstructor::new(Constructor::Block(plan))))
+    }
+
     fn process(
         &self,
         entity: &DecodedEntity,
@@ -52,37 +70,7 @@ impl GeometryProcessor for BlockProcessor {
         _schema: &IfcSchema,
         _quality: TessellationQuality,
     ) -> Result<Mesh> {
-        let x = entity
-            .get_float(1)
-            .ok_or_else(|| Error::geometry("IfcBlock missing XLength".to_string()))?;
-        let y = entity
-            .get_float(2)
-            .ok_or_else(|| Error::geometry("IfcBlock missing YLength".to_string()))?;
-        let z = entity
-            .get_float(3)
-            .ok_or_else(|| Error::geometry("IfcBlock missing ZLength".to_string()))?;
-
-        if !(x.is_finite() && y.is_finite() && z.is_finite() && x > 0.0 && y > 0.0 && z > 0.0) {
-            return Err(Error::geometry(format!(
-                "IfcBlock requires finite positive lengths, got ({}, {}, {})",
-                x, y, z
-            )));
-        }
-
-        let mut mesh = build_axis_aligned_box(x, y, z);
-
-        if let Some(pos_attr) = entity.get(0) {
-            if !pos_attr.is_null() {
-                if let Some(pos_entity) = decoder.resolve_ref(pos_attr)? {
-                    if pos_entity.ifc_type == IfcType::IfcAxis2Placement3D {
-                        let transform = parse_axis2_placement_3d(&pos_entity, decoder)?;
-                        apply_transform(&mut mesh, &transform);
-                    }
-                }
-            }
-        }
-
-        Ok(mesh)
+        Ok(self.lower(entity, decoder)?.evaluate())
     }
 
     fn supported_types(&self) -> Vec<IfcType> {
@@ -97,10 +85,13 @@ impl GeometryProcessor for BlockProcessor {
 /// resolves the reference and dispatches it to the matching leaf processor,
 /// so callers don't need to know that the geometry was wrapped.
 pub struct CsgSolidProcessor {
-    /// Per-build small-cut skip, forwarded to the nested
-    /// [`BooleanClippingProcessor`] this wraps so a CSG tree shares one scoped
-    /// value (see `BooleanClippingProcessor::skip_small_cuts`).
-    skip_small_cuts: bool,
+    /// The boolean recorder of the wrapped CSG tree, carrying the per-build
+    /// small-cut skip (see `BooleanClippingProcessor::skip_small_cuts`) so a
+    /// CSG tree shares one scoped value. Its failures leave through
+    /// [`GeometryProcessor::take_bool_failures`] — i.e. through the router that
+    /// owns THIS processor — instead of a thread-local a different router
+    /// could drain (#3821).
+    recorder: BooleanClippingProcessor,
 }
 
 impl CsgSolidProcessor {
@@ -111,7 +102,12 @@ impl CsgSolidProcessor {
     /// Construct with the per-build small-cut skip forwarded to the boolean
     /// processor at the root of the wrapped CSG tree.
     pub fn with_skip_small_cuts(skip_small_cuts: bool) -> Self {
-        Self { skip_small_cuts }
+        Self { recorder: BooleanClippingProcessor::with_skip_small_cuts(skip_small_cuts) }
+    }
+
+    /// Drain what the wrapped tree's boolean recorder recorded.
+    pub fn take_failures(&self) -> Vec<BoolFailure> {
+        self.recorder.take_failures()
     }
 }
 
@@ -121,71 +117,59 @@ impl Default for CsgSolidProcessor {
     }
 }
 
-impl GeometryProcessor for CsgSolidProcessor {
-    fn process(
-        &self,
-        entity: &DecodedEntity,
-        decoder: &mut EntityDecoder,
-        schema: &IfcSchema,
-        quality: TessellationQuality,
-    ) -> Result<Mesh> {
-        let root_attr = entity.get(0).ok_or_else(|| {
-            Error::geometry("IfcCsgSolid missing TreeRootExpression".to_string())
-        })?;
-        let root = decoder.resolve_ref(root_attr)?.ok_or_else(|| {
-            Error::geometry("IfcCsgSolid TreeRootExpression unresolved".to_string())
-        })?;
-
-        // Per IFC 4.3 (`TreeRootExpression : IfcCsgSelect`), the root must be
-        // an `IfcBooleanResult` or an `IfcCsgPrimitive3D`, NEVER another
-        // `IfcCsgSolid`. Reject that case explicitly so a malformed (or
-        // adversarial) file with a self-reference can't blow the stack on
-        // unbounded recursion.
-        match root.ifc_type {
-            IfcType::IfcBooleanResult | IfcType::IfcBooleanClippingResult => {
-                BooleanClippingProcessor::with_skip_small_cuts(self.skip_small_cuts)
-                    .process(&root, decoder, schema, quality)
-            }
-            IfcType::IfcBlock => BlockProcessor::new().process(&root, decoder, schema, quality),
-            IfcType::IfcSphere => SphereProcessor::new().process(&root, decoder, schema, quality),
-            IfcType::IfcCsgSolid => Err(Error::geometry(
-                "IfcCsgSolid TreeRootExpression must be IfcBooleanResult or \
-                 IfcCsgPrimitive3D, not another IfcCsgSolid (spec violation)"
-                    .to_string(),
-            )),
-            other => Err(Error::geometry(format!(
-                "Unsupported IfcCsgSolid TreeRootExpression: {}",
-                other
-            ))),
-        }
-    }
-
-    fn supported_types(&self) -> Vec<IfcType> {
-        vec![IfcType::IfcCsgSolid]
-    }
-}
-
-/// `IfcSphere` — CSG primitive: a sphere of given radius centred at the
-/// origin of its Position placement.
+/// Resolve and validate `IfcCsgSolid.TreeRootExpression`.
 ///
-/// Attributes (inherits `IfcCsgPrimitive3D` → Position):
-///   0: Position (`IfcAxis2Placement3D`)
-///   1: Radius (`IfcPositiveLengthMeasure`)
-pub struct SphereProcessor;
-
-impl SphereProcessor {
-    pub fn new() -> Self {
-        Self
+/// Per IFC 4.3 (`TreeRootExpression : IfcCsgSelect`), the root must be an
+/// `IfcBooleanResult` or an `IfcCsgPrimitive3D`, NEVER another `IfcCsgSolid`.
+/// Reject that case explicitly so a malformed (or adversarial) file with a
+/// self-reference cannot recurse. That guard is one hop wide; the operand
+/// path threaded through the boolean continuation closes the two-hop
+/// CSG -> Boolean -> CSG cycle it cannot see (#2866). Only a boolean, an
+/// `IfcBlock` or an `IfcSphere` is returned.
+pub(crate) fn resolve_tree_root(
+    entity: &DecodedEntity,
+    decoder: &mut EntityDecoder,
+) -> Result<DecodedEntity> {
+    let root_attr = entity
+        .get(0)
+        .ok_or_else(|| Error::geometry("IfcCsgSolid missing TreeRootExpression".to_string()))?;
+    let root = decoder
+        .resolve_ref(root_attr)?
+        .ok_or_else(|| Error::geometry("IfcCsgSolid TreeRootExpression unresolved".to_string()))?;
+    match root.ifc_type {
+        IfcType::IfcBooleanResult
+        | IfcType::IfcBooleanClippingResult
+        | IfcType::IfcBlock
+        | IfcType::IfcSphere => Ok(root),
+        IfcType::IfcCsgSolid => Err(Error::geometry(
+            "IfcCsgSolid TreeRootExpression must be IfcBooleanResult or \
+             IfcCsgPrimitive3D, not another IfcCsgSolid (spec violation)"
+                .to_string(),
+        )),
+        other => Err(Error::geometry(format!(
+            "Unsupported IfcCsgSolid TreeRootExpression: {}",
+            other
+        ))),
     }
 }
 
-impl Default for SphereProcessor {
-    fn default() -> Self {
-        Self::new()
+/// Mesh a CSG primitive tree root returned by [`resolve_tree_root`].
+pub(crate) fn primitive_root_mesh(
+    root: &DecodedEntity,
+    decoder: &mut EntityDecoder,
+    schema: &IfcSchema,
+    quality: TessellationQuality,
+) -> Result<Mesh> {
+    match root.ifc_type {
+        IfcType::IfcBlock => BlockProcessor::new().process(root, decoder, schema, quality),
+        IfcType::IfcSphere => SphereProcessor::new().process(root, decoder, schema, quality),
+        ref other => Err(Error::geometry(format!(
+            "Unsupported IfcCsgSolid TreeRootExpression: {other}"
+        ))),
     }
 }
 
-impl GeometryProcessor for SphereProcessor {
+impl GeometryProcessor for CsgSolidProcessor {
     fn process(
         &self,
         entity: &DecodedEntity,
@@ -193,86 +177,23 @@ impl GeometryProcessor for SphereProcessor {
         _schema: &IfcSchema,
         quality: TessellationQuality,
     ) -> Result<Mesh> {
-        let radius = entity
-            .get_float(1)
-            .ok_or_else(|| Error::geometry("IfcSphere missing Radius".to_string()))?;
+        // Top-level entry: the program's continuation from the unguarded CSG
+        // hop, drained with this processor's recorder. The router drives the
+        // same continuation step by step.
+        crate::program::BooleanMachine::new(entity, quality).drain(&self.recorder, decoder).map(|(mesh, _)| mesh)
+    }
 
-        if !radius.is_finite() || radius <= 0.0 {
-            return Err(Error::geometry(format!(
-                "IfcSphere requires finite positive radius, got {radius}",
-            )));
-        }
-
-        // 24 slices × 16 stacks at Medium; scaled by quality.
-        let slices = scale_segments(24, 8, 96, quality);
-        let stacks = scale_segments(16, 4, 64, quality);
-        let mut mesh = build_uv_sphere(radius, slices, stacks);
-
-        if let Some(pos_attr) = entity.get(0) {
-            if !pos_attr.is_null() {
-                if let Some(pos_entity) = decoder.resolve_ref(pos_attr)? {
-                    if pos_entity.ifc_type == IfcType::IfcAxis2Placement3D {
-                        let transform = parse_axis2_placement_3d(&pos_entity, decoder)?;
-                        apply_transform(&mut mesh, &transform);
-                    }
-                }
-            }
-        }
-
-        Ok(mesh)
+    fn boolean_recorder(&self) -> Option<&BooleanClippingProcessor> {
+        Some(&self.recorder)
     }
 
     fn supported_types(&self) -> Vec<IfcType> {
-        vec![IfcType::IfcSphere]
-    }
-}
-
-/// UV-sphere tessellation. `slices` segments around the equator, `stacks`
-/// rings from pole to pole. Pole vertices are duplicated per slice so UV
-/// seams don't share normals — sphere is closed and outward-facing.
-fn build_uv_sphere(radius: f64, slices: usize, stacks: usize) -> Mesh {
-    let slices = slices.max(3);
-    let stacks = stacks.max(2);
-    let vert_count = (stacks + 1) * (slices + 1);
-    let tri_count = stacks * slices * 2;
-    let mut mesh = Mesh::with_capacity(vert_count, tri_count * 3);
-
-    for j in 0..=stacks {
-        let v = j as f64 / stacks as f64;
-        let phi = std::f64::consts::PI * v;
-        let sin_phi = phi.sin();
-        let cos_phi = phi.cos();
-        for i in 0..=slices {
-            let u = i as f64 / slices as f64;
-            let theta = std::f64::consts::TAU * u;
-            let nx = sin_phi * theta.cos();
-            let ny = sin_phi * theta.sin();
-            let nz = cos_phi;
-            mesh.add_vertex(
-                Point3::new(radius * nx, radius * ny, radius * nz),
-                Vector3::new(nx, ny, nz),
-            );
-        }
+        vec![IfcType::IfcCsgSolid]
     }
 
-    let stride = slices + 1;
-    for j in 0..stacks {
-        for i in 0..slices {
-            let a = (j * stride + i) as u32;
-            let b = a + 1;
-            let c = ((j + 1) * stride + i) as u32;
-            let d = c + 1;
-            // Skip degenerate pole triangles
-            if j != 0 {
-                mesh.add_triangle(a, c, b);
-            }
-            if j + 1 != stacks {
-                mesh.add_triangle(b, c, d);
-            }
-        }
+    fn take_bool_failures(&self) -> Vec<BoolFailure> {
+        self.take_failures()
     }
-
-    mesh
 }
 
 /// Build an axis-aligned box from `(0,0,0)` to `(x, y, z)` with one flat
@@ -360,43 +281,5 @@ fn build_axis_aligned_box(x: f64, y: f64, z: f64) -> Mesh {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn axis_aligned_box_is_closed_and_has_outward_normals() {
-        let mesh = build_axis_aligned_box(2.0, 3.0, 4.0);
-        assert_eq!(mesh.positions.len() / 3, 24);
-        assert_eq!(mesh.indices.len() / 3, 12);
-
-        let mut min = [f32::INFINITY; 3];
-        let mut max = [f32::NEG_INFINITY; 3];
-        for chunk in mesh.positions.chunks_exact(3) {
-            for i in 0..3 {
-                min[i] = min[i].min(chunk[i]);
-                max[i] = max[i].max(chunk[i]);
-            }
-        }
-        assert_eq!(min, [0.0, 0.0, 0.0]);
-        assert_eq!(max, [2.0, 3.0, 4.0]);
-
-        // Each face's normal should match its outward axis.
-        let mut faces_seen = [false; 6];
-        for chunk in mesh.normals.chunks_exact(12) {
-            let nx = chunk[0];
-            let ny = chunk[1];
-            let nz = chunk[2];
-            let label = match (nx, ny, nz) {
-                (x, _, _) if x > 0.5 => 0,
-                (x, _, _) if x < -0.5 => 1,
-                (_, y, _) if y > 0.5 => 2,
-                (_, y, _) if y < -0.5 => 3,
-                (_, _, z) if z > 0.5 => 4,
-                (_, _, z) if z < -0.5 => 5,
-                _ => panic!("non-axial normal"),
-            };
-            faces_seen[label] = true;
-        }
-        assert!(faces_seen.iter().all(|&seen| seen), "missing a face");
-    }
-}
+#[path = "csg_primitive_tests.rs"]
+mod tests;

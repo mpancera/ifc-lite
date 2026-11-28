@@ -11,9 +11,12 @@
  * as an unhandled rejection over a map the user can still pan and use.
  */
 
+// Fork: the privacy switch reads window storage; the test DOM turns it on.
+import '@/test/setup-dom.js';
 import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 import { geocodeSearch } from './location-map-geocode.js';
+import { setExternalRequestsAllowed } from '@/lib/privacy/externalRequests';
 
 const realFetch = globalThis.fetch;
 
@@ -27,7 +30,14 @@ function stubFetch(impl: () => Promise<unknown> | never): string[] {
 }
 
 describe('geocodeSearch', () => {
-  afterEach(() => { globalThis.fetch = realFetch; });
+  afterEach(() => { globalThis.fetch = realFetch; setExternalRequestsAllowed(true); });
+
+  it('asks no geocoder while external requests are off (fork privacy switch)', async () => {
+    setExternalRequestsAllowed(false);
+    const urls = stubFetch(async () => ({ ok: true, json: async () => [] }));
+    assert.deepEqual(await geocodeSearch('Bern'), []);
+    assert.deepEqual(urls, []);
+  });
 
   it('maps Nominatim hits to numbers', async () => {
     stubFetch(async () => ({

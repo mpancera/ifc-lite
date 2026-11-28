@@ -20,7 +20,7 @@
 
 import { type StateCreator } from 'zustand';
 import type { CatalogEntry } from '@/lib/catalog';
-import { VIEWER_ROLE_ID, normalizeRoleId } from '@/lib/roles/disciplineRoles';
+import { EDITOR_ROLE_ID, VIEWER_ROLE_ID, normalizeRoleId } from '@/lib/roles/disciplineRoles';
 import { mayCreateEntities } from '@/lib/roles/roleGuard';
 import type { BoundaryMode } from '@ifc-lite/create';
 
@@ -29,6 +29,9 @@ const ROLE_STORAGE_KEY = 'ifclite.authoring.discipline-role';
 /** Last chosen role. `normalizeRoleId` migrates the pre-split `standard` value
  *  and sends anything unrecognised to the read-only default. */
 function readStoredRole(): string {
+  // Headless (SDK, scripts, store-only tests) has no role picker, so nobody
+  // could ever leave the read-only default: it writes as upstream does.
+  if (typeof window === 'undefined') return EDITOR_ROLE_ID;
   try {
     return normalizeRoleId(window.localStorage.getItem(ROLE_STORAGE_KEY));
   } catch {

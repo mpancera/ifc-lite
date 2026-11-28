@@ -22,7 +22,8 @@
         "api/*.ts",
         "scripts/dev-chat-api.ts",
         "scripts/add-license-headers.mjs"
-      ]
+      ],
+      "ignoreUnresolved": ["^/__perf/frames\\.js$"]
     },
     "packages/ids": {
       "ignoreDependencies": ["@xmldom/xmldom"]

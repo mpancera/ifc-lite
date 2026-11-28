@@ -5,90 +5,87 @@
 //! Sharded pre-pass wasm APIs (split from `prepass.rs`): the per-worker
 //! entity-index shard scan, the per-worker styled-item slice resolver, and
 //! the canonical styles finalize that merges the shard results. The main
-//! sharded pre-pass entry (`buildPrePassStreamingSharded`) stays in
-//! `prepass.rs` beside its serial twin.
+//! sharded pre-pass entry (`buildPrePassStreamingSharded`) lives in
+//! `prepass_owned_columns.rs`; its serial twin lives in `prepass.rs`.
 
 use crate::api::IfcAPI;
-use js_sys::Function;
 use wasm_bindgen::prelude::*;
+
+/// One `[r, g, b, a]` per id. `finalizePrepassStyles` reads four floats per id
+/// from both style column pairs, and under wasm `panic=abort` a read past the
+/// end traps the instance, so any other length is refused before either pair
+/// is read (#4614).
+pub(super) fn check_rgba_columns(what: &str, ids: &[u32], colors: &[f32]) -> Result<(), String> {
+    if colors.len().is_multiple_of(4) && colors.len() / 4 == ids.len() {
+        return Ok(());
+    }
+    Err(format!(
+        "{what} style columns disagree: {} ids need {} colour floats, got {}",
+        ids.len(),
+        ids.len() as u64 * 4,
+        colors.len()
+    ))
+}
+
+/// The `unitScale` wire value: NaN when the length unit is refused (#7678),
+/// which every batch router the host builds from it refuses, so the browser
+/// meshes nothing rather than the model at a metre scale. One encoder for the
+/// JS object below and the native C4-0 parity gate.
+pub(super) fn stream_meta_unit_scale(meta: &ifc_lite_processing::stream_meta::StreamMeta) -> f64 {
+    if meta.length_unit_refused.is_some() {
+        f64::NAN
+    } else {
+        meta.length_unit_scale
+    }
+}
 
 /// Serialize the shared [`StreamMeta`] onto a JS object as the wire fields the
 /// host reads: `unitScale`, `planeAngleToRadians`, `rtcOffset` (`[x,y,z]`),
-/// `needsShift`, `buildingRotation` (`null` when absent). Used by both the
+/// `needsShift`, `buildingRotation` and `siteOrigin` (`[x,y,z]` metres; both
+/// `null` when absent). Used by both the
 /// `buildPrePassOnce` result object and the streaming `meta` events so all
 /// three emission points serialize identically.
 pub(super) fn set_stream_meta_props(
     obj: &js_sys::Object,
     meta: &ifc_lite_processing::stream_meta::StreamMeta,
+    site_origin: Option<[f64; 3]>,
 ) {
-    crate::api::set_js_prop(obj, "unitScale", &meta.length_unit_scale.into());
+    // `unitRefused` says why a NaN `unitScale` was sent.
+    crate::api::set_js_prop(obj, "unitScale", &stream_meta_unit_scale(meta).into());
+    crate::api::set_js_prop(obj, "unitRefused", &meta.length_unit_refused.is_some().into());
     crate::api::set_js_prop(obj, "planeAngleToRadians", &meta.plane_angle_to_radians.into());
     let rtc_arr = js_sys::Float64Array::new_with_length(3);
-    rtc_arr.set_index(0, meta.rtc_offset.0);
-    rtc_arr.set_index(1, meta.rtc_offset.1);
-    rtc_arr.set_index(2, meta.rtc_offset.2);
+    let (rtc_x, rtc_y, rtc_z) = meta.frame.rtc_offset();
+    rtc_arr.set_index(0, rtc_x);
+    rtc_arr.set_index(1, rtc_y);
+    rtc_arr.set_index(2, rtc_z);
     crate::api::set_js_prop(obj, "rtcOffset", &rtc_arr);
-    crate::api::set_js_prop(obj, "needsShift", &meta.needs_shift.into());
+    crate::api::set_js_prop(obj, "needsShift", &meta.frame.needs_shift().into());
     match meta.building_rotation {
         Some(rot) => crate::api::set_js_prop(obj, "buildingRotation", &rot.into()),
         None => crate::api::set_js_prop(obj, "buildingRotation", &JsValue::NULL),
+    };
+    match site_origin {
+        Some(origin) => {
+            let arr = js_sys::Float64Array::new_with_length(3);
+            arr.copy_from(&origin);
+            crate::api::set_js_prop(obj, "siteOrigin", &arr)
+        }
+        None => crate::api::set_js_prop(obj, "siteOrigin", &JsValue::NULL),
     };
 }
 
 #[wasm_bindgen]
 impl IfcAPI {
-    /// Sharded pre-pass variant: same scan/discovery/jobs/columns pipeline as
-    /// `buildPrePassStreaming`, but
-    ///  1. the entity index is PREBUILT from the host's stitched shard columns
-    ///     (file order; see `scanEntityIndexShard`) — the scan skips its inline
-    ///     index build, the meta RTC ladder resolves against the FULL index
-    ///     (no partial-ladder full-rescan detour), and the post-scan
-    ///     `entity-index` event is skipped (the host already delivered it), and
-    ///  2. styles resolution is EXTERNAL: the styled-item spans are resolved as
-    ///     shard slices on the geometry workers (`resolveStyledItemsShard`);
-    ///     this call stashes the SUPPORT spans + plane-angle scale, and the
-    ///     follow-up `finalizePrepassStyles` merges + flattens into the exact
-    ///     styles payload the serial path emits. NO `styles` event is emitted
-    ///     here.
-    #[wasm_bindgen(js_name = buildPrePassStreamingSharded)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn build_pre_pass_streaming_sharded(
-        &self,
-        data: &[u8],
-        on_event: &Function,
-        chunk_size: u32,
-        disabled_type_names: Option<Vec<String>>,
-        skip_type_geometry: bool,
-        index_ids: &[u32],
-        index_starts: &[u32],
-        index_lengths: &[u32],
-        index_classes: &[u8],
-    ) -> Result<JsValue, JsValue> {
-        let prebuilt = ifc_lite_core::ColumnarEntityIndex::from_columns(
-            index_ids,
-            index_starts,
-            index_lengths,
-        );
-        self.pre_pass_streaming_impl(
-            data,
-            on_event,
-            chunk_size,
-            disabled_type_names,
-            skip_type_geometry,
-            Some(prebuilt),
-            true,
-            Some((index_ids, index_starts, index_lengths, index_classes)),
-        )
-    }
-
     /// SPIKE (sharded pre-pass): scan the entity index over a single byte range.
     ///
     /// Each idle browser geometry worker calls this on its `[range_start,
     /// range_end)` shard; the main thread stitches the returned columns into the
     /// full entity index (byte-identical to the single-threaded
     /// `build_entity_index`) by binary-searching each shard for the previous
-    /// shard's `handoff`. Delegates to `ifc_lite_processing::scan_shard_classified`
-    /// — a separately-maintained loop over the same `EntityScanner` primitive as
+    /// shard's `handoff`. Delegates to
+    /// `ifc_lite_processing::scan_shard_classified_with_refusals` — a
+    /// separately-maintained loop over the same `EntityScanner` primitive as
     /// `scan_shard` (the one the native `build_entity_index_parallel` fans across
     /// cores), plus a per-record class column this sharded path also needs. The
     /// two loops' records/handoff are kept in parity by a dedicated test
@@ -98,24 +95,35 @@ impl IfcAPI {
     /// Byte offsets returned are GLOBAL (relative to file start), so shards
     /// concatenate without rewriting. Returns a plain object:
     ///   `{ ids: Uint32Array, starts: Uint32Array, lengths: Uint32Array,
-    ///      classes: Uint8Array, handoff: number }`
+    ///      classes: Uint8Array, handoff: number,
+    ///      oversizedIdStarts: Uint32Array }`
     /// where `classes` is the parallel per-record prepass class byte
     /// (`PREPASS_CLASS_*`: named code in the low bits plus the geometry-job /
     /// type-candidate flags) the host filters on to rebuild pre-pass span
     /// lists, and `handoff` is the global start of the first entity at/after
     /// `range_end` (the next shard's first real entity), or `-1` at EOF.
+    ///
+    /// `oversizedIdStarts` carries the global start byte of every record this
+    /// shard refused for an express id above `u32::MAX` (#3395). Offsets, not
+    /// a count, and deliberately NOT reported from here: a shard begins at an
+    /// arbitrary byte, so it can start inside a quoted value and refuse a
+    /// string literal shaped like `#4294967297=IFCWALL(` — text no file
+    /// declared. Reporting per shard would warn "skipped N records" on a file
+    /// that is fine. The host's stitch keeps only the offsets at/after the
+    /// retained boundary it computed for this shard and reports once, which is
+    /// what makes the number attributable to a record the stitch retained
+    /// (#3430).
     #[wasm_bindgen(js_name = scanEntityIndexShard)]
-    pub fn scan_entity_index_shard(
-        &self,
-        data: &[u8],
-        range_start: u32,
-        range_end: u32,
-    ) -> JsValue {
+    pub fn scan_entity_index_shard(&self, data: &[u8], range_start: u32, range_end: u32) -> JsValue {
         let total = data.len();
         let start = (range_start as usize).min(total);
         let end = (range_end as usize).min(total);
-        let (records, classes, handoff) =
-            ifc_lite_processing::scan_shard_classified(data, start, end);
+        // Shared named-result scanner; preserve the established JS wire.
+        let scan = ifc_lite_processing::scan_shard_result(data, start, end, true);
+        let records = scan.records;
+        let classes = scan.classes.expect("classified scan");
+        let handoff = scan.handoff;
+        let oversized_id_starts = scan.refusals;
 
         let n = records.len() as u32;
         let ids = js_sys::Uint32Array::new_with_length(n);
@@ -143,13 +151,32 @@ impl IfcAPI {
             None => -1.0,
         };
         crate::api::set_js_prop(&result, "handoff", &handoff_val.into());
+        // #3395: the stitched columns are the ONLY thing the parser worker sees
+        // on the SAB-backed pre-scanned load, and a refused record is absent
+        // from them by construction — the host cannot recount it. Carry the
+        // offsets so the stitch can attribute them and `scanIfcEntities` can
+        // report ONCE on the canonical viewer path, instead of returning an
+        // apparently clean, incomplete model. No console line from here: a
+        // per-shard report is exactly the false alarm #3430 retracted.
+        let refusals = js_sys::Uint32Array::new_with_length(oversized_id_starts.len() as u32);
+        for (i, &offset) in oversized_id_starts.iter().enumerate() {
+            debug_assert!(
+                offset <= u32::MAX as usize,
+                "refusal offset exceeds the u32 column ceiling"
+            );
+            refusals.set_index(i as u32, offset as u32);
+        }
+        crate::api::set_js_prop(&result, "oversizedIdStarts", &refusals);
         result.into()
     }
 
     /// Sharded pre-pass: resolve ONE contiguous (file-ordered) slice of the
     /// styled-item span list on this worker, against the entity index installed
     /// by `setEntityIndex`. Returns raw resolved maps as flat columns:
-    /// `{ orphanIds, orphanColors (f32 rgba per id), geomIds, geomColors }`.
+    /// `{ orphanIds, orphanColors (f32 rgba per id), geomIds, geomColors,
+    /// geomFinishes }`, where `geomFinishes` is the #5582 `[metallic,
+    /// roughness]` pair per `geomIds` entry (NaN when unauthored), from
+    /// `resolve_geometry_finishes` over this slice.
     /// The host merges shard results IN SHARD ORDER with first-wins per
     /// geometry id, reproducing the serial resolver's file-order precedence,
     /// then hands the merged columns to `finalizePrepassStyles`.
@@ -158,8 +185,7 @@ impl IfcAPI {
     pub fn resolve_styled_items_shard(&self, data: &[u8], spans: &[u32]) -> Result<JsValue, JsValue> {
         use ifc_lite_core::EntityDecoder;
         let index = {
-            let slot = self
-                .cached_entity_index
+            let slot = self.content.cached_entity_index
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             slot.clone()
@@ -169,7 +195,7 @@ impl IfcAPI {
                 "resolveStyledItemsShard: no entity index installed (setEntityIndex must run first)",
             ));
         };
-        let mut decoder = EntityDecoder::with_arc_columnar_index(data, index);
+        let mut decoder = EntityDecoder::with_arc_columnar_index(data, index).with_strict_reals(); // native parity (#7678)
         let styled: Vec<(u32, usize, usize)> = spans
             .chunks_exact(3)
             .map(|c| (c[0], c[1] as usize, c[1] as usize + c[2] as usize))
@@ -185,7 +211,12 @@ impl IfcAPI {
             &mut geom,
             &mut deferred,
         );
+        // #5582: this slice's finishes, first-wins in the slice's file order
+        // exactly like `geom`. Emitted aligned to `geomIds` below, so the host's
+        // first-wins colour merge picks each id's finish from the same slice.
+        let finishes = ifc_lite_processing::prepass::resolve_geometry_finishes(&styled, &mut decoder);
 
+        self.collect_pipeline_refusals(&decoder);
         let orphan_ids = js_sys::Uint32Array::new_with_length(orphan.len() as u32);
         let orphan_colors = js_sys::Float32Array::new_with_length((orphan.len() * 4) as u32);
         for (i, (&id, color)) in orphan.iter().enumerate() {
@@ -196,17 +227,22 @@ impl IfcAPI {
         }
         let geom_ids = js_sys::Uint32Array::new_with_length(geom.len() as u32);
         let geom_colors = js_sys::Float32Array::new_with_length((geom.len() * 4) as u32);
+        let geom_finishes = js_sys::Float32Array::new_with_length((geom.len() * 2) as u32);
         for (i, (&id, info)) in geom.iter().enumerate() {
             geom_ids.set_index(i as u32, id);
             for (j, &c) in info.color.iter().enumerate() {
                 geom_colors.set_index((i * 4 + j) as u32, c);
             }
+            let finish = ifc_lite_processing::prepass::finish_to_wire(finishes.get(&id).copied());
+            geom_finishes.set_index((i * 2) as u32, finish[0]);
+            geom_finishes.set_index((i * 2 + 1) as u32, finish[1]);
         }
         let result = js_sys::Object::new();
         crate::api::set_js_prop(&result, "orphanIds", &orphan_ids);
         crate::api::set_js_prop(&result, "orphanColors", &orphan_colors);
         crate::api::set_js_prop(&result, "geomIds", &geom_ids);
         crate::api::set_js_prop(&result, "geomColors", &geom_colors);
+        crate::api::set_js_prop(&result, "geomFinishes", &geom_finishes);
         Ok(result.into())
     }
 
@@ -215,7 +251,11 @@ impl IfcAPI {
     /// CANONICAL styles flatten. Returns the exact `styles` event payload the
     /// serial path emits. Runs on any worker with `setEntityIndex` installed.
     /// Span arguments are `[id, start, len]` triples; `plane_angle_to_radians`
-    /// comes from the meta event.
+    /// comes from the meta event. `orphanColors` / `geomColors` carry exactly
+    /// four floats per id in `orphanIds` / `geomIds`; any other length throws
+    /// before either column is read. The payload's `styleFinishes` come from
+    /// the geometry finishes a preceding `setPrepassGeometryFinishes` stashed
+    /// (consumed here); without that call they are all NaN.
     #[wasm_bindgen(js_name = finalizePrepassStyles)]
     #[allow(clippy::too_many_arguments)]
     pub fn finalize_prepass_styles(
@@ -234,6 +274,9 @@ impl IfcAPI {
         plane_angle_to_radians: f64,
     ) -> Result<JsValue, JsValue> {
         use ifc_lite_core::EntityDecoder;
+        check_rgba_columns("orphan", orphan_ids, orphan_colors)
+            .and_then(|()| check_rgba_columns("geometry", geom_ids, geom_colors))
+            .map_err(|message| JsValue::from_str(&format!("finalizePrepassStyles: {message}")))?;
         fn triples(v: &[u32]) -> Vec<(u32, usize, usize)> {
             v.chunks_exact(3)
                 .map(|c| (c[0], c[1] as usize, c[1] as usize + c[2] as usize))
@@ -247,10 +290,14 @@ impl IfcAPI {
             void_rels: triples(void_spans),
             fills_rels: triples(fills_spans),
             aggregate_rels: triples(aggregate_spans),
+            // Not plumbed across this wasm_bindgen boundary (no
+            // rel-defines-by-type span param here yet): occurrences merged
+            // via this sharded-finalize path get no type-material fallback.
+            // The serial and columns-discovery paths (the common case) do.
+            defines_by_type: Vec::new(),
         };
         let index = {
-            let slot = self
-                .cached_entity_index
+            let slot = self.content.cached_entity_index
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             slot.clone()
@@ -258,7 +305,7 @@ impl IfcAPI {
         let Some(index) = index else {
             return Err(JsValue::from_str("finalizePrepassStyles: no entity index"));
         };
-        let mut decoder = EntityDecoder::with_arc_columnar_index(data, index);
+        let mut decoder = EntityDecoder::with_arc_columnar_index(data, index).with_strict_reals(); // native parity (#7678)
         decoder.seed_unit_scales(1.0, plane_angle_to_radians);
 
         // Rebuild the shard-merged styled maps and SEED them into the resolver
@@ -266,13 +313,8 @@ impl IfcAPI {
         // orphan_styled_items, so injecting after resolve_prepass loses
         // material-dependent styles.
         let mut orphan_seed = rustc_hash::FxHashMap::default();
-        for (i, &id) in orphan_ids.iter().enumerate() {
-            orphan_seed.insert(id, [
-                orphan_colors[i * 4],
-                orphan_colors[i * 4 + 1],
-                orphan_colors[i * 4 + 2],
-                orphan_colors[i * 4 + 3],
-            ]);
+        for (&id, rgba) in orphan_ids.iter().zip(orphan_colors.chunks_exact(4)) {
+            orphan_seed.insert(id, [rgba[0], rgba[1], rgba[2], rgba[3]]);
         }
         // Geometry styles stay as COLUMNS (stage 2): the support resolution
         // only consults the ORPHAN map (material chain), and the column-based
@@ -286,33 +328,42 @@ impl IfcAPI {
             },
             Some((orphan_seed, rustc_hash::FxHashMap::default())),
         );
-        let flat = ifc_lite_processing::flat_styles_rgba8_from_geometry_columns(
+        let (style_ids, style_colors) = ifc_lite_processing::flat_styles_rgba8_from_geometry_columns(
             geom_ids,
             geom_colors,
             &resolved,
             &mut decoder,
         );
+        // Geometry wins every id it shares with a fallback in that flatten, so
+        // a per-id lookup into the geometry finishes is aligned by construction.
+        let geom_finishes = self.take_pending_geometry_finishes();
+        let style_finishes = ifc_lite_processing::prepass::style_finishes_for_ids(&style_ids, |id| {
+            geom_finishes.get(&id).copied()
+        });
 
-        Ok(styles_payload_with_flat(flat, &resolved).into())
+        self.collect_pipeline_refusals(&decoder);
+        Ok(styles_payload_with_flat((style_ids, style_colors, style_finishes), &resolved).into())
     }
 }
 
 /// Serialize a [`ResolvedPrepass`] into the flat `styles` wire payload
-/// (styleIds/styleColors/voidKeys/voidCounts/voidValues/materialElementIds/
+/// (styleIds/styleColors/styleFinishes/voidKeys/voidCounts/voidValues/materialElementIds/
 /// materialColorCounts/materialColors). Shared by the serial pre-pass's
 /// styles event and the sharded finalize so the two cannot drift.
 pub(super) fn styles_payload(
     resolved: &ifc_lite_processing::prepass::ResolvedPrepass,
+    geometry_finishes: &rustc_hash::FxHashMap<u32, ifc_lite_processing::style::SpecularMaterial>,
     decoder: &mut ifc_lite_core::EntityDecoder,
 ) -> js_sys::Object {
-    let flat = ifc_lite_processing::prepass::flat_styles_rgba8(resolved, decoder);
+    let flat =
+        ifc_lite_processing::prepass::flat_styles_with_finishes(resolved, geometry_finishes, decoder);
     styles_payload_with_flat(flat, resolved)
 }
 
 /// [`styles_payload`] with the style columns precomputed (the sharded
 /// finalize computes them via the column-based flatten).
 pub(super) fn styles_payload_with_flat(
-    (style_ids_vec, style_colors_vec): (Vec<u32>, Vec<u8>),
+    (style_ids_vec, style_colors_vec, style_finishes_vec): (Vec<u32>, Vec<u8>, Vec<f32>),
     resolved: &ifc_lite_processing::prepass::ResolvedPrepass,
 ) -> js_sys::Object {
     let (void_keys_vec, void_counts_vec, void_values_vec) =
@@ -322,6 +373,7 @@ pub(super) fn styles_payload_with_flat(
     let result = js_sys::Object::new();
     crate::api::set_js_prop(&result, "styleIds", &js_sys::Uint32Array::from(style_ids_vec.as_slice()));
     crate::api::set_js_prop(&result, "styleColors", &js_sys::Uint8Array::from(style_colors_vec.as_slice()));
+    crate::api::set_js_prop(&result, "styleFinishes", &js_sys::Float32Array::from(style_finishes_vec.as_slice()));
     crate::api::set_js_prop(&result, "voidKeys", &js_sys::Uint32Array::from(void_keys_vec.as_slice()));
     crate::api::set_js_prop(&result, "voidCounts", &js_sys::Uint32Array::from(void_counts_vec.as_slice()));
     crate::api::set_js_prop(&result, "voidValues", &js_sys::Uint32Array::from(void_values_vec.as_slice()));
@@ -330,3 +382,7 @@ pub(super) fn styles_payload_with_flat(
     crate::api::set_js_prop(&result, "materialColors", &js_sys::Uint8Array::from(mat_colors_vec.as_slice()));
     result
 }
+
+#[cfg(test)]
+#[path = "prepass_sharded_tests.rs"]
+mod tests;

@@ -48,7 +48,7 @@ export interface PlanToolbarProps {
   displayOptions: {
     useSymbolicRepresentations: boolean;
     showIfcAnnotations: boolean;
-    showConstructionProjection: boolean;
+    showConstructionProjection: boolean | null;
   };
   onToggleSymbolic: () => void;
   onToggleIfcAnnotations: () => void;
@@ -286,7 +286,7 @@ export function PlanToolbar(props: PlanToolbarProps): React.ReactElement {
             id: 'constructionProjection',
             label: 'Projektion unter dem Schnitt',
             count: null,
-            visible: displayOptions.showConstructionProjection,
+            visible: displayOptions.showConstructionProjection === true,
             onToggle: onToggleConstructionProjection,
           },
         ]}

@@ -52,7 +52,7 @@ END-ISO-10303-21;
 
 /// First and last emitted point of the single polyline, as (x, y).
 fn endpoints(ifc: &str) -> ((f32, f32), (f32, f32)) {
-    let data = extract_symbolic_data(ifc);
+    let data = extract_symbolic_data(ifc).expect("symbolic extraction must complete");
     assert_eq!(
         data.polylines.len(),
         1,
@@ -186,7 +186,7 @@ DATA;
 ENDSEC;
 END-ISO-10303-21;
 "#;
-    let data = extract_symbolic_data(ifc);
+    let data = extract_symbolic_data(ifc).expect("symbolic extraction must complete");
     assert_eq!(data.polylines.len(), 1);
     let p = &data.polylines[0];
     assert!(
@@ -240,7 +240,7 @@ DATA;
 ENDSEC;
 END-ISO-10303-21;
 "#;
-    let data = extract_symbolic_data(ifc);
+    let data = extract_symbolic_data(ifc).expect("symbolic extraction must complete");
     assert_eq!(data.polylines.len(), 1);
     assert_eq!(
         data.polylines[0].points.len(),
@@ -264,7 +264,7 @@ fn full_turn_trim_is_not_collapsed_to_two_points() {
         ".PARAMETER.",
         "",
     );
-    let data = extract_symbolic_data(&ifc);
+    let data = extract_symbolic_data(&ifc).expect("symbolic extraction must complete");
     assert_eq!(data.polylines.len(), 1);
     let p = &data.polylines[0];
     assert!(
@@ -301,7 +301,7 @@ fn near_full_turn_trim_is_not_flattened_by_the_radius_shortcut() {
         ".PARAMETER.",
         "",
     );
-    let data = extract_symbolic_data(&ifc);
+    let data = extract_symbolic_data(&ifc).expect("symbolic extraction must complete");
     assert_eq!(data.polylines.len(), 1);
     let p = &data.polylines[0];
     assert!(
@@ -310,6 +310,37 @@ fn near_full_turn_trim_is_not_flattened_by_the_radius_shortcut() {
          collapsed to a 2-point chord; got {} points",
         p.points.len() / 2
     );
+}
+
+/// The same defect in the band that test missed (Rust review finding G2).
+/// `radius > chord_len * 10.0` is |sin(sweep/2)| < 0.05, true within 0.1 rad
+/// of a full turn, while the full-turn escape covered only 0.02 rad, so a 355
+/// or 362 degree arc (0.087 and 0.035 rad from a full turn) still came out as
+/// a two-point chord. Every emitted point must also lie on the circle.
+///
+/// MUTATION that fails both cases: restore `|| radius > chord_len * 10.0` and
+/// the 0.02 rad `is_full_turn` window in `extract_trimmed_curve`.
+#[test]
+fn arcs_within_a_tenth_of_a_radian_of_a_full_turn_are_not_flattened() {
+    for degrees in [355.0_f64, 362.0] {
+        let end = format!("(IFCPARAMETERVALUE({:?}))", degrees.to_radians());
+        let ifc = fixture("$", "(IFCPARAMETERVALUE(0.))", &end, ".PARAMETER.", "");
+        let data = extract_symbolic_data(&ifc).expect("symbolic extraction must complete");
+        assert_eq!(data.polylines.len(), 1);
+        let p = &data.polylines[0].points;
+        assert!(
+            p.len() / 2 > 8,
+            "a {degrees} degree trim must be tessellated as an arc; got {} point(s): {p:?}",
+            p.len() / 2
+        );
+        for xy in p.chunks_exact(2) {
+            let r = (xy[0] * xy[0] + xy[1] * xy[1]).sqrt();
+            assert!(
+                (r - 2.0).abs() < 1e-3,
+                "{degrees} degrees: {xy:?} is off the circle"
+            );
+        }
+    }
 }
 
 /// BOUNDING CONTROL — a genuinely degenerate trim (start == end, no
@@ -325,7 +356,7 @@ fn zero_span_trim_still_collapses_to_a_point_segment() {
         ".PARAMETER.",
         "",
     );
-    let data = extract_symbolic_data(&ifc);
+    let data = extract_symbolic_data(&ifc).expect("symbolic extraction must complete");
     assert_eq!(data.polylines.len(), 1);
     assert_eq!(
         data.polylines[0].points.len(),
@@ -347,7 +378,7 @@ fn reversed_sense_sweeps_the_complementary_arc() {
         "",
     )
     .replace(",.T.,.PARAMETER.", ",.F.,.PARAMETER.");
-    let data = extract_symbolic_data(&ifc);
+    let data = extract_symbolic_data(&ifc).expect("symbolic extraction must complete");
     assert_eq!(data.polylines.len(), 1);
     let p = &data.polylines[0];
     let n = p.points.len();
@@ -367,10 +398,10 @@ fn reversed_sense_sweeps_the_complementary_arc() {
 
 /// PINS: a review sub-finding on #2356 claimed the typed-parameter form
 /// `IFCPARAMETERVALUE(1.57)` — which the tokenizer hands back as
-/// `List([String("IFCPARAMETERVALUE"), Float(v)])`, not a bare `Float` —
+/// `AttributeValue::Typed { name: "IFCPARAMETERVALUE", value: Float(v) }`, not a bare `Float` —
 /// needed an extra unwrap in `resolve_trim`. It does not: `resolve_trim`
 /// calls `other.as_float()` on every non-`EntityRef` set member, and
-/// `AttributeValue::as_float()` already unwraps a `List([String, Float])`
+/// `AttributeValue::as_float()` already sees through a `Typed` value
 /// generically (`rust/core/src/schema_gen.rs`). This exercises the REAL
 /// tokenizer → decoder → `resolve_trim` path end to end, not the unit-level
 /// `as_float()` check in `schema_gen_tests.rs`.
@@ -394,8 +425,8 @@ fn typed_float_parameter_value_trim_resolves_correctly() {
 
 /// Same claim, for the INTEGER-valued typed form: `IFCPARAMETERVALUE(2)`
 /// (no decimal point) tokenizes its argument as `Token::Integer(2)`, so the
-/// wrapper is `List([String, Integer(2)])`. `as_float()` has a distinct
-/// match arm for `Integer` inside the `List` case (schema_gen.rs ~129) —
+/// wrapper is a `Typed` of `Integer(2)`. `as_float()` has a distinct
+/// match arm for `Integer` after `unwrap_typed` (schema_gen.rs) —
 /// an unwrap that handled `Float` but not `Integer` would be a real gap,
 /// so this is checked independently of the float case above.
 #[test]

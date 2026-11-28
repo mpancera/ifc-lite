@@ -3,29 +3,33 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * LocationMap — a compact MapLibre GL JS minimap that shows the model's
- * real-world position derived from IfcMapConversion + IfcProjectedCRS.
+ * LocationMap — a compact MapLibre GL JS minimap of the declared
+ * georeference origin, with the independently transformed geometry footprint.
  *
  * Features:
- *   - Place/drag pin on map to reposition the model
+ *   - Place/drag pin on map to edit the georeference origin
  *   - Search for places via Nominatim geocoding
  *   - Query terrain elevation at pin location
  *   - Apply pin position back to IfcMapConversion (eastings/northings/height)
  *   - Links to Google Maps, OpenStreetMap, and Google Earth (KMZ export)
  */
 
+import { useLocationMapReady } from './use-location-map-ready.js';
+import { LocationMapWaiting } from './LocationMapWaiting.js';
+import { trackExportCompleted } from '@/lib/analytics';
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
-import {
-  Map as MapIcon, ExternalLink, Loader2, MapPinOff, Globe2,
-  Search, Mountain, MapPin, X, Check,
-} from 'lucide-react';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import type { MapConversion, ProjectedCRS } from '@ifc-lite/parser';
-import type { CoordinateInfo, GeometryResult, MeshData } from '@ifc-lite/geometry';
-import { downloadBlob } from '@/lib/export/download';
-import { reprojectToLatLon, reprojectFromLatLon, queryTerrainElevation, computeFootprintGeoJSON, type LatLon } from '@/lib/geo/reproject';
+import { Map as MapIcon, MapPinOff, Search, Mountain, MapPin, X, Check } from 'lucide-react';
+import { IconButton } from '@/components/ui/icon-button';
+import { Spinner } from '@/components/ui/spinner';
+import { toast } from '@/components/ui/toast';
+import type { IfcDataStore, MapConversion, ProjectedCRS } from '@ifc-lite/parser';
+import type { CoordinateInfo, GeometryResult } from '@ifc-lite/geometry';
+import { downloadBlob, modelExportFilename } from '@/lib/export/download';
+import { reprojectFromLatLon, queryTerrainElevation, computeFootprintGeoJSON, type LatLon } from '@/lib/geo/reproject';
 import { buildKmzForResolvedGeoref } from '@/lib/geo/kmz-export';
 import type { KmzProcessor } from '@/lib/geo/kmz-exporter';
+import type { InstancedModelRange } from '@/utils/instancedExport';
+import { formatLocaleNumber, useTranslation } from '@/i18n';
 import {
   probeMapWebglSupport, markMapWebglUnsupported, takeMapWebglReportSlot,
   getMapWebglVerdict, describeMapInitFailure, watchContextCreationStatus,
@@ -39,7 +43,14 @@ import {
 } from '@/lib/privacy/externalRequests';
 import { addFootprintToMap, removeFootprintFromMap } from './location-map-footprint';
 import { geocodeSearch, type GeocodeResult } from './location-map-geocode';
-import { loadMaplibre, disposeMap, purgeMapContainer } from './location-map-lifecycle';
+import { loadMaplibre, disposeMap, purgeMapContainer, updateOriginMarker } from './location-map-lifecycle';
+import { mapInkClass, mapInkStyle, pickedPinElement } from './location-map-ink';
+import { LocationMapSearchBar } from './location-map-search';
+import { LocationMapLinks } from './location-map-links';
+import { useViewerStore } from '@/store';
+import { LocationGeoreferenceNotices } from './location-georeference-notices';
+import { readSiteLocationReference } from '@/lib/geo/site-location-disagreement';
+import { useLocationGeoreference } from './use-location-georeference';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 
 /** Position picked on the map, ready to be applied to IfcMapConversion */
@@ -50,17 +61,30 @@ export interface PickedPosition {
 }
 
 export interface LocationMapProps {
+  dataStore?: IfcDataStore;
   mapConversion?: MapConversion;
   projectedCRS?: ProjectedCRS;
   /** Coordinate info from the model's GeometryResult (includes bounds and RTC offset) */
   coordinateInfo?: CoordinateInfo;
   /** Geometry result for KMZ export (optional — KMZ button hidden if not provided) */
   geometryResult?: GeometryResult | null;
+  /**
+   * This model's global-id bracket (`{ idOffset, maxExpressId }`), scoping the KMZ
+   * export's `withInstancedMeshes` restoration of GPU-instanced occurrences to just
+   * this model. `null` mirrors the pre-#2255 "isPrimary" behavior (no filter, take
+   * every loaded model's instanced occurrences) — correct only when this panel's
+   * model IS the sole model loaded. In a multi-model federation, passing `null`
+   * leaks every OTHER loaded model's instanced geometry into this one export.
+   * Callers with more than one model loaded must pass the displayed model's own
+   * range instead.
+   */
+  instancedModelRange?: InstancedModelRange | null;
+  modelName?: string; // the displayed model's; the KMZ download is filed under it (#5833)
   /** IFC project length unit → metres (e.g. 0.001 for mm models). Default 1 (metres). */
   lengthUnitScale?: number;
-  /** Whether the map is in edit mode (allows repositioning) */
+  /** Whether georeference origin editing is enabled */
   editable?: boolean;
-  /** Called when the user applies a new position from the map */
+  /** Called when the user applies a new origin and optional terrain height */
   onApplyPosition?: (position: PickedPosition) => void;
   /**
    * wasm seam for the KMZ export, forwarded to `buildKmzForResolvedGeoref`.
@@ -74,8 +98,6 @@ export interface LocationMapProps {
   createKmzProcessor?: () => KmzProcessor;
 }
 
-type MapState = 'idle' | 'loading' | 'ready' | 'error';
-
 /**
  * Why the minimap could not be shown. Kept separate from `MapState`, which
  * tracks *coordinate resolution*: the two are independent, and folding them
@@ -88,16 +110,23 @@ type MapState = 'idle' | 'loading' | 'ready' | 'error';
  */
 type MapUnavailableReason = MapWebglFailureReason | 'map_load_failed' | 'external_requests_off';
 
+function basemapStyleUrl(dark: boolean): string {
+  return dark
+    ? 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json'
+    : 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
+}
+
 export function LocationMap({
-  mapConversion, projectedCRS, coordinateInfo, geometryResult,
+  mapConversion, projectedCRS, coordinateInfo, geometryResult, dataStore,
   lengthUnitScale = 1, editable, onApplyPosition, createKmzProcessor,
+  instancedModelRange = null, modelName = '',
 }: LocationMapProps) {
+  const { t, locale } = useTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<InstanceType<typeof import('maplibre-gl').Map> | null>(null);
   const markerRef = useRef<InstanceType<typeof import('maplibre-gl').Marker> | null>(null);
   const pickedMarkerRef = useRef<InstanceType<typeof import('maplibre-gl').Marker> | null>(null);
   const editableRef = useRef(editable);
-
   // Keep editableRef in sync; clean up edit-only state when leaving edit mode
   useEffect(() => {
     editableRef.current = editable;
@@ -115,9 +144,10 @@ export function LocationMap({
     }
   }, [editable]);
 
-  const [mapState, setMapState] = useState<MapState>('idle');
-  const [latLon, setLatLon] = useState<LatLon | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const siteReference = useMemo(() => readSiteLocationReference(dataStore), [dataStore]);
+  const { latLon, mapState, errorKey, geometryDistanceKm, locationKind, siteDistanceMetres } = useLocationGeoreference(
+    mapConversion, projectedCRS, coordinateInfo, lengthUnitScale, siteReference,
+  );
 
   // Seeded from the session latch, so a remount on a device already known to
   // refuse WebGL paints the fallback immediately — no probe, no construction,
@@ -184,6 +214,15 @@ export function LocationMap({
   // Building footprint state (bounding box polygon in WGS84)
   const [footprint, setFootprint] = useState<[number, number][] | null>(null);
   const [styleVersion, setStyleVersion] = useState(0);
+  // Tiles follow the app theme (#8802 R4); "Toggle style" flips them. The ref feeds the async map
+  // construction and is synced in an effect (not during render) that runs before the construction and style effects.
+  const theme = useViewerStore((s) => s.theme);
+  const [styleFlipped, setStyleFlipped] = useState(false);
+  const darkBasemap = (theme === 'dark') !== styleFlipped;
+  const darkBasemapRef = useRef(darkBasemap);
+  useEffect(() => { darkBasemapRef.current = darkBasemap; }, [darkBasemap]);
+  /** The tile style the live map was last given; null before it exists. */
+  const appliedDarkRef = useRef<boolean | null>(null);
   const footprintRef = useRef<[number, number][] | null>(null);
 
   // Compute building footprint from bounding box
@@ -223,34 +262,6 @@ export function LocationMap({
     return () => { cancelled = true; };
   }, [debouncedQuery]);
 
-  // Reproject model position to lat/lon
-  useEffect(() => {
-    if (!mapConversion || !projectedCRS) {
-      setLatLon(null);
-      setError(null);
-      return;
-    }
-
-    let cancelled = false;
-    setMapState('loading');
-    setError(null);
-
-    reprojectToLatLon(mapConversion, projectedCRS, coordinateInfo, lengthUnitScale).then(result => {
-      if (cancelled) return;
-      if (result) {
-        setLatLon(result);
-        setMapState('ready');
-      } else {
-        setLatLon(null);
-        setError('Could not resolve projection — EPSG code may be unsupported');
-        setMapState('error');
-      }
-    });
-
-    return () => { cancelled = true; };
-  }, [mapConversion, projectedCRS, coordinateInfo, lengthUnitScale]);
-
-  // When a picked position changes, reverse-project and query elevation
   useEffect(() => {
     if (!pickedLatLon || !projectedCRS) {
       setProjectedCoords(null);
@@ -262,8 +273,8 @@ export function LocationMap({
     setProjectedCoords(null);
 
     // Reverse-project to get IfcMapConversion eastings/northings
-    // Accounts for model local geometry offset, rotation, and scale
-    reprojectFromLatLon(pickedLatLon, projectedCRS, mapConversion, coordinateInfo, lengthUnitScale).then(coords => {
+    // The pin edits the declared origin, so do not subtract the mesh centre (#6677).
+    reprojectFromLatLon(pickedLatLon, projectedCRS, lengthUnitScale).then(coords => {
       if (!cancelled) setProjectedCoords(coords);
     });
 
@@ -277,7 +288,7 @@ export function LocationMap({
     });
 
     return () => { cancelled = true; };
-  }, [pickedLatLon, projectedCRS, mapConversion, coordinateInfo, lengthUnitScale]);
+  }, [pickedLatLon, projectedCRS, lengthUnitScale]);
 
   // Place or move the picked marker on the map
   const updatePickedMarker = useCallback((pos: LatLon, maplibregl: typeof import('maplibre-gl')) => {
@@ -285,10 +296,7 @@ export function LocationMap({
     if (pickedMarkerRef.current) {
       pickedMarkerRef.current.setLngLat([pos.lon, pos.lat]);
     } else {
-      const el = document.createElement('div');
-      el.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="#7c3aed" stroke="white" stroke-width="2"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>`;
-      el.style.cursor = 'grab';
-      const marker = new maplibregl.Marker({ element: el, draggable: true })
+      const marker = new maplibregl.Marker({ element: pickedPinElement(), draggable: true })
         .setLngLat([pos.lon, pos.lat])
         .addTo(mapRef.current);
       marker.on('dragend', () => {
@@ -354,10 +362,9 @@ export function LocationMap({
     setPickedElevation(null);
   }, []);
 
-  // Initialize/update the map when we have a valid lat/lon
+  const mapReady = useLocationMapReady(!!latLon && !mapUnavailable);
   useEffect(() => {
-    if (!latLon || !containerRef.current) return;
-    // Already known to be unavailable: never touch the GPU again this session.
+    if (!mapReady || !latLon || !containerRef.current) return;
     if (mapUnavailable) return;
 
     let cancelled = false;
@@ -368,9 +375,7 @@ export function LocationMap({
       // If map already exists, just fly to new position
       if (mapRef.current) {
         mapRef.current.flyTo({ center: [latLon.lon, latLon.lat], zoom: 15, duration: 1200 });
-        if (markerRef.current) {
-          markerRef.current.setLngLat([latLon.lon, latLon.lat]);
-        }
+        markerRef.current = updateOriginMarker(maplibregl, mapRef.current, markerRef.current, latLon, locationKind === 'origin');
         return;
       }
 
@@ -385,7 +390,6 @@ export function LocationMap({
       // network layer, so nothing is requested at all.
       if (!externalRequestsAllowed()) {
         setMapUnavailable('external_requests_off');
-        setMapState('idle');
         return;
       }
 
@@ -406,10 +410,11 @@ export function LocationMap({
       // arrives as a DOM event on it. See `watchContextCreationStatus`.
       const contextStatus = watchContextCreationStatus(container);
       let map: InstanceType<typeof maplibregl.Map>;
+      appliedDarkRef.current = darkBasemapRef.current;
       try {
         map = new maplibregl.Map({
           container,
-          style: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
+          style: basemapStyleUrl(appliedDarkRef.current),
           center: [latLon.lon, latLon.lat],
           zoom: 15,
           attributionControl: false,
@@ -488,19 +493,8 @@ export function LocationMap({
       map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
       map.addControl(new maplibregl.AttributionControl({ compact: false }), 'bottom-right');
 
-      // Add marker at model location (teal = current model position)
-      const marker = new maplibregl.Marker({ color: '#14b8a6' })
-        .setLngLat([latLon.lon, latLon.lat])
-        .addTo(map);
-
-      // Toggle marker vs footprint based on zoom level
-      map.on('zoomend', () => {
-        const zoom = map.getZoom();
-        if (markerRef.current) {
-          markerRef.current.getElement().style.opacity = zoom >= 17 ? '0' : '1';
-          markerRef.current.getElement().style.pointerEvents = zoom >= 17 ? 'none' : 'auto';
-        }
-      });
+      // Teal marker is the declared origin, independent of geometry bounds.
+      const marker = updateOriginMarker(maplibregl, map, null, latLon, locationKind === 'origin');
 
       // Map click to place pin (only in edit mode)
       map.on('click', handleMapClick);
@@ -528,9 +522,10 @@ export function LocationMap({
     return () => {
       cancelled = true;
     };
-  }, [latLon, handleMapClick, mapUnavailable, degradeMap]);
+  }, [mapReady, latLon, locationKind, handleMapClick, mapUnavailable, degradeMap]);
 
-  // Add/update building footprint GeoJSON layer when footprint or style changes
+  // Add/update the footprint when it or the style changes, and repaint it when the theme
+  // changes the container ink without a style reload (light <-> colorful keep the tiles).
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -544,7 +539,7 @@ export function LocationMap({
     } else {
       map.once('style.load', () => addFootprintToMap(map, footprint));
     }
-  }, [footprint, styleVersion]);
+  }, [footprint, styleVersion, theme]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -573,16 +568,14 @@ export function LocationMap({
   const handleExportKmz = useCallback(async () => {
     if (!latLon || !geometryResult || !mapConversion || !projectedCRS) return;
     try {
-      // Embed the model as COLLADA (Rust exporter): Google Earth's <Model> only loads
-      // COLLADA, renders it bright via emission, and clampToGround keeps it on the
+      // Embed as COLLADA: Google Earth's <Model> only loads COLLADA, and clampToGround keeps it on the
       // terrain so the MSL orthogonal height no longer floats it (#1427).
       //
-      // Placement is NOT computed here. This used to call `buildKmz` directly
-      // with the authored axis and a raw `orthogonalHeight`, which skipped all
-      // three corrections the Export KMZ dialog got: the map-absolute guard
-      // (#2526), the map-unit altitude scaling, and the RTC Z fold-back. Same
-      // model, two buttons, two different files. `buildKmzForResolvedGeoref` is
-      // now the single source for both (#2526 follow-up).
+      // Placement is NOT computed here. This used to call `buildKmz` directly with the authored axis
+      // and a raw `orthogonalHeight`, which skipped all three corrections the Export KMZ dialog got:
+      // the map-absolute guard (#2526), the map-unit altitude scaling, and the RTC Z fold-back. Same
+      // model, two buttons, two different files. `buildKmzForResolvedGeoref` is now the single source
+      // for both (#2526 follow-up).
       const kmz = await buildKmzForResolvedGeoref({
         conversion: mapConversion,
         crs: projectedCRS,
@@ -593,43 +586,40 @@ export function LocationMap({
         // from the exported file (#2577). The Location panel only ever shows
         // the primary model's georeference.
         geometryResult,
-        isPrimaryModel: true,
-        name: 'IFC Model',
+        // Scopes the instanced-occurrence restoration to THIS model's global-id
+        // bracket (see `instancedModelRange` prop doc). Callers with only one
+        // model loaded may still pass `null`; a multi-model federation must pass
+        // the displayed model's own `{ idOffset, maxExpressId }` or every other
+        // loaded model's instanced occurrences leak into this one export (PR
+        // #2878 review).
+        instancedModelRange,
+        name: t('properties.modelMetadata.ifcModel'),
       }, createKmzProcessor);
       if (typeof kmz === 'string') {
-        console.error('KMZ export failed:', kmz);
+        toast.error(t('properties.locationMap.kmzExportFailedWithReason', { reason: kmz }));
         return;
       }
-      downloadBlob(new Blob([kmz as BlobPart], { type: 'application/vnd.google-earth.kmz' }), 'model.kmz');
+      downloadBlob(new Blob([kmz as BlobPart], { type: 'application/vnd.google-earth.kmz' }), modelExportFilename(modelName, 'kmz'));
+      trackExportCompleted({ format: 'kmz', surface: 'location_map' });
     } catch (err) {
-      console.error('KMZ export failed:', err);
+      toast.error(t('properties.locationMap.kmzExportFailedUnknown', { message: err instanceof Error ? err.message : t('properties.locationMap.unknownError') }));
     }
-  }, [latLon, geometryResult, mapConversion, projectedCRS, coordinateInfo, lengthUnitScale, createKmzProcessor]);
-
-  const isDarkRef = useRef(false);
-
-  const handleStyleToggle = useCallback(() => {
-    if (!mapRef.current) return;
-    isDarkRef.current = !isDarkRef.current;
-    mapRef.current.setStyle(
-      isDarkRef.current
-        ? 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json'
-        : 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
-    );
+  }, [latLon, geometryResult, mapConversion, projectedCRS, coordinateInfo, lengthUnitScale, createKmzProcessor, instancedModelRange, modelName, t]);
+  const handleStyleToggle = useCallback(() => setStyleFlipped(f => !f), []);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || appliedDarkRef.current === darkBasemap) return;
+    appliedDarkRef.current = darkBasemap;
+    map.setStyle(basemapStyleUrl(darkBasemap));
     // Re-add markers and layers after style fully loads
-    if (mapRef.current) {
-      mapRef.current.once('style.load', () => {
-        if (markerRef.current && mapRef.current) {
-          markerRef.current.addTo(mapRef.current);
-        }
-        if (pickedMarkerRef.current && mapRef.current) {
-          pickedMarkerRef.current.addTo(mapRef.current);
-        }
-        // Trigger footprint layer re-add
-        setStyleVersion(v => v + 1);
-      });
-    }
-  }, []);
+    map.once('style.load', () => {
+      if (mapRef.current !== map) return;
+      markerRef.current?.addTo(map);
+      pickedMarkerRef.current?.addTo(map);
+      // Trigger footprint layer re-add
+      setStyleVersion(v => v + 1);
+    });
+  }, [darkBasemap]);
 
   // Nothing to show if no georeferencing data
   if (!mapConversion || !projectedCRS) {
@@ -637,86 +627,55 @@ export function LocationMap({
   }
 
   return (
-    <div className="border-t border-zinc-100 dark:border-zinc-900">
+    <div className="border-t border-border">
       {/* Header with search */}
       <div className="flex items-center gap-2 px-3 py-1.5">
-        <MapIcon className="h-3 w-3 text-teal-500 shrink-0" />
-        <span className="font-bold text-[11px] text-zinc-700 dark:text-zinc-300 uppercase tracking-wide flex-1">
-          Location
+        <MapIcon className="h-3 w-3 text-muted-foreground shrink-0" />
+        <span className="text-xs font-semibold text-foreground flex-1">
+          {t('properties.locationMap.heading')}
         </span>
         {latLon && !searchOpen && (
-          <span className="text-[10px] font-mono text-teal-600/70 dark:text-teal-500/60">
-            {latLon.lat.toFixed(5)}, {latLon.lon.toFixed(5)}
+          <span className="text-xs font-mono text-muted-foreground" title={t(locationKind === 'geometry' ? 'properties.locationMap.geometryLatLon' : 'properties.locationMap.latLon')}>
+            {formatLocaleNumber(locale, latLon.lat, { minimumFractionDigits: 5, maximumFractionDigits: 5 })}, {formatLocaleNumber(locale, latLon.lon, { minimumFractionDigits: 5, maximumFractionDigits: 5 })}
           </span>
         )}
         {editable && (
-          <button
+          <IconButton
+            label={t('properties.locationMap.searchTooltip')} size="icon-xs"
             onClick={() => { setSearchOpen(!searchOpen); setSearchQuery(''); setSearchResults([]); }}
-            className="p-0.5 text-zinc-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors"
-            title="Search for a place"
+            className="text-muted-foreground hover:text-foreground"
           >
             <Search className="h-3 w-3" />
-          </button>
+          </IconButton>
         )}
       </div>
-
-      {/* Search bar */}
+      {/* Search bar + results dropdown (#5817: the dropdown is now a Radix
+          Popover) — extracted to `location-map-search.tsx`. */}
       {editable && searchOpen && (
-        <div className="px-3 pb-1.5 relative">
-          <div className="flex items-center gap-1">
-            <div className="flex-1 relative">
-              <input
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                placeholder="Search for a place..."
-                className="w-full text-[11px] px-2 py-1 border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 outline-none focus:ring-1 focus:ring-teal-400 focus:border-teal-400 placeholder:text-zinc-400/60"
-                autoFocus
-                onKeyDown={e => { if (e.key === 'Escape') { setSearchOpen(false); setSearchQuery(''); setSearchResults([]); } }}
-              />
-              {searchLoading && (
-                <Loader2 className="absolute right-2 top-1/2 -translate-y-1/2 h-3 w-3 text-teal-500 animate-spin" />
-              )}
-            </div>
-            <button
-              onClick={() => { setSearchOpen(false); setSearchQuery(''); setSearchResults([]); }}
-              className="p-0.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
-            >
-              <X className="h-3 w-3" />
-            </button>
-          </div>
-
-          {/* Search results dropdown */}
-          {searchResults.length > 0 && (
-            <div className="absolute left-3 right-3 top-full z-50 mt-0.5 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 shadow-lg max-h-[160px] overflow-y-auto">
-              {searchResults.map((r, i) => (
-                <button
-                  key={i}
-                  onClick={() => handleSearchSelect(r)}
-                  className="w-full text-left px-2 py-1.5 text-[10px] text-zinc-700 dark:text-zinc-300 hover:bg-teal-50 dark:hover:bg-teal-950/50 border-b border-zinc-100 dark:border-zinc-800 last:border-0 transition-colors"
-                >
-                  <div className="flex items-start gap-1.5">
-                    <MapPin className="h-3 w-3 text-teal-500 shrink-0 mt-0.5" />
-                    <span className="line-clamp-2">{r.display_name}</span>
-                  </div>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        <LocationMapSearchBar
+          query={searchQuery}
+          onQueryChange={setSearchQuery}
+          results={searchResults}
+          onResultsChange={setSearchResults}
+          loading={searchLoading}
+          placeholder={t('properties.locationMap.searchPlaceholder')}
+          onSelect={handleSearchSelect}
+          onClose={() => { setSearchOpen(false); setSearchQuery(''); setSearchResults([]); }}
+        />
       )}
+
+      <LocationGeoreferenceNotices locationKind={locationKind}
+        geometryDistanceKm={geometryDistanceKm} siteDistanceMetres={siteDistanceMetres} />
 
       {/* Map container */}
       {mapState === 'loading' && (
-        <div className="flex items-center justify-center h-[180px] bg-zinc-50 dark:bg-zinc-900/50">
-          <Loader2 className="h-4 w-4 text-teal-500 animate-spin" />
-          <span className="text-[10px] text-zinc-400 ml-2">Resolving coordinates...</span>
-        </div>
+        <LocationMapWaiting label={t('properties.locationMap.resolvingCoordinates')} />
       )}
 
       {mapState === 'error' && (
-        <div className="flex items-center justify-center h-[60px] bg-zinc-50 dark:bg-zinc-900/50 gap-2 px-3">
-          <MapPinOff className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
-          <span className="text-[10px] text-zinc-400">{error}</span>
+        <div className="flex items-center justify-center h-[60px] bg-muted gap-2 px-3">
+          <MapPinOff className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+          <span className="text-xs text-muted-foreground">{errorKey && t(errorKey)}</span>
         </div>
       )}
 
@@ -727,19 +686,13 @@ export function LocationMap({
                GPU stays: the coordinate readout above, the external map links
                and the KMZ export below, and — in edit mode — place search,
                which still drives the reverse projection and the Apply button. */
-            <div className="flex flex-col items-center justify-center h-[180px] bg-zinc-50 dark:bg-zinc-900/50 gap-1.5 px-4 text-center">
-              <MapPinOff className="h-4 w-4 text-zinc-400" />
-              <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
-                {mapUnavailable === 'external_requests_off'
-                  ? 'Map preview off'
-                  : 'Map preview unavailable on this device'}
+            <div className="flex flex-col items-center justify-center h-[180px] bg-muted gap-1.5 px-4 text-center">
+              <MapPinOff className="h-4 w-4 text-muted-foreground" />
+              <span className="text-xs text-muted-foreground">
+                {mapUnavailable === 'external_requests_off' ? 'Map preview off' : t('properties.locationMap.unavailableOnDevice')}
               </span>
-              <span className="text-[9px] text-zinc-400 dark:text-zinc-500 max-w-[240px]">
-                {mapUnavailable === 'external_requests_off'
-                  ? 'Drawing the map requests tiles for this building’s position, so it would send that position to a third party. Coordinates and the export below work without it.'
-                  : mapUnavailable === 'map_load_failed'
-                    ? 'The map component could not be loaded. Check your connection and reload the page.'
-                    : 'Your browser could not provide graphics for the map. Coordinates, search and the links below still work; reloading the page may restore it.'}
+              <span className="text-xs text-muted-foreground max-w-[240px]">
+                {mapUnavailable === 'external_requests_off' ? 'Drawing the map requests tiles for this building’s position, so it would send that position to a third party. Coordinates and the export below work without it.' : mapUnavailable === 'map_load_failed' ? t('properties.locationMap.mapLoadFailed') : t('properties.locationMap.graphicsUnavailable')}
               </span>
               {mapUnavailable === 'external_requests_off' && (
                 <button
@@ -752,15 +705,17 @@ export function LocationMap({
             </div>
           ) : (
             <div className="relative">
+              {!mapReady && <LocationMapWaiting label={t('commandPalette.availability.loading')} />}
               <div
                 ref={containerRef}
-                className="h-[180px] w-full [&_.maplibregl-ctrl-attrib]:!text-[7px] [&_.maplibregl-ctrl-attrib]:!bg-white/40 [&_.maplibregl-ctrl-attrib]:dark:!bg-black/30 [&_.maplibregl-ctrl-attrib]:!py-0 [&_.maplibregl-ctrl-attrib]:!px-1 [&_.maplibregl-ctrl-attrib]:!shadow-none [&_.maplibregl-ctrl-attrib]:!text-zinc-400/70 [&_.maplibregl-ctrl-attrib_a]:!text-zinc-400/70 [&_.maplibregl-ctrl-attrib]:!leading-normal"
-                style={{ minHeight: 180 }}
+                hidden={!mapReady}
+                className={`h-[180px] w-full ${mapInkClass(darkBasemap)} [&_.maplibregl-ctrl-attrib]:!text-2xs [&_.maplibregl-ctrl-attrib]:!bg-popover/40 [&_.maplibregl-ctrl-attrib]:!py-0 [&_.maplibregl-ctrl-attrib]:!px-1 [&_.maplibregl-ctrl-attrib]:!shadow-none [&_.maplibregl-ctrl-attrib]:!text-zinc-400/70 [&_.maplibregl-ctrl-attrib_a]:!text-zinc-400/70 [&_.maplibregl-ctrl-attrib]:!leading-normal`}
+                style={{ minHeight: 180, ...mapInkStyle(darkBasemap) }}
               />
               {/* Edit mode hint overlay */}
               {editable && !pickedLatLon && (
-                <div className="absolute top-2 left-2 bg-white/90 dark:bg-zinc-900/90 backdrop-blur-sm px-2 py-1 text-[9px] text-zinc-500 dark:text-zinc-400 pointer-events-none shadow-sm border border-zinc-200/50 dark:border-zinc-700/50">
-                  Click map to place pin
+                <div className="absolute top-2 left-2 bg-popover/90 backdrop-blur-sm px-2 py-1 text-xs text-muted-foreground pointer-events-none shadow-sm border border-border/50">
+                  {t('properties.locationMap.clickToPlacePin')}
                 </div>
               )}
             </div>
@@ -768,51 +723,51 @@ export function LocationMap({
 
           {/* Picked position info bar */}
           {pickedLatLon && editable && (
-            <div className="bg-purple-50/80 dark:bg-purple-950/30 border-t border-purple-200/50 dark:border-purple-800/30 px-3 py-2">
+            <div className="bg-overlay-accent-soft border-t border-overlay-accent/40 px-3 py-2">
               <div className="flex items-center gap-2 mb-1.5">
-                <MapPin className="h-3 w-3 text-purple-600 dark:text-purple-400 shrink-0" />
-                <span className="text-[10px] font-semibold text-purple-700 dark:text-purple-300 flex-1">
-                  New Position
+                <MapPin className="h-3 w-3 text-overlay-accent shrink-0" />
+                <span className="text-xs font-semibold text-foreground flex-1">
+                  {t('properties.locationMap.newPosition')}
                 </span>
                 <button
                   onClick={handleClearPick}
-                  className="p-0.5 text-purple-400 hover:text-purple-600 dark:hover:text-purple-300 transition-colors"
-                  title="Remove pin"
+                  className="p-0.5 text-muted-foreground hover:text-foreground transition-colors"
+                  title={t('properties.locationMap.removePinTooltip')}
                 >
                   <X className="h-3 w-3" />
                 </button>
               </div>
 
-              <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] font-mono mb-2">
-                <div className="text-zinc-500 dark:text-zinc-400">Lat/Lon</div>
-                <div className="text-purple-700 dark:text-purple-300 text-right">
-                  {pickedLatLon.lat.toFixed(6)}, {pickedLatLon.lon.toFixed(6)}
+              <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs font-mono mb-2">
+                <div className="text-muted-foreground">{t('properties.locationMap.latLon')}</div>
+                <div className="text-foreground text-right">
+                  {formatLocaleNumber(locale, pickedLatLon.lat, { minimumFractionDigits: 6, maximumFractionDigits: 6 })}, {formatLocaleNumber(locale, pickedLatLon.lon, { minimumFractionDigits: 6, maximumFractionDigits: 6 })}
                 </div>
 
                 {projectedCoords && (
                   <>
-                    <div className="text-zinc-500 dark:text-zinc-400">Easting</div>
-                    <div className="text-purple-700 dark:text-purple-300 text-right tabular-nums">
-                      {projectedCoords.easting.toFixed(3)}
+                    <div className="text-muted-foreground">{t('properties.locationMap.easting')}</div>
+                    <div className="text-foreground text-right tabular-nums">
+                      {formatLocaleNumber(locale, projectedCoords.easting, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
                     </div>
-                    <div className="text-zinc-500 dark:text-zinc-400">Northing</div>
-                    <div className="text-purple-700 dark:text-purple-300 text-right tabular-nums">
-                      {projectedCoords.northing.toFixed(3)}
+                    <div className="text-muted-foreground">{t('properties.locationMap.northing')}</div>
+                    <div className="text-foreground text-right tabular-nums">
+                      {formatLocaleNumber(locale, projectedCoords.northing, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
                     </div>
                   </>
                 )}
 
-                <div className="text-zinc-500 dark:text-zinc-400 flex items-center gap-1">
+                <div title={t('properties.locationMap.terrainHeightHelp')} className="text-muted-foreground flex items-center gap-1">
                   <Mountain className="h-2.5 w-2.5" />
-                  Elevation
+                  {t('properties.locationMap.elevation')}
                 </div>
-                <div className="text-purple-700 dark:text-purple-300 text-right tabular-nums">
+                <div className="text-foreground text-right tabular-nums">
                   {elevationLoading ? (
-                    <Loader2 className="h-2.5 w-2.5 animate-spin inline" />
+                    <Spinner className="h-2.5 w-2.5 inline" />
                   ) : pickedElevation !== null ? (
-                    `${pickedElevation.toFixed(1)} m`
+                    t('properties.locationMap.elevationMeters', { value: formatLocaleNumber(locale, pickedElevation, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) })
                   ) : (
-                    <span className="text-zinc-400">—</span>
+                    <span className="text-muted-foreground">—</span>
                   )}
                 </div>
               </div>
@@ -822,74 +777,24 @@ export function LocationMap({
                 <button
                   onClick={handleApply}
                   disabled={elevationLoading}
-                  className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 text-[10px] font-semibold text-white bg-purple-600 hover:bg-purple-700 dark:bg-purple-700 dark:hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 text-xs font-semibold text-overlay-halo bg-overlay-accent hover:bg-overlay-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   <Check className="h-3 w-3" />
-                  Apply to Eastings / Northings
-                  {pickedElevation !== null && ' / Height'}
+                  {pickedElevation !== null
+                    ? t('properties.locationMap.applyToEastingsNorthingsHeight')
+                    : t('properties.locationMap.applyToEastingsNorthings')}
                 </button>
               )}
             </div>
           )}
 
-          {/* Action links */}
-          <div className="flex items-center gap-3 px-3 py-1.5 border-t border-zinc-100 dark:border-zinc-900">
-            {googleMapsUrl && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <a
-                    href={googleMapsUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-1 text-[10px] text-teal-600 dark:text-teal-400 hover:text-teal-800 dark:hover:text-teal-300 transition-colors"
-                  >
-                    <ExternalLink className="h-2.5 w-2.5" />
-                    Google Maps
-                  </a>
-                </TooltipTrigger>
-                <TooltipContent>Open model location in Google Maps</TooltipContent>
-              </Tooltip>
-            )}
-            {openStreetMapUrl && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <a
-                    href={openStreetMapUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-1 text-[10px] text-teal-600 dark:text-teal-400 hover:text-teal-800 dark:hover:text-teal-300 transition-colors"
-                  >
-                    <ExternalLink className="h-2.5 w-2.5" />
-                    OpenStreetMap
-                  </a>
-                </TooltipTrigger>
-                <TooltipContent>Open model location in OpenStreetMap</TooltipContent>
-              </Tooltip>
-            )}
-            {geometryResult && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={handleExportKmz}
-                    className="flex items-center gap-1 text-[10px] text-teal-600 dark:text-teal-400 hover:text-teal-800 dark:hover:text-teal-300 transition-colors"
-                  >
-                    <Globe2 className="h-2.5 w-2.5" />
-                    Google Earth
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>Download KMZ for Google Earth Pro (desktop), placed at the model location. Google Earth on the web cannot show KMZ 3D models — use Export GLB for the web.</TooltipContent>
-              </Tooltip>
-            )}
-            {/* Hidden without a map: it would be a permanent no-op. */}
-            {!mapUnavailable && (
-              <button
-                onClick={handleStyleToggle}
-                className="ml-auto text-[10px] text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors"
-              >
-                Toggle style
-              </button>
-            )}
-          </div>
+          <LocationMapLinks
+            googleMapsUrl={googleMapsUrl}
+            openStreetMapUrl={openStreetMapUrl}
+            geometryLocation={locationKind === 'geometry'}
+            onExportKmz={geometryResult ? handleExportKmz : undefined}
+            onToggleStyle={mapUnavailable ? undefined : handleStyleToggle}
+          />
         </>
       )}
     </div>

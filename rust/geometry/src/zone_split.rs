@@ -32,9 +32,13 @@
 //!   only reach `Mesh` (f32) at the caller's boundary. A per-piece f64 -> f32 ->
 //!   f64 round trip is what turns a shared zone boundary into a crack.
 
-use crate::kernel::arrangement::{boolean, box_mesh, difference_all, union_all, BoolOp, Tri};
+use crate::kernel::arrangement::{
+    boolean, box_mesh, difference_all, operands_admitted, union_all, BoolOp, Tri,
+};
+use crate::kernel::budget;
 use crate::kernel::mesh_bridge::orient_outward;
 use crate::kernel::signed_volume::signed_volume_of;
+use crate::math::aabb::Aabb3;
 
 /// A zone as the viewer authors it: an oriented box that rotates about the
 /// VERTICAL axis only. Coordinates are the caller's frame; the viewer passes
@@ -189,10 +193,11 @@ impl ZoneSplit {
     /// The invariant #2508 puts above every other for this feature. Exposed
     /// rather than asserted here: a caller that wants to refuse an untrustworthy
     /// split needs the number, and a caller displaying a warning needs it too.
+    ///
+    /// `whole_volume` is never zero here: [`split_mesh_by_zones`] returns
+    /// `None` for a host that encloses no volume instead of a split whose
+    /// every signal reads perfect.
     pub fn sum_error_rel(&self) -> f64 {
-        if self.whole_volume.abs() <= f64::MIN_POSITIVE {
-            return 0.0;
-        }
         let sum: f64 = self.pieces.iter().map(|p| p.volume).sum();
         ((sum - self.whole_volume) / self.whole_volume).abs()
     }
@@ -205,6 +210,13 @@ impl ZoneSplit {
 /// have to identify and delete by hand. Matches the intent of the
 /// apportionment path's own negligible-share threshold, one level up.
 pub const NEGLIGIBLE_PIECE_REL: f64 = 1e-9;
+
+/// A host whose enclosed volume is at most this fraction of its bounding-box
+/// diagonal cubed encloses nothing: a double-sided sheet off the axis planes
+/// sums to rounding residue (about 1e-32 for a unit sheet), not to exactly
+/// zero. A real solid is many orders above it (a 1 mm by 1 m by 1 m plate,
+/// 1e-3 m3 against a diagonal cubed of about 2.83, is about 3.5e-4).
+pub const NO_VOLUME_REL: f64 = 1e-12;
 
 /// Split `host` into one solid per zone it reaches, plus the remainder.
 ///
@@ -222,11 +234,42 @@ pub const NEGLIGIBLE_PIECE_REL: f64 = 1e-9;
 /// double-count, so [`ZoneSplit::sum_error_rel`] rises far above any floating
 /// point residue and the caller can refuse on it. That is the same signal the
 /// apportionment path reports as `overlapping`.
-pub fn split_mesh_by_zones(host: &[Tri], zones: &[ZoneShape]) -> ZoneSplit {
+///
+/// Returns `None` when the host or any zone has a coordinate the kernel
+/// refuses (non-finite, or past `MAX_OPERAND_COORD`; #7677), or when `host`
+/// encloses no volume: no triangles, or a
+/// degenerate shell whose divergence sum is rounding residue (see
+/// [`NO_VOLUME_REL`]). There is nothing to split, and a `ZoneSplit` for it would carry one zero-triangle "remainder", a
+/// `sum_error_rel` of zero and `remainder_failed == false`: every signal a
+/// caller gates on reading as a perfect split of nothing. The wasm entry
+/// drops malformed triangles before calling here, so an all-malformed input
+/// arrives as an empty host.
+/// A kernel operation that exhausts its exact-work budget also returns `None`;
+/// no partial split or unchanged remainder is returned as a successful split.
+/// Each intersection, union and remainder starts a fresh per-operation budget
+/// while retaining any enclosing element's accumulated work.
+pub fn split_mesh_by_zones(host: &[Tri], zones: &[ZoneShape]) -> Option<ZoneSplit> {
+    // The kernel refuses coordinates it cannot answer (#7677, KERNEL-30): a
+    // non-finite or out-of-range host or zone is no split, never a wrong one.
+    let zone_tris: Vec<Vec<Tri>> = zones.iter().map(ZoneShape::to_tris).collect();
+    let mut operands: Vec<&[Tri]> = zone_tris.iter().map(Vec::as_slice).collect();
+    operands.push(host);
+    if !operands_admitted(&operands) {
+        return None;
+    }
     let host = orient_outward(host.to_vec());
+    if host.is_empty() {
+        return None;
+    }
     let whole_volume = signed_volume_of(&host);
+    let host_box = Aabb3::from_points(host.iter().flatten().copied());
+    let (host_lo, host_hi) = (host_box.min, host_box.max);
+    let diagonal = (0..3).map(|k| (host_hi[k] - host_lo[k]).powi(2)).sum::<f64>().sqrt();
+    // A NaN volume fails `<=` and falls through to `sum_error_rel` as NaN.
+    if whole_volume.abs() <= diagonal.powi(3) * NO_VOLUME_REL {
+        return None;
+    }
     let negligible = whole_volume.abs() * NEGLIGIBLE_PIECE_REL;
-    let (host_lo, host_hi) = tris_aabb(&host);
 
     let mut pieces = Vec::new();
     let mut reached: Vec<Vec<Tri>> = Vec::new();
@@ -236,8 +279,10 @@ pub fn split_mesh_by_zones(host: &[Tri], zones: &[ZoneShape]) -> ZoneSplit {
         if (0..3).any(|k| lo[k] > host_hi[k] || hi[k] < host_lo[k]) {
             continue;
         }
-        let box_tris = orient_outward(zone.to_tris());
+        let box_tris = orient_outward(zone_tris[index].clone());
+        budget::begin();
         let piece = boolean(&host, &box_tris, BoolOp::Intersection);
+        if budget::tripped() { return None; }
         let volume = signed_volume_of(&piece);
         if piece.is_empty() || volume <= negligible {
             // NOT subtracted from the remainder. A zone the element merely
@@ -266,7 +311,9 @@ pub fn split_mesh_by_zones(host: &[Tri], zones: &[ZoneShape]) -> ZoneSplit {
         // boundary. `union_all` merges the tiles first and drops each
         // co-oriented duplicate, so the difference sees one clean operand.
         let operands: Vec<&[Tri]> = reached.iter().map(|t| t.as_slice()).collect();
+        budget::begin();
         let (cutter, conforming) = union_all(&operands);
+        if budget::tripped() { return None; }
         // A non-conforming union is refused BEFORE the difference sees it: the
         // cutter would already be torn, and `difference_all`'s own conformity
         // gate is about ITS arrangement, not about the operand it was handed.
@@ -277,9 +324,14 @@ pub fn split_mesh_by_zones(host: &[Tri], zones: &[ZoneShape]) -> ZoneSplit {
         // Either way the failure is SAID rather than left to `sum_error_rel`,
         // which a caller cannot tell apart from overlapping zones and which
         // would point them at redrawing zones that are not the problem.
-        let rest = if conforming { difference_all(&host, &[&cutter]) } else { None };
+        let rest = if conforming {
+            budget::begin();
+            let rest = difference_all(&host, &[&cutter]);
+            if budget::tripped() { return None; }
+            rest
+        } else { None };
         match rest {
-            Some(rest) => {
+            Some((rest, _changed)) => {
                 let volume = signed_volume_of(&rest);
                 if !rest.is_empty() && volume > negligible {
                     pieces.push(ZonePiece { zone: None, tris: rest, volume });
@@ -294,21 +346,7 @@ pub fn split_mesh_by_zones(host: &[Tri], zones: &[ZoneShape]) -> ZoneSplit {
         pieces.push(ZonePiece { zone: None, tris: host, volume });
     }
 
-    ZoneSplit { pieces, whole_volume, remainder_failed }
-}
-
-fn tris_aabb(tris: &[Tri]) -> ([f64; 3], [f64; 3]) {
-    let mut lo = [f64::INFINITY; 3];
-    let mut hi = [f64::NEG_INFINITY; 3];
-    for t in tris {
-        for p in t {
-            for k in 0..3 {
-                lo[k] = lo[k].min(p[k]);
-                hi[k] = hi[k].max(p[k]);
-            }
-        }
-    }
-    (lo, hi)
+    Some(ZoneSplit { pieces, whole_volume, remainder_failed })
 }
 
 #[cfg(test)]

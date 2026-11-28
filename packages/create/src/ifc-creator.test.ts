@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { generateIfcGuid, isValidIfcGuid, ifcGuidToUuid, uuidToIfcGuid } from '@ifc-lite/encoding';
+import { IfcParser, extractScheduleOnDemand, getSchemaRegistryForVersion } from '@ifc-lite/parser';
 import { IfcCreator } from './ifc-creator.js';
 
 describe('IfcCreator', () => {
@@ -21,6 +22,14 @@ describe('IfcCreator', () => {
     expect(result.stats.entityCount).toBeGreaterThan(10);
     expect(result.stats.fileSize).toBeGreaterThan(0);
     expect(result.entities.some(e => e.type === 'IfcProject')).toBe(true);
+  });
+
+  it('writes an IfcMonetaryUnit for ProjectParams.Currency (#4856)', () => {
+    const creator = new IfcCreator({ Name: 'Test Project', Currency: 'EUR' });
+    const result = creator.toIfc();
+
+    expect(result.content).toContain('IFCMONETARYUNIT');
+    expect(result.content).toContain("'EUR'");
   });
 
   it('adds a storey and includes it in aggregation', () => {
@@ -334,6 +343,215 @@ describe('IfcCreator', () => {
     expect(result.content).toContain('IFCQUANTITYAREA');
     expect(result.content).toContain('IFCQUANTITYVOLUME');
     expect(result.content).toContain("'Qto_SlabBaseQuantities'");
+
+    // IfcPhysicalSimpleQuantity subtypes (IfcQuantityArea/Volume/…) declare
+    // 5 attributes from IFC4 on: Name, Description, Unit, <Value>, Formula.
+    // Formula is trailing-optional but STEP still requires an explicit `$`
+    // slot for it — a record with only 4 fields is one attribute short of
+    // what the default IFC4 schema declares
+    // (packages/data/src/ifc-schema/generated/entities-ifc4.ts).
+    const areaLine = result.content.split('\n').find(l => l.includes('IFCQUANTITYAREA('));
+    const volumeLine = result.content.split('\n').find(l => l.includes('IFCQUANTITYVOLUME('));
+    expect(areaLine).toMatch(/^#\d+=IFCQUANTITYAREA\('GrossArea',\$,\$,80\.,\$\);$/);
+    expect(volumeLine).toMatch(/^#\d+=IFCQUANTITYVOLUME\('GrossVolume',\$,\$,24\.,\$\);$/);
+  });
+
+  it('attaches quantity sets in IFC2X3 without the Formula attribute', () => {
+    // entities-ifc2x3.ts declares only 4 attributes for IfcQuantityArea/
+    // Volume/…: Name, Description, Unit, <Value> — no Formula (added in
+    // IFC4). A creator targeting IFC2X3 must NOT write the trailing `$`
+    // the IFC4 branch needs, or the record has one attribute too many.
+    const creator = new IfcCreator({ Schema: 'IFC2X3' });
+    const storey = creator.addIfcBuildingStorey({ Name: 'GF', Elevation: 0 });
+    const slabId = creator.addIfcSlab(storey, {
+      Position: [0, 0, 0], Thickness: 0.3, Width: 10, Depth: 8,
+    });
+
+    creator.addIfcElementQuantity(slabId, {
+      Name: 'Qto_SlabBaseQuantities',
+      Quantities: [
+        { Name: 'GrossArea', Value: 80, Kind: 'IfcQuantityArea' },
+        { Name: 'GrossVolume', Value: 24, Kind: 'IfcQuantityVolume' },
+      ],
+    });
+
+    const result = creator.toIfc();
+    const areaLine = result.content.split('\n').find(l => l.includes('IFCQUANTITYAREA('));
+    const volumeLine = result.content.split('\n').find(l => l.includes('IFCQUANTITYVOLUME('));
+    expect(areaLine).toMatch(/^#\d+=IFCQUANTITYAREA\('GrossArea',\$,\$,80\.\);$/);
+    expect(volumeLine).toMatch(/^#\d+=IFCQUANTITYVOLUME\('GrossVolume',\$,\$,24\.\);$/);
+  });
+
+  it('drops the trailing IFC4-only attribute for IfcWall/Column/Beam/RelSequence in IFC2X3', () => {
+    // entities-ifc2x3.ts gives IfcWall/IfcColumn/IfcBeam 8 attributes (no
+    // PredefinedType) and IfcRelSequence 8 (no UserDefinedSequenceType) —
+    // all four gained one trailing attribute only from IFC4 on.
+    const creator = new IfcCreator({ Schema: 'IFC2X3' });
+    const storey = creator.addIfcBuildingStorey({ Name: 'GF', Elevation: 0 });
+    creator.addIfcWall(storey, { Start: [0, 0, 0], End: [5, 0, 0], Thickness: 0.2, Height: 3 });
+    creator.addIfcColumn(storey, { Position: [0, 0, 0], Width: 0.3, Depth: 0.3, Height: 3 });
+    creator.addIfcBeam(storey, { Start: [0, 0, 0], End: [3, 0, 0], Width: 0.2, Height: 0.4 });
+    const t1 = creator.addIfcTask({ Name: 'T1' });
+    const t2 = creator.addIfcTask({ Name: 'T2' });
+    creator.addIfcRelSequence(t1, t2, { UserDefinedSequenceType: 'custom' });
+
+    const result = creator.toIfc();
+    const find = (tag: string) => result.content.split('\n').find(l => l.includes(`${tag}(`));
+    expect(find('IFCWALL')).toMatch(/,\$\);$/);
+    expect(find('IFCCOLUMN')).toMatch(/,\$\);$/);
+    expect(find('IFCBEAM')).toMatch(/,\$\);$/);
+    expect(find('IFCRELSEQUENCE')).toMatch(/,\.FINISH_START\.\);$/);
+  });
+
+  // #9359: every line IfcCreator writes must match the target schema's attribute
+  // count, enum members and required slots (entities-<schema>.ts via the registry).
+  const stepAttrs = (line: string) => {
+    const body = line.slice(line.indexOf('(') + 1, line.lastIndexOf(')'));
+    const out: string[] = [];
+    let depth = 0, inStr = false, cur = '';
+    for (const ch of body) {
+      if (ch === "'") inStr = !inStr;
+      if (!inStr && ch === '(') depth++;
+      if (!inStr && ch === ')') depth--;
+      if (!inStr && depth === 0 && ch === ',') { out.push(cur); cur = ''; } else cur += ch;
+    }
+    out.push(cur);
+    return out;
+  };
+  const buildEveryCreator = (schema: 'IFC2X3' | 'IFC4' | 'IFC4X3') => {
+    const creator = new IfcCreator({ Schema: schema });
+    const storey = creator.addIfcBuildingStorey({ Name: 'GF', Elevation: 0 });
+    const wall = creator.addIfcWall(storey, { Start: [0, 0, 0], End: [8, 0, 0], Thickness: 0.2, Height: 3 });
+    creator.addIfcWallDoor(wall, { Position: [1, 0, 0], Width: 0.9, Height: 2.1 });
+    creator.addIfcWallWindow(wall, { Position: [4, 0, 1], Width: 1.2, Height: 1.2 });
+    creator.addIfcSlab(storey, { Position: [0, 0, 0], Thickness: 0.2, Width: 5, Depth: 5, Openings: [{ Position: [1, 1, 0], Width: 1, Height: 1 }] });
+    creator.addIfcDoor(storey, { Position: [1, 2, 0], Width: 0.9, Height: 2.1 });
+    creator.addIfcWindow(storey, { Position: [1, 2, 0], Width: 1.2, Height: 1.5 });
+    creator.addIfcPlate(storey, { Position: [1, 2, 0], Width: 1, Depth: 1, Thickness: 0.01 });
+    creator.addIfcMember(storey, { Start: [0, 0, 0], End: [2, 0, 0], Width: 0.1, Height: 0.1 });
+    creator.addIfcIShapeBeam(storey, { Start: [0, 0, 0], End: [3, 0, 0], OverallWidth: 0.2, OverallDepth: 0.4, WebThickness: 0.01, FlangeThickness: 0.02 });
+    creator.addIfcLShapeMember(storey, { Start: [0, 0, 0], End: [2, 0, 0], Depth: 0.1, Width: 0.1, Thickness: 0.01 });
+    creator.addIfcTShapeMember(storey, { Start: [0, 0, 0], End: [2, 0, 0], FlangeWidth: 0.1, Depth: 0.1, WebThickness: 0.01, FlangeThickness: 0.01 });
+    creator.addIfcUShapeMember(storey, { Start: [0, 0, 0], End: [2, 0, 0], Depth: 0.1, FlangeWidth: 0.05, WebThickness: 0.01, FlangeThickness: 0.01 });
+    creator.addIfcCurtainWall(storey, { Start: [0, 3, 0], End: [3, 3, 0], Height: 3 });
+    creator.addIfcBuildingElementProxy(storey, { Position: [5, 5, 0], Width: 1, Depth: 1, Height: 1 });
+    creator.addIfcPile(storey, { Position: [6, 6, 0], Length: 5, Diameter: 0.4 });
+    creator.addElement(storey, { IfcType: 'IFCMEMBER', Placement: { Location: [0, 0, 0] }, Profile: { ProfileType: 'AREA', Depth: 0.2, Width: 0.1, WallThickness: 0.01, Girth: 0.02 } as never, Depth: 2 });
+    creator.addElement(storey, { IfcType: 'IFCBUILDINGELEMENTPROXY', Placement: { Location: [0, 0, 0] }, Profile: { ProfileType: 'AREA', XDim: 1, YDim: 1 } as never, Depth: 0.01 });
+    creator.addAxisElement(storey, { IfcType: 'IFCFLOWSEGMENT', Start: [0, 0, 0], End: [2, 0, 0], Profile: { ProfileType: 'AREA', XDim: 0.1, YDim: 0.1 } as never });
+    creator.addIfcMaterial(wall, { Name: 'Concrete', Category: 'Concrete' });
+    creator.addIfcMaterial(wall, { Name: 'Build-up', Layers: [{ Name: 'Brick', Thickness: 0.1 }, { Name: 'Air', Thickness: 0.05, IsVentilated: true }] } as never);
+    const t1 = creator.addIfcTask({ Name: 'T1' });
+    const t2 = creator.addIfcTask({ Name: 'T2', Identification: 'A-2' });
+    creator.addIfcRelSequence(t1, t2, {});
+    return creator.toIfc().content.split('\n');
+  };
+
+  it.each(['IFC2X3', 'IFC4', 'IFC4X3'] as const)('writes every creator line schema-valid in %s (#9359)', (schema) => {
+    const registry = getSchemaRegistryForVersion(schema);
+    const byUpper = new Map(Object.keys(registry.entities).map(name => [name.toUpperCase(), name]));
+    const checked = new Set<string>();
+    for (const line of buildEveryCreator(schema)) {
+      const tag = /^#\d+=([A-Z0-9]+)\(/.exec(line)?.[1];
+      if (!tag) continue;
+      const entity = byUpper.get(tag);
+      expect(entity, `${tag} is not an ${schema} entity`).toBeDefined();
+      const schemaAttrs = registry.entities[entity!].allAttributes ?? [];
+      const values = stepAttrs(line);
+      expect(values.length, line).toBe(schemaAttrs.length);
+      schemaAttrs.forEach((attr, i) => {
+        if (!attr.optional) expect(values[i], `${entity}.${attr.name} is required in ${line}`).not.toBe('$');
+        const token = /^\.([A-Z_0-9]+)\.$/.exec(values[i])?.[1];
+        const enumValues = registry.enums[attr.type];
+        if (enumValues && token) expect(enumValues, `${entity}.${attr.name} in ${line}`).toContain(token);
+      });
+      checked.add(tag);
+    }
+    for (const tag of ['IFCDOOR', 'IFCWINDOW', 'IFCOPENINGELEMENT', 'IFCPLATE', 'IFCMEMBER', 'IFCCURTAINWALL', 'IFCBUILDINGELEMENTPROXY',
+      'IFCPILE', 'IFCFLOWSEGMENT', 'IFCISHAPEPROFILEDEF', 'IFCLSHAPEPROFILEDEF', 'IFCTSHAPEPROFILEDEF', 'IFCUSHAPEPROFILEDEF',
+      'IFCCSHAPEPROFILEDEF', 'IFCMATERIAL', 'IFCMATERIALLAYER', 'IFCMATERIALLAYERSET', 'IFCTASK', 'IFCRELSEQUENCE', 'IFCSTYLEDITEM']) {
+      expect(checked, tag).toContain(tag);
+    }
+  });
+
+  it('wraps IFC2X3 styles once per style and nests site → building → storey placements (#9359)', () => {
+    const lines = buildEveryCreator('IFC2X3');
+    const byId = new Map(lines.map(l => [/^#(\d+)=/.exec(l)?.[1], l] as const));
+    const styled = lines.filter(l => l.includes('=IFCSTYLEDITEM('));
+    const refs = new Set(styled.map(l => /,\(#(\d+)\),/.exec(l)![1]));
+    expect(styled.length).toBeGreaterThan(refs.size);
+    expect(lines.filter(l => l.includes('=IFCPRESENTATIONSTYLEASSIGNMENT(')).length).toBe(refs.size);
+    for (const ref of refs) {
+      const style = /=IFCPRESENTATIONSTYLEASSIGNMENT\(\(#(\d+)\)\);$/.exec(byId.get(ref) ?? '')?.[1];
+      expect(byId.get(style!)).toContain('=IFCSURFACESTYLE(');
+    }
+    const placementOf = (tag: string) => stepAttrs(lines.find(l => l.includes(`=${tag}(`))!)[5].slice(1);
+    const site = placementOf('IFCSITE'), building = placementOf('IFCBUILDING'), storey = placementOf('IFCBUILDINGSTOREY');
+    expect(building).not.toBe(site);
+    expect(stepAttrs(byId.get(building)!)[0]).toBe(`#${site}`);
+    expect(stepAttrs(byId.get(storey)!)[0]).toBe(`#${building}`);
+    expect(stepAttrs(byId.get(building)!)[1]).toBe(stepAttrs(byId.get(site)!)[1]); // identity relative transform
+  });
+
+  it('keeps IFC4 styled items and the shared site/building placement unchanged', () => {
+    const lines = buildEveryCreator('IFC4');
+    expect(lines.join('\n')).not.toContain('IFCPRESENTATIONSTYLEASSIGNMENT');
+    const placementOf = (tag: string) => stepAttrs(lines.find(l => l.includes(`=${tag}(`))!)[5];
+    expect(placementOf('IFCBUILDING')).toBe(placementOf('IFCSITE'));
+  });
+
+  it('maps a generic IFC2X3 proxy PredefinedType onto CompositionType (#9359)', () => {
+    const creator = new IfcCreator({ Schema: 'IFC2X3' });
+    const storey = creator.addIfcBuildingStorey({ Name: 'GF', Elevation: 0 });
+    const proxy = (PredefinedType?: string) => creator.addElement(storey, { IfcType: 'IFCBUILDINGELEMENTPROXY', Placement: { Location: [0, 0, 0] }, Profile: { ProfileType: 'AREA', XDim: 1, YDim: 1 } as never, Depth: 0.1, PredefinedType });
+    proxy('NOTDEFINED');
+    proxy('PARTIAL');
+    expect(() => proxy('USERDEFINED')).toThrow(/CompositionType must be one of COMPLEX, ELEMENT, PARTIAL in IFC2X3; got USERDEFINED/);
+    const proxies = creator.toIfc().content.split('\n').filter(l => l.includes('=IFCBUILDINGELEMENTPROXY('));
+    expect(proxies.map(l => stepAttrs(l)[8])).toEqual(['$', '.PARTIAL.']);
+    expect(() => creator.addElement(storey, { IfcType: 'IFCMEMBER', Placement: { Location: [0, 0, 0] }, Profile: { ProfileType: 'AREA', XDim: 1, YDim: 1 } as never, Depth: 1, PredefinedType: 'BRACE' }))
+      .toThrow(/IfcMember has no PredefinedType attribute in IFC2X3/);
+  });
+
+  it.each(['IFC2X3', 'IFC4', 'IFC4X3'] as const)('writes generic door/window/stair/proxy tails from the %s schema (#9359)', (schema) => {
+    const creator = new IfcCreator({ Schema: schema });
+    const storey = creator.addIfcBuildingStorey({ Name: 'GF', Elevation: 0 });
+    const profile = { ProfileType: 'AREA', XDim: 1, YDim: 1 } as never;
+    for (const IfcType of ['IFCDOOR', 'IFCWINDOW', 'IFCSTAIR', 'IFCBUILDINGELEMENTPROXY', 'IFCMEMBER', 'IFCFLOWSEGMENT']) {
+      creator.addElement(storey, { IfcType, Placement: { Location: [0, 0, 0] }, Profile: profile, Depth: 1 });
+      creator.addAxisElement(storey, { IfcType, Start: [0, 0, 0], End: [1, 0, 0], Profile: profile, PredefinedType: IfcType === 'IFCFLOWSEGMENT' || (schema === 'IFC2X3' && IfcType !== 'IFCSTAIR') ? undefined : 'NOTDEFINED' });
+    }
+    expect(() => creator.addElement(storey, { IfcType: 'IFCDOOR', Placement: { Location: [0, 0, 0] }, Profile: profile, Depth: 1, PredefinedType: 'NOT_A_DOOR' }))
+      .toThrow(schema === 'IFC2X3' ? /IfcDoor has no PredefinedType attribute in IFC2X3/ : /IfcDoor.PredefinedType must be one of/);
+    const registry = getSchemaRegistryForVersion(schema);
+    const byUpper = new Map(Object.keys(registry.entities).map(name => [name.toUpperCase(), name]));
+    let checked = 0;
+    for (const line of creator.toIfc().content.split('\n')) {
+      const tag = /^#\d+=([A-Z0-9]+)\(/.exec(line)?.[1];
+      if (!tag || !['IFCDOOR', 'IFCWINDOW', 'IFCSTAIR', 'IFCBUILDINGELEMENTPROXY', 'IFCMEMBER', 'IFCFLOWSEGMENT'].includes(tag)) continue;
+      const attrs = registry.entities[byUpper.get(tag)!].allAttributes ?? [];
+      const values = stepAttrs(line);
+      expect(values.length, line).toBe(attrs.length);
+      attrs.forEach((attr, i) => {
+        const token = /^\.([A-Z_0-9]+)\.$/.exec(values[i])?.[1];
+        if (token) expect(registry.enums[attr.type], `${tag}.${attr.name} in ${line}`).toContain(token);
+        if (!attr.optional) expect(values[i], `${tag}.${attr.name} in ${line}`).not.toBe('$');
+      });
+      checked++;
+    }
+    expect(checked).toBe(12);
+  });
+
+  it('refuses IFC4-only scheduling data in IFC2X3 instead of writing invalid records (#9359)', () => {
+    const creator = new IfcCreator({ Schema: 'IFC2X3' });
+    const t1 = creator.addIfcTask({ Name: 'T1' });
+    const t2 = creator.addIfcTask({ Name: 'T2' });
+    expect(() => creator.addIfcTask({ Name: 'T3', ScheduleStart: '2026-03-02T07:00:00' })).toThrow(/task times, LongDescription and PredefinedType are not supported for IFC2X3/);
+    expect(() => creator.addIfcTask({ Name: 'T4', LongDescription: 'handoff' })).toThrow(/not supported for IFC2X3/);
+    expect(() => creator.addIfcTask({ Name: 'T5', PredefinedType: 'CONSTRUCTION' })).toThrow(/not supported for IFC2X3/);
+    expect(() => creator.addIfcRelSequence(t1, t2, { TimeLag: 'P1D' })).toThrow(/TimeLag durations \(IfcLagTime\) are not supported for IFC2X3/);
+    expect(() => creator.addIfcWorkSchedule({ Name: 'WS', StartTime: '2026-03-01T00:00:00' })).toThrow(/addIfcWorkSchedule: work controls .* are not supported for IFC2X3/);
+    expect(() => creator.addIfcWorkPlan({ Name: 'WP', StartTime: '2026-03-01T00:00:00' })).toThrow(/addIfcWorkPlan: work controls .* are not supported for IFC2X3/);
   });
 
   it('attaches a simple material via IfcRelAssociatesMaterial', () => {
@@ -607,6 +825,136 @@ describe('IfcCreator — scheduling / 4D', () => {
   });
 });
 
+describe('IfcCreator — IfcWorkCalendar (#4830)', () => {
+  /** Parse emitted STEP with the real parser, not a hand-rolled scanner. */
+  async function extractSchedule(content: string) {
+    const bytes = new TextEncoder().encode(content);
+    const store = await new IfcParser().parseColumnar(bytes.buffer as ArrayBuffer);
+    return extractScheduleOnDemand(store);
+  }
+
+  it('emits IFCWORKCALENDAR with its IfcWorkTime / IfcRecurrencePattern / IfcTimePeriod', () => {
+    const c = new IfcCreator();
+    const calId = c.addIfcWorkCalendar({
+      Name: 'Site calendar',
+      Description: 'Five-day week',
+      Identification: 'CAL-1',
+      PredefinedType: 'FIRSTSHIFT',
+      WorkingTimes: [{
+        Name: 'Weekdays',
+        Start: '2024-05-01',
+        Finish: '2024-12-31',
+        RecurrencePattern: {
+          RecurrenceType: 'WEEKLY',
+          WeekdayComponent: [1, 2, 3, 4, 5],
+          Interval: 1,
+          Occurrences: 30,
+          TimePeriods: [{ StartTime: '07:00:00', EndTime: '16:00:00' }],
+        },
+      }],
+      ExceptionTimes: [{ Name: 'Shutdown', Start: '2024-08-01', Finish: '2024-08-14' }],
+    });
+    const result = c.toIfc();
+    expect(calId).toBeGreaterThan(0);
+    expect(result.content).toContain('IFCWORKCALENDAR');
+    expect(result.content).toContain("'Site calendar'");
+    expect(result.content).toContain('.FIRSTSHIFT.');
+    expect(result.content).toContain('.WEEKLY.');
+    expect(result.content).toContain('(1,2,3,4,5)');
+    expect(result.content).toContain("IFCTIMEPERIOD('07:00:00','16:00:00')");
+    // One IfcWorkTime per entry in each list.
+    expect((result.content.match(/=IFCWORKTIME\(/g) ?? []).length).toBe(2);
+    // The exception time carries no recurrence — only one pattern is emitted.
+    expect((result.content.match(/=IFCRECURRENCEPATTERN\(/g) ?? []).length).toBe(1);
+    // The calendar is reported in the created-entity list like other entities.
+    expect(result.entities.some(e => e.type === 'IfcWorkCalendar' && e.Name === 'Site calendar')).toBe(true);
+  });
+
+  it('emits no IfcWorkTime entities for a calendar with no times', () => {
+    const c = new IfcCreator();
+    c.addIfcWorkCalendar({ Name: 'Bare', PredefinedType: 'NOTDEFINED' });
+    const result = c.toIfc();
+    expect(result.content).toContain('IFCWORKCALENDAR');
+    expect(result.content).not.toContain('IFCWORKTIME');
+    expect(result.content).not.toContain('IFCRECURRENCEPATTERN');
+  });
+
+  it('rejects IfcWorkCalendar before allocating nested entities in IFC2X3', () => {
+    const c = new IfcCreator({ Schema: 'IFC2X3' });
+    expect(() => c.addIfcWorkCalendar({
+      Name: 'Unsupported',
+      WorkingTimes: [{ RecurrencePattern: { RecurrenceType: 'DAILY', Interval: 1 } }],
+    })).toThrow(/not supported for IFC2X3/);
+    expect(c.toIfc().content).not.toContain('IFCWORK');
+  });
+
+  it.each([
+    ['fractional day', { RecurrenceType: 'MONTHLY_BY_DAY_OF_MONTH' as const, DayComponent: [1.5] }],
+    ['out-of-range weekday', { RecurrenceType: 'WEEKLY' as const, WeekdayComponent: [8] }],
+    ['out-of-range month', { RecurrenceType: 'YEARLY_BY_DAY_OF_MONTH' as const, DayComponent: [1], MonthComponent: [13] }],
+    ['non-finite occurrence', { RecurrenceType: 'DAILY' as const, Occurrences: Number.POSITIVE_INFINITY }],
+    ['non-positive interval', { RecurrenceType: 'DAILY' as const, Interval: 0 }],
+    ['invalid component combination', { RecurrenceType: 'DAILY' as const, WeekdayComponent: [1] }],
+  ])('rejects invalid recurrence input: %s', (_label, recurrencePattern) => {
+    const c = new IfcCreator();
+    expect(() => c.addIfcWorkCalendar({
+      Name: 'Invalid',
+      WorkingTimes: [{ RecurrencePattern: recurrencePattern }],
+    })).toThrow(/IfcRecurrencePattern/);
+  });
+
+  it('round-trips through the parser: the extractor reads back what we wrote', async () => {
+    const c = new IfcCreator();
+    const calId = c.addIfcWorkCalendar({
+      Name: 'Site calendar',
+      Identification: 'CAL-1',
+      PredefinedType: 'SECONDSHIFT',
+      WorkingTimes: [{
+        Name: 'Weekdays',
+        Start: '2024-05-01',
+        Finish: '2024-12-31',
+        RecurrencePattern: {
+          RecurrenceType: 'WEEKLY',
+          WeekdayComponent: [1, 2, 3, 4, 5],
+          Interval: 2,
+          TimePeriods: [{ StartTime: '07:00:00', EndTime: '16:00:00' }],
+        },
+      }],
+    });
+    const scheduleId = c.addIfcWorkSchedule({ Name: 'Main', StartTime: '2024-05-01T08:00:00' });
+    const taskId = c.addIfcTask({ Name: 'Install walls', ScheduleStart: '2024-05-06T08:00:00' });
+    c.assignTasksToWorkSchedule(scheduleId, [taskId]);
+    c.assignCalendarToTasks(calId, [taskId]);
+
+    const parsed = await extractSchedule(c.toIfc().content);
+
+    expect(parsed.workCalendars).toHaveLength(1);
+    const cal = parsed.workCalendars![0];
+    expect(cal.name).toBe('Site calendar');
+    expect(cal.identification).toBe('CAL-1');
+    expect(cal.predefinedType).toBe('SECONDSHIFT');
+    expect(cal.workingTimes).toHaveLength(1);
+    expect(cal.workingTimes[0].start).toBe('2024-05-01');
+    const pattern = cal.workingTimes[0].recurrencePattern!;
+    expect(pattern.recurrenceType).toBe('WEEKLY');
+    expect(pattern.weekdayComponent).toEqual([1, 2, 3, 4, 5]);
+    expect(pattern.interval).toBe(2);
+    expect(pattern.timePeriods).toEqual([{ start: '07:00:00', end: '16:00:00' }]);
+
+    // The two assignments live on independent fields — neither clobbers the other.
+    const task = parsed.tasks[0];
+    expect(task.name).toBe('Install walls');
+    expect(task.calendarGlobalIds).toEqual([cal.globalId]);
+    expect(task.controllingScheduleGlobalIds).toEqual([parsed.workSchedules[0].globalId]);
+  });
+
+  it('assignCalendarToTasks rejects an empty id list like its sibling helpers', () => {
+    const c = new IfcCreator();
+    const calId = c.addIfcWorkCalendar({ Name: 'Cal' });
+    expect(() => c.assignCalendarToTasks(calId, [])).toThrow(/empty/);
+  });
+});
+
 describe('IfcCreator deterministic output (Timestamp + GuidSource)', () => {
   /** Simple LCG in [0, 1): same seed => same stream. */
   const seededRng = (seed: number) => {
@@ -641,8 +989,17 @@ describe('IfcCreator deterministic output (Timestamp + GuidSource)', () => {
     const first = buildModel(opts());
     const second = buildModel(opts());
     expect(second).toBe(first);
-    // The fixed instant landed in the STEP header and IfcOwnerHistory.
-    expect(first).toContain("'20240101T000000'");
+    // The fixed instant landed in the STEP header and IfcOwnerHistory, as
+    // an ISO 8601 date-time (ISO 10303-21 time_stamp) — not digits with the
+    // '-'/':' separators stripped.
+    //
+    // Assert on the FILE_NAME line rather than on the whole file: this
+    // model also carries an IfcWorkSchedule seeded with that same literal
+    // (`buildModel` above), so a bare `toContain` matches whatever the
+    // header holds and cannot fail. The pre-fix form was live only because
+    // '20240101T000000' happened to occur nowhere else.
+    const fileName = first.split('\n').find((l) => l.startsWith('FILE_NAME('));
+    expect(fileName).toContain("'2024-01-01T00:00:00'");
     expect(first).toContain(`,${Math.floor(FIXED / 1000)});`);
   });
 
@@ -682,5 +1039,511 @@ describe('IfcCreator deterministic output (Timestamp + GuidSource)', () => {
     // a constant source trips the bounded-retry guard already in the constructor.
     const constant = generateIfcGuid();
     expect(() => new IfcCreator({ GuidSource: () => constant })).toThrow(/repeating/);
+  });
+});
+
+/**
+ * Dimension validation — see LTplus-AG/ifc-lite#2767 (sibling fix for the
+ * in-store/ builders, which lives outside this class). A bare `<= 0` check
+ * is `false` for both `NaN` and `Infinity`, so those values used to be
+ * emitted into the STEP file as the literal strings "NaN"/"Infinity" — not
+ * valid STEP REAL tokens. Every method below is table-driven so a future
+ * method added without a guard shows up as a new failing case, not a gap
+ * nobody notices.
+ */
+describe('IfcCreator dimension validation', () => {
+  type Build = (creator: IfcCreator, storeyId: number) => unknown;
+
+  // Each case builds the element with one bad value substituted in for a
+  // real dimension. `label` documents which field/method is under test.
+  const methodCases: Array<{ label: string; build: Build }> = [
+    {
+      label: 'addIfcColumn Width=NaN',
+      build: (c, s) => c.addIfcColumn(s, { Position: [0, 0, 0], Width: NaN, Depth: 0.3, Height: 3 }),
+    },
+    {
+      label: 'addIfcColumn Width=-2 (pre-existing hole: no guard at all before this fix)',
+      build: (c, s) => c.addIfcColumn(s, { Position: [0, 0, 0], Width: -2, Depth: 0.3, Height: 3 }),
+    },
+    {
+      label: 'addIfcColumn Height=Infinity',
+      build: (c, s) => c.addIfcColumn(s, { Position: [0, 0, 0], Width: 0.3, Depth: 0.3, Height: Infinity }),
+    },
+    {
+      label: 'addIfcWall Thickness=NaN',
+      build: (c, s) => c.addIfcWall(s, { Start: [0, 0, 0], End: [5, 0, 0], Thickness: NaN, Height: 3 }),
+    },
+    {
+      label: 'addIfcWall Height=Infinity',
+      build: (c, s) => c.addIfcWall(s, { Start: [0, 0, 0], End: [5, 0, 0], Thickness: 0.2, Height: Infinity }),
+    },
+    {
+      label: 'addIfcSlab Thickness=NaN',
+      build: (c, s) => c.addIfcSlab(s, { Position: [0, 0, 0], Thickness: NaN, Width: 5, Depth: 5 }),
+    },
+    {
+      label: 'addIfcSlab Width=Infinity',
+      build: (c, s) => c.addIfcSlab(s, { Position: [0, 0, 0], Thickness: 0.2, Width: Infinity, Depth: 5 }),
+    },
+    {
+      label: 'addIfcBeam Width=NaN',
+      build: (c, s) => c.addIfcBeam(s, { Start: [0, 0, 0], End: [5, 0, 0], Width: NaN, Height: 0.5 }),
+    },
+    {
+      label: 'addIfcBeam Height=Infinity',
+      build: (c, s) => c.addIfcBeam(s, { Start: [0, 0, 0], End: [5, 0, 0], Width: 0.3, Height: Infinity }),
+    },
+    {
+      label: 'addIfcStair NumberOfRisers=NaN',
+      build: (c, s) => c.addIfcStair(s, { Position: [0, 0, 0], NumberOfRisers: NaN, RiserHeight: 0.18, TreadLength: 0.28, Width: 1 }),
+    },
+    {
+      label: 'addIfcRoof Thickness=Infinity',
+      build: (c, s) => c.addIfcRoof(s, { Position: [0, 0, 0], Width: 6, Depth: 4, Thickness: Infinity }),
+    },
+    {
+      label: 'addIfcRoof Slope=NaN',
+      build: (c, s) => c.addIfcRoof(s, { Position: [0, 0, 0], Width: 6, Depth: 4, Thickness: 0.3, Slope: NaN }),
+    },
+    {
+      label: 'addIfcGableRoof Width=NaN',
+      build: (c, s) => c.addIfcGableRoof(s, { Position: [0, 0, 0], Width: NaN, Depth: 4, Thickness: 0.3, Slope: 0.4 }),
+    },
+    {
+      label: 'addIfcGableRoof Slope=Infinity',
+      build: (c, s) => c.addIfcGableRoof(s, { Position: [0, 0, 0], Width: 6, Depth: 4, Thickness: 0.3, Slope: Infinity }),
+    },
+    {
+      label: 'addIfcGableRoof Overhang=NaN',
+      build: (c, s) => c.addIfcGableRoof(s, { Position: [0, 0, 0], Width: 6, Depth: 4, Thickness: 0.3, Slope: 0.4, Overhang: NaN }),
+    },
+    {
+      label: 'addIfcDoor Width=NaN',
+      build: (c, s) => c.addIfcDoor(s, { Position: [0, 0, 0], Width: NaN, Height: 2.1 }),
+    },
+    {
+      label: 'addIfcDoor Thickness=Infinity',
+      build: (c, s) => c.addIfcDoor(s, { Position: [0, 0, 0], Width: 0.9, Height: 2.1, Thickness: Infinity }),
+    },
+    {
+      label: 'addIfcWindow Height=NaN',
+      build: (c, s) => c.addIfcWindow(s, { Position: [0, 0, 0], Width: 1.2, Height: NaN }),
+    },
+    {
+      label: 'addIfcRamp Length=NaN',
+      build: (c, s) => c.addIfcRamp(s, { Position: [0, 0, 0], Width: 1.5, Length: NaN, Thickness: 0.2 }),
+    },
+    {
+      label: 'addIfcRamp Rise=Infinity',
+      build: (c, s) => c.addIfcRamp(s, { Position: [0, 0, 0], Width: 1.5, Length: 5, Thickness: 0.2, Rise: Infinity }),
+    },
+    {
+      label: 'addIfcRailing Height=NaN',
+      build: (c, s) => c.addIfcRailing(s, { Start: [0, 0, 0], End: [5, 0, 0], Height: NaN }),
+    },
+    {
+      label: 'addIfcRailing Width=Infinity',
+      build: (c, s) => c.addIfcRailing(s, { Start: [0, 0, 0], End: [5, 0, 0], Height: 1.1, Width: Infinity }),
+    },
+    {
+      label: 'addIfcPlate Thickness=NaN',
+      build: (c, s) => c.addIfcPlate(s, { Position: [0, 0, 0], Width: 1, Depth: 1, Thickness: NaN }),
+    },
+    {
+      label: 'addIfcMember Width=NaN',
+      build: (c, s) => c.addIfcMember(s, { Start: [0, 0, 0], End: [3, 0, 0], Width: NaN, Height: 0.1 }),
+    },
+    {
+      label: 'addIfcFooting Height=NaN',
+      build: (c, s) => c.addIfcFooting(s, { Position: [0, 0, 0], Width: 1, Depth: 1, Height: NaN }),
+    },
+    {
+      label: 'addIfcPile Diameter=NaN',
+      build: (c, s) => c.addIfcPile(s, { Position: [0, 0, 0], Length: 5, Diameter: NaN }),
+    },
+    {
+      label: 'addIfcPile RectangularDepth=Infinity',
+      build: (c, s) => c.addIfcPile(s, { Position: [0, 0, 0], Length: 5, Diameter: 0.4, IsRectangular: true, RectangularDepth: Infinity }),
+    },
+    {
+      label: 'addIfcSpace Height=NaN',
+      build: (c, s) => c.addIfcSpace(s, { Position: [0, 0, 0], Width: 4, Depth: 4, Height: NaN }),
+    },
+    {
+      label: 'addIfcCurtainWall Height=NaN',
+      build: (c, s) => c.addIfcCurtainWall(s, { Start: [0, 0, 0], End: [5, 0, 0], Height: NaN }),
+    },
+    {
+      label: 'addIfcCurtainWall Thickness=Infinity',
+      build: (c, s) => c.addIfcCurtainWall(s, { Start: [0, 0, 0], End: [5, 0, 0], Height: 3, Thickness: Infinity }),
+    },
+    {
+      label: 'addIfcFurnishingElement Height=NaN',
+      build: (c, s) => c.addIfcFurnishingElement(s, { Position: [0, 0, 0], Width: 1, Depth: 1, Height: NaN }),
+    },
+    {
+      label: 'addIfcFurnishingElement Direction=Infinity',
+      build: (c, s) => c.addIfcFurnishingElement(s, { Position: [0, 0, 0], Width: 1, Depth: 1, Height: 1, Direction: Infinity }),
+    },
+    {
+      label: 'addIfcBuildingElementProxy Height=NaN',
+      build: (c, s) => c.addIfcBuildingElementProxy(s, { Position: [0, 0, 0], Width: 1, Depth: 1, Height: NaN }),
+    },
+    {
+      label: 'addIfcCircularColumn Radius=NaN',
+      build: (c, s) => c.addIfcCircularColumn(s, { Position: [0, 0, 0], Radius: NaN, Height: 3 }),
+    },
+    {
+      label: 'addIfcIShapeBeam OverallWidth=NaN',
+      build: (c, s) => c.addIfcIShapeBeam(s, {
+        Start: [0, 0, 0], End: [5, 0, 0],
+        OverallWidth: NaN, OverallDepth: 0.4, WebThickness: 0.01, FlangeThickness: 0.02,
+      }),
+    },
+    {
+      label: 'addIfcIShapeBeam FilletRadius=Infinity',
+      build: (c, s) => c.addIfcIShapeBeam(s, {
+        Start: [0, 0, 0], End: [5, 0, 0],
+        OverallWidth: 0.2, OverallDepth: 0.4, WebThickness: 0.01, FlangeThickness: 0.02, FilletRadius: Infinity,
+      }),
+    },
+    {
+      label: 'addIfcLShapeMember Thickness=NaN',
+      build: (c, s) => c.addIfcLShapeMember(s, { Start: [0, 0, 0], End: [3, 0, 0], Depth: 0.1, Width: 0.1, Thickness: NaN }),
+    },
+    {
+      label: 'addIfcTShapeMember FlangeWidth=NaN',
+      build: (c, s) => c.addIfcTShapeMember(s, {
+        Start: [0, 0, 0], End: [3, 0, 0], FlangeWidth: NaN, Depth: 0.2, WebThickness: 0.01, FlangeThickness: 0.02,
+      }),
+    },
+    {
+      label: 'addIfcUShapeMember Depth=NaN',
+      build: (c, s) => c.addIfcUShapeMember(s, {
+        Start: [0, 0, 0], End: [3, 0, 0], Depth: NaN, FlangeWidth: 0.1, WebThickness: 0.01, FlangeThickness: 0.02,
+      }),
+    },
+    {
+      label: 'addIfcHollowCircularColumn WallThickness=NaN',
+      build: (c, s) => c.addIfcHollowCircularColumn(s, { Position: [0, 0, 0], Radius: 0.2, WallThickness: NaN, Height: 3 }),
+    },
+    {
+      label: 'addIfcRectangleHollowBeam XDim=NaN',
+      build: (c, s) => c.addIfcRectangleHollowBeam(s, { Start: [0, 0, 0], End: [3, 0, 0], XDim: NaN, YDim: 0.2, WallThickness: 0.01 }),
+    },
+    {
+      label: 'addIfcRectangleHollowBeam InnerFilletRadius=Infinity',
+      build: (c, s) => c.addIfcRectangleHollowBeam(s, {
+        Start: [0, 0, 0], End: [3, 0, 0], XDim: 0.2, YDim: 0.2, WallThickness: 0.01, InnerFilletRadius: Infinity,
+      }),
+    },
+    {
+      label: 'addIfcWallDoor Thickness=Infinity',
+      build: (c, s) => {
+        const wallId = c.addIfcWall(s, { Start: [0, 0, 0], End: [5, 0, 0], Thickness: 0.2, Height: 3 });
+        c.addIfcWallDoor(wallId, { Position: [1, 0, 0], Width: 0.9, Height: 2.1, Thickness: Infinity });
+      },
+    },
+    {
+      label: 'addIfcWallDoor Width=NaN',
+      build: (c, s) => {
+        const wallId = c.addIfcWall(s, { Start: [0, 0, 0], End: [5, 0, 0], Thickness: 0.2, Height: 3 });
+        c.addIfcWallDoor(wallId, { Position: [1, 0, 0], Width: NaN, Height: 2.1 });
+      },
+    },
+    {
+      label: 'addIfcWallWindow Thickness=Infinity',
+      build: (c, s) => {
+        const wallId = c.addIfcWall(s, { Start: [0, 0, 0], End: [5, 0, 0], Thickness: 0.2, Height: 3 });
+        c.addIfcWallWindow(wallId, { Position: [1, 0, 0.9], Width: 1.2, Height: 1.2, Thickness: Infinity });
+      },
+    },
+    {
+      label: 'addIfcWallWindow Height=NaN',
+      build: (c, s) => {
+        const wallId = c.addIfcWall(s, { Start: [0, 0, 0], End: [5, 0, 0], Thickness: 0.2, Height: 3 });
+        c.addIfcWallWindow(wallId, { Position: [1, 0, 0.9], Width: 1.2, Height: NaN });
+      },
+    },
+  ];
+
+  it.each(methodCases.map((c) => [c.label, c.build] as const))('rejects %s', (_label, build) => {
+    const creator = new IfcCreator();
+    const storeyId = creator.addIfcBuildingStorey({ Name: 'GF', Elevation: 0 });
+    // The NaN/Infinity value must be rejected before it reaches emitted
+    // STEP output. Slope goes through its own bounded-range message
+    // ("must be in radians..."); everything else goes through
+    // assertPositiveFinite or a dedicated finite-number check — both
+    // throw, which is what matters here (previously neither did).
+    expect(() => build(creator, storeyId)).toThrow();
+  });
+
+  // Distinct-points gap: a non-finite Start/End coordinate makes the
+  // computed length NaN, and `NaN <= 0` is false, so the (already-existing)
+  // zero-length guard in vecNorm() never fires. Guard the source
+  // coordinates instead of trusting the derived length.
+  const distinctPointsCases: Array<{ label: string; build: Build }> = [
+    {
+      label: 'addIfcWall Start=[NaN,0,0]',
+      build: (c, s) => c.addIfcWall(s, { Start: [NaN, 0, 0], End: [5, 0, 0], Thickness: 0.2, Height: 3 }),
+    },
+    {
+      label: 'addIfcBeam End=[5,0,Infinity]',
+      build: (c, s) => c.addIfcBeam(s, { Start: [0, 0, 0], End: [5, 0, Infinity], Width: 0.3, Height: 0.5 }),
+    },
+    {
+      label: 'addIfcMember Start=[NaN,0,0]',
+      build: (c, s) => c.addIfcMember(s, { Start: [NaN, 0, 0], End: [3, 0, 0], Width: 0.1, Height: 0.1 }),
+    },
+    {
+      label: 'addIfcRailing End=[NaN,0,0]',
+      build: (c, s) => c.addIfcRailing(s, { Start: [0, 0, 0], End: [NaN, 0, 0], Height: 1.1 }),
+    },
+    {
+      label: 'addIfcCurtainWall Start=[0,Infinity,0]',
+      build: (c, s) => c.addIfcCurtainWall(s, { Start: [0, Infinity, 0], End: [5, 0, 0], Height: 3 }),
+    },
+    {
+      label: 'addIfcIShapeBeam Start=[NaN,0,0]',
+      build: (c, s) => c.addIfcIShapeBeam(s, {
+        Start: [NaN, 0, 0], End: [5, 0, 0],
+        OverallWidth: 0.2, OverallDepth: 0.4, WebThickness: 0.01, FlangeThickness: 0.02,
+      }),
+    },
+    {
+      label: 'addIfcLShapeMember End=[3,NaN,0]',
+      build: (c, s) => c.addIfcLShapeMember(s, { Start: [0, 0, 0], End: [3, NaN, 0], Depth: 0.1, Width: 0.1, Thickness: 0.01 }),
+    },
+    {
+      label: 'addIfcTShapeMember Start=[0,0,Infinity]',
+      build: (c, s) => c.addIfcTShapeMember(s, {
+        Start: [0, 0, Infinity], End: [3, 0, 0], FlangeWidth: 0.1, Depth: 0.2, WebThickness: 0.01, FlangeThickness: 0.02,
+      }),
+    },
+    {
+      label: 'addIfcUShapeMember End=[NaN,0,0]',
+      build: (c, s) => c.addIfcUShapeMember(s, {
+        Start: [0, 0, 0], End: [NaN, 0, 0], Depth: 0.2, FlangeWidth: 0.1, WebThickness: 0.01, FlangeThickness: 0.02,
+      }),
+    },
+    {
+      label: 'addIfcRectangleHollowBeam Start=[NaN,0,0]',
+      build: (c, s) => c.addIfcRectangleHollowBeam(s, { Start: [NaN, 0, 0], End: [3, 0, 0], XDim: 0.2, YDim: 0.2, WallThickness: 0.01 }),
+    },
+  ];
+
+  it.each(distinctPointsCases.map((c) => [c.label, c.build] as const))('rejects %s', (_label, build) => {
+    const creator = new IfcCreator();
+    const storeyId = creator.addIfcBuildingStorey({ Name: 'GF', Elevation: 0 });
+    expect(() => build(creator, storeyId)).toThrow(/finite coordinates/);
+  });
+
+  // Non-finite Position gap (LTplus-AG/ifc-lite#5217): `serializeStepValue`
+  // turns a non-finite number into `$`, which is valid syntax for an
+  // *omitted* attribute but invalid as a member of a mandatory
+  // `LIST [1:3] OF IfcLengthMeasure` (IfcCartesianPoint.Coordinates). These
+  // seven methods accepted a non-finite Position without validation, unlike
+  // addIfcWall/addIfcBeam/addIfcMember, which already guard Start/End.
+  const positionCases: Array<{ label: string; build: Build }> = [
+    {
+      label: 'addIfcColumn Position=[NaN,0,0]',
+      build: (c, s) => c.addIfcColumn(s, { Position: [NaN, 0, 0], Width: 0.3, Depth: 0.4, Height: 3 }),
+    },
+    {
+      label: 'addIfcDoor Position=[0,Infinity,0]',
+      build: (c, s) => c.addIfcDoor(s, { Position: [0, Infinity, 0], Width: 0.9, Height: 2.1 }),
+    },
+    {
+      label: 'addIfcWindow Position=[0,0,NaN]',
+      build: (c, s) => c.addIfcWindow(s, { Position: [0, 0, NaN], Width: 1.2, Height: 1.5 }),
+    },
+    {
+      label: 'addIfcSlab Position=[Infinity,0,0]',
+      build: (c, s) => c.addIfcSlab(s, { Position: [Infinity, 0, 0], Thickness: 0.2, Width: 5, Depth: 5 }),
+    },
+    {
+      label: 'addIfcRoof Position=[0,NaN,0]',
+      build: (c, s) => c.addIfcRoof(s, { Position: [0, NaN, 0], Width: 6, Depth: 4, Thickness: 0.3 }),
+    },
+    {
+      label: 'addIfcPlate Position=[0,0,Infinity]',
+      build: (c, s) => c.addIfcPlate(s, { Position: [0, 0, Infinity], Width: 1, Depth: 1, Thickness: 0.01 }),
+    },
+    {
+      label: 'addIfcSpace Position=[NaN,0,0]',
+      build: (c, s) => c.addIfcSpace(s, { Position: [NaN, 0, 0], Width: 4, Depth: 4, Height: 2.5 }),
+    },
+    // The guard lives where every point is written (`addCartesianPoint`), so
+    // builders the issue did not list are covered by the same line.
+    {
+      label: 'addIfcStair Position=[NaN,0,0]',
+      build: (c, s) => c.addIfcStair(s, { Position: [NaN, 0, 0], NumberOfRisers: 3, RiserHeight: 0.18, TreadLength: 0.28, Width: 1 }),
+    },
+    {
+      label: 'addIfcRamp Position=[0,Infinity,0]',
+      build: (c, s) => c.addIfcRamp(s, { Position: [0, Infinity, 0], Width: 1.2, Length: 5, Thickness: 0.2 }),
+    },
+    {
+      label: 'addIfcGableRoof Position=[0,0,NaN]',
+      build: (c, s) => c.addIfcGableRoof(s, { Position: [0, 0, NaN], Width: 6, Depth: 4, Thickness: 0.3, Slope: 0.5 }),
+    },
+    {
+      label: 'addIfcFooting Position=[NaN,0,0]',
+      build: (c, s) => c.addIfcFooting(s, { Position: [NaN, 0, 0], Width: 1, Depth: 1, Height: 0.5 }),
+    },
+    {
+      label: 'addIfcPile Position=[0,NaN,0]',
+      build: (c, s) => c.addIfcPile(s, { Position: [0, NaN, 0], Length: 10, Diameter: 0.4 }),
+    },
+    {
+      label: 'addIfcFurnishingElement Position=[Infinity,0,0]',
+      build: (c, s) => c.addIfcFurnishingElement(s, { Position: [Infinity, 0, 0], Width: 1, Depth: 1, Height: 1 }),
+    },
+    {
+      label: 'addIfcBuildingElementProxy Position=[0,0,NaN]',
+      build: (c, s) => c.addIfcBuildingElementProxy(s, { Position: [0, 0, NaN], Width: 1, Depth: 1, Height: 1 }),
+    },
+  ];
+
+  it.each(positionCases.map((c) => [c.label, c.build] as const))('rejects %s', (_label, build) => {
+    const creator = new IfcCreator();
+    const storeyId = creator.addIfcBuildingStorey({ Name: 'GF', Elevation: 0 });
+    expect(() => build(creator, storeyId)).toThrow(/finite coordinates/);
+  });
+
+  // No-regression pin: an ordinary finite Position must still be accepted,
+  // for every one of the seven newly-guarded methods.
+  it('still accepts a finite Position for every newly-guarded method', () => {
+    const creator = new IfcCreator();
+    const storeyId = creator.addIfcBuildingStorey({ Name: 'GF', Elevation: 0 });
+    expect(() => creator.addIfcColumn(storeyId, { Position: [1, 2, 0], Width: 0.3, Depth: 0.4, Height: 3 })).not.toThrow();
+    expect(() => creator.addIfcDoor(storeyId, { Position: [1, 2, 0], Width: 0.9, Height: 2.1 })).not.toThrow();
+    expect(() => creator.addIfcWindow(storeyId, { Position: [1, 2, 0], Width: 1.2, Height: 1.5 })).not.toThrow();
+    expect(() => creator.addIfcSlab(storeyId, { Position: [1, 2, 0], Thickness: 0.2, Width: 5, Depth: 5 })).not.toThrow();
+    expect(() => creator.addIfcRoof(storeyId, { Position: [1, 2, 0], Width: 6, Depth: 4, Thickness: 0.3 })).not.toThrow();
+    expect(() => creator.addIfcPlate(storeyId, { Position: [1, 2, 0], Width: 1, Depth: 1, Thickness: 0.01 })).not.toThrow();
+    expect(() => creator.addIfcSpace(storeyId, { Position: [1, 2, 0], Width: 4, Depth: 4, Height: 2.5 })).not.toThrow();
+  });
+
+  // Pin the pre-existing `<= 0` behaviour: still rejected after the fix.
+  it('still rejects non-positive dimensions (pre-existing behaviour, unchanged)', () => {
+    const creator = new IfcCreator();
+    const storeyId = creator.addIfcBuildingStorey({ Name: 'GF', Elevation: 0 });
+    expect(() => creator.addIfcColumn(storeyId, { Position: [0, 0, 0], Width: 0, Depth: 0.3, Height: 3 }))
+      .toThrow(/positive finite number/);
+    expect(() => creator.addIfcColumn(storeyId, { Position: [0, 0, 0], Width: -2, Depth: 0.3, Height: 3 }))
+      .toThrow(/positive finite number/);
+    expect(() => creator.addIfcWall(storeyId, { Start: [1, 1, 0], End: [1, 1, 0], Thickness: 0.2, Height: 3 }))
+      .toThrow(/zero-length vector/);
+  });
+});
+
+/**
+ * computeRefDirection() has a world-X fallback so a near-vertical Axis does
+ * not produce a degenerate (zero-length) cross product:
+ *   up = |axis[2]| < 0.9 ? [0,0,1] : [1,0,0]
+ * Pin both branches — vertical (up flips to world-X) and horizontal (up
+ * stays world-Z) — for two structurally different call sites so the
+ * branches cannot silently collapse into one another.
+ */
+describe('IfcCreator — computeRefDirection vertical-axis branch', () => {
+  // Resolve the raw attribute string of a STEP entity line, e.g.
+  // "#12=IFCDIRECTION((0.,-1.,0.));" -> "(0.,-1.,0.)" is inside — we return
+  // the args between the outer parens as written by stepLine().
+  function entityLine(content: string, id: number): string {
+    const re = new RegExp(`^#${id}=\\w+\\(([\\s\\S]*?)\\);$`, 'm');
+    const m = content.match(re);
+    if (!m) throw new Error(`Entity #${id} not found in content`);
+    return m[1];
+  }
+
+  // Numeric #refs referenced by an entity, in the order they appear —
+  // this mirrors the constructor-argument order used when the line was
+  // built, regardless of exact id numbering.
+  function refIdsOf(content: string, id: number): number[] {
+    return [...entityLine(content, id).matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
+  }
+
+  function directionValueOf(content: string, id: number): number[] {
+    const line = entityLine(content, id); // e.g. "(0.,-1.,0.)" — already the single-paren group
+    const m = line.match(/^\(([^)]+)\)$/);
+    if (!m) throw new Error(`Entity #${id} is not an IFCDIRECTION: ${line}`);
+    return m[1].split(',').map(Number);
+  }
+
+  // addIfcBeam: RefDirection flows through addLocalPlacement's
+  // {Axis, RefDirection} -> IFCLOCALPLACEMENT -> IFCAXIS2PLACEMENT3D chain.
+  function beamRefDirection(content: string, beamId: number): number[] {
+    const [, placementId] = refIdsOf(content, beamId); // [ownerHistory, placement, prodShape]
+    const [, axis2Id] = refIdsOf(content, placementId); // IFCLOCALPLACEMENT(relativeTo, axis2)
+    const [, , refDirId] = refIdsOf(content, axis2Id); // IFCAXIS2PLACEMENT3D(origin, axis, refDir)
+    return directionValueOf(content, refDirId);
+  }
+
+  // addIfcRailing: the outer ObjectPlacement carries no Axis/RefDirection
+  // (identity orientation, so posts extrude along world Z). The
+  // RefDirection instead lands on the rail *solid*'s own
+  // IfcAxis2Placement3D, reached via Representation -> ShapeRepresentation
+  // -> first Item (the rail; posts are items 2 and 3).
+  function railingRefDirection(content: string, railingId: number): number[] {
+    const [, , prodShapeId] = refIdsOf(content, railingId); // [ownerHistory, placement, prodShape]
+    const [shapeId] = refIdsOf(content, prodShapeId); // IFCPRODUCTDEFINITIONSHAPE($,$,(shape))
+    const [, railSolidId] = refIdsOf(content, shapeId); // IFCSHAPEREPRESENTATION(context, item1, ...)
+    const [, railAxis2Id] = refIdsOf(content, railSolidId); // IFCEXTRUDEDAREASOLID(profile, position, dir, depth)
+    const [, , refDirId] = refIdsOf(content, railAxis2Id); // IFCAXIS2PLACEMENT3D(origin, axis, refDir)
+    return directionValueOf(content, refDirId);
+  }
+
+  // Derived directly from computeRefDirection's own formula, not copied
+  // from the sibling in-store tests: up=[1,0,0] when |axis.z|>=0.9,
+  // cross([1,0,0],[0,0,1]) = (0,-1,0), already unit length.
+  const VERTICAL_REF = [0, -1, 0];
+  // up=[0,0,1] when |axis.z|<0.9, cross([0,0,1],[1,0,0]) = (0,1,0).
+  const HORIZONTAL_REF = [0, 1, 0];
+
+  it('addIfcBeam: vertical axis does not throw and yields the world-X-fallback RefDirection', () => {
+    const creator = new IfcCreator();
+    const storey = creator.addIfcBuildingStorey({ Name: 'GF', Elevation: 0 });
+    let beamId!: number;
+    expect(() => {
+      beamId = creator.addIfcBeam(storey, {
+        Start: [0, 0, 0], End: [0, 0, 5], Width: 0.2, Height: 0.4,
+      });
+    }).not.toThrow();
+    const result = creator.toIfc();
+    expect(beamRefDirection(result.content, beamId)).toEqual(VERTICAL_REF);
+  });
+
+  it('addIfcBeam: horizontal axis stays on the world-Z branch', () => {
+    const creator = new IfcCreator();
+    const storey = creator.addIfcBuildingStorey({ Name: 'GF', Elevation: 0 });
+    const beamId = creator.addIfcBeam(storey, {
+      Start: [0, 0, 0], End: [5, 0, 0], Width: 0.2, Height: 0.4,
+    });
+    const result = creator.toIfc();
+    expect(beamRefDirection(result.content, beamId)).toEqual(HORIZONTAL_REF);
+  });
+
+  it('addIfcRailing: vertical axis does not throw and yields the world-X-fallback RefDirection', () => {
+    const creator = new IfcCreator();
+    const storey = creator.addIfcBuildingStorey({ Name: 'GF', Elevation: 0 });
+    let railingId!: number;
+    expect(() => {
+      railingId = creator.addIfcRailing(storey, {
+        Start: [0, 0, 0], End: [0, 0, 5], Height: 1.1,
+      });
+    }).not.toThrow();
+    const result = creator.toIfc();
+    expect(railingRefDirection(result.content, railingId)).toEqual(VERTICAL_REF);
+  });
+
+  it('addIfcRailing: horizontal axis stays on the world-Z branch', () => {
+    const creator = new IfcCreator();
+    const storey = creator.addIfcBuildingStorey({ Name: 'GF', Elevation: 0 });
+    const railingId = creator.addIfcRailing(storey, {
+      Start: [0, 0, 0], End: [5, 0, 0], Height: 1.1,
+    });
+    const result = creator.toIfc();
+    expect(railingRefDirection(result.content, railingId)).toEqual(HORIZONTAL_REF);
   });
 });

@@ -37,11 +37,29 @@ export interface CutPolygon2D {
   };
   ifcType: string;
   expressId: number;
+  /** Model the element belongs to in a federation; scopes {@link CapHighlight} entries. Absent ⇒ matched by id alone. */
+  modelIndex?: number;
   /** Optional per-polygon RGBA (0–1). When present, this cap polygon fills with
    *  this colour (an `IfcMaterialLayerSet` wall/slab layer, or a frame+glass
    *  window part) instead of the uniform cap fill. Absent ⇒ uniform cap style +
    *  per-`ifcType` fallback, unchanged. */
   color?: [number, number, number, number];
+  /** Optional per-polygon hatch. When present, overrides the upload's capStyle hatch
+   *  fields for this polygon only. Absent ⇒ unchanged (capStyle applies). */
+  hatch?: {
+    /** Same ids as `Section2DOverlayCapStyle.patternId` (0 = none). */
+    patternId: number;
+    /** Defaults to `capStyle.spacingPx`. */
+    spacingPx?: number;
+    /** Defaults to `capStyle.angleRad`. */
+    angleRad?: number;
+    /** Defaults to `capStyle.widthPx`. */
+    widthPx?: number;
+    /** Defaults to `capStyle.secondaryAngleRad`. */
+    secondaryAngleRad?: number;
+    /** Hatch line colour (RGBA 0–1); defaults to `capStyle.strokeColor`. */
+    strokeColor?: [number, number, number, number];
+  };
 }
 
 export interface DrawingLine2D {
@@ -132,10 +150,111 @@ export function createSectionLift(
   return (x2d, y2d) => transform2Dto3D(x2d, y2d, axis, planePosition, flipped, customPlane);
 }
 
-/** Interleaved `[x, y, z, r, g, b, a]` cap vertices plus their triangle indices. */
+/** One cut polygon's slice of the cap's vertex buffer: which element it belongs to and where its vertices sit. */
+export interface CapPolygonRange {
+  expressId: number;
+  modelIndex?: number;
+  /** Index of the polygon's first vertex (not float offset). */
+  vertexStart: number;
+  vertexCount: number;
+}
+
+/** Interleaved cap vertices ({@link CAP_FILL_VERTEX_ATTRIBUTES} layout) plus their triangle indices. */
 export interface CapFillGeometry {
   vertices: Float32Array;
   indices: Uint32Array;
+  /** Per-polygon vertex slices, so a selection can recolour one element's cap without re-triangulating. */
+  ranges: CapPolygonRange[];
+}
+
+/**
+ * One cap fill vertex, offsets in floats. The cap fill pipeline's vertex
+ * buffer layout is built from this table, and a test checks the fill shader's
+ * `VertexInput` against it.
+ *
+ *  - `hatchA` = patternId, spacingPx, angleRad, widthPx
+ *  - `hatchB` = secondaryAngleRad, override mask ({@link CAP_HATCH_OVERRIDE}), 0, 0
+ *  - `hatchStroke` = hatch stroke RGBA
+ *
+ * The hatch floats are per polygon ({@link CutPolygon2D.hatch}); a field whose
+ * mask bit is clear falls back to the uniform cap style in the shader.
+ */
+export const CAP_FILL_VERTEX_ATTRIBUTES = [
+  { name: 'position', shaderLocation: 0, offset: 0, floats: 3 },
+  { name: 'color', shaderLocation: 1, offset: 3, floats: 4 },
+  { name: 'hatchA', shaderLocation: 2, offset: 7, floats: 4 },
+  { name: 'hatchB', shaderLocation: 3, offset: 11, floats: 4 },
+  { name: 'hatchStroke', shaderLocation: 4, offset: 15, floats: 4 },
+] as const;
+
+/** Floats per cap fill vertex: position (3) + RGBA (4) + hatch (3 × 4). */
+export const CAP_FILL_VERTEX_FLOATS = 19;
+
+/**
+ * Bits of the per-vertex hatch override mask (`hatchB.y`). A set bit means the
+ * polygon supplies that field; a clear bit means the shader uses the uniform
+ * cap style. A mask rather than sentinels, because 0 and negative angles are
+ * valid values.
+ */
+export const CAP_HATCH_OVERRIDE = {
+  patternId: 1,
+  spacingPx: 2,
+  angleRad: 4,
+  widthPx: 8,
+  secondaryAngleRad: 16,
+  strokeColor: 32,
+} as const;
+
+/** The 12 hatch floats (`hatchA`, `hatchB`, `hatchStroke`) shared by one polygon's vertices. */
+function capHatchFloats(hatch: CutPolygon2D['hatch']): number[] {
+  if (!hatch) return [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  let mask = CAP_HATCH_OVERRIDE.patternId;
+  const field = (value: number | undefined, bit: number): number => {
+    if (value === undefined) return 0;
+    mask |= bit;
+    return value;
+  };
+  const spacing = field(hatch.spacingPx, CAP_HATCH_OVERRIDE.spacingPx);
+  const angle = field(hatch.angleRad, CAP_HATCH_OVERRIDE.angleRad);
+  const width = field(hatch.widthPx, CAP_HATCH_OVERRIDE.widthPx);
+  const angle2 = field(hatch.secondaryAngleRad, CAP_HATCH_OVERRIDE.secondaryAngleRad);
+  if (hatch.strokeColor) mask |= CAP_HATCH_OVERRIDE.strokeColor;
+  const stroke = hatch.strokeColor ?? [0, 0, 0, 0];
+  return [hatch.patternId, spacing, angle, width, angle2, mask, 0, 0, stroke[0], stroke[1], stroke[2], stroke[3]];
+}
+
+/** Key of an element in a {@link CapHighlight}: its model (omit to match the id in every model) and express id. */
+export function capHighlightKey(modelIndex: number | undefined, expressId: number): string {
+  return `${modelIndex ?? '*'}:${expressId}`;
+}
+
+/** {@link capHighlightKey} → RGBA (0–1, same space as {@link CutPolygon2D.color}) painted over that element's cap polygons. */
+export type CapHighlight = ReadonlyMap<string, readonly [number, number, number, number]>;
+
+/**
+ * A copy of the cap's vertices with every highlighted element's polygons
+ * recoloured, or `null` when no polygon belongs to a highlighted element (the
+ * caller then keeps the original buffer). The source is never modified, so
+ * clearing the highlight restores the cap exactly.
+ */
+export function recolorCapVertices(
+  vertices: Float32Array,
+  ranges: readonly CapPolygonRange[],
+  highlight: CapHighlight | null | undefined,
+): Float32Array | null {
+  if (!highlight || highlight.size === 0) return null;
+  let out: Float32Array | null = null;
+  for (const range of ranges) {
+    const color = highlight.get(capHighlightKey(range.modelIndex, range.expressId))
+      ?? highlight.get(capHighlightKey(undefined, range.expressId));
+    if (!color) continue;
+    out ??= vertices.slice();
+    for (let i = 0; i < range.vertexCount; i++) {
+      const o = (range.vertexStart + i) * CAP_FILL_VERTEX_FLOATS + 3;
+      out[o] = color[0]; out[o + 1] = color[1]; out[o + 2] = color[2]; out[o + 3] = color[3];
+    }
+  }
+  return out;
 }
 
 /**
@@ -158,9 +277,16 @@ export interface CapFillGeometry {
 export function buildCapFillGeometry(
   polygons: readonly CutPolygon2D[],
   lift: SectionLift,
+  /**
+   * Canonical f64 plane anchor. Supplying it makes this builder narrow only
+   * plane-local residuals; callers that omit it retain the legacy world-f32
+   * representation.
+   */
+  origin?: readonly [number, number, number],
 ): CapFillGeometry | null {
   const fillVertices: number[] = [];
   const fillIndices: number[] = [];
+  const ranges: CapPolygonRange[] = [];
   let vertexOffset = 0;
 
   for (const polygon of polygons) {
@@ -173,6 +299,9 @@ export function buildCapFillGeometry(
     // fill shader falls back to the uniform cap style (architectural fill +
     // hatch) byte-identically — see fs_main.
     const color: [number, number, number, number] = polygon.color ?? [0, 0, 0, -1];
+    // Per-polygon hatch, the same opt-in: absent ⇒ override mask 0, so every
+    // hatch field comes from the uniform cap style exactly as before.
+    const hatch = capHatchFloats(polygon.hatch);
 
     const outerRing: Pt[] = outer.map((p) => ({ x: p.x, z: p.y }));
     const holeRings: Pt[][] = polygon.polygon.holes
@@ -187,18 +316,26 @@ export function buildCapFillGeometry(
     const baseVertex = vertexOffset;
     for (const pt of capPoints) {
       const [x3d, y3d, z3d] = lift(pt.x, pt.z);
-      fillVertices.push(x3d, y3d, z3d, color[0], color[1], color[2], color[3]);
+      fillVertices.push(
+        origin ? x3d - origin[0] : x3d,
+        origin ? y3d - origin[1] : y3d,
+        origin ? z3d - origin[2] : z3d,
+        color[0], color[1], color[2], color[3],
+        ...hatch,
+      );
       vertexOffset++;
     }
     for (const [a, b, c] of tris) {
       fillIndices.push(baseVertex + a, baseVertex + b, baseVertex + c);
     }
+    ranges.push({ expressId: polygon.expressId, modelIndex: polygon.modelIndex, vertexStart: baseVertex, vertexCount: vertexOffset - baseVertex });
   }
 
   if (fillVertices.length === 0) return null;
   return {
     vertices: new Float32Array(fillVertices),
     indices: new Uint32Array(fillIndices),
+    ranges,
   };
 }
 
@@ -213,6 +350,8 @@ export function buildDrawingOutlineVertices(
   polygons: readonly CutPolygon2D[],
   lines: readonly DrawingLine2D[],
   lift: SectionLift,
+  /** See {@link buildCapFillGeometry}; applies to every in-plane axis too. */
+  origin?: readonly [number, number, number],
 ): Float32Array | null {
   const lineVertices: number[] = [];
 
@@ -224,7 +363,10 @@ export function buildDrawingOutlineVertices(
       const p2 = outer[(i + 1) % outer.length];
       const [x1, y1, z1] = lift(p1.x, p1.y);
       const [x2, y2, z2] = lift(p2.x, p2.y);
-      lineVertices.push(x1, y1, z1, x2, y2, z2);
+      lineVertices.push(
+        origin ? x1 - origin[0] : x1, origin ? y1 - origin[1] : y1, origin ? z1 - origin[2] : z1,
+        origin ? x2 - origin[0] : x2, origin ? y2 - origin[1] : y2, origin ? z2 - origin[2] : z2,
+      );
     }
 
     // Hole outlines
@@ -234,7 +376,10 @@ export function buildDrawingOutlineVertices(
         const p2 = hole[(i + 1) % hole.length];
         const [x1, y1, z1] = lift(p1.x, p1.y);
         const [x2, y2, z2] = lift(p2.x, p2.y);
-        lineVertices.push(x1, y1, z1, x2, y2, z2);
+        lineVertices.push(
+          origin ? x1 - origin[0] : x1, origin ? y1 - origin[1] : y1, origin ? z1 - origin[2] : z1,
+          origin ? x2 - origin[0] : x2, origin ? y2 - origin[1] : y2, origin ? z2 - origin[2] : z2,
+        );
       }
     }
   }
@@ -243,7 +388,10 @@ export function buildDrawingOutlineVertices(
   for (const line of lines) {
     const [x1, y1, z1] = lift(line.line.start.x, line.line.start.y);
     const [x2, y2, z2] = lift(line.line.end.x, line.line.end.y);
-    lineVertices.push(x1, y1, z1, x2, y2, z2);
+    lineVertices.push(
+      origin ? x1 - origin[0] : x1, origin ? y1 - origin[1] : y1, origin ? z1 - origin[2] : z1,
+      origin ? x2 - origin[0] : x2, origin ? y2 - origin[1] : y2, origin ? z2 - origin[2] : z2,
+    );
   }
 
   if (lineVertices.length === 0) return null;

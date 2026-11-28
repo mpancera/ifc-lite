@@ -5,29 +5,51 @@
 /**
  * Selection handler functions extracted from useMouseControls.
  * Handles click/double-click selection and context menu interactions.
- * Pure functions that operate on a MouseHandlerContext — no React dependency.
+ * Pure functions operating on a MouseHandlerContext — no React dependency.
  */
-
+import { isTouchSelectionClick, selectViewportTarget } from './referenceSelection.js';
+import type { PickResult } from '@ifc-lite/renderer';
 import type { MouseHandlerContext } from './mouseHandlerTypes.js';
-import type { SensorInStoreParams } from '@ifc-lite/create';
+import { handleAddElementClick } from './addElementHandlers.js';
+import { openContextMenuAt } from './contextMenuSelection.js';
 import { useViewerStore } from '@/store';
-import { fromGlobalIdFromModels, toGlobalIdFromModels } from '@/store/globalId';
-import { pointInPolygon } from '@/lib/polygon-clip';
+import { fromGlobalIdFromModels } from '@/store/globalId';
 import { toast } from '@/components/ui/toast';
+import { routeCommandPointer } from './commandPointer.js';
+import { runToolAt } from './toolTap.js';
+import { fieldTelemetry } from '@/lib/perf/fieldTelemetryLoader';
 import { raycastForPolylinePoint, isNearPolylineStart,
   isDuplicateClickPoint,
 } from './measureHandlers.js';
+import { handlePointClick } from './measurePointMode.js';
+import { pressOutlivedReset } from './distanceClick.js';
+import { viaReadback } from './measureReadback.js';
+import { rememberVertexPress, unsnapFromPrevious } from './measurePress.js';
+import { pickViewportAppearanceFace, viewportFacePickError } from './appearance/face-mask/viewport-face-picker.js';
+import { resolve as translate } from '@/i18n/registry';
+import { refuseCaptureHeldPick } from '@/lib/viewport-capture';
+import { isGeometryRestoreHeld } from '@/lib/pick-gating';
+export { setViewportInteractionCursor } from './useViewportCursor.js';
+export {
+  handleAddElementHover, handleAddElementDrop, commitAddElementSlabPolygon, rendererPointToIfcStoreyLocal,
+} from './addElementHandlers.js';
 
-/**
- * Handle click event for selection (single click and double click).
- * Manages click timing for double-click detection and Ctrl/Cmd multi-select.
- */
+/** The click-driven Measure modes' point placement; also a touch tap's (#5856). */
+export function handleMeasureClickAt(ctx: MouseHandlerContext, x: number, y: number): void {
+  const mode = useViewerStore.getState().measureMode;
+  if (mode === 'polyline') handlePolylineClick(ctx, x, y);
+  else if (mode === 'angle') handleAngleClick(ctx, x, y);
+  else if (mode === 'radius') handleRadiusClick(ctx, x, y);
+  else if (mode === 'point') handlePointClick(ctx, x, y);
+}
+
 export async function handleSelectionClick(ctx: MouseHandlerContext, e: MouseEvent): Promise<void> {
   const { canvas, renderer, mouseState } = ctx;
   const rect = canvas.getBoundingClientRect();
   const x = e.clientX - rect.left;
   const y = e.clientY - rect.top;
   const tool = ctx.activeToolRef.current;
+  if (isTouchSelectionClick(canvas, e, x, y)) return;
 
   // Skip selection if user was dragging (orbiting/panning)
   if (mouseState.didDrag) {
@@ -36,6 +58,19 @@ export async function handleSelectionClick(ctx: MouseHandlerContext, e: MouseEve
 
   // Skip selection for pan/walk tools - they don't select
   if (tool === 'pan' || tool === 'walk') {
+    return;
+  }
+  const storeState = useViewerStore.getState();
+  if (isGeometryRestoreHeld(storeState)) return;
+  // Every tool below picks: not through a capture's frame (#9137).
+  if (refuseCaptureHeldPick(renderer)) {
+    ctx.lastClickTimeRef.current = 0; ctx.lastClickPosRef.current = null;
+    return;
+  }
+
+  if (tool === 'appearance-face') {
+    const message = viewportFacePickError(pickViewportAppearanceFace(renderer.raycastScene(x, y, ctx.getPickOptions())?.intersection ?? null));
+    if (message) toast.error(translate(message));
     return;
   }
 
@@ -71,569 +106,42 @@ export async function handleSelectionClick(ctx: MouseHandlerContext, e: MouseEve
   // opposite — it does nothing on mousedown/drag, so a click is the ONLY
   // gesture that adds a point, which is what makes the two modes unable to
   // corrupt each other's state (see `setMeasureMode` in measurementSlice.ts).
-  if (tool === 'measure') {
-    const mode = useViewerStore.getState().measureMode;
-    if (mode === 'polyline') {
-      handlePolylineClick(ctx, x, y);
-    } else if (mode === 'angle') {
-      handleAngleClick(ctx, x, y);
-    }
-    return;
-  }
+  // A press from before Esc or a mode or tool switch belongs to the gesture that was reset (#8786).
+  if (tool === 'measure') return pressOutlivedReset(mouseState) ? undefined : handleMeasureClickAt(ctx, x, y);
 
-  // Section-tool face-pick (issue #243): clicking any visible face places
-  // the clip plane through it. Intercept BEFORE the generic select path
-  // so the click doesn't also flip the selection.
-  //
-  // Camera-aware orientation: we flip the picked normal if it faces away
-  // from the camera, so the kept half-space is the one the user is looking
-  // at by default (the most common expectation; if the cut goes the wrong
-  // way the existing Flip button still works). This addresses the
-  // CodeRabbit minor on PR #581 about face-pick not being camera-aware.
-  if (tool === 'section' && ctx.sectionPickModeRef?.current) {
-    const hit = renderer.raycastScene(x, y, {
-      hiddenIds:   ctx.hiddenEntitiesRef.current,
-      isolatedIds: ctx.isolatedEntitiesRef.current,
-    });
-    if (hit?.intersection) {
-      const n = hit.intersection.normal;
-      const p = hit.intersection.point;
-      const cam = renderer.getCamera().getPosition();
-      // View vector = camera → hit. If `dot(view, normal) > 0` the normal
-      // points away from the camera; invert so the cut keeps the side
-      // facing the user.
-      const vx = cam.x - p.x, vy = cam.y - p.y, vz = cam.z - p.z;
-      const dot = vx * n.x + vy * n.y + vz * n.z;
-      const sign = dot < 0 ? -1 : 1;
-      const bounds = ctx.modelBoundsRef?.current;
-      ctx.setSectionPlaneFromFace?.(
-        [sign * n.x, sign * n.y, sign * n.z],
-        [p.x, p.y, p.z],
-        bounds ? {
-          min: [bounds.min.x, bounds.min.y, bounds.min.z],
-          max: [bounds.max.x, bounds.max.y, bounds.max.z],
-        } : undefined,
-      );
-    } else {
-      // Missed geometry — disarm so the user isn't stuck in pick mode
-      // after an errant background click.
-      ctx.setSectionPickMode?.(false);
-    }
-    return;
-  }
+  // Section face-pick (#243), a running modeling command (#6232) and an
+  // Annotate pin take the click BEFORE the generic select path, so it doesn't
+  // also flip the selection.
+  // Fork: AddElement panel placement (see addElementHandlers.ts).
+  if (tool === 'addElement') { await handleAddElementClick(ctx, x, y); return; }
 
-  // Add-element tool — multi-click placement (start→end for walls/beams,
-  // corner→opposite for slab rectangle, N+Enter for slab polygon, single
-  // for columns). Uses magnetic snap so points lock to vertices/edges
-  // when the cursor is near them — same UX as the measure tool.
-  // Split tool — click on a wall / beam / column / member to cut
-  // it at the cursor's projected position. Hover preview lives on
-  // the store (splitHoverPoint / splitHoverDistance) and
-  // SplitOverlay renders the SVG guide; this handler commits the
-  // click by dispatching to the right action for the latched
-  // target's element type.
-  if (tool === 'split') {
-    const state = useViewerStore.getState();
-    const targetModelId = state.splitTargetModelId;
-    const targetExpressId = state.splitTargetExpressId;
-    if (targetModelId === null || targetExpressId === null) {
-      // Click missed any splittable element — no-op so the cursor
-      // doesn't fight the user. The overlay's hint stays visible.
-      return;
-    }
+  if (runToolAt(ctx, tool, x, y, () => routeCommandPointer(ctx, 'down', x, y, e))) return;
 
-    // Slab two-click flow takes precedence when we're mid-anchor.
-    // The second click commits the cut line from anchor → cursor.
-    // Raycast onto the SOURCE SLAB'S floor (not the global active
-    // storey) so federated / non-active-storey splits land at the
-    // right elevation.
-    if (state.splitMode === 'first-anchor' && state.slabCutAnchor) {
-      const slabFloorY = resolveSlabFloorY(targetModelId, targetExpressId);
-      const cutPoint = raycastStoreyFloor(ctx, x, y, slabFloorY ?? undefined);
-      if (!cutPoint) {
-        toast.error("Couldn't read cut point");
-        return;
-      }
-      const cursorIfc = rendererPointToIfcStoreyLocal(cutPoint);
-      const result = state.splitSlabByLine(
-        targetModelId,
-        targetExpressId,
-        state.slabCutAnchor,
-        [cursorIfc[0], cursorIfc[1]],
-      );
-      if (!result.ok) {
-        toast.error(`Couldn't split slab: ${result.reason}`);
-        return;
-      }
-      state.clearSplitHover();
-      // Move selection to whichever half contains the click. Both
-      // halves are valid polygons; the click landed at `cursorIfc`.
-      const rightFp = state.readSlabFootprint(targetModelId, result.right.expressId);
-      const inRight = rightFp
-        ? pointInPolygon(rightFp.footprint, [cursorIfc[0], cursorIfc[1]])
-        : false;
-      state.setSelectedEntityId(inRight ? result.right.globalId : result.left.globalId);
-      toast.success('Slab split — Ctrl+Z to undo');
-      return;
-    }
-
-    // Single-click element split (wall / beam / column / member).
-    // Wall first because most edits land on walls; if that returns
-    // null we try the linear-element path.
-    const distance = state.splitHoverDistance;
-    if (distance !== null && distance > 0) {
-      const wallTry = state.splitWallAtDistance(targetModelId, targetExpressId, distance);
-      if (wallTry.ok) {
-        state.clearSplitHover();
-        state.setSelectedEntityId(wallTry.right.globalId);
-        // Mention opening reassignment in the toast only when it
-        // happened — silence is preferable to "0 openings moved"
-        // for a wall with no doors / windows.
-        const op = wallTry.openings;
-        const opSummary =
-          op.toLeft + op.toRight > 0
-            ? ` (${op.toLeft + op.toRight} opening${op.toLeft + op.toRight === 1 ? '' : 's'} reassigned)`
-            : '';
-        toast.success(`Wall split${opSummary} — Ctrl+Z to undo`);
-        return;
-      }
-      const linearTry = state.splitLinearElementAtDistance(
-        targetModelId,
-        targetExpressId,
-        distance,
-      );
-      if (linearTry.ok) {
-        state.clearSplitHover();
-        state.setSelectedEntityId(linearTry.right.globalId);
-        toast.success('Element split — Ctrl+Z to undo');
-        return;
-      }
-    }
-
-    // Fall through to the slab path: first click latches the
-    // anchor, second click (handled above) commits. Anchor lands
-    // on the source slab's storey floor (not the global active
-    // storey) — `slabFootprint.storeyElevation` is already the
-    // exact value we need, so pass it through directly.
-    const slabFootprint = state.readSlabFootprint(targetModelId, targetExpressId);
-    if (slabFootprint) {
-      const anchorPoint = raycastStoreyFloor(ctx, x, y, slabFootprint.storeyElevation);
-      if (!anchorPoint) {
-        toast.error("Couldn't read anchor point");
-        return;
-      }
-      const anchorIfc = rendererPointToIfcStoreyLocal(anchorPoint);
-      state.setSlabCutAnchor(
-        [anchorIfc[0], anchorIfc[1]],
-        slabFootprint.footprint,
-        slabFootprint.storeyElevation,
-      );
-      return;
-    }
-
-    toast.error("Couldn't split: not a splittable element");
-    return;
-  }
-
-  if (tool === 'addElement') {
-    const currentLock = ctx.edgeLockStateRef.current;
-    const result = renderer.raycastSceneMagnetic(x, y, {
-      edge: currentLock.edge,
-      meshExpressId: currentLock.meshExpressId,
-      lockStrength: currentLock.lockStrength,
-    }, {
-      hiddenIds: ctx.hiddenEntitiesRef.current,
-      isolatedIds: ctx.isolatedEntitiesRef.current,
-      snapOptions: ctx.snapEnabledRef.current ? {
-        snapToVertices: true,
-        snapToEdges: true,
-        snapToFaces: true,
-        screenSnapRadius: 40,
-      } : {
-        snapToVertices: false,
-        snapToEdges: false,
-        snapToFaces: false,
-        screenSnapRadius: 0,
-      },
-    });
-    const point = result.snapTarget?.position
-      ?? result.intersection?.point
-      ?? raycastStoreyFloor(ctx, x, y);
-    if (!point) return;
-    // Smart-placement: if the click landed on (or snapped to) an
-    // existing entity, infer the target storey from THAT entity's
-    // spatial-hierarchy entry rather than the AddElement panel's
-    // dropdown. Lets the user click on a wall on storey 3 to add
-    // a beam there without first changing the storey selector.
-    // Only kicks in when we actually have an entity under the
-    // cursor — empty-space clicks fall back to the panel value.
-    const hitExpressId = result.snapTarget?.expressId
-      ?? result.intersection?.expressId
-      ?? null;
-    const inferredStorey = hitExpressId !== null
-      ? inferStoreyForGlobalId(hitExpressId)
-      : null;
-    await handleAddElementDrop(point, inferredStorey ?? undefined);
-    return;
-  }
-
-  // Annotate tool — drop a pin at the cursor's world point.
-  // Raycasts the scene; if the click misses geometry the draft is
-  // not opened (annotations are anchored to surface points by
-  // design, not floating in space).
-  if (tool === 'annotate') {
-    const store = useViewerStore.getState();
-    // In a shared room, only commenter/editor/admin may drop pins (solo allowed).
-    if (!store.canCollabComment()) return;
-    const result = renderer.raycastScene(x, y, ctx.getPickOptions());
-    if (!result?.intersection) return;
-    const { intersection } = result;
-    // Federated models — resolve which model the hit globalId belongs
-    // to so the annotation carries enough context to render its
-    // popover header. Falls back to (null, expressId) when there's
-    // only the legacy single-model state.
-    const modelLookup = fromGlobalIdFromModels(store.models, intersection.expressId);
-    const modelId = modelLookup?.modelId ?? null;
-    const localExpressId = modelLookup?.expressId ?? intersection.expressId;
-    store.beginDraft(
-      { x: intersection.point.x, y: intersection.point.y, z: intersection.point.z },
-      localExpressId ?? null,
-      modelId,
-    );
-    return;
-  }
-
+  fieldTelemetry?.noteInspectClick(e.timeStamp); // #6961 ifc_inspect: sampled click -> properties shown
   const now = Date.now();
   const timeSinceLastClick = now - ctx.lastClickTimeRef.current;
   const clickPos = { x, y };
-  if (ctx.lastClickPosRef.current &&
-    timeSinceLastClick < 300 &&
-    Math.abs(clickPos.x - ctx.lastClickPosRef.current.x) < 5 &&
-    Math.abs(clickPos.y - ctx.lastClickPosRef.current.y) < 5) {
-    const pickOptions = ctx.getPickOptions();
-    // Double-click - isolate element
-    // Uses visibility filtering so only visible elements can be selected
-    const pickResult = await renderer.pick(x, y, pickOptions);
-    if (pickResult) {
-      ctx.handlePickForSelection(pickResult);
-    }
-    ctx.lastClickTimeRef.current = 0;
-    ctx.lastClickPosRef.current = null;
-  } else {
-    const pickOptions = ctx.getPickOptions();
-    // Single click - uses visibility filtering so only visible elements can be selected
-    const pickResult = await renderer.pick(x, y, pickOptions);
-
-    // Multi-selection with Ctrl/Cmd
-    if (e.ctrlKey || e.metaKey) {
-      if (pickResult) {
-        ctx.toggleSelection(pickResult.expressId);
-      }
+  const doubleClick = ctx.lastClickPosRef.current && timeSinceLastClick < 300
+    && Math.abs(clickPos.x - ctx.lastClickPosRef.current.x) < 5
+    && Math.abs(clickPos.y - ctx.lastClickPosRef.current.y) < 5;
+  const applyIfc = (pickResult: PickResult | null) => {
+    if (doubleClick) {
+      if (pickResult) ctx.handlePickForSelection(pickResult);
+      ctx.lastClickTimeRef.current = 0; ctx.lastClickPosRef.current = null;
     } else {
-      ctx.handlePickForSelection(pickResult);
+      if (e.ctrlKey || e.metaKey) { if (pickResult) ctx.toggleSelection(pickResult.expressId); }
+      else ctx.handlePickForSelection(pickResult);
+      ctx.lastClickTimeRef.current = now; ctx.lastClickPosRef.current = clickPos;
     }
-
-    ctx.lastClickTimeRef.current = now;
-    ctx.lastClickPosRef.current = clickPos;
-  }
-}
-
-/**
- * Resolve the storey + model for a hit globalId so the AddElement
- * click handler can place the new entity in the SAME storey as the
- * existing element under the cursor. Returns null when the hit
- * doesn't resolve to any model's spatial-hierarchy entry — caller
- * falls back to the AddElement panel's storey selector.
- *
- * Federation-aware via `fromGlobalIdFromModels`.
- */
-function inferStoreyForGlobalId(
-  globalId: number,
-): { modelId: string; storeyId: number } | null {
-  const state = useViewerStore.getState();
-  const local = fromGlobalIdFromModels(state.models, globalId);
-  if (!local) return null;
-  const ds = state.models.get(local.modelId)?.ifcDataStore;
-  const storeyId = ds?.spatialHierarchy?.elementToStorey.get(local.expressId);
-  if (storeyId === undefined) return null;
-  return { modelId: local.modelId, storeyId };
-}
-
-/**
- * Find the first IfcBuildingStorey entity in the active model. Used as a
- * fallback when the user hasn't picked a target storey in the panel.
- */
-function firstStoreyExpressId(modelId: string): number | null {
-  const state = useViewerStore.getState();
-  const model = state.models.get(modelId);
-  const ids = model?.ifcDataStore?.entityIndex.byType.get('IFCBUILDINGSTOREY');
-  return ids && ids.length > 0 ? ids[0] : null;
-}
-
-/**
- * Active model resolver — falls back through the same legacy chain
- * the rest of the viewer uses when a single model is loaded.
- */
-function resolveActiveModelId(): string | null {
-  const state = useViewerStore.getState();
-  if (state.activeModelId) return state.activeModelId;
-  const first = state.models.keys().next();
-  return first.done ? null : first.value;
-}
-
-/**
- * Convert a renderer Y-up world point to IFC Z-up storey-local
- * coordinates with Z forced to the storey floor (0). Mirrors the
- * matrix in `packages/renderer/src/pipeline.ts`. Z is clamped so the
- * click landing on a vertical surface doesn't lift the element above
- * the floor — matches construction-tool placement intuition. Refine
- * via the Raw STEP tab if needed.
- */
-export function rendererPointToIfcStoreyLocal(point: { x: number; y: number; z: number }): [number, number, number] {
-  return [point.x, -point.z, 0];
-}
-
-/**
- * Storey-floor ray-plane intersection — used as a fallback when the
- * scene raycast misses every mesh (so the user can place new elements
- * in empty space, not just on existing surfaces). The floor sits at
- * renderer Y = storey elevation.
- *
- * `storeyOverride` lets the caller supply an explicit floor Y
- * (renderer frame). Used by the Split tool so a slab on storey 3
- * doesn't accidentally project clicks onto storey 0's floor when
- * the addElement / active-model state points elsewhere. Falls back
- * to `resolveStoreyFloorY()` (active-model lookup) when omitted.
- */
-function raycastStoreyFloor(
-  ctx: MouseHandlerContext,
-  x: number,
-  y: number,
-  storeyOverride?: number,
-): { x: number; y: number; z: number } | null {
-  const camera = ctx.renderer.getCamera();
-  const canvas = ctx.renderer.getCanvas();
-  if (!camera || !canvas) return null;
-  // x/y arrive in CSS space (handleSelectionClick subtracts the
-  // bounding-rect origin). `unprojectToRay` expects drawing-buffer
-  // coords, which differ from CSS by DPR. Convert both the cursor
-  // and the canvas size so the ray is computed in the same space
-  // `projectToScreen` writes to — otherwise pick drifts at DPR ≠ 1.
-  const rect = canvas.getBoundingClientRect();
-  const sx = rect.width > 0 ? (x / rect.width) * canvas.width : x;
-  const sy = rect.height > 0 ? (y / rect.height) * canvas.height : y;
-  const ray = camera.unprojectToRay(sx, sy, canvas.width, canvas.height);
-  if (!ray) return null;
-  const planeY = storeyOverride ?? resolveStoreyFloorY();
-  // Looking down typically means D.y < 0; reject parallel / near-parallel
-  // cases so we don't hand back a wildly extrapolated intersection.
-  const dy = ray.direction.y;
-  if (Math.abs(dy) < 1e-6) return null;
-  const t = (planeY - ray.origin.y) / dy;
-  if (!Number.isFinite(t) || t <= 0) return null;
-  return {
-    x: ray.origin.x + ray.direction.x * t,
-    y: planeY,
-    z: ray.origin.z + ray.direction.z * t,
   };
-}
-
-/**
- * Helper: resolve a slab's storey elevation in renderer-frame Y so
- * callers can pass it to `raycastStoreyFloor`. Read from the
- * model's spatialHierarchy (matches the rest of the split flow's
- * elevation lookups). Returns null when the slab isn't contained
- * in a storey we can resolve.
- */
-function resolveSlabFloorY(modelId: string, expressId: number): number | null {
-  const state = useViewerStore.getState();
-  const ds = state.models.get(modelId)?.ifcDataStore;
-  if (!ds) return null;
-  const storeyId = ds.spatialHierarchy?.elementToStorey.get(expressId);
-  if (storeyId === undefined) return null;
-  const elev = ds.spatialHierarchy?.storeyElevations?.get(storeyId);
-  return typeof elev === 'number' ? elev : null;
-}
-
-/**
- * Resolve the renderer Y of the currently selected (or first
- * available) storey's floor. Falls back to 0 when nothing is loaded.
- */
-function resolveStoreyFloorY(): number {
-  const state = useViewerStore.getState();
-  const modelId = state.addElementModelId ?? state.activeModelId;
-  if (!modelId) return 0;
-  const model = state.models.get(modelId);
-  const ds = model?.ifcDataStore;
-  if (!ds) return 0;
-  const storeyId = state.addElementStoreyId ?? firstStoreyExpressId(modelId);
-  if (storeyId === null) return 0;
-  return ds.spatialHierarchy?.storeyElevations?.get(storeyId) ?? 0;
-}
-
-/**
- * Update the live hover preview for the add-element tool. Runs the
- * same magnetic raycast as the click handler and keeps `hoverPoint`
- * in sync with whatever the next click would place. Used by the
- * 3D-overlay preview so the user sees the in-progress edge / rectangle
- * / polygon segment as they move the cursor.
- *
- * Returns true when handled so the mouse-controls hook can early-out
- * before falling through to the generic hover-tooltip path.
- */
-export function handleAddElementHover(ctx: MouseHandlerContext, x: number, y: number): boolean {
-  const { renderer } = ctx;
-  if (!ctx.measureRaycastPendingRef.current) {
-    ctx.measureRaycastPendingRef.current = true;
-    ctx.measureRaycastFrameRef.current = requestAnimationFrame(() => {
-      ctx.measureRaycastPendingRef.current = false;
-      ctx.measureRaycastFrameRef.current = null;
-
-      const currentLock = ctx.edgeLockStateRef.current;
-      const result = renderer.raycastSceneMagnetic(x, y, {
-        edge: currentLock.edge,
-        meshExpressId: currentLock.meshExpressId,
-        lockStrength: currentLock.lockStrength,
-      }, {
-        hiddenIds: ctx.hiddenEntitiesRef.current,
-        isolatedIds: ctx.isolatedEntitiesRef.current,
-        snapOptions: ctx.snapEnabledRef.current ? {
-          snapToVertices: true,
-          snapToEdges: true,
-          snapToFaces: true,
-          screenSnapRadius: 40,
-        } : {
-          snapToVertices: false,
-          snapToEdges: false,
-          snapToFaces: false,
-          screenSnapRadius: 0,
-        },
-      });
-
-      const point = result.snapTarget?.position
-        ?? result.intersection?.point
-        ?? raycastStoreyFloor(ctx, x, y);
-      const store = useViewerStore.getState();
-      store.setAddElementHoverPoint(point ? { x: point.x, y: point.y, z: point.z } : null);
-
-      // Mirror measure's snap-viz behaviour so vertex/edge/face indicators
-      // appear under the cursor with the same UX shape.
-      ctx.setSnapTarget(result.snapTarget ?? null);
-      if (result.snapTarget) {
-        if (result.edgeLock.shouldRelease) {
-          ctx.clearEdgeLock();
-        } else if (result.edgeLock.shouldLock && result.edgeLock.edge) {
-          ctx.setEdgeLock(result.edgeLock.edge, result.edgeLock.meshExpressId!, result.edgeLock.edgeT);
-        }
-      } else {
-        ctx.clearEdgeLock();
-      }
-    });
+  if (tool === 'select') {
+    await selectViewportTarget({ canvas, renderer, x, y, getTool: () => ctx.activeToolRef.current,
+      getPickOptions: ctx.getPickOptions, onIfc: applyIfc,
+      onRefused: () => { ctx.lastClickTimeRef.current = 0; ctx.lastClickPosRef.current = null; },
+      onReference: () => { ctx.lastClickTimeRef.current = 0; ctx.lastClickPosRef.current = null; } });
+  } else {
+    applyIfc(await renderer.pick(x, y, ctx.getPickOptions()));
   }
-  return true;
-}
-
-/**
- * Live hover preview for the Split tool. SCOPED TO THE CURRENT
- * SPLIT TARGET — the slice's `splitTargetModelId` /
- * `splitTargetExpressId` are set when the user enters Split mode
- * (via Geometry-card Split button or K shortcut), and they never
- * change as the cursor moves over other elements. Hovering over a
- * different wall does NOT switch target; the user must exit Split
- * (Esc), re-select, and re-enter.
- *
- * This is the v2 model — the previous "free-roam, hover anything,
- * latch new target each frame" approach surfaced way too many
- * actionable elements at once and made it unclear what would be
- * cut. Selection-bound matches the rest of the edit-mode UX
- * (gizmo, geometry card, etc.).
- *
- * The cursor still drives the cut POINT — we ray-cast to get a
- * world point, project that onto the target's axis (linear) or
- * use cursor XY (slab), and push the result into the slice for
- * the SplitOverlay to render.
- */
-export function handleSplitHover(ctx: MouseHandlerContext, x: number, y: number): boolean {
-  const { renderer } = ctx;
-  if (!ctx.measureRaycastPendingRef.current) {
-    ctx.measureRaycastPendingRef.current = true;
-    ctx.measureRaycastFrameRef.current = requestAnimationFrame(() => {
-      ctx.measureRaycastPendingRef.current = false;
-      ctx.measureRaycastFrameRef.current = null;
-
-      const store = useViewerStore.getState();
-      const targetModelId = store.splitTargetModelId;
-      const targetExpressId = store.splitTargetExpressId;
-      if (targetModelId === null || targetExpressId === null) {
-        // Split engaged with no target — clear any stale hover.
-        if (store.splitMode === 'aiming') store.clearSplitHover();
-        return;
-      }
-
-      // Ray-cast to get a world point under the cursor. We don't
-      // care which entity it hit — we use the world point and
-      // project it onto the TARGET's axis. Falls back to the
-      // storey floor so the user can aim at empty space and still
-      // get a sensible cut.
-      const result = renderer.raycastScene(x, y, {
-        hiddenIds: ctx.hiddenEntitiesRef.current,
-        isolatedIds: ctx.isolatedEntitiesRef.current,
-      });
-      // Fallback raycast uses the TARGET's storey floor (not the
-      // global active storey) so the cursor projection stays in
-      // the same Y plane as the element being split.
-      const targetFloorY = resolveSlabFloorY(targetModelId, targetExpressId) ?? undefined;
-      const worldPoint = result?.intersection?.point
-        ?? raycastStoreyFloor(ctx, x, y, targetFloorY);
-      if (!worldPoint) {
-        if (store.splitMode === 'aiming') store.clearSplitHover();
-        return;
-      }
-      const cursorIfc = rendererPointToIfcStoreyLocal(worldPoint);
-
-      // Project onto the target. Try wall (1D), then linear (1D),
-      // then slab (2D — uses the cursor XY directly as a candidate
-      // cut endpoint).
-      const projection =
-        store.readWallSplitProjection(targetModelId, targetExpressId, cursorIfc) ??
-        store.readLinearElementSplitProjection(targetModelId, targetExpressId, cursorIfc);
-      if (projection) {
-        const model = store.models.get(targetModelId);
-        const storeyId = model?.ifcDataStore?.spatialHierarchy?.elementToStorey.get(targetExpressId);
-        const elevation =
-          (storeyId !== undefined
-            ? model?.ifcDataStore?.spatialHierarchy?.storeyElevations?.get(storeyId)
-            : undefined) ?? 0;
-        const [px, py, pz] = projection.cutPoint;
-        const cutRendererFrame: [number, number, number] = [px, pz + elevation, -py];
-        store.setSplitHover(
-          cutRendererFrame,
-          projection.distance,
-          projection.length,
-          projection.cutPoint,
-          projection.axis,
-        );
-        return;
-      }
-      // Slab path — the overlay outlines the polygon + ghost cut
-      // line; the cursor's IFC XY is the candidate endpoint.
-      const slabFootprint = store.readSlabFootprint(targetModelId, targetExpressId);
-      if (slabFootprint) {
-        const [cx, cy] = cursorIfc;
-        const cursorRendererFrame: [number, number, number] = [
-          cx,
-          slabFootprint.storeyElevation,
-          -cy,
-        ];
-        store.setSplitHover(cursorRendererFrame, 0, 0, [cx, cy, 0], null);
-        return;
-      }
-      // Target isn't a splittable shape (rare — gets latched by
-      // the K shortcut / Split button which already checks). Clear.
-      if (store.splitMode === 'aiming') store.clearSplitHover();
-    });
-  }
-  return true;
 }
 
 /**
@@ -645,32 +153,67 @@ export function handleSplitHover(ctx: MouseHandlerContext, x: number, y: number)
  *     ≥3 points already placed) → close the loop, finishing as a perimeter.
  *   - otherwise → append the clicked point.
  *
- * Finishing an OPEN polyline is a different gesture entirely (double-click
- * or Enter — see `finishOpenPolyline`'s call sites in useMouseControls.ts /
- * useKeyboardShortcuts.ts), so a click never finishes anything but a closed
+ * Finishing an OPEN polyline is a different gesture entirely (double-click,
+ * Enter, or the Measurements list's Finish on touch — see
+ * `finishPolylineFromDoubleClick` and store/finishMeasureSequence.ts, #8991),
+ * so a click never finishes anything but a closed
  * loop. A miss (no raycast hit) is a no-op — it neither starts nor extends
  * a sequence, matching how a drag-mode click into empty space does nothing.
  */
 export function handlePolylineClick(ctx: MouseHandlerContext, x: number, y: number): void {
+  if (viaReadback(ctx, 'place', () => handlePolylineClick(ctx, x, y), x, y)) return; // released: after its point is read back (#10880)
   const picked = raycastForPolylinePoint(ctx, x, y);
   if (!picked) return;
 
   const state = useViewerStore.getState();
-  ctx.setSnapTarget(picked.snapTarget);
-
   const active = state.activePolyline;
+  // A press away from the last vertex that snapped back onto it takes the surface hit (#8866).
+  const point = active ? unsnapFromPrevious(ctx, active.points[active.points.length - 1], picked.point, { x, y }) : picked.point;
+  ctx.setSnapTarget(point === picked.point ? picked.snapTarget : null);
   if (!active) {
-    state.startPolyline(picked.point);
+    state.startPolyline(point);
+    rememberVertexPress(ctx, point, { x, y });
     return;
   }
 
   const first = active.points[0];
-  if (active.points.length >= 3 && isNearPolylineStart(picked.point, first)) {
+  if (active.points.length >= 3 && isNearPolylineStart(point, first)) {
     state.finishPolyline(true);
     return;
   }
 
-  state.addPolylinePoint(picked.point);
+  state.addPolylinePoint(point);
+  rememberVertexPress(ctx, point, { x, y }, point !== picked.point);
+}
+
+/**
+ * Handle a click landing on the scene while the Measure tool's radius mode
+ * is active (#2737 item 2). Same click state machine as
+ * {@link handlePolylineClick} minus the close-the-loop branch — radius has
+ * no "closed" concept, so a click only ever starts a sequence or extends it:
+ *
+ *   - no sequence in progress → start one at the clicked point.
+ *   - otherwise → append the clicked point.
+ *
+ * Finishing is double-click, Enter or the Measurements list's Finish
+ * (`finishRadiusFromDoubleClick`, store/finishMeasureSequence.ts, #8991), the
+ * same gestures polyline uses and for the same reason: with an unbounded pick count there
+ * is no "last pick" for the store to recognise and finish itself on, unlike
+ * angle's fixed count. A miss (no raycast hit) is a no-op.
+ */
+export function handleRadiusClick(ctx: MouseHandlerContext, x: number, y: number): void {
+  if (viaReadback(ctx, 'place', () => handleRadiusClick(ctx, x, y), x, y)) return; // released: after its point is read back (#10880)
+  const picked = raycastForPolylinePoint(ctx, x, y);
+  if (!picked) return;
+
+  const state = useViewerStore.getState();
+  const active = state.activeRadius;
+  // As for polyline: a press away from the last vertex that snapped back onto it takes the surface hit (#8866).
+  const point = active ? unsnapFromPrevious(ctx, active.points[active.points.length - 1], picked.point, { x, y }) : picked.point;
+  ctx.setSnapTarget(point === picked.point ? picked.snapTarget : null);
+  if (active) state.addRadiusPoint(point);
+  else state.startRadius(point);
+  rememberVertexPress(ctx, point, { x, y }, point !== picked.point);
 }
 
 /**
@@ -708,19 +251,76 @@ export function handlePolylineClick(ctx: MouseHandlerContext, x: number, y: numb
  * which is why the pick carries its `kind` rather than being a bare point.
  */
 export function handleAngleClick(ctx: MouseHandlerContext, x: number, y: number): void {
+  if (viaReadback(ctx, 'place', () => handleAngleClick(ctx, x, y), x, y)) return; // released: after its point is read back (#10880)
   const state = useViewerStore.getState();
-  if (state.angleKind !== 'points') return;
+  const kind = state.angleKind;
+
+  // Faces need the surface normal, which only the raycast hit carries, so they
+  // take a different path from the two point-based kinds rather than sharing
+  // the snap-driven one. Snapping a face pick to a nearby VERTEX would move the
+  // point off the surface whose normal we just read.
+  if (kind === 'faces') {
+    const hit = ctx.renderer?.raycastScene(x, y, {
+      hiddenIds: ctx.hiddenEntitiesRef.current,
+      isolatedIds: ctx.isolatedEntitiesRef.current,
+    });
+    const n = hit?.intersection?.normal;
+    const p = hit?.intersection?.point;
+    if (!n || !p) return;
+
+    // Faces need the SAME double-click guard as the point-based kinds, which
+    // this early-return path was skipping. A face pair needs exactly two picks,
+    // so a physical double-click on one face recorded both halves instantly and
+    // completed a bogus measurement reading "Parallel" - a plausible-looking
+    // number for two picks the user never made.
+    //
+    // There is no shape boundary to exempt here, unlike edges: both face picks
+    // belong to one measurement, and two clicks in the same spot are always the
+    // same face.
+    const facePrior = state.activeAngle?.picks ?? [];
+    const facePrev = facePrior.length > 0 ? facePrior[facePrior.length - 1].point : null;
+    const facePoint = { x: p.x, y: p.y, z: p.z, screenX: x, screenY: y };
+    if (facePrev && isDuplicateClickPoint(facePrev, facePoint)) return;
+
+    state.addAnglePick({
+      kind: 'faces',
+      // screen coords are the click itself, which is what the overlay
+      // reprojects from; `updateMeasurementScreenCoords` refreshes them on
+      // camera move exactly as it does for the other kinds.
+      point: facePoint,
+      normal: { x: n.x, y: n.y, z: n.z },
+    });
+    return;
+  }
 
   const picked = raycastForPolylinePoint(ctx, x, y);
   if (!picked) return;
 
-  // Drop the second half of a physical double-click (see the note above).
-  const prior = state.activeAngle?.picks;
-  const last = prior && prior.length > 0 ? prior[prior.length - 1].point : null;
-  if (last && isDuplicateClickPoint(last, picked.point)) return;
+  // Drop the second half of a physical double-click (see the note above), but
+  // only WITHIN a shape, never across the boundary between the two edges.
+  //
+  // The natural gesture for an edge pair is to trace edge A into a shared
+  // corner and edge B out of it, so picks 2 and 3 are the SAME point. Guarding
+  // across that boundary swallowed pick 3, the measurement never completed, and
+  // the only recourse was to click slightly off the corner - degrading the very
+  // direction being measured. Worse, the opposite pick order (corner first)
+  // survived, so the mode worked or did not depending on which end of edge A
+  // the user started from, which is not a distinction they can see.
+  //
+  // A shared vertex is NOT a degenerate edge: a zero-length second edge needs
+  // pick 4 to coincide with pick 3, and that is still caught below.
+  const prior = state.activeAngle?.picks ?? [];
+  const startsNewShape = kind === 'edges' && prior.length % 2 === 0;
+  const previous = prior.length > 0 ? prior[prior.length - 1].point : null;
+  const last = !startsNewShape ? previous : null;
+  // A press away from the last pick that snapped back onto it takes the surface hit (#8866). Across
+  // the edge boundary only a double-press is caught, so a shared corner keeps its snap.
+  const point = previous ? unsnapFromPrevious(ctx, previous, picked.point, { x, y }, startsNewShape) : picked.point;
+  if (last && isDuplicateClickPoint(last, point)) return;
 
-  ctx.setSnapTarget(picked.snapTarget);
-  state.addAnglePick({ kind: 'points', point: picked.point });
+  ctx.setSnapTarget(point === picked.point ? picked.snapTarget : null);
+  state.addAnglePick({ kind, point });
+  rememberVertexPress(ctx, point, { x, y }, point !== picked.point);
 }
 
 /**
@@ -748,297 +348,17 @@ export function finishPolylineFromDoubleClick(): boolean | null {
 }
 
 /**
- * Resolve the active model + storey + a snap-aware world point.
- * Surfaces the same toast errors all add-element entry points share.
- *
- * `override` lets the caller force a specific (model, storey) pair —
- * used by smart placement so clicking on an existing element places
- * the new entity in that element's storey/model rather than the
- * AddElement panel's currently-selected one. Falls back through the
- * panel's selector (`addElementStoreyId`) and then the first storey
- * of the active model when no override is supplied.
+ * The store side of the Measure tool's radius double-click finish (#2737
+ * item 2) — same shape as {@link finishPolylineFromDoubleClick}, for the
+ * same reason (radius is the other unbounded, explicit-finish click
+ * sequence). Returns `null` when the gesture does not apply (not in radius
+ * mode, or no sequence in progress); otherwise whether a measurement was
+ * actually recorded.
  */
-function resolveAddElementContext(
-  override?: { modelId: string; storeyId: number },
-): { modelId: string; storeyId: number } | null {
-  if (override) return override;
+export function finishRadiusFromDoubleClick(): boolean | null {
   const state = useViewerStore.getState();
-  const modelId = state.addElementModelId ?? resolveActiveModelId();
-  if (!modelId) {
-    toast.error("Couldn't add element: no model loaded");
-    return null;
-  }
-  const storeyId = state.addElementStoreyId ?? firstStoreyExpressId(modelId);
-  if (storeyId === null) {
-    toast.error("Couldn't add element: model has no IfcBuildingStorey");
-    return null;
-  }
-  return { modelId, storeyId };
-}
-
-/** Common post-place: pick the new entity's global id, toast, clear pending. */
-function finishAddElement(
-  result: { expressId: number } | { error: string },
-  modelId: string,
-  label: string,
-): void {
-  const state = useViewerStore.getState();
-  if ('error' in result) {
-    toast.error(`Couldn't add ${label.toLowerCase()}: ${result.error}`);
-    return;
-  }
-  const globalId = toGlobalIdFromModels(state.models, modelId, result.expressId);
-  state.setSelectedEntityId(globalId);
-  state.clearAddElementPending();
-  toast.success(`${label} #${result.expressId} added — undo to remove`);
-}
-
-/**
- * Handle a click landing on the scene while the addElement tool is
- * active. Implements a per-type click state machine:
- *
- *   - column: 1 click → place
- *   - wall / beam: 1st click → start, 2nd click → end + place
- *   - slab (rectangle): 1st click → corner, 2nd click → opposite + place
- *   - slab (polygon): N clicks accumulate; Enter / double-click closes
- *     (handled in the keyboard layer; this function only appends)
- *
- * Takes a renderer-frame point and reads everything else from the store — no
- * camera, no raycast — which is why plan mode (#50) can drive the SAME state
- * machine from a 2D click instead of growing a second one. A parallel
- * placement path would drift on every type added here, and the multi-click
- * types would keep separate pending-point state that the two surfaces could
- * not hand to each other mid-wall.
- */
-export async function handleAddElementDrop(
-  point: { x: number; y: number; z: number },
-  storeyOverride?: { modelId: string; storeyId: number },
-): Promise<void> {
-  const ctx = resolveAddElementContext(storeyOverride);
-  if (!ctx) return;
-  const { modelId, storeyId } = ctx;
-
-  const state = useViewerStore.getState();
-  const type = state.addElementType;
-
-  // Single-click placements: column / door / window all drop on one click.
-  if (type === 'column') {
-    const ifc = rendererPointToIfcStoreyLocal(point);
-    const p = state.addElementColumnParams;
-    finishAddElement(state.addColumn(modelId, storeyId, {
-      Position: ifc, Width: p.Width, Depth: p.Depth, Height: p.Height,
-    }), modelId, 'Column');
-    return;
-  }
-  if (type === 'door') {
-    const ifc = rendererPointToIfcStoreyLocal(point);
-    const p = state.addElementDoorParams;
-    finishAddElement(state.addDoor(modelId, storeyId, {
-      Position: ifc, Width: p.Width, Height: p.Height, FrameThickness: p.FrameThickness,
-    }), modelId, 'Door');
-    return;
-  }
-  if (type === 'window') {
-    const ifc = rendererPointToIfcStoreyLocal(point);
-    const p = state.addElementWindowParams;
-    finishAddElement(state.addWindow(modelId, storeyId, {
-      Position: ifc, Width: p.Width, Height: p.Height, FrameThickness: p.FrameThickness,
-    }), modelId, 'Window');
-    return;
-  }
-  if (type === 'sensor') {
-    const ifc = rendererPointToIfcStoreyLocal(point);
-    const p = state.addElementSensorParams;
-    finishAddElement(state.addSensor(modelId, storeyId, {
-      Position: ifc, Width: p.Width, Depth: p.Depth, Height: p.Height, PredefinedType: p.PredefinedType as SensorInStoreParams['PredefinedType'],
-    }), modelId, 'Sensor');
-    return;
-  }
-  if (type === 'library') {
-    const entry = state.addElementLibrarySelection;
-    if (!entry) {
-      toast.error('Pick an element from the library first');
-      return;
-    }
-    const ifc = rendererPointToIfcStoreyLocal(point);
-    const p = state.addElementLibraryParams;
-    finishAddElement(state.addLibraryElement(modelId, storeyId, {
-      IfcEntity: entry.ifc.entity,
-      PredefinedType: entry.ifc.predefinedType,
-      ObjectType: entry.ifc.objectType,
-      Position: ifc,
-      Width: p.Width, Depth: p.Depth, Height: p.Height,
-      Discipline: entry.discipline,
-      Name: entry.label,
-      CatalogEntryId: entry.id,
-      CatalogEntryTag: entry.tag,
-      TechnicalData: entry.technicalData,
-      Aas: entry.aas,
-    }), modelId, entry.label);
-    return;
-  }
-
-  if (type === 'wall' || type === 'beam' || type === 'member') {
-    const pending = state.addElementPendingPoints;
-    if (pending.length === 0) {
-      // Start point — store the renderer-frame point and wait for end.
-      state.appendAddElementPendingPoint({ x: point.x, y: point.y, z: point.z });
-      return;
-    }
-    // End point — convert both points to IFC at dispatch time.
-    const startIfc = rendererPointToIfcStoreyLocal(pending[0]);
-    const endIfc = rendererPointToIfcStoreyLocal(point);
-    if (type === 'wall') {
-      const p = state.addElementWallParams;
-      finishAddElement(state.addWall(modelId, storeyId, {
-        Start: startIfc, End: endIfc, Thickness: p.Thickness, Height: p.Height,
-      }), modelId, 'Wall');
-    } else if (type === 'beam') {
-      const p = state.addElementBeamParams;
-      finishAddElement(state.addBeam(modelId, storeyId, {
-        Start: startIfc, End: endIfc, Width: p.Width, Height: p.Height,
-      }), modelId, 'Beam');
-    } else {
-      // member
-      const p = state.addElementMemberParams;
-      finishAddElement(state.addMember(modelId, storeyId, {
-        Start: startIfc, End: endIfc, Width: p.Width, Height: p.Height,
-      }), modelId, 'Member');
-    }
-    return;
-  }
-
-  if (type === 'slab' || type === 'roof' || type === 'plate' || type === 'space') {
-    if (state.addElementSlabMode === 'rectangle') {
-      const pending = state.addElementPendingPoints;
-      if (pending.length === 0) {
-        state.appendAddElementPendingPoint({ x: point.x, y: point.y, z: point.z });
-        return;
-      }
-      const cornerIfc = rendererPointToIfcStoreyLocal(pending[0]);
-      const oppositeIfc = rendererPointToIfcStoreyLocal(point);
-      const minX = Math.min(cornerIfc[0], oppositeIfc[0]);
-      const minY = Math.min(cornerIfc[1], oppositeIfc[1]);
-      const width = Math.abs(oppositeIfc[0] - cornerIfc[0]);
-      const depth = Math.abs(oppositeIfc[1] - cornerIfc[1]);
-      if (width <= 0 || depth <= 0) {
-        toast.error(`${capitalize(type)} corners must span a non-zero rectangle`);
-        return;
-      }
-      const position: [number, number, number] = [minX, minY, 0];
-      switch (type) {
-        case 'slab': {
-          const p = state.addElementSlabParams;
-          finishAddElement(state.addSlab(modelId, storeyId, {
-            Position: position, Width: width, Depth: depth, Thickness: p.Thickness,
-          }), modelId, 'Slab');
-          return;
-        }
-        case 'roof': {
-          const p = state.addElementRoofParams;
-          finishAddElement(state.addRoof(modelId, storeyId, {
-            Position: position, Width: width, Depth: depth, Thickness: p.Thickness,
-          }), modelId, 'Roof');
-          return;
-        }
-        case 'plate': {
-          const p = state.addElementPlateParams;
-          finishAddElement(state.addPlate(modelId, storeyId, {
-            Position: position, Width: width, Depth: depth, Thickness: p.Thickness,
-          }), modelId, 'Plate');
-          return;
-        }
-        case 'space': {
-          const p = state.addElementSpaceParams;
-          finishAddElement(state.addSpace(modelId, storeyId, {
-            Position: position, Width: width, Depth: depth, Height: p.Height,
-          }), modelId, 'Space');
-          return;
-        }
-      }
-    }
-    // Polygon mode — append; close handled by Enter.
-    state.appendAddElementPendingPoint({ x: point.x, y: point.y, z: point.z });
-    return;
-  }
-}
-
-function capitalize(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
-/** Signed 2D polygon area via the shoelace formula. */
-function polygonArea2D(points: Array<[number, number]>): number {
-  if (points.length < 3) return 0;
-  let area = 0;
-  for (let i = 0; i < points.length; i++) {
-    const [x1, y1] = points[i];
-    const [x2, y2] = points[(i + 1) % points.length];
-    area += x1 * y2 - x2 * y1;
-  }
-  return area * 0.5;
-}
-
-/**
- * Close an in-progress polygon for any slab-style type
- * (slab / roof / plate / space). Triggered by Enter. Requires
- * ≥3 points; the builder's auto-closure handles the trailing edge.
- */
-export function commitAddElementSlabPolygon(): void {
-  const state = useViewerStore.getState();
-  if (state.activeTool !== 'addElement') return;
-  const type = state.addElementType;
-  const polygonable = type === 'slab' || type === 'roof' || type === 'plate' || type === 'space';
-  if (!polygonable || state.addElementSlabMode !== 'polygon') return;
-  const pending = state.addElementPendingPoints;
-  if (pending.length < 3) {
-    toast.error(`${capitalize(type)} polygon needs at least 3 points`);
-    return;
-  }
-  const ctx = resolveAddElementContext();
-  if (!ctx) return;
-  const { modelId, storeyId } = ctx;
-  const outer = pending.map((pt) => {
-    const ifc = rendererPointToIfcStoreyLocal(pt);
-    return [ifc[0], ifc[1]] as [number, number];
-  });
-  // Reject degenerate (zero-area) polygons — repeated or collinear
-  // pending points would otherwise produce an OuterCurve that exports
-  // as an invalid slab/roof/plate/space profile.
-  if (Math.abs(polygonArea2D(outer)) < 1e-6) {
-    toast.error(`${capitalize(type)} polygon must have a non-zero area`);
-    return;
-  }
-  switch (type) {
-    case 'slab': {
-      const p = state.addElementSlabParams;
-      finishAddElement(state.addSlab(modelId, storeyId, {
-        Profile: 'polygon', OuterCurve: outer, Thickness: p.Thickness,
-      }), modelId, 'Slab');
-      return;
-    }
-    case 'roof': {
-      const p = state.addElementRoofParams;
-      finishAddElement(state.addRoof(modelId, storeyId, {
-        Profile: 'polygon', OuterCurve: outer, Thickness: p.Thickness,
-      }), modelId, 'Roof');
-      return;
-    }
-    case 'plate': {
-      const p = state.addElementPlateParams;
-      finishAddElement(state.addPlate(modelId, storeyId, {
-        Profile: 'polygon', OuterCurve: outer, Thickness: p.Thickness,
-      }), modelId, 'Plate');
-      return;
-    }
-    case 'space': {
-      const p = state.addElementSpaceParams;
-      finishAddElement(state.addSpace(modelId, storeyId, {
-        Profile: 'polygon', OuterCurve: outer, Height: p.Height,
-      }), modelId, 'Space');
-      return;
-    }
-  }
+  if (state.measureMode !== 'radius' || !state.activeRadius) return null;
+  return state.finishRadius({ fromDoubleClick: true });
 }
 
 /**
@@ -1047,17 +367,12 @@ export function commitAddElementSlabPolygon(): void {
  */
 export async function handleContextMenu(ctx: MouseHandlerContext, e: MouseEvent): Promise<void> {
   e.preventDefault();
-  const { canvas, renderer, mouseState } = ctx;
-  // Right-drag is the pan gesture (see useMouseControls). Some browsers
+  const { mouseState } = ctx;
+  // Right-drag is the fly gesture (see useMouseControls). Some browsers
   // still fire `contextmenu` after a tiny right-drag — skip when the
-  // user actually moved, so panning never accidentally pops the menu.
+  // user actually moved, so flying never accidentally pops the menu.
   if (mouseState.didDrag) {
     return;
   }
-  const rect = canvas.getBoundingClientRect();
-  const x = e.clientX - rect.left;
-  const y = e.clientY - rect.top;
-  // Uses visibility filtering so hidden elements don't appear in context menu
-  const pickResult = await renderer.pick(x, y, ctx.getPickOptions());
-  ctx.openContextMenu(pickResult?.expressId ?? null, e.clientX, e.clientY);
+  await openContextMenuAt(ctx, e.clientX, e.clientY);
 }

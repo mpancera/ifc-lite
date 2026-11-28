@@ -15,12 +15,25 @@
 //!   pose-only instances (empty-geometry `InstanceMeshRef`s → `collate_refs`), so
 //!   their vertices are never materialized — the Phase 3 CPU win.
 //! - recovered flat [`MeshData`]s: every other occurrence, baked from the shared
-//!   mapped-item source registry (`bake_source_at_world`) so no geometry is lost.
-//!   These render flat exactly as if instancing had never fired (byte-identical
-//!   world triangles to the flat baseline, mirroring the native orphan recovery).
+//!   mapped-item source registry so no geometry is lost. These render flat exactly
+//!   as if instancing had never fired (byte-identical world triangles to the flat
+//!   baseline) — through the SAME `ifc_lite_processing::recover_occurrences_flat`
+//!   the native orphan recovery uses, so the two cannot drift.
+//!
+//! Grouping (`group_occurrences_by_rep`) and template selection
+//! (`index_templates_by_rep`, called by `batch_recovery`) are the native
+//! finalize's too. What stays here is the browser's own keep-or-recover policy,
+//! scoped to ONE batch: a group rides the shard only against a shard-eligible
+//! template from the same batch and only when it clears the per-batch
+//! threshold. The native finalize runs once over the whole model and has
+//! neither gate (EDGE-WASM-18, #8341).
 
-use ifc_lite_geometry::{bake_source_at_world, SharedMappedItemCache};
-use ifc_lite_processing::{MeshData, RawInstanceOccurrence};
+use super::batch_partition::is_class_toggled;
+use ifc_lite_geometry::SharedMappedItemCache;
+use ifc_lite_processing::element::StyleSource;
+use ifc_lite_processing::{
+    recover_occurrences_flat, MeshData, RawInstanceOccurrence,
+};
 use rustc_hash::FxHashMap;
 
 /// A batch-local template's shard-relevant facts: its PRE-RTC composed world
@@ -43,6 +56,14 @@ pub(super) struct ShardOccurrence {
     pub rep_identity: u128,
     /// PRE-RTC composed world transform (row-major) — `RawInstanceOccurrence::world_transform`.
     pub world_transform: [f64; 16],
+    /// The `IfcRepresentationItem` this occurrence's geometry comes from (#2985);
+    /// rides the IFNS shard as the v2 per-instance item id.
+    pub geometry_item_id: Option<u32>,
+    /// Where its colour came from (#10698), paired with it by production.
+    pub style: ifc_lite_processing::element::StyleSource,
+    /// Its IFC-authored finish (#5984), joined by the batch from `style` after
+    /// resolution; rides the IFNS shard as the v3 per-instance finish.
+    pub finish: Option<ifc_lite_processing::style::SpecularMaterial>,
 }
 
 /// Resolve the batch's collected don't-bake occurrences (#1623 Phase 3). For each
@@ -51,26 +72,38 @@ pub(super) struct ShardOccurrence {
 /// [`ShardOccurrence`]s; every other occurrence is RECOVERED FLAT (baked from the
 /// shared source registry) and pushed to `recovered_flats` so nothing is lost.
 /// Deterministic: groups are visited in rep-id order and the shard output is sorted.
+/// Each occurrence arrives paired with its colour's [`StyleSource`] and stays
+/// paired: a shard instance keeps it, and a recovered flat mesh is paired with
+/// the source of the occurrence it was baked from.
 pub(super) fn resolve_batch_occurrences(
-    raw: Vec<RawInstanceOccurrence>,
+    raw: Vec<(RawInstanceOccurrence, StyleSource)>,
     template_by_rep: &FxHashMap<u128, TemplateInfo>,
     mapped_item_cache: &SharedMappedItemCache,
     rtc: [f64; 3],
     min_occurrences: usize,
-    recovered_flats: &mut Vec<MeshData>,
+    recovered_flats: &mut Vec<(MeshData, StyleSource)>,
 ) -> Vec<ShardOccurrence> {
     if raw.is_empty() {
         return Vec::new();
     }
-    let mut by_rep: FxHashMap<u128, Vec<RawInstanceOccurrence>> = FxHashMap::default();
-    for occ in raw {
-        by_rep.entry(occ.rep_identity).or_default().push(occ);
-    }
-    let mut groups: Vec<(u128, Vec<RawInstanceOccurrence>)> = by_rep.into_iter().collect();
-    groups.sort_by_key(|(rep, _)| *rep);
-
     let mut shard: Vec<ShardOccurrence> = Vec::new();
-    for (rep, occs) in groups {
+    for (rep, occs) in group_paired_by_rep(raw) {
+        // A class-toggled occurrence (#5409) never rides the shard, whatever its
+        // group's template is: the shard carries no class, so its toggle could
+        // not reach it. It recovers flat, and only the rest weigh on the gate.
+        let (occs, toggled): (Vec<_>, Vec<_>) =
+            occs.into_iter().partition(|(occ, _)| !is_class_toggled(&occ.ifc_type));
+        if !toggled.is_empty() {
+            // Its `false` (source absent) is dropped for the reason given at the
+            // other call below: the router registers the source before emitting any
+            // placeholder, and skips the insert only for a source that meshed EMPTY,
+            // which has no geometry to draw on the shard or flat either. So an
+            // absent source is not a toggled occurrence this split loses.
+            recover_paired_flat(rep, &toggled, mapped_item_cache, rtc, recovered_flats);
+        }
+        if occs.is_empty() {
+            continue;
+        }
         // Keep as shard instances only when a shard-eligible in-batch template exists
         // (batch-local mode materializes one per source, so it normally does) AND the
         // group (template + occurrences) clears the instancing gate — matching the
@@ -81,16 +114,25 @@ pub(super) fn resolve_batch_occurrences(
             .is_some_and(|t| t.eligible)
             && (occs.len() + 1) >= min_occurrences;
         if keep {
-            for occ in occs {
+            for (occ, style) in occs {
                 shard.push(ShardOccurrence {
                     entity_id: occ.express_id,
                     color: occ.color,
                     rep_identity: rep,
                     world_transform: occ.world_transform,
+                    geometry_item_id: occ.geometry_item_id,
+                    style,
+                    finish: None,
                 });
             }
         } else {
-            recover_flat(rep, &occs, mapped_item_cache, rtc, recovered_flats);
+            // Recovery lives in `processing` so the browser and native paths cannot
+            // drift (see `recover_occurrences_flat`). Its `false` — the group's
+            // source missing from the registry — is dropped rather than logged
+            // here: `ensure_shared_mapped_source` registers it before any
+            // placeholder is emitted on this path, and the wasm build has no
+            // tracing sink. The native mirror logs it.
+            recover_paired_flat(rep, &occs, mapped_item_cache, rtc, recovered_flats);
         }
     }
     // Deterministic shard-instance order (occurrences arrive in job order, already
@@ -99,51 +141,35 @@ pub(super) fn resolve_batch_occurrences(
     shard
 }
 
-/// Rebuild each occurrence of `rep` as a standalone flat [`MeshData`] from the
-/// shared source registry (source-coords geometry placed at the occurrence's world
-/// transform, post-RTC) — geometrically equal to the flat baked occurrence (same
-/// world triangles). The source is registered by `ensure_shared_mapped_source` on
-/// the don't-bake path, so it is present here; a missing/degenerate source (empty
-/// mesh or a per-element CSG-budget trip that skipped the cache insert) is the only
-/// drop, mirroring the native orphan recovery.
-fn recover_flat(
+/// `group_occurrences_by_rep` over paired occurrences: the same groups, in
+/// ascending `rep_identity`, each in arrival order, each occurrence with its source.
+fn group_paired_by_rep(raw: Vec<(RawInstanceOccurrence, StyleSource)>) -> Vec<(u128, Vec<(RawInstanceOccurrence, StyleSource)>)> {
+    let mut by_rep: FxHashMap<u128, Vec<(RawInstanceOccurrence, StyleSource)>> = FxHashMap::default();
+    for paired in raw {
+        by_rep.entry(paired.0.rep_identity).or_default().push(paired);
+    }
+    let mut groups: Vec<_> = by_rep.into_iter().collect();
+    groups.sort_by_key(|(rep, _)| *rep);
+    groups
+}
+
+/// `recover_occurrences_flat` one occurrence at a time, so each recovered mesh
+/// is paired with the source of the occurrence it was baked from (the shared
+/// recovery skips an occurrence whose bake is empty, so its output is not one
+/// for one with its input).
+fn recover_paired_flat(
     rep: u128,
-    occs: &[RawInstanceOccurrence],
+    occs: &[(RawInstanceOccurrence, StyleSource)],
     mapped_item_cache: &SharedMappedItemCache,
     rtc: [f64; 3],
-    out: &mut Vec<MeshData>,
+    recovered_flats: &mut Vec<(MeshData, StyleSource)>,
 ) {
-    // Mapped rep_identity is the RepresentationMap source id (always < 2^32).
-    let source_id = rep as u32;
-    let source = mapped_item_cache
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&source_id)
-        .cloned();
-    let Some(source) = source else {
-        return;
-    };
-    for occ in occs {
-        let (positions, normals, indices) =
-            bake_source_at_world(&source, &occ.world_transform, rtc);
-        if positions.is_empty() || indices.is_empty() {
-            continue;
+    let mut flats = Vec::new();
+    for (occ, style) in occs {
+        if !recover_occurrences_flat(rep, std::slice::from_ref(occ), mapped_item_cache, rtc, &mut flats) {
+            return;
         }
-        out.push(
-            MeshData::new(
-                occ.express_id,
-                occ.ifc_type.clone(),
-                positions,
-                normals,
-                indices,
-                occ.color,
-            )
-            .with_element_metadata(
-                occ.global_id.clone(),
-                occ.name.clone(),
-                occ.presentation_layer.clone(),
-            ),
-        );
+        recovered_flats.extend(flats.drain(..).map(|mesh| (mesh, *style)));
     }
 }
 
@@ -159,7 +185,7 @@ mod resolve_batch_occurrences_tests {
     //! the instanced shard) exactly when template + placeholders clears
     //! `min_occurrences`; otherwise every placeholder recovers flat.
     //!
-    //! With no source registered in `mapped_item_cache`, `recover_flat` no-ops
+    //! With no source registered in `mapped_item_cache`, `recover_occurrences_flat` no-ops
     //! (`Some(source)` fails) and contributes nothing to `shard` either way, so
     //! `shard.len()` alone distinguishes kept (== occs.len()) from not-kept (== 0)
     //! without needing real bakeable geometry.
@@ -167,6 +193,11 @@ mod resolve_batch_occurrences_tests {
     use std::sync::{Arc, Mutex};
 
     const MIN_OCCURRENCES: usize = 4;
+
+    /// Occurrences as the batch collects them: each paired with its colour's source.
+    fn paired(raw: Vec<RawInstanceOccurrence>) -> Vec<(RawInstanceOccurrence, StyleSource)> {
+        raw.into_iter().map(|occ| (occ, StyleSource::Unstyled)).collect()
+    }
     const REP: u128 = 42;
 
     fn make_occ(express_id: u32) -> RawInstanceOccurrence {
@@ -178,6 +209,7 @@ mod resolve_batch_occurrences_tests {
             presentation_layer: None,
             color: [1.0, 1.0, 1.0, 1.0],
             rep_identity: REP,
+            geometry_item_id: None,
             world_transform: [
                 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
             ],
@@ -197,7 +229,7 @@ mod resolve_batch_occurrences_tests {
         template_by_rep.insert(REP, TemplateInfo { eligible: true });
         let mut recovered_flats = Vec::new();
         let shard = resolve_batch_occurrences(
-            raw,
+            paired(raw),
             &template_by_rep,
             &empty_cache(),
             [0.0, 0.0, 0.0],
@@ -226,5 +258,122 @@ mod resolve_batch_occurrences_tests {
         // occs.len() + 1 == MIN_OCCURRENCES + 1: comfortably kept.
         let occ_count = MIN_OCCURRENCES as u32;
         assert_eq!(shard_len_for(occ_count), occ_count as usize);
+    }
+
+    /// #5409: a class-toggled occurrence recovers flat even when its group's
+    /// template is shard-eligible and the group clears the gate, and it no
+    /// longer counts toward that gate. The physical occurrences of the same
+    /// group still ride the shard, so the split is per occurrence, not per group.
+    #[test]
+    fn class_toggled_occurrences_recover_flat_and_leave_the_rest_instanced() {
+        let mut source = ifc_lite_geometry::Mesh::new();
+        source.positions = vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        source.normals = vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        source.indices = vec![0, 1, 2];
+        let cache: SharedMappedItemCache = Arc::new(Mutex::new(FxHashMap::default()));
+        cache.lock().unwrap().insert(REP as u32, Arc::new(source));
+
+        let physical = MIN_OCCURRENCES as u32;
+        let mut raw: Vec<RawInstanceOccurrence> = (0..physical).map(make_occ).collect();
+        for (i, class) in ["IfcOpeningElement", "IfcSpace"].iter().enumerate() {
+            let mut occ = make_occ(100 + i as u32);
+            occ.ifc_type = (*class).to_string();
+            raw.push(occ);
+        }
+        let mut template_by_rep = FxHashMap::default();
+        template_by_rep.insert(REP, TemplateInfo { eligible: true });
+        let mut recovered_flats = Vec::new();
+        let shard = resolve_batch_occurrences(
+            paired(raw),
+            &template_by_rep,
+            &cache,
+            [0.0, 0.0, 0.0],
+            MIN_OCCURRENCES,
+            &mut recovered_flats,
+        );
+
+        let shard_ids: Vec<u32> = shard.iter().map(|o| o.entity_id).collect();
+        assert_eq!(shard_ids, (0..physical).collect::<Vec<_>>(), "only physical occurrences instance");
+        let mut flat: Vec<(u32, String)> =
+            recovered_flats.iter().map(|(m, _)| (m.express_id, m.ifc_type.clone())).collect();
+        flat.sort();
+        assert_eq!(
+            flat,
+            vec![(100, "IfcOpeningElement".to_string()), (101, "IfcSpace".to_string())],
+            "class-toggled occurrences render flat, carrying their class"
+        );
+
+        // With only toggled occurrences beyond the gate, the physical remainder
+        // is judged on its own count: one short of the gate recovers flat.
+        let mut raw: Vec<RawInstanceOccurrence> = (0..(MIN_OCCURRENCES as u32 - 2)).map(make_occ).collect();
+        let mut opening = make_occ(100);
+        opening.ifc_type = "IfcOpeningElement".to_string();
+        raw.push(opening);
+        let mut recovered_flats = Vec::new();
+        let shard = resolve_batch_occurrences(
+            paired(raw),
+            &template_by_rep,
+            &cache,
+            [0.0, 0.0, 0.0],
+            MIN_OCCURRENCES,
+            &mut recovered_flats,
+        );
+        assert!(shard.is_empty(), "a toggled occurrence must not lift a group over the gate");
+        assert_eq!(recovered_flats.len(), MIN_OCCURRENCES - 1);
+    }
+
+    /// #2985. A SUB-THRESHOLD occurrence never reaches the shard, so the wire
+    /// format cannot carry its item id — it renders flat and the id has to ride
+    /// the recovered `MeshData` instead. This is the half of the gap that needs
+    /// no wire change and is therefore the easiest to leave behind: the shard
+    /// path could be perfect while every recovered occurrence still reported no
+    /// source item, and nothing above would notice, because "no item id" and
+    /// "this geometry has no item" look identical to a consumer.
+    ///
+    /// Needs a REGISTERED source, unlike the threshold tests above: with an
+    /// empty cache `recover_occurrences_flat` returns before building any `MeshData`, so the
+    /// assertion would be vacuous — zero recovered meshes, zero wrong ids.
+    #[test]
+    fn a_recovered_flat_occurrence_reports_its_item_id() {
+        const ITEM_ID: u32 = 4638;
+        const SOURCE_ID: u32 = REP as u32;
+
+        let mut source = ifc_lite_geometry::Mesh::new();
+        source.positions = vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        source.normals = vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        source.indices = vec![0, 1, 2];
+        let cache: SharedMappedItemCache = Arc::new(Mutex::new(FxHashMap::default()));
+        cache
+            .lock()
+            .unwrap()
+            .insert(SOURCE_ID, std::sync::Arc::new(source));
+
+        const STYLED_ITEM: u32 = 99;
+        let mut occ = make_occ(7);
+        occ.geometry_item_id = Some(ITEM_ID);
+        let mut template_by_rep = FxHashMap::default();
+        // Not eligible ⇒ the group recovers flat rather than riding the shard.
+        template_by_rep.insert(REP, TemplateInfo { eligible: false });
+        let mut recovered_flats = Vec::new();
+        let shard = resolve_batch_occurrences(
+            vec![(occ, StyleSource::Style(STYLED_ITEM))],
+            &template_by_rep,
+            &cache,
+            [0.0, 0.0, 0.0],
+            MIN_OCCURRENCES,
+            &mut recovered_flats,
+        );
+
+        assert!(shard.is_empty(), "an ineligible group must not reach the shard");
+        assert_eq!(recovered_flats.len(), 1, "the occurrence must be recovered, not dropped");
+        assert_eq!(
+            recovered_flats[0].0.geometry_item_id,
+            Some(ITEM_ID),
+            "the recovered flat mesh lost the item id the occurrence carried"
+        );
+        // #3199 disjointness: the id is a representation item, never a material.
+        assert_eq!(recovered_flats[0].0.material_id, None);
+        // #10698: the recovered mesh keeps the source of the occurrence it was baked from.
+        assert_eq!(recovered_flats[0].1, StyleSource::Style(STYLED_ITEM));
     }
 }

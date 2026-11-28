@@ -24,6 +24,15 @@ echo "🦀 Building IFC-Lite WASM..."
 # `unstable.build-std`, so host builds (`cargo test --release`, etc.) never
 # see it.
 export CARGO_UNSTABLE_BUILD_STD="std,panic_abort"
+# Path-independent bytes: panic locations would otherwise embed the checkout,
+# cargo registry and toolchain paths of whatever machine built the wasm, so the
+# raw size the `engine-wasm-bytes` ratchet gates would differ between hosted
+# and self-hosted runners (different checkout paths) and from a local build.
+# Cargo's trim-paths (the env equivalent of `-Z trim-paths` plus the profile's
+# `trim-paths = "all"`) rewrites them to package-relative and `/rustc/<hash>`
+# forms, as for `std` itself; it also keeps local paths out of published wasm.
+export CARGO_UNSTABLE_TRIM_PATHS=true
+export CARGO_PROFILE_RELEASE_TRIM_PATHS=all
 
 # Build with wasm-pack
 echo "📦 Running wasm-pack..."
@@ -38,6 +47,9 @@ echo "📦 Running wasm-pack..."
 # rebuild from source when possible but soft-skip when not, so a missing
 # wasm-pack doesn't hard-fail `turbo build` / `turbo typecheck`. (CI's build
 # job and Vercel do install Rust and rebuild from source.)
+EXPECTED_DTS="packages/wasm/pkg/ifc-lite.d.ts"
+EXPECTED_WASM="packages/wasm/pkg/ifc-lite_bg.wasm"
+
 WASM_PACK="wasm-pack"
 if ! command -v wasm-pack &> /dev/null; then
   CARGO_BIN="$HOME/.cargo/bin/wasm-pack"
@@ -53,8 +65,6 @@ if ! command -v wasm-pack &> /dev/null; then
     # surface is already on disk. Type-checking works either way; running or
     # bundling the app still needs the real runtime (the viewer's vite build
     # demands the .js/.wasm), so this can't silently mask a missing runtime.
-    EXPECTED_DTS="packages/wasm/pkg/ifc-lite.d.ts"
-    EXPECTED_WASM="packages/wasm/pkg/ifc-lite_bg.wasm"
     if [ -f "$EXPECTED_WASM" ]; then
       echo "⚠️  wasm-pack not found — using the wasm runtime already on disk at $EXPECTED_WASM"
       echo "   (To rebuild from Rust sources, install Rust + wasm-pack:"
@@ -98,12 +108,51 @@ fi
 OUT_DIR="../../packages/wasm/pkg"
 echo "🟢 Building single-thread bundle → $OUT_DIR"
 
-rustup run nightly-2025-11-15 "$WASM_PACK" build rust/wasm-bindings \
+# The same soft-skip the missing-wasm-pack branch above applies, for the
+# symmetric case: wasm-pack is INSTALLED but its build fails (it fetches a
+# wasm-bindgen binary at run time, so a network or toolchain hiccup takes it
+# down) while a usable runtime is already on disk -- which is exactly what
+# `pnpm build:wasm:fetch` puts there. Without this the documented escape hatch
+# for hosts that cannot compile Rust does not actually let `pnpm build`
+# succeed: `set -e` aborts and the whole turbo graph fails with nothing built,
+# even though `pkg/ifc-lite_bg.wasm` is sitting right there (#5543).
+#
+# NEVER on CI: a real build failure there must stay a failure, so the fallback
+# is gated on $CI being unset. Anything that ships an artifact -- the release
+# and docker workflows, Vercel -- sets it.
+# Export runs on demand. Size-optimize its crate in the main engine bundle
+# while leaving native builds and the WASM geometry and parsing crates at -O3.
+if ! rustup run nightly-2025-11-15 "$WASM_PACK" build rust/wasm-bindings \
   --target web \
   --out-dir "$OUT_DIR" \
   --out-name ifc-lite \
   --release \
-  $FEATURES
+  $FEATURES \
+  -- --config 'profile.release.package.ifc-lite-export.opt-level="s"'
+then
+  if [ -z "${CI:-}" ] && [ -f "$EXPECTED_WASM" ]; then
+    echo ""
+    echo "⚠️  wasm-pack build FAILED — falling back to the runtime already on disk at $EXPECTED_WASM"
+    echo "   That artifact is whatever was built or fetched previously, NOT this checkout's"
+    echo "   Rust sources, so a change under rust/ is not in it. Re-run once the build works,"
+    echo "   or re-fetch a matching prebuilt with: pnpm build:wasm:fetch"
+    exit 0
+  fi
+  echo ""
+  if [ -n "${CI:-}" ]; then
+    echo "❌ wasm-pack build failed. Not falling back to the on-disk runtime: this is CI,"
+    echo "   where a build failure must stay a failure rather than ship a stale artifact."
+  else
+    echo "❌ wasm-pack build failed and no usable runtime is on disk at $EXPECTED_WASM."
+    echo "   Fetch a prebuilt one with: pnpm build:wasm:fetch"
+  fi
+  exit 1
+fi
+
+# wasm-pack's pkg/.gitignore contains `*`. An explicit npm ignore file keeps
+# generated snippet directories publishable; packages/wasm/package.json's files
+# list remains the authoritative package allowlist. Keep this generated.
+printf '\n' > packages/wasm/pkg/.npmignore
 
 # NOTE: wasm-opt is disabled. The bundle is single-threaded (SIMD128 only,
 # no atomics/shared-memory), and the Rust compiler's LLVM -O3 (release
@@ -125,6 +174,22 @@ if [ -f "$DTS_PATH" ]; then
   echo "🧹 stripped internal __wasm_bindgen_func_elem_* indices from $DTS_PATH"
 fi
 
+# Engine-binary marker. `@ifc-lite/geometry` compiles the engine binary once
+# and hands the compiled module to every glue instance (wasm-shared-module.ts).
+# It must compile the binary THIS glue was generated for: a consumer that
+# aliases `@ifc-lite/wasm` to the geometry-core bundle (`@ifc-lite/wasm/core`,
+# below) gets that bundle's glue, whose import object does not link against the
+# full binary. The full bundle names no binary (null: geometry keeps its
+# default `pkg/ifc-lite_bg.wasm` resolution); the core bundle names its own.
+# Appended to both the runtime and the committed .d.ts, so the sync gate and
+# `fetch-prebuilt-wasm.mjs`'s export-parity check see the same surface.
+append_engine_binary_marker() {
+  local dir="$1" value="$2"
+  printf '\n// ifc-lite engine-binary marker (scripts/build-wasm.sh)\nexport const ENGINE_BINARY_URL = %s;\n' "$value" >> "$dir/ifc-lite.js"
+  printf '\n/** The binary this glue was generated for when it is not the default `pkg/ifc-lite_bg.wasm` (the geometry-core bundle); `null` for the full engine. */\nexport const ENGINE_BINARY_URL: URL | null;\n' >> "$dir/ifc-lite.d.ts"
+}
+append_engine_binary_marker "$(echo "$OUT_DIR" | sed 's|^../../||')" "null"
+
 # Show bundle size
 echo ""
 echo "📊 Bundle size:"
@@ -143,6 +208,41 @@ if [ $WASM_SIZE -lt $TARGET_SIZE ]; then
   echo "   ✅ Under $TARGET_LABEL target!"
 else
   echo "   ⚠️  Over $TARGET_LABEL target ($(($WASM_SIZE / 1024))KB)"
+fi
+
+# --- Geometry-core bundle (`@ifc-lite/wasm/core`) ---------------------------
+# Off for ordinary builds (a second LTO link of the engine); the release
+# workflow sets BUILD_CORE=1 so the published package carries it. The same
+# crate built with `--no-default-features`: IFC parsing, mesh streaming,
+# styles and the 2D helpers stay; the exporters, LandXML, clash, point-cloud
+# scan operations and PDF underlays (the `full` feature in
+# rust/wasm-bindings/Cargo.toml) are left out. Bundler consumers that only
+# mesh IFC alias `@ifc-lite/wasm` to `@ifc-lite/wasm/core`
+# (docs/guide/geometry-core.md).
+if [ "${BUILD_CORE:-}" = "1" ]; then
+  CORE_OUT="../../packages/wasm/pkg-core"
+  CORE_FEATURES="console_error_panic_hook"
+  if [ "${DEBUG_GEOMETRY:-}" = "1" ]; then CORE_FEATURES="$CORE_FEATURES,debug_geometry"; fi
+  echo ""
+  echo "🪶 Building geometry-core bundle → $CORE_OUT (--no-default-features)"
+  rustup run nightly-2025-11-15 "$WASM_PACK" build rust/wasm-bindings \
+    --target web \
+    --out-dir "$CORE_OUT" \
+    --out-name ifc-lite \
+    --release \
+    --no-default-features \
+    --features "$CORE_FEATURES"
+  CORE_REL="$(echo "$CORE_OUT" | sed 's|^../../||')"
+  printf '\n' > "$CORE_REL/.npmignore"
+  CORE_DTS="$CORE_REL/ifc-lite.d.ts"
+  grep -v '__wasm_bindgen_func_elem_' "$CORE_DTS" > "$CORE_DTS.tmp" && mv "$CORE_DTS.tmp" "$CORE_DTS"
+  # The glue's own default binary, the URL the same glue resolves in its init.
+  append_engine_binary_marker "$CORE_REL" "new URL('ifc-lite_bg.wasm', import.meta.url)"
+  if grep -qE '\b(exportGlb|parseLandXmlTinBytes|segmentScanPoints|preparePdfVectorPage)\(' "$CORE_DTS"; then
+    echo "🪶 ❌ geometry-core bundle still exposes export/LandXML/clash APIs — features not applied; refusing to ship"
+    exit 1
+  fi
+  ls -lh "$CORE_REL/ifc-lite_bg.wasm" | awk '{print "   Core WASM: " $5}'
 fi
 
 # --- Optional second bundle: threaded (atomics + shared memory) -------------
@@ -209,51 +309,61 @@ if [ "${BUILD_THREADED:-}" = "1" ]; then
   ls -lh "$THREADED_WASM" | awk '{print "   Threaded WASM: " $5 " (no budget — not the default bundle)"}'
 fi
 
-# --- Optional third bundle: wide-arithmetic ---------------------------------
-# Off by default. Enable with `BUILD_WIDE=1 ./scripts/build-wasm.sh`.
-# Same single-thread bundle as `pkg`, plus the wasm wide-arithmetic proposal
-# (+wide-arithmetic), which maps the exact-CSG kernel's bnum 64x64->128 limb
-# products to i64.mul_wide / i64.add128 instead of __multi3 libcalls. Measured
-# ~1.7x on a real void cut (docs/architecture/wasm-wide-arithmetic.md). Selected
-# at runtime via a WebAssembly.validate() probe (packages/geometry/src/wasm-features.ts,
-# NOT yet created — see docs/architecture/wasm-wide-arithmetic.md delivery plan);
-# engines without the proposal load the `pkg` bundle and are unaffected.
-if [ "${BUILD_WIDE:-}" = "1" ]; then
-  WIDE_OUT="../../packages/wasm/pkg-wide"
+# --- Optional bundle: retained browser executor ------------------------------
+# Off by default. Enable with `BUILD_RETAINED=1 ./scripts/build-wasm.sh`.
+# The same single-thread engine plus the opt-in `retained-browser` feature
+# (#7955): `IfcAPI.retainedSources` and `RetainedBrowserExecutor`, which drives
+# the separately deployed SMLib bundle at /smlib/. It is loaded only by
+# `@ifc-lite/wasm/retained` (`loadRetainedEngine`); the default `pkg` bundle
+# above never contains it, so ordinary loads pay nothing for it.
+if [ "${BUILD_RETAINED:-}" = "1" ]; then
+  RETAINED_OUT="../../packages/wasm/pkg-retained"
+  RETAINED_FEATURES="retained-browser"
+  if [ "${DEBUG_GEOMETRY:-}" = "1" ]; then RETAINED_FEATURES="$RETAINED_FEATURES,debug_geometry"; fi
   echo ""
-  echo "🔢 Building wide-arithmetic bundle → $WIDE_OUT (+wide-arithmetic)"
-  # RUSTFLAGS fully replaces .cargo/config.toml's target rustflags, so repeat the
-  # base flags (max-memory, stack-size, simd128) and add +wide-arithmetic.
-  RUSTFLAGS="-C link-arg=--max-memory=4294967296 -C link-arg=-zstack-size=8388608 -C target-feature=+simd128,+wide-arithmetic" \
+  echo "🧱 Building retained browser bundle → $RETAINED_OUT (--features retained-browser)"
   rustup run nightly-2025-11-15 "$WASM_PACK" build rust/wasm-bindings \
     --target web \
-    --out-dir "$WIDE_OUT" \
+    --out-dir "$RETAINED_OUT" \
     --out-name ifc-lite \
     --release \
-    -- $FEATURES
-
-  WIDE_REL="$(echo "$WIDE_OUT" | sed 's|^../../||')"
-  WIDE_DTS="$WIDE_REL/ifc-lite.d.ts"
-  if [ -f "$WIDE_DTS" ]; then
-    grep -v '__wasm_bindgen_func_elem_' "$WIDE_DTS" > "$WIDE_DTS.tmp" && mv "$WIDE_DTS.tmp" "$WIDE_DTS"
+    --features "$RETAINED_FEATURES"
+  RETAINED_REL="$(echo "$RETAINED_OUT" | sed 's|^../../||')"
+  # wasm-pack overwrites .gitignore; retain the tracked declaration baseline.
+  printf '%s\n' '*' '# The committed declarations are the drift baseline CI diffs against.' \
+    '!.gitignore' '!ifc-lite.d.ts' > "$RETAINED_REL/.gitignore"
+  printf '\n' > "$RETAINED_REL/.npmignore"
+  cp LICENSE "$RETAINED_REL/IFC_LITE_LICENSE.txt"
+  cp licenses/retained/THIRD_PARTY_NOTICES.txt "$RETAINED_REL/THIRD_PARTY_NOTICES.txt"
+  RETAINED_DTS="$RETAINED_REL/ifc-lite.d.ts"
+  if [ -f "$RETAINED_DTS" ]; then
+    grep -v '__wasm_bindgen_func_elem_' "$RETAINED_DTS" > "$RETAINED_DTS.tmp" && mv "$RETAINED_DTS.tmp" "$RETAINED_DTS"
   fi
-  # Litmus test: the bundle must actually contain wide-arithmetic ops.
-  # wasm-tools is REQUIRED for BUILD_WIDE=1 — without it we cannot verify the
-  # bundle isn't silently baseline wasm, so refuse to proceed rather than ship
-  # an unverified bundle.
-  if ! command -v wasm-tools >/dev/null 2>&1; then
-    echo "🔢 ❌ wasm-tools not found — required for BUILD_WIDE=1 to verify wide ops; refusing to ship an unverified bundle"
-    echo "      Install it with: cargo install wasm-tools"
+  if ! grep -q 'class RetainedBrowserExecutor' "$RETAINED_DTS"; then
+    echo "🧱 ❌ retained bundle lacks RetainedBrowserExecutor — feature not applied; refusing to ship"
     exit 1
   fi
-  if [ "$(wasm-tools print "$WIDE_REL/ifc-lite_bg.wasm" 2>/dev/null | grep -cE 'mul_wide|add128|sub128')" -gt 0 ]; then
-    echo "🔢 ✅ wide-arithmetic bundle emits wide ops"
-  else
-    echo "🔢 ❌ wide-arithmetic bundle has NO wide ops — flags wrong; refusing to ship"
-    exit 1
-  fi
-  ls -lh "$WIDE_REL/ifc-lite_bg.wasm" | awk '{print "   Wide WASM: " $5 " (no budget — not the default bundle)"}'
+  ls -lh "$RETAINED_REL/ifc-lite_bg.wasm" | awk '{print "   Retained WASM: " $5 " (no budget — not the default bundle)"}'
 fi
 
 echo ""
+# Independent payloads beside the engine: built from their own crates and
+# loaded explicitly by their own package export, so their exports never enter
+# either geometry engine and cannot grow the default geometry download.
+build_payload() { # <label> <crate dir> <package dir> <out name>
+  echo "Building independent $1 engine"
+  rustup run nightly-2025-11-15 "$WASM_PACK" build "$2" \
+    --target web \
+    --out-dir "../../packages/wasm/$3" \
+    --out-name "$4" \
+    --release
+  printf '\n' > "packages/wasm/$3/.npmignore"
+  local dts="packages/wasm/$3/$4.d.ts"
+  grep -v '__wasm_bindgen_func_elem_' "$dts" > "$dts.tmp" && mv "$dts.tmp" "$dts"
+}
+# @ifc-lite/wasm/diff: comparison features (#8042).
+build_payload diff rust/diff-wasm pkg-diff ifc-lite-diff
+# @ifc-lite/wasm/rhino: the .3dm scene builder, fetched only when a .3dm export runs.
+build_payload "Rhino scene" rust/rhino-wasm pkg-rhino ifc-lite-rhino
+
 echo "✨ Build complete!"

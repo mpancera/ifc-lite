@@ -28,18 +28,29 @@ console.log(`Schema: ${result.schemaVersion}`); // 'IFC5'
 renderer.loadGeometry(result.meshes);
 ```
 
+Geometry extraction uses a Rust-owned imported-geometry program. The synchronous
+`extractGeometry` and `extractPointClouds` helpers keep their existing return
+shapes and require no initialization. A bundled static JavaScript target is
+compiled from the same Rust implementation as the native and WebAssembly entry;
+it needs no runtime WebAssembly compilation or dynamic code generation.
+Composition, layer provenance, images and point-cloud codecs remain with this
+package's existing format adapter. Display buffers preserve the current Float32
+staging and Y-up frame while the internal import owner retains original source
+coefficients and traversal identities.
+
 ## Auto-detect format
 
 ```typescript
-import { detectFormat } from '@ifc-lite/ifcx';
+import { detectFormat, parseIfcx } from '@ifc-lite/ifcx';
+import { IfcParser } from '@ifc-lite/parser';
 
 const format = detectFormat(buffer);
-// 'ifcx' | 'ifc' | 'glb' | 'unknown'
+// 'ifcx' | 'ifc' | 'glb' | '3dm' | 'unknown'
 
 if (format === 'ifcx') {
   await parseIfcx(buffer);
 } else if (format === 'ifc') {
-  await ifcParser.parse(buffer); // @ifc-lite/parser
+  await new IfcParser().parse(buffer);
 }
 ```
 
@@ -49,6 +60,12 @@ IFCX supports overlays — a base file with the geometry, plus one or more layer
 
 ```typescript
 import { parseFederatedIfcx } from '@ifc-lite/ifcx';
+
+const [baseBytes, psetOverlayBytes, scheduleOverlayBytes] = await Promise.all(
+  ['architecture.ifcx', 'fire-safety-overlay.ifcx', 'construction-schedule.ifcx'].map(
+    (name) => fetch(name).then((r) => r.arrayBuffer()),
+  ),
+);
 
 const result = await parseFederatedIfcx([
   { buffer: baseBytes, name: 'architecture.ifcx' },
@@ -72,6 +89,14 @@ const ifcx = exporter.export({ includeGeometry: true });
 // ifcx.content → IFCX JSON string, save as .ifcx
 ```
 
+For the low-level `IfcxWriter`, `spatialHierarchy` is a parsed snapshot. If a
+`mutationView` changes an `IfcRelAggregates`, `IfcRelNests`, or
+`IfcRelContainedInSpatialStructure` record, supply `effectiveSpatialEdges`
+containing the **complete** current spatial edge set (`sourceId`, `targetId`,
+`relationshipType`). The writer uses those edges to build `children` and raises
+an error if it detects such an edit without them. `applyMutations: false` uses
+the parsed hierarchy.
+
 ## API
 
 See the [Parsing Guide](https://ifclite.dev/docs/guide/parsing/) and [API Reference](https://ifclite.dev/docs/api/typescript/#ifc-liteifcx).
@@ -79,3 +104,13 @@ See the [Parsing Guide](https://ifclite.dev/docs/guide/parsing/) and [API Refere
 ## License
 
 [MPL-2.0](../../LICENSE)
+
+Textured IFCX mesh roundtrips use the declared `ifclite::appearance::v1` /
+`ifclite::image::v1` extension. Standard USD geometry and IFC owner paths remain
+readable without the extension. `parseIfcx` returns per-fragment UVs and shared
+RGBA pixels, plus optional original PNG/JPEG bytes retained without decoding.
+The shared wire exports are consumed by `@ifc-lite/export`; see
+[texture portability](../../docs/guide/exporting.md#ifcx-texture-portability)
+for interoperability, allocation limits, and the native structural-only boundary.
+
+IFCX files may carry `ifclite::georeference::v1` on one model node. The parse result's optional `georeferencing` field preserves canonical `IfcProjectedCRS` (`Name`, metre `MapUnit`) and `IfcMapConversion` (`Eastings`, `Northings`, `OrthogonalHeight`, `XAxisAbscissa`, `XAxisOrdinate`, `Scale`) attributes. The viewer maps this into its existing federation alignment and map placement path. Invalid or conflicting placement records fail parsing. If an overlay fails composition or extraction, `addIfcxOverlay` removes the rejected layer so the previous stage remains usable.

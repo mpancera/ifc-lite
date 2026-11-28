@@ -13,6 +13,7 @@ import type {
   FillRelationship,
   EntityMetadata,
   DoorOperationType,
+  WindowPartitioningType,
   Vec3,
 } from '../types.js';
 
@@ -91,8 +92,16 @@ export class OpeningRelationshipBuilder {
         };
 
         // Add door operation type if available
-        if (type === 'door' && fillingMeta?.properties) {
-          info.doorOperation = this.extractDoorOperation(fillingMeta.properties);
+        if (type === 'door' && fillingMeta) {
+          info.doorOperation = this.extractDoorOperation(
+            fillingMeta.properties ?? {},
+            fillingMeta.typeOperationType
+          );
+        }
+
+        // Add window partitioning type if available
+        if (type === 'window' && fillingMeta?.properties) {
+          info.windowPartitioning = this.extractWindowPartitioning(fillingMeta.properties);
         }
 
         this.openingInfo.set(openingId, info);
@@ -119,20 +128,43 @@ export class OpeningRelationshipBuilder {
     return 'opening';
   }
 
-  private extractDoorOperation(properties: Record<string, unknown>): DoorOperationType {
-    // Look for OperationType in properties
-    const operationType = properties['OperationType'] as string | undefined;
-    if (operationType) {
-      return operationType as DoorOperationType;
+  /**
+   * The occurrence's OperationType unless it is NOTDEFINED or absent, else the type's
+   * (`typeOperationType`), else the default. NOTDEFINED states no handedness, so it must not
+   * shadow the type's value (#8232).
+   */
+  private extractDoorOperation(
+    properties: Record<string, unknown>,
+    typeOperationType?: string
+  ): DoorOperationType {
+    const psets = properties['Pset_DoorCommon'] as Record<string, unknown> | undefined;
+    const stated = (v: unknown): DoorOperationType | null => {
+      if (typeof v !== 'string') return null;
+      const t = v.replace(/\./g, '').trim().toUpperCase();
+      return t === '' || t === 'NOTDEFINED' ? null : (t as DoorOperationType);
+    };
+    return (
+      stated(properties['OperationType']) ??
+      stated(psets?.['OperationType']) ??
+      stated(typeOperationType) ??
+      'SINGLE_SWING_LEFT' // Default
+    );
+  }
+
+  private extractWindowPartitioning(properties: Record<string, unknown>): WindowPartitioningType {
+    // Look for PartitioningType in properties (IfcWindow's own attribute)
+    const partitioningType = properties['PartitioningType'] as string | undefined;
+    if (partitioningType) {
+      return partitioningType as WindowPartitioningType;
     }
 
     // Look in nested property sets
-    const psets = properties['Pset_DoorCommon'] as Record<string, unknown> | undefined;
-    if (psets?.['OperationType']) {
-      return psets['OperationType'] as DoorOperationType;
+    const psets = properties['Pset_WindowCommon'] as Record<string, unknown> | undefined;
+    if (psets?.['PartitioningType']) {
+      return psets['PartitioningType'] as WindowPartitioningType;
     }
 
-    return 'SINGLE_SWING_LEFT'; // Default
+    return 'SINGLE_PANEL'; // Default
   }
 }
 

@@ -10,7 +10,9 @@
  * source buffer (same expressIds, same attribute text) and only regenerates
  * the ISO-10303-21 header. So a parse → export → re-parse cycle must
  * preserve the complete model: per-type entity counts, GlobalIds, property
- * sets, and units. (Schema CONVERSION and mutation application are separate
+ * sets, and units. One exception: an IFC2X3 product sharing an object
+ * placement gets its own copy, written after the last record, since IFC2X3
+ * places one product per placement (#9209). (Schema CONVERSION and mutation application are separate
  * code paths covered by step-exporter.test.ts / schema-converter.test.ts;
  * here we always export to the source schema so no conversion runs.)
  *
@@ -22,7 +24,7 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'fs';
 import { resolve } from 'path';
 import { IfcParser, type IfcDataStore } from '@ifc-lite/parser';
-import { StepExporter } from './step-exporter.js';
+import { StepExporter, exportToStep } from './step-exporter.js';
 
 const MODELS_DIR = resolve(__dirname, '../../../tests/models');
 
@@ -35,18 +37,22 @@ const FIXTURES = [
     schema: 'IFC2X3' as const,
     lengthUnitScale: 1, // metres
     hasPsets: false,
+    // The building and storey share the site's #3: each gets a copy (#9209).
+    placementCopies: 2,
   },
   {
     name: 'buildingsmart/wall-with-opening-and-window.ifc',
     schema: 'IFC4' as const,
     lengthUnitScale: 0.001, // millimetres
     hasPsets: true,
+    placementCopies: 0,
   },
   {
     name: 'buildingsmart/basin-tessellation.ifc',
     schema: 'IFC4' as const,
     lengthUnitScale: 0.001, // millimetres
     hasPsets: false,
+    placementCopies: 0,
   },
 ];
 
@@ -122,10 +128,12 @@ describe.skipIf(!FIXTURES_AVAILABLE)('STEP export round-trip fidelity', () => {
         const reparsed = await roundTrip(original);
 
         expect(reparsed.schemaVersion).toBe(original.schemaVersion);
-        expect(reparsed.entityCount).toBe(original.entityCount);
+        expect(reparsed.entityCount).toBe(original.entityCount + fixture.placementCopies);
         // Full per-type map equality: catches both dropped entities and
         // entities whose type token got mangled on export.
-        expect(typeCounts(reparsed)).toEqual(typeCounts(original));
+        const expected = typeCounts(original);
+        if (fixture.placementCopies) expected.IFCLOCALPLACEMENT += fixture.placementCopies;
+        expect(typeCounts(reparsed)).toEqual(expected);
       });
 
       it('preserves the GlobalId set', async () => {
@@ -192,4 +200,56 @@ describe.skipIf(!FIXTURES_AVAILABLE)('STEP export round-trip fidelity', () => {
       });
     });
   }
+});
+
+// The `exportToStep()` convenience wrapper is the public one-call round-trip
+// path. It used to hardcode `schema: 'IFC4'` as its default, so a caller who
+// omitted `schema` silently schema-CONVERTED every non-IFC4 model: an IFC2X3
+// or IFC4X3 file came back out under a `FILE_SCHEMA(('IFC4'))` header — the
+// wrong schema token, and an invalid file wherever the source used
+// schema-specific entities (e.g. AB22's IFC4X3 IfcRoad / IfcCourse /
+// IfcPavement have no IFC4 equivalent). The wrapper must default to the SOURCE
+// schema, matching `StepExporter.export()`'s own fallback and the
+// `?? store.schemaVersion ?? 'IFC4'` every internal caller already spells out.
+const SCHEMA_FIXTURES = [
+  { name: 'various/test.ifc', schema: 'IFC2X3', token: 'IFC2X3', placementCopies: 2 },
+  { name: 'AB22.ifc', schema: 'IFC4X3', token: 'IFC4X3_RC4', placementCopies: 0 },
+] as const;
+const SCHEMA_FIXTURES_AVAILABLE = SCHEMA_FIXTURES.every((f) =>
+  existsSync(resolve(MODELS_DIR, f.name)),
+);
+
+function fileSchemaToken(step: string): string | undefined {
+  // FILE_SCHEMA(('IFC4X3_RC4')); -> IFC4X3_RC4
+  return step.match(/FILE_SCHEMA\s*\(\s*\(\s*'([^']+)'/)?.[1];
+}
+
+describe.skipIf(!SCHEMA_FIXTURES_AVAILABLE)('exportToStep default schema fidelity', () => {
+  for (const fixture of SCHEMA_FIXTURES) {
+    it(`preserves the source ${fixture.schema} schema when no schema option is given (${fixture.name})`, async () => {
+      const original = await parseFixture(fixture.name);
+      expect(original.schemaVersion).toBe(fixture.schema);
+
+      // No `schema` option: the default must NOT force conversion to IFC4.
+      const step = exportToStep(original);
+      expect(fileSchemaToken(step)).toBe(fixture.token);
+
+      const store = await new IfcParser().parseColumnar(
+        new TextEncoder().encode(step).buffer as ArrayBuffer,
+      );
+      expect(store.schemaVersion).toBe(fixture.schema);
+      // The whole model must still be present (no entities lost to a
+      // spurious cross-schema conversion pass).
+      expect(store.entityCount).toBe(original.entityCount + fixture.placementCopies);
+    });
+  }
+
+  it('still honors an EXPLICIT schema override (conversion path is unchanged)', async () => {
+    const original = await parseFixture('various/test.ifc');
+    expect(original.schemaVersion).toBe('IFC2X3');
+    // Control: an explicit target still converts, proving the fix only moved
+    // the DEFAULT and did not disable the conversion path.
+    const step = exportToStep(original, { schema: 'IFC4' });
+    expect(fileSchemaToken(step)).toBe('IFC4');
+  });
 });

@@ -8,23 +8,36 @@
 //! re-exported from the `ifc-lite-processing` crate. Server-only types remain here.
 
 use super::MeshData;
-use ifc_lite_processing::SymbolicData;
+use ifc_lite_processing::SymbolicDataWithProvenance;
 use serde::{Deserialize, Serialize};
 
 // Re-export shared types from the processing crate
-pub use ifc_lite_processing::{ModelMetadata, ParseResponse, ProcessingStats};
+pub use ifc_lite_processing::{MeshCoordinateSpace, ModelMetadata, ParseResponse, ProcessingStats};
 
 /// Metadata-only response (no geometry).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataResponse {
     /// Total number of entities.
     pub entity_count: usize,
-    /// Number of geometry-bearing entities.
+    /// Geometry jobs a default parse schedules: the parse response's
+    /// `metadata.geometry_entity_count` for the same file (#8341).
     pub geometry_count: usize,
     /// IFC schema version.
     pub schema_version: String,
     /// File size in bytes.
     pub file_size: usize,
+    /// Records the scan refused because their instance name does not fit
+    /// `u32` (#3395). Non-zero means `entity_count` is short by this many —
+    /// the file declares records this response does not count.
+    pub oversized_id_count: usize,
+    /// Whether the scan dropped a record with no terminating `;` of its own
+    /// (an unterminated or unescaped string, an unterminated comment, or a
+    /// truncated file — #3695, #4179, #7541).
+    /// `true` means `entity_count` is short: a partial view of the file, not
+    /// a smaller file. The scan resumes where a real boundary remains (the
+    /// record's own `)`, or for a misread quote the next declaration that
+    /// begins a line) and stops where none does (an unterminated comment).
+    pub malformed_record_found: bool,
 }
 
 /// Server-Sent Event types for streaming.
@@ -56,6 +69,12 @@ pub enum StreamEvent {
         meshes: Vec<MeshData>,
         /// Batch sequence number.
         batch_number: usize,
+        /// Row-major `native_to_baked` for the frame these meshes are baked
+        /// in (#5407): what the stream's shape collator needs to verify a
+        /// site-rotated model's repeats (#4118). Server-internal; never on the
+        /// wire.
+        #[serde(skip)]
+        baked_basis: Option<[f64; 16]>,
     },
 
     /// Processing complete.
@@ -64,11 +83,10 @@ pub enum StreamEvent {
         stats: ProcessingStats,
         /// Model metadata.
         metadata: ModelMetadata,
-        /// Cache key for the result.
-        cache_key: String,
-        /// Coordinate space of the mesh vertices: `"site_local"`, `"model_rtc"`, or `"raw_ifc"`.
+        /// Coordinate space of the mesh vertices; the wire spelling is
+        /// [`MeshCoordinateSpace`]'s.
         #[serde(skip_serializing_if = "Option::is_none")]
-        mesh_coordinate_space: Option<String>,
+        mesh_coordinate_space: Option<MeshCoordinateSpace>,
         /// IfcSite ObjectPlacement as a column-major 4×4 matrix (metres).
         #[serde(skip_serializing_if = "Option::is_none")]
         site_transform: Option<Vec<f64>>,
@@ -78,8 +96,8 @@ pub enum StreamEvent {
         /// 2D symbol data extracted from `IfcAnnotation` and `IfcGrid`
         /// entities — mirrors the inline field on `POST /api/v1/parse`
         /// (issue #843) so the streaming paths reach parity (issue #900).
-        #[serde(default, skip_serializing_if = "SymbolicData::is_empty")]
-        symbolic_data: SymbolicData,
+        #[serde(default, skip_serializing_if = "SymbolicDataWithProvenance::is_empty")]
+        symbolic_data: SymbolicDataWithProvenance,
     },
 
     /// Error occurred.
@@ -102,11 +120,10 @@ mod tests {
         let event = StreamEvent::Complete {
             stats: ProcessingStats::default(),
             metadata: ModelMetadata::default(),
-            cache_key: "k".to_string(),
             mesh_coordinate_space: None,
             site_transform: None,
             building_transform: None,
-            symbolic_data: SymbolicData::default(),
+            symbolic_data: SymbolicDataWithProvenance::default(),
         };
         let json = serde_json::to_value(&event).unwrap();
         let obj = json.as_object().unwrap();
@@ -136,11 +153,10 @@ mod tests {
         let event = StreamEvent::Complete {
             stats: ProcessingStats::default(),
             metadata: ModelMetadata::default(),
-            cache_key: "k".to_string(),
-            mesh_coordinate_space: Some("site_local".to_string()),
+            mesh_coordinate_space: Some(MeshCoordinateSpace::SiteLocal),
             site_transform: Some(vec![1.0; 16]),
             building_transform: Some(vec![2.0; 16]),
-            symbolic_data: SymbolicData::default(),
+            symbolic_data: SymbolicDataWithProvenance::default(),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["mesh_coordinate_space"], "site_local");

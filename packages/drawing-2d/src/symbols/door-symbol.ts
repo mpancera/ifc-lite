@@ -21,6 +21,7 @@ import type {
   DoorOperationType,
   Bounds2D,
 } from '../types.js';
+import { generateArc, arcSvgPath, handedness, unit } from './door-arc.js';
 
 /**
  * Result of door symbol generation
@@ -44,7 +45,15 @@ export interface DoorSymbolConfig {
   swingAngle: number;
   /** Show door leaf line */
   showLeaf: boolean;
-  /** Show threshold line */
+  /**
+   * Declared but never read. No threshold-rendering code exists anywhere in
+   * the package, so this field cannot switch anything on: setting it to
+   * `true` produces exactly the same geometry as leaving it at the default
+   * `false`. There is no substitute option — a threshold line would have to
+   * be drawn by the caller. Slated for removal; see issue #2731.
+   *
+   * @deprecated Ignored by the generator — no threshold is ever drawn.
+   */
   showThreshold: boolean;
 }
 
@@ -66,12 +75,21 @@ export class DoorSymbolGenerator {
   }
 
   /**
-   * Generate door symbol from opening info
+   * Generate door symbol from opening info.
+   *
+   * `doorAxes`, when given, are the door placement's local X and Y axes projected into the
+   * drawing plane. The hinge side is then derived from the door's own frame per IFC4.3
+   * IfcDoorTypeOperationEnum (SINGLE_SWING_LEFT: "hinges on the left side as viewed in the
+   * direction of the positive y-axis", leaf opening to +Y): LEFT hinges on local -X, RIGHT on
+   * local +X, the leaf swings to local +Y. A mirrored placement (negative determinant) therefore
+   * flips the hand. Without `doorAxes`, `wallDirection` is the local X axis and its CCW
+   * perpendicular the swing direction, as before.
    */
   generateFromOpening(
     opening: OpeningInfo,
     bounds2D: Bounds2D,
-    wallDirection: Point2D
+    wallDirection: Point2D,
+    doorAxes?: { x: Point2D; y: Point2D }
   ): DoorSymbolResult {
     const operation = opening.doorOperation ?? 'SINGLE_SWING_LEFT';
     const width = opening.width;
@@ -81,6 +99,12 @@ export class DoorSymbolGenerator {
       x: (bounds2D.min.x + bounds2D.max.x) / 2,
       y: (bounds2D.min.y + bounds2D.max.y) / 2,
     };
+
+    const ax = doorAxes && unit(doorAxes.x);
+    const ay = doorAxes && unit(doorAxes.y);
+    if (ax && ay) {
+      return this.generateSymbol(center, width, operation, ax, ay);
+    }
 
     // Determine wall perpendicular direction (into room)
     const perpendicular = this.getPerpendicularDirection(wallDirection);
@@ -161,13 +185,18 @@ export class DoorSymbolGenerator {
       lines.push({ start: hingePoint, end: leafEnd });
     }
 
+    // The arc's sense follows the frame: a swing direction clockwise of the wall direction
+    // (mirrored placement) sweeps the other way.
+    const hand = handedness(wallDir, swingDir);
+    const arcSense: 1 | -1 = (hingeSide === 'left' ? 1 : -1) * hand as 1 | -1;
+
     // Generate swing arc
-    const arcLines = this.generateArc(
+    const arcLines = generateArc(
+      this.config.arcSegments,
       hingePoint,
       width,
-      wallDir,
       swingDir,
-      hingeSide === 'left' ? 1 : -1,
+      arcSense,
       swingAngleRad
     );
     lines.push(...arcLines);
@@ -178,12 +207,12 @@ export class DoorSymbolGenerator {
         x: -swingDir.x,
         y: -swingDir.y,
       };
-      const oppositeArcLines = this.generateArc(
+      const oppositeArcLines = generateArc(
+        this.config.arcSegments,
         hingePoint,
         width,
-        wallDir,
         oppositeSwingDir,
-        hingeSide === 'left' ? -1 : 1,
+        -arcSense as 1 | -1,
         swingAngleRad
       );
       lines.push(...oppositeArcLines);
@@ -206,7 +235,13 @@ export class DoorSymbolGenerator {
         parameters: params,
       },
       lines,
-      arcPath: this.generateArcSVGPath(hingePoint, width, wallDir, swingDir, swingAngleRad),
+      arcPath: arcSvgPath(
+        hingePoint,
+        width,
+        swingDir,
+        arcSense,
+        swingAngleRad
+      ),
     };
   }
 
@@ -247,7 +282,8 @@ export class DoorSymbolGenerator {
         },
       });
     }
-    lines.push(...this.generateArc(leftHinge, leafWidth, wallDir, swingDir, 1, swingAngleRad));
+    const hand = handedness(wallDir, swingDir);
+    lines.push(...generateArc(this.config.arcSegments, leftHinge, leafWidth, swingDir, hand, swingAngleRad));
 
     // Right door leaf and arc
     if (this.config.showLeaf) {
@@ -259,7 +295,7 @@ export class DoorSymbolGenerator {
         },
       });
     }
-    lines.push(...this.generateArc(rightHinge, leafWidth, wallDir, swingDir, -1, swingAngleRad));
+    lines.push(...generateArc(this.config.arcSegments, rightHinge, leafWidth, swingDir, -hand as 1 | -1, swingAngleRad));
 
     const params: DoorSwingParameters = {
       width,
@@ -486,68 +522,6 @@ export class DoorSymbolGenerator {
       },
       lines,
     };
-  }
-
-  /**
-   * Generate arc as line segments
-   */
-  private generateArc(
-    center: Point2D,
-    radius: number,
-    wallDir: Point2D,
-    swingDir: Point2D,
-    direction: 1 | -1,
-    angleRad: number
-  ): Line2D[] {
-    const lines: Line2D[] = [];
-    const segments = this.config.arcSegments;
-
-    // Start angle is along wall direction (door closed)
-    const startAngle = Math.atan2(wallDir.y, wallDir.x) + (direction > 0 ? Math.PI : 0);
-
-    for (let i = 0; i < segments; i++) {
-      const t1 = i / segments;
-      const t2 = (i + 1) / segments;
-      const angle1 = startAngle + direction * t1 * angleRad;
-      const angle2 = startAngle + direction * t2 * angleRad;
-
-      lines.push({
-        start: {
-          x: center.x + Math.cos(angle1) * radius,
-          y: center.y + Math.sin(angle1) * radius,
-        },
-        end: {
-          x: center.x + Math.cos(angle2) * radius,
-          y: center.y + Math.sin(angle2) * radius,
-        },
-      });
-    }
-
-    return lines;
-  }
-
-  /**
-   * Generate SVG arc path string
-   */
-  private generateArcSVGPath(
-    center: Point2D,
-    radius: number,
-    wallDir: Point2D,
-    swingDir: Point2D,
-    angleRad: number
-  ): string {
-    const startAngle = Math.atan2(wallDir.y, wallDir.x);
-    const endAngle = startAngle + angleRad;
-
-    const startX = center.x + Math.cos(startAngle) * radius;
-    const startY = center.y + Math.sin(startAngle) * radius;
-    const endX = center.x + Math.cos(endAngle) * radius;
-    const endY = center.y + Math.sin(endAngle) * radius;
-
-    const largeArc = angleRad > Math.PI ? 1 : 0;
-    const sweep = 1;
-
-    return `M ${startX} ${startY} A ${radius} ${radius} 0 ${largeArc} ${sweep} ${endX} ${endY}`;
   }
 
   private getPerpendicularDirection(dir: Point2D): Point2D {

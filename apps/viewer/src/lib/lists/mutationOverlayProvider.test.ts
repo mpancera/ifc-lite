@@ -218,7 +218,7 @@ test('withMutationOverlay: the Raum column of the demo list carries the room', (
   const wrapped = withMutationOverlay(baseProvider(), view, { isRowEntity: (id) => id === sensorId });
   const definition: ListDefinition = {
     id: 'devices', name: 'Platzierte Geraete', createdAt: 0, updatedAt: 0,
-    entityTypes: [IfcTypeEnum.IfcSensor], conditions: [],
+    entityTypes: [IfcTypeEnum.IfcSensor], groups: [],
     columns: [
       { id: 'attr-name', source: 'attribute', propertyName: 'Name' },
       { id: 'spatial-container', source: 'spatial', propertyName: 'Container', label: 'Raum' },

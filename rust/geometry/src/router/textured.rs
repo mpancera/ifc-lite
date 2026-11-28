@@ -8,10 +8,26 @@
 //! element pipeline stays within the module-size house rule; the texture
 //! index itself is built in `crate::processors::texture`.
 
-use ifc_lite_core::{DecodedEntity, EntityDecoder, IfcType};
+use ifc_lite_core::{slot, DecodedEntity, EntityDecoder};
+use nalgebra::Matrix4;
 
+use super::frame_parts::{single_frame_source, SourceParts};
 use super::GeometryRouter;
+use crate::processors::texture::TextureAttachment;
+use crate::program::mapping_budget::{LogicalBudget, SourceResult};
 use crate::{Error, Mesh, Result, SubMeshCollection};
+
+/// The accounted header admission for one retained UV-carrying part, out of line.
+#[cold]
+#[inline(never)]
+pub(crate) fn admit_textured_part<T>(textured: &mut Vec<T>) -> Result<()> {
+    crate::resource::reserve_headers(textured, 1)?.retain();
+    Ok(())
+}
+/// One textured item of a type's map: its own part, UVs and image (#961).
+pub(crate) type TexturedPart = (Mesh, Vec<f32>, TextureAttachment);
+/// A type map's render parts: textured ones carry their UVs and image.
+pub(crate) type TypeParts = Vec<(Mesh, Vec<f32>, Option<TextureAttachment>)>;
 
 impl GeometryRouter {
     /// Texture-aware [`Self::process_element_with_submeshes`] (#1781): a face
@@ -25,12 +41,29 @@ impl GeometryRouter {
         decoder: &mut EntityDecoder,
         texture_index: &rustc_hash::FxHashMap<u32, crate::processors::texture::ResolvedTextureMap>,
     ) -> Result<SubMeshCollection> {
-        let textures = if texture_index.is_empty() {
-            None
-        } else {
-            Some(texture_index)
-        };
-        self.process_element_with_submeshes_impl(element, decoder, true, textures)
+        self.styled_submeshes_textured(element, decoder, texture_index).map(crate::styled_parts::StyledParts::into_collection)
+    }
+
+    /// [`Self::process_element_with_submeshes_textured`] with each sub-mesh's
+    /// `IfcMappedItem` occurrence chain ([`crate::StyledSubMeshes`], #10698):
+    /// the same sub-meshes in the same order.
+    pub fn process_element_with_styled_submeshes_textured(
+        &self,
+        element: &DecodedEntity,
+        decoder: &mut EntityDecoder,
+        texture_index: &rustc_hash::FxHashMap<u32, crate::processors::texture::ResolvedTextureMap>,
+    ) -> Result<crate::StyledSubMeshes> {
+        self.styled_submeshes_textured(element, decoder, texture_index).map(crate::StyledSubMeshes::new)
+    }
+
+    fn styled_submeshes_textured(
+        &self,
+        element: &DecodedEntity,
+        decoder: &mut EntityDecoder,
+        texture_index: &rustc_hash::FxHashMap<u32, crate::processors::texture::ResolvedTextureMap>,
+    ) -> Result<crate::styled_parts::StyledParts> {
+        let textures = if texture_index.is_empty() { None } else { Some(texture_index) };
+        self.process_element_with_submeshes_impl(element, decoder, true, textures, super::processing::SourceHygiene::Watertight)
     }
 
     /// Tessellate an `IfcRepresentationMap`'s `MappedRepresentation` and bake
@@ -48,6 +81,10 @@ impl GeometryRouter {
     /// MappingOrigin axis placement is the only transform. It is the caller's
     /// responsibility to only invoke this for orphan representation maps so
     /// normally-instanced typed products aren't double-rendered.
+    ///
+    /// Errors when the map's items cannot share one f64 frame (#6446); use
+    /// [`Self::process_representation_map_with_texture`] to keep such a map
+    /// at full precision.
     pub fn process_representation_map(
         &self,
         rep_map: &DecodedEntity,
@@ -55,11 +92,11 @@ impl GeometryRouter {
     ) -> Result<Mesh> {
         let empty = rustc_hash::FxHashMap::default();
         let parts = self.process_representation_map_with_texture(rep_map, decoder, &empty)?;
-        let mut mesh = Mesh::new();
+        let mut mesh = SourceParts::default();
         for (part, _uvs, _texture) in parts {
             mesh.merge(&part);
         }
-        Ok(mesh)
+        single_frame_source("IfcRepresentationMap", rep_map.id, mesh.into_parts()?)
     }
 
     /// Texture-aware variant of [`Self::process_representation_map`] (issue
@@ -67,116 +104,115 @@ impl GeometryRouter {
     /// `IfcTriangulatedFaceSet` item becomes its OWN part carrying its UVs +
     /// decoded image (so a representation with several differently-textured
     /// items renders each with the correct image), and all untextured items are
-    /// merged into a single part with empty UVs / no texture. The MappingOrigin
-    /// placement is baked into every part.
+    /// merged into a single part with empty UVs / no texture, except that
+    /// untextured items in frames at least 1 km apart stay separate untextured
+    /// parts (#6446). The MappingOrigin placement is baked into every part.
     pub fn process_representation_map_with_texture(
         &self,
         rep_map: &DecodedEntity,
         decoder: &mut EntityDecoder,
         texture_index: &rustc_hash::FxHashMap<u32, crate::processors::texture::ResolvedTextureMap>,
-    ) -> Result<
-        Vec<(
-            Mesh,
-            Vec<f32>,
-            Option<crate::processors::texture::TextureAttachment>,
-        )>,
-    > {
-        // attr 1: MappedRepresentation (IfcShapeRepresentation)
-        let mapped_rep_attr = rep_map.get(1).ok_or_else(|| {
-            Error::geometry("RepresentationMap missing MappedRepresentation".to_string())
-        })?;
+    ) -> Result<Vec<(Mesh, Vec<f32>, Option<TextureAttachment>)>> {
+        crate::program::GeometryProgram::type_map(rep_map, texture_index).drain_type_parts(self, decoder)
+    }
+
+    /// Process a type map with its owning IfcTypeProduct for refusal attribution.
+    pub fn process_representation_map_for_product(
+        &self, rep_map: &DecodedEntity, product: &DecodedEntity,
+        decoder: &mut EntityDecoder,
+        texture_index: &rustc_hash::FxHashMap<u32, crate::ResolvedTextureMap>,
+    ) -> Result<Vec<(Mesh, Vec<f32>, Option<TextureAttachment>)>> {
+        crate::program::GeometryProgram::type_map_for_product(rep_map, texture_index, product)
+            .drain_type_parts(self, decoder)
+    }
+
+    /// Admit a type's representation map for the type-map walk: its
+    /// `MappedRepresentation` and that representation's whole Items list.
+    pub(crate) fn admit_type_map(
+        &self,
+        rep_map: &DecodedEntity,
+        decoder: &mut EntityDecoder,
+        budget: &mut LogicalBudget,
+    ) -> SourceResult<(DecodedEntity, Vec<DecodedEntity>)> {
+        let mapped_rep_attr = rep_map
+            .get(slot::IfcRepresentationMap::MAPPED_REPRESENTATION.index())
+            .ok_or_else(|| {
+                Error::geometry("RepresentationMap missing MappedRepresentation".to_string())
+            })?;
         let mapped_rep = decoder
             .resolve_ref(mapped_rep_attr)?
             .ok_or_else(|| Error::geometry("Failed to resolve MappedRepresentation".to_string()))?;
-
-        // attr 3: Items
         let items_attr = mapped_rep
-            .get(3)
+            .get(slot::IfcRepresentation::ITEMS.index())
             .ok_or_else(|| Error::geometry("Representation missing Items".to_string()))?;
+        budget.materialize_items(mapped_rep.id, items_attr.as_list().unwrap_or(&[]))?;
         let items = decoder.resolve_ref_list(items_attr)?;
+        Ok((mapped_rep, items))
+    }
 
-        let mut untextured = Mesh::new();
-        // One entry per textured item — keeps each item with its own image.
-        let mut textured: Vec<(
-            Mesh,
-            Vec<f32>,
-            crate::processors::texture::TextureAttachment,
-        )> = Vec::new();
-        for item in items {
-            // A nested IfcMappedItem inside a type's own representation: process
-            // it (applies its MappingTarget) rather than dropping its geometry.
-            if item.ifc_type == IfcType::IfcMappedItem {
-                if let Ok(sub_mesh) = self.process_mapped_item_cached(&item, decoder) {
-                    untextured.merge(&sub_mesh); // already scaled inside the cached path
-                }
-                continue;
-            }
+    /// The map's `MappingOrigin` (IfcAxis2Placement), scaled: the only
+    /// placement transform of type geometry. Read after the last item.
+    pub(crate) fn type_map_origin(&self, rep_map: &DecodedEntity, decoder: &mut EntityDecoder)
+        -> Result<Option<Matrix4<f64>>> {
+        Ok(self.mapping_origin_frame(rep_map, decoder)?.map(|mut transform| {
+            self.scale_transform(&mut transform);
+            transform
+        }))
+    }
 
-            // Textured tessellated face set → its own part with per-vertex UVs (#961).
-            if item.ifc_type == IfcType::IfcTriangulatedFaceSet {
-                if let Some(map) = texture_index.get(&item.id) {
-                    let proc = crate::processors::TriangulatedFaceSetProcessor::new();
-                    if let Ok((mut sub_mesh, sub_uvs)) =
-                        proc.process_with_texture(&item, decoder, map)
-                    {
-                        self.scale_mesh(&mut sub_mesh); // UVs are unaffected by scale
-                        textured.push((sub_mesh, sub_uvs, map.attachment()));
-                        continue;
-                    }
-                }
-            }
-
-            if let Some(processor) = self.processors.get(&item.ifc_type) {
-                if let Ok(mut sub_mesh) =
-                    processor.process(&item, decoder, &self.schema, self.tessellation_quality)
-                {
-                    sub_mesh.validate_indices();
-                    self.scale_mesh(&mut sub_mesh);
-                    untextured.merge(&sub_mesh);
-                }
-            }
-        }
-
-        // attr 0: MappingOrigin (IfcAxis2Placement3D) — the only 3D transform;
-        // UVs are 2D and unaffected. Parse once, bake into every part.
-        let origin_transform: Option<nalgebra::Matrix4<f64>> = match rep_map.get(0) {
-            Some(origin_attr) if !origin_attr.is_null() => {
-                match decoder.resolve_ref(origin_attr)? {
-                Some(origin) if origin.ifc_type == IfcType::IfcAxis2Placement3D => {
-                    let mut t = self.parse_axis2_placement_3d(&origin, decoder)?;
-                    self.scale_transform(&mut t);
-                    Some(t)
-                }
-                _ => None,
-                }
-            }
-            _ => None,
-        };
-
-        let mut out: Vec<(
-            Mesh,
-            Vec<f32>,
-            Option<crate::processors::texture::TextureAttachment>,
-        )> = Vec::new();
+    /// Bake the MappingOrigin into every part of a walked map: textured parts
+    /// first, each with its own image, then the untextured frame parts. UVs are
+    /// 2D and unaffected. Same sliver hygiene as the other mesh-output
+    /// chokepoints; `clean_degenerate` edits only indices, so a part's
+    /// parallel per-vertex UV array stays in sync.
+    pub(crate) fn finish_type_map(&self, untextured: SourceParts, textured: Vec<TexturedPart>,
+        origin: Option<&Matrix4<f64>>) -> Result<TypeParts> {
+        let mut out: TypeParts = Vec::new();
         for (mut mesh, uvs, texture) in textured {
-            if let Some(t) = &origin_transform {
-                self.transform_mesh_local(&mut mesh, t);
+            if let Some(origin) = origin {
+                self.transform_mesh_local(&mut mesh, origin);
             }
-            // Same sliver hygiene as the other mesh-output chokepoints. This is
-            // the type-geometry (RepresentationMap) channel and the only one
-            // carrying a parallel per-vertex UV array; clean_degenerate edits
-            // only indices (vertices/UVs untouched), so the UVs stay in sync.
             mesh.clean_degenerate();
             out.push((mesh, uvs, Some(texture)));
         }
-        if !untextured.is_empty() {
-            if let Some(t) = &origin_transform {
-                self.transform_mesh_local(&mut untextured, t);
+        for mut mesh in untextured.into_parts()?.into_iter().filter(|mesh| !mesh.is_empty()) {
+            if let Some(origin) = origin {
+                self.transform_mesh_local(&mut mesh, origin);
             }
-            untextured.clean_degenerate();
-            out.push((untextured, Vec::new(), None));
+            mesh.clean_degenerate();
+            out.push((mesh, Vec::new(), None));
         }
-
         Ok(out)
+    }
+}
+
+#[cfg(feature = "retained-runtime")]
+impl GeometryRouter {
+    /// Whether an orphan map has an item the exact type-map walk can mesh.
+    /// This only applies exact's dispatch selection; it never executes geometry.
+    /// Invalid or budget-limited sources return `None` and remain candidates so
+    /// the retained walk reports their fault.
+    #[doc(hidden)]
+    pub fn type_map_has_exact_mesh_items(&self, map_id: u32, decoder: &mut EntityDecoder)
+        -> Option<bool> {
+        let mut pending = vec![map_id];
+        let mut visited = rustc_hash::FxHashSet::default();
+        let mut budget = LogicalBudget::default();
+        while let Some(id) = pending.pop() {
+            // This is an existence predicate, not accumulated geometry. A
+            // repeated map has the same dispatch answer on every path.
+            if !visited.insert(id) { continue; }
+            budget.commit();
+            let map = decoder.decode_by_id(id).ok()?;
+            let (_, items) = self.admit_type_map(&map, decoder, &mut budget).ok()?;
+            for item in items {
+                if item.ifc_type == ifc_lite_core::IfcType::IfcMappedItem {
+                    pending.push(item.ref_at(slot::IfcMappedItem::MAPPING_SOURCE)?);
+                } else if self.processor_for(&item.ifc_type).is_some() {
+                    return Some(true);
+                }
+            }
+        }
+        Some(false)
     }
 }

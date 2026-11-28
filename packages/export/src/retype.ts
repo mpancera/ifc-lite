@@ -26,9 +26,10 @@
  * raw argument tokens are preserved byte-for-byte.
  */
 
-import { ENTITIES_IFC2X3, ENTITIES_IFC4, ENTITIES_IFC4X3 } from '@ifc-lite/data';
+import { getEntitiesIfc2x3, getEntitiesIfc4Express, getEntitiesIfc4x3 } from '@ifc-lite/data';
 import { escapeStepString } from './step-serialization.js';
-import { splitTopLevelArgs } from './step-argument-parser.js';
+import { frameArgs, stepRecordFrame } from './step-record-frame.js';
+import { splitTopLevelStepArguments } from './step-argument-parser.js';
 import type { IfcSchemaVersion } from './schema-converter.js';
 
 interface RetypeEntityInfo {
@@ -49,13 +50,26 @@ function buildSchemaMap(
   return map;
 }
 
-const SCHEMA_MAPS: Record<IfcSchemaVersion, Map<string, RetypeEntityInfo>> = {
-  IFC2X3: buildSchemaMap(ENTITIES_IFC2X3),
-  IFC4: buildSchemaMap(ENTITIES_IFC4),
-  IFC4X3: buildSchemaMap(ENTITIES_IFC4X3),
+// Built on first use: the tables decode on first use too, and loading this
+// module must not decode them (the viewer's startup chunks carry it).
+let schemaMaps: Record<IfcSchemaVersion, Map<string, RetypeEntityInfo>> | undefined;
+function getSchemaMaps(): Record<IfcSchemaVersion, Map<string, RetypeEntityInfo>> {
+  if (schemaMaps === undefined) schemaMaps = buildSchemaMaps();
+  return schemaMaps;
+}
+
+function buildSchemaMaps(): Record<IfcSchemaVersion, Map<string, RetypeEntityInfo>> {
+  return {
+  IFC2X3: buildSchemaMap(getEntitiesIfc2x3()),
+  // Not the raw `ENTITIES_IFC4`: retyping into one of its phantom IFC4
+  // entities wrote a class IFC4 lacks, and into `IfcCartesianPointList3D`
+  // appended a `TagList` IFC4 never had (#5204).
+  IFC4: buildSchemaMap(getEntitiesIfc4Express()),
+  IFC4X3: buildSchemaMap(getEntitiesIfc4x3()),
   // IFC5 isn't STEP; never reached for retype, but keep the lookup total.
-  IFC5: buildSchemaMap(ENTITIES_IFC4X3),
-};
+  IFC5: buildSchemaMap(getEntitiesIfc4x3()),
+  };
+}
 
 /**
  * Look up a class's attribute layout + PredefinedType domain for a schema.
@@ -64,7 +78,8 @@ const SCHEMA_MAPS: Record<IfcSchemaVersion, Map<string, RetypeEntityInfo>> = {
  */
 function lookupEntityInfo(schema: IfcSchemaVersion, name: string): RetypeEntityInfo | null {
   const upper = name.toUpperCase();
-  return SCHEMA_MAPS[schema]?.get(upper) ?? SCHEMA_MAPS.IFC4.get(upper) ?? null;
+  const maps = getSchemaMaps();
+  return maps[schema]?.get(upper) ?? maps.IFC4.get(upper) ?? null;
 }
 
 /** Strip the dot-wrapping from a STEP enum token: `.ELEMENT.` → `ELEMENT`. */
@@ -91,7 +106,7 @@ export interface RetypeArgsResult {
  * Re-lay-out an entity's STEP argument tokens for a new class.
  *
  * `argTokens` are already-serialized STEP fragments (as produced by
- * {@link splitTopLevelArgs}). Returns a fresh token array in the target
+ * {@link splitTopLevelStepArguments}). Returns a fresh token array in the target
  * class's attribute order. When source or target layout can't be resolved
  * from the schema (vendor extension, malformed), `resolved` is false and the
  * caller should fall back to a keyword-only swap.
@@ -173,25 +188,30 @@ export function retypeStepLine(
   predefinedType: string | null | undefined,
   schema: IfcSchemaVersion,
 ): string {
-  const eq = entityText.indexOf('=');
-  const openParen = entityText.indexOf('(');
-  const closeParen = entityText.lastIndexOf(');');
+  // The one record frame (#7682): trivia between the `)` and the `;` is valid
+  // Part 21, and a literal `');'` bound dropped every retype on such a record.
+  const frame = stepRecordFrame(entityText);
   const newUpper = newType.toUpperCase();
-
-  if (eq < 0 || openParen < eq || closeParen < openParen) {
-    return entityText;
-  }
-
-  const idPrefix = entityText.slice(0, eq + 1); // "#123="
-  const argTokens = splitTopLevelArgs(entityText.slice(openParen + 1, closeParen));
+  if (frame === null) return entityText;
+  const { head } = frame;
+  // Validating, not permissive: the re-layout below maps source slot i to the
+  // attribute NAME at position i, so a mis-scanned list renames every slot
+  // after the first swallowed comma. On the #4125 record — two undoubled
+  // apostrophes, which leave quote parity even and paren depth at zero — the
+  // permissive split returned seven parts for a nine-attribute class, and the
+  // rewrite emitted ELEVEN top-level arguments because one part still carried
+  // two commas of its own. A `null` here means the line is left exactly as the
+  // source wrote it, which the caller reads as `retyped: false`.
+  const argTokens = splitTopLevelStepArguments(frameArgs(entityText, frame));
+  if (argTokens === null) return entityText;
   const { tokens, resolved } = retypeArgTokens(argTokens, sourceType, newType, predefinedType, schema);
 
+  // The keyword is swapped in place: every other character of the record
+  // (trivia around it, the closing `)`, `;` and anything after) is kept.
+  const before = entityText.slice(0, head.typeStart);
   if (!resolved) {
     // Keyword-only swap: keep the original argument list verbatim.
-    return `${idPrefix}${newUpper}${entityText.slice(openParen)}`;
+    return `${before}${newUpper}${entityText.slice(head.typeEnd)}`;
   }
-
-  // `entityText.slice(closeParen)` keeps the closing `);` plus any trailing
-  // bytes (newline) intact.
-  return `${idPrefix}${newUpper}(${tokens.join(',')}${entityText.slice(closeParen)}`;
+  return `${before}${newUpper}${entityText.slice(head.typeEnd, head.open + 1)}${tokens.join(',')}${entityText.slice(frame.close)}`;
 }

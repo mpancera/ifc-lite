@@ -10,13 +10,19 @@
  */
 
 import type { MeshData } from '@ifc-lite/geometry';
+import { compactBounds, type CompactRef } from '@ifc-lite/geometry/compact';
+import { perfTally } from '@ifc-lite/load-trace';
 import { BATCH_CONSTANTS } from './constants.js';
 import type { BoundingBox } from './scene-raycaster.js';
+import { worldBounds } from './scene-precision.js';
+export { originPreservesTriangleTopology, topologySafeBatchOrigin } from './scene-precision.js';
 
 /** The subset of `MeshData` a world-space AABB needs. */
 export interface AabbPiece {
   positions: Float32Array;
   origin?: [number, number, number];
+  /** A compact piece (`MeshData.compact`): its box travels with its records. */
+  compact?: CompactRef;
 }
 
 /**
@@ -46,12 +52,54 @@ export interface AabbPiece {
  */
 export function worldAabbFromPieces(pieces: readonly AabbPiece[] | undefined): BoundingBox | null {
   if (!pieces || pieces.length === 0) return null;
+  const box = emptyBox();
+  foldPieces(pieces, box);
+  return boxOrNull(box);
+}
 
-  let minX = Infinity, minY = Infinity, minZ = Infinity;
-  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-  let hasValidData = false;
+/** `worldAabbFromPieces` over every entity's pieces at once: the whole scene's box (`Scene.getBounds`). */
+export function worldAabbOfPieceLists(lists: Iterable<readonly AabbPiece[]>): BoundingBox | null {
+  const box = emptyBox();
+  for (const pieces of lists) foldPieces(pieces, box);
+  return boxOrNull(box);
+}
 
+/** The union of `boxes`, or `null` when there is none. */
+export function unionOfBoxes(boxes: Iterable<BoundingBox>): BoundingBox | null {
+  const box = emptyBox();
+  for (const b of boxes) {
+    if (b.min.x < box[0]) box[0] = b.min.x;
+    if (b.min.y < box[1]) box[1] = b.min.y;
+    if (b.min.z < box[2]) box[2] = b.min.z;
+    if (b.max.x > box[3]) box[3] = b.max.x;
+    if (b.max.y > box[4]) box[4] = b.max.y;
+    if (b.max.z > box[5]) box[5] = b.max.z;
+  }
+  return boxOrNull(box);
+}
+
+/** `[minx, miny, minz, maxx, maxy, maxz]`, seeded so any finite point replaces it. */
+function emptyBox(): number[] {
+  return [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+}
+
+function boxOrNull(box: readonly number[]): BoundingBox | null {
+  if (!(box[0] <= box[3])) return null;
+  return { min: { x: box[0], y: box[1], z: box[2] }, max: { x: box[3], y: box[4], z: box[5] } };
+}
+
+function foldPieces(pieces: readonly AabbPiece[], box: number[]): void {
   for (const piece of pieces) {
+    if (piece.compact) {
+      // A compact piece's box came with its records; reading `positions` would decode it.
+      const b = compactBounds(piece.compact);
+      if (!(b[0] <= b[3])) continue;
+      for (let axis = 0; axis < 3; axis++) {
+        if (b[axis] < box[axis]) box[axis] = b[axis];
+        if (b[axis + 3] > box[axis + 3]) box[axis + 3] = b[axis + 3];
+      }
+      continue;
+    }
     const positions = piece.positions;
     // world = origin + position (per-element local frame); origin absent or
     // [0,0,0] for legacy absolute meshes.
@@ -63,41 +111,34 @@ export function worldAabbFromPieces(pieces: readonly AabbPiece[] | undefined): B
       const y = positions[i + 1] + oy;
       const z = positions[i + 2] + oz;
       if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
-      hasValidData = true;
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (z < minZ) minZ = z;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-      if (z > maxZ) maxZ = z;
+      if (x < box[0]) box[0] = x;
+      if (y < box[1]) box[1] = y;
+      if (z < box[2]) box[2] = z;
+      if (x > box[3]) box[3] = x;
+      if (y > box[4]) box[4] = y;
+      if (z > box[5]) box[5] = z;
     }
   }
-
-  if (!hasValidData) return null;
-  return {
-    min: { x: minX, y: minY, z: minZ },
-    max: { x: maxX, y: maxY, z: maxZ },
-  };
 }
 
 const MAX_ENCODED_ENTITY_ID = 0xFFFFFF;
 let warnedEntityIdRange = false;
 
 /**
- * Per-vertex z-nudge salt (issue: lens/overlay colouring).
+ * Per-vertex z-nudge salt.
  *
  * The anti-z-fight depth nudge in `main.wgsl.ts` must produce the SAME depth for
- * a given surface in BOTH the base opaque pass and the lens/IDS/compare/4D
- * OVERLAY pass (the overlay pipeline uses `depthCompare: 'equal'`, so any depth
- * difference rejects every overlay fragment — colour silently fails to paint).
+ * a given surface in every draw of it: its batch, a partial sub-batch drawn
+ * instead of it, and the selection highlight (`greater-equal`) drawn over it.
+ * (It was introduced for the equal-depth colour-overlay pass, retired in #6076.)
  *
  * Material-layer slices share their parent's expressId, so the nudge can't
  * separate their coincident coplanar caps from the id alone — it needs the
  * material colour. We bake an 8-bit hash of `MeshData.color` into the HIGH 8
  * bits of the per-vertex entityId lane (the low 24 bits stay the picking id;
  * `encodeId24` masks the salt off). Because the salt comes from the geometry's
- * OWN colour — not the per-draw `baseColor` uniform — the base and overlay
- * passes compute an identical nudge, while distinct layers still separate.
+ * OWN colour — not the per-draw `baseColor` uniform — every redraw computes an
+ * identical nudge, while distinct layers still separate.
  *
  * Returns a byte in [0,255]. Stamp it as `(id & 0x00FFFFFF) | (salt << 24)`.
  */
@@ -115,6 +156,79 @@ export function colorSaltByte(color?: readonly number[] | null): number {
 /** Stamp the colour salt into the high 8 bits, picking id into the low 24. */
 export function packEntityLane(rawId: number, saltByte: number): number {
   return (((rawId >>> 0) & 0x00FFFFFF) | ((saltByte & 0xFF) << 24)) >>> 0;
+}
+
+/**
+ * Release every GPU buffer a batch (or sub-batch clone) owns.
+ *
+ * Lives here rather than in `scene.ts` so the partial sub-batch cache can free
+ * clones without importing back into the Scene that owns it. Structurally
+ * typed on the buffer fields, so it serves `BatchedMesh`, individual `Mesh`
+ * and the sub-batch clones alike.
+ */
+export function destroyGpuResources(
+  m: { vertexBuffer: GPUBuffer; indexBuffer: GPUBuffer; uniformBuffer?: GPUBuffer; uniformSlot?: { release(): void }; lod1IndexBuffer?: GPUBuffer },
+): void {
+  m.vertexBuffer.destroy();
+  m.indexBuffer.destroy();
+  if (m.uniformBuffer) m.uniformBuffer.destroy();
+  m.uniformSlot?.release();
+  if (m.lod1IndexBuffer) m.lod1IndexBuffer.destroy();
+}
+
+/**
+ * The entity lane every vertex of `mesh` carries (unless it has per-vertex
+ * `entityIds`): its id, masked to the seam-ID range, and the high-8-bit
+ * material-colour salt (identical nudge in every redraw; see colorSaltByte()).
+ */
+export function entityLaneOf(mesh: MeshData): { entityId: number; saltByte: number } {
+  let entityId = mesh.expressId >>> 0;
+  if (!mesh.entityIds && entityId > MAX_ENCODED_ENTITY_ID) {
+    if (!warnedEntityIdRange) {
+      warnedEntityIdRange = true;
+      console.warn('[Renderer] expressId exceeds 24-bit seam-ID encoding range; seam lines may collide.');
+    }
+    entityId = entityId & MAX_ENCODED_ENTITY_ID;
+  }
+  return { entityId, saltByte: colorSaltByte(mesh.color) };
+}
+
+/**
+ * Write `mesh`'s vertices as merged batch records (position relative to
+ * `origin`, normal, entity lane: 7 floats each) at record `vertexBase`.
+ * Returns the vertex count. The one writer of the batch layout: `mergeGeometry`
+ * and the stream assembly's LOD input (scene-stream-assembly.ts) share it.
+ */
+export function writeMergedRecords(
+  mesh: MeshData,
+  origin: readonly [number, number, number],
+  vertexData: Float32Array,
+  vertexDataU32: Uint32Array,
+  vertexBase: number,
+): number {
+  const positions = mesh.positions;
+  const normals = mesh.normals;
+  const vertexCount = positions.length / 3;
+  // Shift this mesh into the batch-local frame: stored = world - origin
+  // = (mesh.origin - origin) + localPosition. f64 fold, f32 store.
+  const dox = (mesh.origin ? mesh.origin[0] : 0) - origin[0];
+  const doy = (mesh.origin ? mesh.origin[1] : 0) - origin[1];
+  const doz = (mesh.origin ? mesh.origin[2] : 0) - origin[2];
+  let outIdx = vertexBase * 7;
+  const perVertexEntityIds = mesh.entityIds; // color-merged batches
+  const { entityId, saltByte } = entityLaneOf(mesh);
+  const hasNormals = normals.length > 0;
+  for (let i = 0; i < vertexCount; i++) {
+    const srcIdx = i * 3;
+    vertexData[outIdx++] = positions[srcIdx] + dox;
+    vertexData[outIdx++] = positions[srcIdx + 1] + doy;
+    vertexData[outIdx++] = positions[srcIdx + 2] + doz;
+    vertexData[outIdx++] = hasNormals ? normals[srcIdx] : 0;
+    vertexData[outIdx++] = hasNormals ? normals[srcIdx + 1] : 0;
+    vertexData[outIdx++] = hasNormals ? normals[srcIdx + 2] : 0;
+    vertexDataU32[outIdx++] = packEntityLane(perVertexEntityIds ? perVertexEntityIds[i] : entityId, saltByte);
+  }
+  return vertexCount;
 }
 
 /**
@@ -151,6 +265,7 @@ export function mergeGeometry(
     totalVertices += mesh.positions.length / 3;
     totalIndices += mesh.indices.length;
   }
+  perfTally('render.mergeGeometry', totalVertices, 'vertices'); // #6957
 
   // Create merged buffers
   const vertexBufferRaw = new ArrayBuffer(totalVertices * 7 * 4);
@@ -163,19 +278,7 @@ export function mergeGeometry(
   // magnitudes small (≈ half the batch's spatial spread) regardless of the
   // model's world placement — which is what prevents f32 fan collapse. A mesh
   // without an origin contributes its absolute positions (legacy no-op shift).
-  let minX = Infinity, minY = Infinity, minZ = Infinity;
-  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-  for (const mesh of meshDataArray) {
-    const p = mesh.positions;
-    const ox = mesh.origin ? mesh.origin[0] : 0;
-    const oy = mesh.origin ? mesh.origin[1] : 0;
-    const oz = mesh.origin ? mesh.origin[2] : 0;
-    for (let i = 0; i < p.length; i += 3) {
-      const x = p[i] + ox, y = p[i + 1] + oy, z = p[i + 2] + oz;
-      if (x < minX) minX = x; if (y < minY) minY = y; if (z < minZ) minZ = z;
-      if (x > maxX) maxX = x; if (y > maxY) maxY = y; if (z > maxZ) maxZ = z;
-    }
-  }
+  const { minX, minY, minZ, maxX, maxY, maxZ } = worldBounds(meshDataArray);
   // Prefer the caller's shared scene origin (consistent across all batches → no
   // seam z-fight); fall back to this batch's own world bbox centre.
   const batchOrigin: [number, number, number] = forcedOrigin
@@ -187,41 +290,7 @@ export function mergeGeometry(
   let vertexBase = 0;
 
   for (const mesh of meshDataArray) {
-    const positions = mesh.positions;
-    const normals = mesh.normals;
-    const vertexCount = positions.length / 3;
-    // Shift this mesh into the batch-local frame: stored = world - batchOrigin
-    // = (mesh.origin - batchOrigin) + localPosition. f64 fold, f32 store.
-    const dox = (mesh.origin ? mesh.origin[0] : 0) - batchOrigin[0];
-    const doy = (mesh.origin ? mesh.origin[1] : 0) - batchOrigin[1];
-    const doz = (mesh.origin ? mesh.origin[2] : 0) - batchOrigin[2];
-
-    // Interleave vertex data (position + normal + entityId)
-    let outIdx = vertexBase * 7;
-    const perVertexEntityIds = mesh.entityIds; // color-merged batches
-    let entityId = mesh.expressId >>> 0;
-    if (!perVertexEntityIds && entityId > MAX_ENCODED_ENTITY_ID) {
-      if (!warnedEntityIdRange) {
-        warnedEntityIdRange = true;
-        console.warn('[Renderer] expressId exceeds 24-bit seam-ID encoding range; seam lines may collide.');
-      }
-      entityId = entityId & MAX_ENCODED_ENTITY_ID;
-    }
-    // High-8-bit material-colour salt → identical nudge in base & overlay passes
-    // (so the lens/IDS/compare/4D overlay's depthCompare:'equal' matches). See
-    // colorSaltByte() above.
-    const saltByte = colorSaltByte(mesh.color);
-    const hasNormals = normals.length > 0;
-    for (let i = 0; i < vertexCount; i++) {
-      const srcIdx = i * 3;
-      vertexData[outIdx++] = positions[srcIdx] + dox;
-      vertexData[outIdx++] = positions[srcIdx + 1] + doy;
-      vertexData[outIdx++] = positions[srcIdx + 2] + doz;
-      vertexData[outIdx++] = hasNormals ? normals[srcIdx] : 0;
-      vertexData[outIdx++] = hasNormals ? normals[srcIdx + 1] : 0;
-      vertexData[outIdx++] = hasNormals ? normals[srcIdx + 2] : 0;
-      vertexDataU32[outIdx++] = packEntityLane(perVertexEntityIds ? perVertexEntityIds[i] : entityId, saltByte);
-    }
+    const vertexCount = writeMergedRecords(mesh, batchOrigin, vertexData, vertexDataU32, vertexBase);
 
     // Copy indices with vertex base offset
     const meshIndices = mesh.indices;
@@ -299,4 +368,15 @@ export function splitMeshDataForBufferLimit(meshDataArray: MeshData[], maxBuffer
   }
 
   return chunks;
+}
+
+/** Never cache an empty sentinel: a later streaming fragment may add vertices. */
+export function cachedWorldAabb(
+  id: number, pieces: readonly AabbPiece[] | undefined, cache: Map<number, BoundingBox>,
+): BoundingBox | null {
+  const cached = cache.get(id);
+  if (cached) return cached;
+  const box = worldAabbFromPieces(pieces);
+  if (box) cache.set(id, box);
+  return box;
 }

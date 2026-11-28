@@ -6,23 +6,22 @@
  * Persistence for list definitions via localStorage
  */
 
-import type { ListDefinition } from '@ifc-lite/lists';
+import { trackExportCompleted } from '@/lib/analytics';
+import { type ListDefinition } from '@ifc-lite/lists';
 import { downloadFile, sanitizeFilename } from '../export/download.js';
+
+import { reconcileLibraryRows, LibraryRowsConflict } from '../storage/reconcile-library-rows.js';
+import { readLocalLibrary, saveLocalLibrary, localLibraryWriteRefusal } from '../storage/local-library-source.js';
+import type { SaveResult } from '../storage/save-result.js';
+import { decodeSavedList, encodeSavedList } from './saved-list-codec.js';
 
 const STORAGE_KEY = 'ifc-lite-lists';
 
 /**
- * Bring a stored definition up to date with headings that have since been
- * renamed.
- *
- * A saved list carries its own `label` per column, so a list authored before a
- * rename keeps showing the old heading forever — two lists over the same data
- * disagreeing about what a column is called. Only a label that still equals the
- * OLD default is rewritten; anything the author typed themselves is theirs and
- * is left alone.
- *
- * `propertyName` is the stored contract the engine resolves against and never
- * changes here — this is presentation only.
+ * Fork: bring a stored definition up to date with headings that have since
+ * been renamed. A saved list carries its own `label` per column, so a list
+ * authored before a rename keeps the old heading. Only a label that still
+ * equals the OLD default is rewritten; `propertyName` never changes here.
  */
 export function migrateListDefinition(definition: ListDefinition): ListDefinition {
   let changed = false;
@@ -37,28 +36,46 @@ export function migrateListDefinition(definition: ListDefinition): ListDefinitio
   return changed ? { ...definition, columns } : definition;
 }
 
+export function readListLibrarySource() {
+  return readLocalLibrary(STORAGE_KEY, value => migrateListDefinition(decodeSavedList(value)));
+}
+
 export function loadListDefinitions(): ListDefinition[] {
+  return readListLibrarySource().rows;
+}
+
+export function saveListDefinitionsResult(definitions: ListDefinition[], baseline?: readonly ListDefinition[]): Exclude<SaveResult, { ok: true }> | { ok: true; rows: ListDefinition[] } {
+  const source = readListLibrarySource();
+  const refusal = localLibraryWriteRefusal(source, 'Lists');
+  if (refusal) return refusal;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    return (JSON.parse(raw) as ListDefinition[]).map(migrateListDefinition);
-  } catch {
-    return [];
+    const rows = baseline ? reconcileLibraryRows(source.rows, baseline, definitions, row => encodeSavedList(decodeSavedList(encodeSavedList(row)))) : definitions;
+    const saved = saveLocalLibrary(STORAGE_KEY, rows.map(encodeSavedList), source, 'Lists');
+    return saved.ok ? { ok: true, rows } : saved;
+  } catch (error) {
+    if (error instanceof LibraryRowsConflict) return { ok: false, reason: 'unavailable', message: error.message };
+    console.warn('[Lists] Failed to serialize list definitions', error);
+    return { ok: false, reason: 'serialize', message: 'Could not save List changes.' };
   }
 }
 
-export function saveListDefinitions(definitions: ListDefinition[]): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(definitions));
-  } catch {
-    console.warn('[Lists] Failed to save list definitions to localStorage');
-  }
+export function saveListDefinitions(definitions: ListDefinition[]): boolean {
+  return saveListDefinitionsResult(definitions).ok;
 }
 
 export function exportListDefinition(definition: ListDefinition): void {
-  const json = JSON.stringify(definition, null, 2);
+  const json = JSON.stringify(encodeSavedList(definition), null, 2);
   const name = sanitizeFilename(definition.name, { fallback: 'list' });
   downloadFile(json, `${name}.list.json`, 'application/json');
+  trackExportCompleted({ format: 'json', surface: 'list_results' });
+}
+
+/** Native JSON import semantics, shared by file picker and operation adapter. */
+export function parseListDefinitionFile(text: string): ListDefinition {
+  const raw: unknown = JSON.parse(text);
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new Error('Invalid list definition file');
+  const migrated = decodeSavedList(raw, Date.now());
+  return { ...migrateListDefinition(migrated), id: crypto.randomUUID() };
 }
 
 export function importListDefinition(file: File): Promise<ListDefinition> {
@@ -66,16 +83,7 @@ export function importListDefinition(file: File): Promise<ListDefinition> {
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        const def = JSON.parse(reader.result as string) as ListDefinition;
-        if (!def.id || !def.name || !def.entityTypes || !def.columns) {
-          reject(new Error('Invalid list definition file'));
-          return;
-        }
-        // Generate a new ID to avoid collisions
-        def.id = crypto.randomUUID();
-        def.createdAt = Date.now();
-        def.updatedAt = Date.now();
-        resolve(migrateListDefinition(def));
+        resolve(parseListDefinitionFile(reader.result as string));
       } catch {
         reject(new Error('Failed to parse list definition file'));
       }

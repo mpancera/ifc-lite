@@ -14,7 +14,7 @@
  * looking like a successful export. So this function does not accept "the
  * meshes" as one list it might quietly under-fill: `instancedMeshes` is a
  * REQUIRED field, materialized by the caller through
- * `withInstancedMeshes(geometryResult, isPrimary)`, and it is appended before
+ * `withInstancedMeshes(geometryResult, instancedModelRange)`, and it is appended before
  * any filtering so the instanced half answers every visibility channel the
  * flat half does.
  *
@@ -43,7 +43,7 @@
 import type { MeshData } from '@ifc-lite/geometry';
 import { isEntityVisible } from '@ifc-lite/renderer';
 import { effectiveIsolatedIds } from '@/lib/effective-isolation';
-import { isTypeVisible, type TypeVisibilityGate } from '@/store/typeVisibilityFilter';
+import { isMeshTypeVisible, type RetypedClasses, type TypeVisibilityGate } from '@/store/typeVisibilityFilter';
 
 /** Everything the drawn mesh set is a function of. Plain data: no store reads,
  *  no renderer reads — the caller resolves those so this stays testable. */
@@ -53,7 +53,7 @@ export interface ViewMeshInput {
   meshes: readonly MeshData[];
   /**
    * GPU-instanced occurrences, materialized by the caller from the live
-   * renderer scene via `withInstancedMeshes(geometryResult, isPrimary)`.
+   * renderer scene via `withInstancedMeshes(geometryResult, instancedModelRange)`.
    *
    * Required, not optional, and not defaulted: an omitted-by-accident
    * instanced half is precisely the #2558 defect, and a required field turns
@@ -69,6 +69,9 @@ export interface ViewMeshInput {
   computedIsolatedIds: ReadonlySet<number> | null | undefined;
   /** The class-level toggles (`typeVisibility`). */
   typeVisibility: TypeVisibilityGate;
+  structuralViewMode?: 'both' | 'physical' | 'analytical';
+  /** Classes after retypes, so a retyped mesh is filtered by its entity's class (#10119). */
+  retypedClasses?: RetypedClasses;
   /**
    * Per-model visibility keyed by `MeshData.modelIndex`. An index that is
    * ABSENT from the map counts as visible, so the single-model path can pass
@@ -84,9 +87,9 @@ export interface ViewMeshInput {
  * filters, so hiding an instanced occurrence hides it in the PDF too.
  *
  * Instanced shard meshes carry no `ifcType` (the renderer's scene does not keep
- * one), so the class toggles cannot gate them — the same limitation the
- * viewport has, where `Scene.setInstancedVisibility` takes only the hide and
- * isolate sets. `isTypeVisible` treats a missing type as visible, matching it.
+ * one), and `isTypeVisible` treats a missing type as visible. That is safe
+ * because no class-toggled class ever reaches the shard: the wasm partition
+ * keeps them flat, where they carry their type (#5409).
  */
 export function collectViewMeshes(input: ViewMeshInput): MeshData[] {
   const isolatedIds = effectiveIsolatedIds(input.computedIsolatedIds, input.isolatedEntities);
@@ -98,7 +101,7 @@ export function collectViewMeshes(input: ViewMeshInput): MeshData[] {
   return complete.filter(
     (mesh) =>
       isModelVisible(mesh.modelIndex, input.modelVisibility) &&
-      isTypeVisible(mesh.ifcType, input.typeVisibility) &&
+      isMeshTypeVisible(mesh, input.typeVisibility, input.structuralViewMode, input.retypedClasses) &&
       isEntityVisible(mesh.expressId, input.hiddenEntities, isolatedIds),
   );
 }

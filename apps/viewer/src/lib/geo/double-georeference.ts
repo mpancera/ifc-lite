@@ -32,16 +32,30 @@
  * band of models that would be silently corrected without being flagged, and
  * another that would be flagged without being corrected. (#2526, #2543/#2534
  * reconciliation.)
+ *
+ * The guard also recognises the same export with the IfcSite anchor written
+ * in map units inside a millimetre file (#9480, Vectorworks 2026 Update 7);
+ * {@link DoubleGeoreference.anchorUnitRatio} says which signature fired.
  */
 
 import type { MapConversion, ProjectedCRS } from '@ifc-lite/parser';
 import type { CoordinateInfo } from '@ifc-lite/geometry';
 
-import { computeModelCenterInIfcMeters, effectiveMapConversionForGeometry } from './map-absolute';
-import { getEffectiveHorizontalScale, resolveMapUnitToMetreScale } from './geo-scale';
+import { computeModelCenterInIfcMeters, effectiveMapConversionForGeometry, matchMapAbsoluteGeometry } from './map-absolute';
+import { resolveMapAxisDirection } from './map-axis-direction';
+import {
+  authoredNonUnitFactors,
+  getEffectiveAxisScales,
+  resolveMapUnitToMetreScale,
+  type FactorName,
+} from './geo-scale';
 
 export interface DoubleGeoreference {
-  /** Model centre in IFC world metres, Z-up (X ≈ easting, Y ≈ northing). */
+  /**
+   * Model centre in map metres as ifc-lite places it (X ≈ easting,
+   * Y ≈ northing): the IFC world centre, plus the part of the anchor a #9480
+   * unit-slipped site placement leaves out.
+   */
   worldCenter: { x: number; y: number };
   /** `IfcMapConversion` eastings/northings converted to metres. */
   offset: { easting: number; northing: number };
@@ -101,6 +115,23 @@ export interface DoubleGeoreference {
    * foot/metre bridge is neither overridden nor mentioned.
    */
   scaleForExport: number | null;
+  /**
+   * Factors authored off 1. The guard clears every factor, so the export must
+   * set each to 1, including when Scale needs no change (#4675).
+   */
+  factorsForExport: FactorName[];
+  /**
+   * Non-null when the IfcSite placement repeats the anchor in map units
+   * instead of project units (#9480): `lengthUnitScale / mapUnitScale`, e.g.
+   * 0.001 for a millimetre file in a metre CRS. Null for the #2526 signature.
+   */
+  anchorUnitRatio: number | null;
+  /**
+   * #9480 only: metres the slipped site Z adds to the placement height, or
+   * null when it cannot be recovered (no published `siteOrigin`, or the site
+   * is not the slipped anchor) and the elevation is left as authored.
+   */
+  siteHeightShiftMetres: number | null;
 }
 
 /**
@@ -133,30 +164,46 @@ export function detectDoubleGeoreference(
 
   const easting = conversion.eastings * mapScale;
   const northing = conversion.northings * mapScale;
-  const { ifcX, ifcY } = computeModelCenterInIfcMeters(coordinateInfo);
+  const { ifcX: rawX, ifcY: rawY } = computeModelCenterInIfcMeters(coordinateInfo);
+  const match = matchMapAbsoluteGeometry(conversion, mapScale, coordinateInfo);
+  const anchorUnitRatio = match?.kind === 'unitMismatchedAnchor' ? match.anchorUnitRatio : null;
+  const siteHeightShiftMetres = match?.kind === 'unitMismatchedAnchor' ? match.siteHeightShiftMetres ?? null : null;
+  // Where ifc-lite puts the centre in the map: the neutralised conversion is a
+  // pure translation (zero for #2526), so this is the world centre moved by it.
+  const ifcX = rawX + neutralised.eastings * mapScale;
+  const ifcY = rawY + neutralised.northings * mapScale;
 
   // Where a spec-strict tool would put the model, versus where its geometry
   // already sits in the map CRS. Mirrors `computeProjectedCenter` exactly —
   // including the `?? 1 / ?? 0` axis defaults and the effective (not raw)
-  // horizontal scale — so the quoted error is the one such a tool renders.
+  // per-axis scales — so the quoted error is the one such a tool renders.
   //
   // Deliberately NOT guarded against a non-finite axis or Scale. The guard
   // above does not inspect either, so a malformed file is still corrected on
   // screen; bailing here would move it silently and say nothing. Quote "an
   // unknown distance" instead of suppressing the whole message. (#2526.)
-  const abscissa = conversion.xAxisAbscissa ?? 1;
-  const ordinate = conversion.xAxisOrdinate ?? 0;
-  const scale = getEffectiveHorizontalScale(conversion.scale, mapScale, lengthUnitScale);
-  const appliedE = easting + scale * (abscissa * ifcX - ordinate * ifcY);
-  const appliedN = northing + scale * (ordinate * ifcX + abscissa * ifcY);
+  // The axis is a direction, so the same unit vector `computeProjectedCenter`
+  // uses (#6700); an authored vector with no direction (zero length or
+  // non-finite) has no placement to quote, which the wording below already
+  // renders as "an unknown distance".
+  const axis = resolveMapAxisDirection(conversion.xAxisAbscissa, conversion.xAxisOrdinate);
+  const { x: scaleX, y: scaleY } = getEffectiveAxisScales(conversion, mapScale, lengthUnitScale);
+  const appliedE = axis ? easting + axis.a * scaleX * rawX - axis.b * scaleY * rawY : Number.NaN;
+  const appliedN = axis ? northing + axis.b * scaleX * rawX + axis.a * scaleY * rawY : Number.NaN;
 
-  const rotationIsIdentity = Math.abs(abscissa - 1) < 1e-9 && Math.abs(ordinate) < 1e-9;
+  const rotationIsIdentity = axis !== null && Math.abs(axis.a - 1) < 1e-9 && Math.abs(axis.b) < 1e-9;
   // The tolerance is expressed as INDUCED POSITION ERROR, not as a fraction:
   // this scale multiplies a map-sized coordinate, so 0.4% of a 6 000 km
   // easting is 24 km of drift and a fraction-based band would wave it through.
   // One metre at the model's own distance from the origin is what matters.
   const worldMagnitude = Math.hypot(ifcX, ifcY);
-  const scaleIsUnit = Math.abs(scale - 1) * worldMagnitude <= 1;
+  const isUnit = ({ x, y }: { x: number; y: number }) =>
+    Math.max(Math.abs(x - 1), Math.abs(y - 1)) * worldMagnitude <= 1;
+  const factorsForExport = authoredNonUnitFactors(conversion);
+  // The export resets the factors to 1, so once any is named Scale must be
+  // right on its own: Scale 2 x factors 0.5 reads 1 now but 2 after (#4675).
+  const scaleIsUnit = isUnit({ x: scaleX, y: scaleY }) && (factorsForExport.length === 0
+    || isUnit(getEffectiveAxisScales({ scale: conversion.scale }, mapScale, lengthUnitScale)));
   const mapUnitScale = mapScale > 0 ? mapScale : 1;
   const lengthScale = lengthUnitScale > 0 ? lengthUnitScale : 1;
 
@@ -167,7 +214,56 @@ export function detectDoubleGeoreference(
     displacement: Math.hypot(appliedE - ifcX, appliedN - ifcY),
     overridesAuthoredRotation: !rotationIsIdentity,
     scaleForExport: scaleIsUnit ? null : lengthScale / mapUnitScale,
+    factorsForExport,
+    anchorUnitRatio,
+    siteHeightShiftMetres,
   };
+}
+
+/** "a", "a and b", "a, b, and c". */
+function joinSerial(items: string[]): string {
+  if (items.length <= 2) return items.join(' and ');
+  return `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`;
+}
+
+type ExportScaleFields = Pick<DoubleGeoreference, 'scaleForExport' | 'factorsForExport'>
+  & Partial<Pick<DoubleGeoreference, 'anchorUnitRatio'>>;
+
+/**
+ * The sentence saying the file's Scale and factors from
+ * {@link DoubleGeoreference.factorsForExport} are not applied, or null when
+ * neither is overridden.
+ */
+export function overriddenScaleNote(found: ExportScaleFields): string | null {
+  const names = [...(found.scaleForExport !== null ? ['Scale'] : []), ...found.factorsForExport];
+  if (names.length === 0) return null;
+  const [verb, pronoun] = names.length > 1 ? ['are', 'they'] : ['is', 'it'];
+  // Only a horizontal scale acts on the map-sized coordinates.
+  const why = found.scaleForExport !== null
+    ? `: on map-sized coordinates ${pronoun} would re-scale the model about the map origin`
+    : '';
+  return `Its ${joinSerial(names)} ${verb} not applied either${why}.`;
+}
+
+/**
+ * How to bake the neutralised conversion into an export: the offsets and
+ * rotation always, Scale when it is overridden. The panel does not edit the
+ * IfcMapConversionScaled factors, so any in
+ * {@link DoubleGeoreference.factorsForExport} are sent to the authoring tool.
+ */
+export function exportCorrectionInstruction(found: ExportScaleFields): string {
+  // #9480: no IfcMapConversion edit is a fixed point. Offsets that put the
+  // site on the anchor (`Eastings x (1 - ratio)`) still leave the geometry at
+  // `anchor x ratio`, so the guard reads them as the same slip and shrinks
+  // them again (~6 km for the reporter's file). Only the placement can be fixed.
+  if (found.anchorUnitRatio != null) return SITE_ANCHOR_SOURCE_FIX;
+  const fields = ['Eastings and Northings to 0', 'Model rotation in map coordinates to 0'];
+  if (found.scaleForExport !== null) fields.push(`Scale to ${trimFloat(found.scaleForExport)}`);
+  const inApp = `set ${joinSerial(fields)}, then use Export IFC (with changes).`;
+  const factors = found.factorsForExport;
+  if (factors.length === 0) return inApp;
+  const [pronoun, verb] = factors.length > 1 ? ['them', 'are'] : ['it', 'is'];
+  return `${inApp} ${joinSerial(factors)} ${verb} not editable in ifc-lite; set ${pronoun} to 1 in the authoring tool, or the exported file is still scaled by ${pronoun}.`;
 }
 
 /**
@@ -197,6 +293,8 @@ export function trimFloat(value: number): string {
   if (!Number.isFinite(value)) return String(value);
   return String(Number(value.toPrecision(6)));
 }
+
+const SITE_ANCHOR_SOURCE_FIX = "fix the IfcSite placement in the authoring tool so it uses the file's length unit; no IfcMapConversion edit here can express this correction.";
 
 export function formatApproxDistance(metres: number): string {
   if (!Number.isFinite(metres)) return 'an unknown distance';

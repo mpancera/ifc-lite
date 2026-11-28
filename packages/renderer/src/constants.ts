@@ -50,14 +50,14 @@ export const CAMERA_CONSTANTS = {
   // Polar angle constraints (gimbal-lock protection)
   // Phi is clamped just off the two poles (±Y). camera.up stays world Y
   // throughout, so the orbit math (sinφ in the tangent) is well-defined
-  // for any phi ∈ [MIN_PHI, π − MIN_PHI]. The full sphere minus the exact
-  // poles is reachable — top/bottom/front/back/left/right presets all fit
-  // inside this range without needing per-preset clamp overrides.
+  // for any phi ∈ [MIN_PHI, π − MIN_PHI]. The top/bottom presets sit exactly
+  // ON the poles with a horizontal `up` (#9501: an orthographic plan must not
+  // tilt), and the first orbit from there steps out to this range.
   //
   // Pattern matches yomotsu/camera-controls and Autodesk Viewer.
-  /** Minimum phi angle. Top preset uses this — keeps phi off the +Y pole. */
+  /** Minimum phi angle for orbiting — keeps phi off the +Y pole. */
   MIN_PHI: 0.01,
-  /** Maximum phi angle. Bottom preset uses this — keeps phi off the −Y pole. */
+  /** Maximum phi angle for orbiting — keeps phi off the −Y pole. */
   MAX_PHI: Math.PI - 0.01,
   /** Sin phi threshold for pole detection */
   POLE_THRESHOLD: 0.05,
@@ -86,10 +86,11 @@ export const CAMERA_CONSTANTS = {
 
 export const PIPELINE_CONSTANTS = {
   // Buffer layout (bytes) - must match WGSL shader expectations.
-  // 56 floats: viewProj(16)+model(16)+baseColor(4)+metallicRoughness/pad(4)+
-  // sectionPlane(4)+flags(4)+clipBoxMin(4)+clipBoxMax(4) = 224 bytes.
+  // 60 floats: viewProj(16)+model(16)+baseColor(4)+metallicRoughness/pad(4)+
+  // sectionPlane(4)+flags(4)+clipBoxMin(4)+clipBoxMax(4)+quantParams(4)+
+  // RTE view-projection(16)+drawable high/low(8) = 336 bytes.
   /** Total uniform buffer size */
-  UNIFORM_BUFFER_SIZE: 224,
+  UNIFORM_BUFFER_SIZE: 336,
   /** Byte offset for flags in uniform buffer */
   FLAGS_BYTE_OFFSET: 176,
 

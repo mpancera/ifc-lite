@@ -22,14 +22,26 @@ import { buildReferenceIndex } from './referenceIndex';
  * This is the room when one enclosed the placement, else the storey.
  */
 export function overlayContainerOf(view: MutablePropertyView, expressId: number): number | undefined {
-  for (const entity of view.getNewEntities()) {
-    if (entity.type !== 'IfcRelContainedInSpatialStructure') continue;
+  const containerIn = (entity: { type: string; attributes: readonly unknown[] } | null): number | undefined => {
+    if (!entity || entity.type !== 'IfcRelContainedInSpatialStructure') return undefined;
     const related = entity.attributes[4];
     const structure = entity.attributes[5];
-    if (!Array.isArray(related) || typeof structure !== 'string') continue;
-    if (!related.includes(`#${expressId}`)) continue;
+    if (!Array.isArray(related) || typeof structure !== 'string') return undefined;
+    if (!related.includes(`#${expressId}`)) return undefined;
     const containerId = Number(structure.replace('#', ''));
     return Number.isNaN(containerId) ? undefined : containerId;
+  };
+  // The builder writes the containment right after the element, so look at the
+  // ids allocated since it first: creating an element stays proportional to
+  // what it appended, not to all authoring so far (#6760).
+  const next = view.peekNextExpressId();
+  for (let id = expressId + 1; id < next; id++) {
+    const found = containerIn(view.getNewEntity(id));
+    if (found !== undefined) return found;
+  }
+  for (const entity of view.getNewEntities()) {
+    const found = containerIn(entity);
+    if (found !== undefined) return found;
   }
   return undefined;
 }

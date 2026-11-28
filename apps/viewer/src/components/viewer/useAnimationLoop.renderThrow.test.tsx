@@ -23,7 +23,7 @@ import assert from 'node:assert/strict';
 import { useRef } from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { Renderer } from '@ifc-lite/renderer';
+import type { Renderer, RenderOptions } from '@ifc-lite/renderer';
 import { useAnimationLoop, type UseAnimationLoopParams } from './useAnimationLoop.js';
 
 /**
@@ -68,11 +68,13 @@ interface FakeRendererState {
    * render(), so a frame that throws spends the request on the way in.
    */
   renderRequested: boolean;
+  animating?: boolean;
+  frames?: RenderOptions[];
 }
 
 function fakeRenderer(state: FakeRendererState): Renderer {
   const camera = {
-    update: () => false,
+    update: () => state.animating ?? false,
     getRotation: () => ({ azimuth: 0, elevation: 0 }),
     getPosition: () => ({ x: 0, y: 0, z: 0 }),
     getDistance: () => 10,
@@ -80,20 +82,26 @@ function fakeRenderer(state: FakeRendererState): Renderer {
   const scene = {
     hasQueuedMeshes: () => false,
     hasResidencyRestoreWork: () => false,
+    getColorOverrides: () => null,
   };
   return {
     getCamera: () => camera,
     getScene: () => scene,
-    getGPUDevice: () => ({}),
+    // No device: the frame pacer (#5865, covered in useAnimationLoop.gpuBacklog.test.tsx)
+    // never engages, so these tests can step frames synchronously.
+    getGPUDevice: () => null,
     getPipeline: () => ({}),
     peekRenderRequest: () => state.renderRequested,
     consumeRenderRequest: () => { state.renderRequested = false; },
     requestRender: () => { state.renderRequested = true; },
     clearCaches: () => {},
     getModelBounds: () => null,
-    render: () => {
+    getFrameStats: () => null,
+    renderWithResult: (options: RenderOptions) => {
+      state.frames?.push(options);
       state.renderCalls++;
       if (state.renderThrows) throw new Error(SAFARI_LOST);
+      return true;
     },
   } as unknown as Renderer;
 }
@@ -121,6 +129,7 @@ function baseParams(renderer: Renderer): UseAnimationLoopParams {
     clearColorRef: ref<[number, number, number, number]>([1, 1, 1, 1]),
     visualEnhancementRef: ref({ enabled: false }),
     environmentRef: ref({}),
+    sunShadowsRef: ref(null),
     sectionPlaneRef: ref({ axis: 'y', position: 0, enabled: false, flipped: false }),
     sectionRangeRef: ref<{ min: number; max: number } | null>(null),
     selectedEntityIdsRef: ref<Set<number> | undefined>(undefined),
@@ -270,5 +279,44 @@ describe('useAnimationLoop — a throwing render() must not kill the loop (#2229
     step();
 
     assert.equal(state.renderCalls, callsAtUnmount, 'no frames after unmount');
+  });
+});
+
+// #6709: exercise the mounted canonical loop, including frames after dirty flags
+// were consumed. A setter/readback test would miss a stranded low-resolution frame.
+describe('navigation resolution lifecycle (#6709)', () => {
+  it('keeps gestures and inertia reduced, renders a sharp settle frame, then goes idle', async () => {
+    const state: FakeRendererState = { renderCalls: 0, renderThrows: false, renderRequested: true, frames: [] };
+    const params = baseParams(fakeRenderer(state));
+    await mount(params);
+    step();
+    params.isInteractingRef.current = true;
+    step();
+    params.isInteractingRef.current = false;
+    state.animating = true;
+    step();
+    state.animating = false;
+    step(); // No release request: the loop must itself request restoration.
+    step();
+    assert.equal(state.renderCalls, 4, 'one idle, gesture, inertia and settle frame; no idle spin');
+    assert.deepEqual(state.frames?.map(f => [f.isInteracting, f.maxPixelRatio]), [
+      [false, undefined], [true, 1], [true, 1], [false, undefined],
+    ]);
+  });
+  it('restores sharpness after a gesture with no inertia and after a camera-only tween', async () => {
+    const state: FakeRendererState = { renderCalls: 0, renderThrows: false, renderRequested: false, frames: [] };
+    const params = baseParams(fakeRenderer(state));
+    await mount(params);
+    params.isInteractingRef.current = true;
+    step();
+    params.isInteractingRef.current = false;
+    step();
+    state.animating = true;
+    step();
+    state.animating = false;
+    step();
+    step();
+    assert.equal(state.renderCalls, 4);
+    assert.deepEqual(state.frames?.map(f => f.maxPixelRatio), [1, undefined, 1, undefined]);
   });
 });

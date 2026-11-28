@@ -17,7 +17,7 @@
 //! [`orient_mesh_outward`] recovers face adjacency (the meshes are flat-shaded,
 //! so positions are welded by a fine grid), propagates a consistent orientation
 //! across shared edges per connected component, then flips each CLOSED component
-//! so its signed volume is positive (outward). An OPEN component (a TIN /
+//! so its signed volume is positive (outward); a closed component nested an odd number of closed shells deep AND authored opposite to its innermost container (a revolved bore) is kept wound into its cavity, so its volume is negative (#7755); a same-wound nested solid is a separate solid and is made positive. An OPEN component (a TIN /
 //! `SurfaceModel` sheet with boundary edges — no meaningful enclosed volume) or a
 //! non-manifold / non-orientable one is left untouched: re-orienting it is
 //! ambiguous and would reverse authored normals. The winding-invariant geometry
@@ -29,42 +29,18 @@
 //! pipeline that knows. [`orient_mesh_outward_verdict`] hands that verdict back
 //! (it used to be computed and dropped on the floor); see [`OrientVerdict`].
 
+use crate::kernel::signed_volume::signed_volume6_of;
 use crate::Mesh;
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 
-/// Incident-triangle record for one undirected welded edge. A boundary edge has
-/// one incident triangle and a manifold edge exactly two, so the two triangle
-/// slots are stored INLINE — replacing the old per-edge heap `Vec<usize>`, which
-/// allocated ~1.5 tiny Vecs per triangle and dominated the allocator churn of
-/// this pass on mesh-heavy models. `count` is the TRUE incidence; a value > 2
-/// marks a non-manifold edge, which the propagation skips before ever reading
-/// the slots. Only the first two triangles are consulted, stored in ascending
-/// scan order (identical to the old `Vec` push order), so the BFS traversal —
-/// and therefore every flip decision — is byte-identical.
-#[derive(Clone, Copy, Default)]
-struct EdgeInc {
-    tris: [usize; 2],
-    count: u32,
-}
-
-impl EdgeInc {
-    #[inline]
-    fn push(&mut self, t: usize) {
-        if (self.count as usize) < 2 {
-            self.tris[self.count as usize] = t;
-        }
-        self.count += 1;
-    }
-
-    /// The incident triangles the propagation may consult (the first two, in
-    /// push order). Only reached for `count` of 1 or 2 — the `count > 2` path
-    /// `continue`s first — so this yields exactly what the old `Vec` iterated.
-    #[inline]
-    fn incident(&self) -> &[usize] {
-        &self.tris[..(self.count as usize).min(2)]
-    }
-}
+#[path = "mesh_orient_adjacency.rs"]
+mod adjacency;
+#[path = "mesh_orient_nesting.rs"]
+mod nesting;
+use adjacency::EdgeAdjacency;
+#[cfg(test)]
+use adjacency::EdgeInc;
 
 /// Vertex weld grid scale (reciprocal of a 10 µm grid, i.e. positions are
 /// quantized to `round(v * WELD_SCALE)`): fine enough not to merge distinct
@@ -76,7 +52,7 @@ const WELD_SCALE: f64 = 1.0e5;
 
 /// Per-worker reusable scratch for [`orient_mesh_outward`], cleared (never freed)
 /// between meshes. The pass runs once per assembled submesh (~109k times on a
-/// mesh-heavy model), so each fresh call's two `FxHashMap`s + six `Vec`s were
+/// mesh-heavy model), so each fresh call's two `FxHashMap`s + the traversal `Vec`s were
 /// ~4-6% of busy CPU on pure-brep/steel models; pooling makes it allocate-once,
 /// clear-many. BYTE-IDENTICAL: neither map is ever iterated — both are only
 /// `.entry()`-inserted (order fixed by the deterministic scan) and keyed-looked-up,
@@ -88,11 +64,15 @@ struct OrientScratch {
     vid_of: FxHashMap<(i64, i64, i64), u32>,
     vpos: Vec<[f64; 3]>,
     corner: Vec<u32>,
-    edge_tris: FxHashMap<(u32, u32), EdgeInc>,
+    edge_tris: EdgeAdjacency,
     flip: Vec<bool>,
     visited: Vec<bool>,
     comp: Vec<usize>,
     stack: Vec<usize>,
+    /// Triangles of every closed orientable component, back to back, and each
+    /// component's span, signed volume and authored winding in it (#7755).
+    closed_tris: Vec<usize>,
+    closed_spans: Vec<nesting::ClosedSpan>,
 }
 
 thread_local! {
@@ -159,19 +139,26 @@ impl OrientVerdict {
     /// The one shape for which a divergence-theorem volume over this mesh is
     /// trustworthy: EXACTLY ONE closed, orientable component.
     ///
-    /// Why not the weaker "all components closed". This pass flips each closed
-    /// component so its OWN signed volume is positive. For two disjoint solids
-    /// that is right and the sum is their combined volume. But for a solid whose
-    /// cavity is modelled as a second, inner shell it is wrong in the worst way:
-    /// the cavity shell is also made positive, so the sum reports
-    /// `outer + cavity` where the true volume is `outer − cavity`. Telling those
-    /// two arrangements apart needs a containment test this pass does not do —
-    /// and the orientation it already applied has destroyed the sign that would
-    /// have distinguished them. One component has no such ambiguity.
+    /// Why not the weaker "all components closed". Two disjoint solids sum
+    /// correctly, and a solid whose cavity is a second, inner shell now does
+    /// too (the orienter faces a shell nested an odd number of levels deep INTO
+    /// its cavity, #7755), but a volume consumer still has to know which
+    /// arrangement it has, and the containment is not part of this verdict.
+    /// One component has no such ambiguity.
     #[inline]
     pub fn is_single_closed_solid(&self) -> bool {
         self.components == 1 && self.all_closed && self.all_orientable
     }
+}
+
+/// A coordinate's weld-grid key: `(v * WELD_SCALE).round() as i64`, bit for
+/// bit, via `grid::round_i64` instead of a libm `round` call per coordinate.
+#[inline(always)]
+fn grid_key(v: f32) -> i64 {
+    // Test builds count the coordinates quantised without libm.
+    #[cfg(test)]
+    tests::note_inline_round();
+    crate::grid::round_i64(v as f64 * WELD_SCALE)
 }
 
 /// Orient every connected component of `mesh` consistently and outward, in place.
@@ -211,19 +198,23 @@ pub fn orient_mesh_outward_verdict(mesh: &mut Mesh) -> OrientVerdict {
     // splits struct fields) let a read-only closure borrow one buffer while another
     // is mutated.
     let mut scratch = ORIENT_SCRATCH.with(|c| c.borrow_mut().take()).unwrap_or_default();
-    let OrientScratch { vid_of, vpos, corner, edge_tris, flip, visited, comp, stack } =
-        &mut scratch;
-    // Clear (retain capacity) before use so no stale data leaks in; the reserves
-    // restore the original `with_capacity` sizing.
-    vid_of.clear();
-    vid_of.reserve(vertex_count);
+    let OrientScratch { vid_of, vpos, corner, edge_tris, flip, visited, comp, stack, closed_tris, closed_spans } = &mut scratch;
+    // Empty before use so no stale data leaks in; the reserves restore the
+    // original `with_capacity` sizing. `reset_for` keeps the reset O(this mesh)
+    // after an outsized one (the map is never iterated, so its size is unseen).
+    crate::scratch_map::reset_for(vid_of, vertex_count);
     vpos.clear();
     corner.clear();
     corner.reserve(mesh.indices.len());
 
-    // Weld positions -> welded vertex id; record the welded vid of every corner.
-    let q = |v: f32| (v as f64 * WELD_SCALE).round() as i64;
+    // #3988: indexed corners repeatedly use the SAME source vertex. Reuse its
+    // welded id, keeping the original first-corner insertion order. Sparse meshes
+    // use corner slots instead, so scratch never exceeds the old corner budget.
+    let indexed = vertex_count < mesh.indices.len();
+    if indexed { corner.resize(vertex_count, u32::MAX); }
+    let q = grid_key;
     for &idx in &mesh.indices {
+        if indexed && corner[idx as usize] != u32::MAX { continue; }
         let b = idx as usize * 3;
         let key = (
             q(mesh.positions[b]),
@@ -239,22 +230,30 @@ pub fn orient_mesh_outward_verdict(mesh: &mut Mesh) -> OrientVerdict {
             ]);
             id
         });
-        corner.push(vid);
+        if indexed { corner[idx as usize] = vid; } else { corner.push(vid); }
     }
-    let tv = |t: usize| [corner[3 * t], corner[3 * t + 1], corner[3 * t + 2]];
+    let tv = |t: usize| std::array::from_fn::<_, 3, _>(|k| {
+        corner[if indexed { mesh.indices[3 * t + k] as usize } else { 3 * t + k }]
+    });
+
+    // A triangle's welded corners, wound as `flipped` says.
+    let corners = |t: usize, flipped: bool| {
+        let v = tv(t);
+        let (i0, i1, i2) = if flipped { (v[0], v[2], v[1]) } else { (v[0], v[1], v[2]) };
+        [vpos[i0 as usize], vpos[i1 as usize], vpos[i2 as usize]]
+    };
 
     // Undirected welded edge -> incident triangles. >2 incident ⇒ non-manifold.
     // A closed manifold has ~1.5 edges per triangle; reserve to skip rehashing.
-    edge_tris.clear();
-    edge_tris.reserve(ntri * 2);
+    edge_tris.reset(ntri);
     for t in 0..ntri {
         let v = tv(t);
-        for &(a, b) in &[(v[0], v[1]), (v[1], v[2]), (v[2], v[0])] {
+        for (slot, &(a, b)) in [(v[0], v[1]), (v[1], v[2]), (v[2], v[0])].iter().enumerate() {
             if a == b {
                 continue; // welded-degenerate edge
             }
             let key = if a < b { (a, b) } else { (b, a) };
-            edge_tris.entry(key).or_default().push(t);
+            edge_tris.push(key, t * 3 + slot);
         }
     }
 
@@ -263,6 +262,7 @@ pub fn orient_mesh_outward_verdict(mesh: &mut Mesh) -> OrientVerdict {
     flip.resize(ntri, false);
     visited.clear();
     visited.resize(ntri, false);
+    closed_tris.clear(); closed_spans.clear();
     let mut any_flip = false;
     // The verdict, folded across components as they are discovered. `all_*`
     // start TRUE because they are conjunctions over the components; a mesh with
@@ -303,22 +303,16 @@ pub fn orient_mesh_outward_verdict(mesh: &mut Mesh) -> OrientVerdict {
             } else {
                 [(v[0], v[1]), (v[1], v[2]), (v[2], v[0])]
             };
-            for &(a, b) in &dirs {
+            for (slot, &(a, b)) in dirs.iter().enumerate() {
                 if a == b {
                     continue;
                 }
                 let key = if a < b { (a, b) } else { (b, a) };
-                let inc = &edge_tris[&key];
-                if inc.count != 2 {
-                    closed = false; // boundary (1) or non-manifold (>2) edge
-                }
-                if inc.count > 2 {
-                    continue; // ambiguous — don't propagate across a non-manifold edge
-                }
-                for &nb in inc.incident() {
-                    if nb == t {
-                        continue;
-                    }
+                let original_slot = if flip[t] { 2 - slot } else { slot };
+                let (closed_edge, neighbors) = edge_tris.neighbors(key, t * 3 + original_slot);
+                if !closed_edge { closed = false; }
+                for nb in neighbors {
+                    if nb == usize::MAX || nb == t { continue; }
                     // A consistent neighbour must traverse this edge as (b, a). Its
                     // UNFLIPPED winding has (a, b) iff it must flip to do so.
                     let nv = tv(nb);
@@ -345,25 +339,15 @@ pub fn orient_mesh_outward_verdict(mesh: &mut Mesh) -> OrientVerdict {
             continue;
         }
 
-        // Flip the whole CLOSED component outward (positive signed volume).
-        let mut vol6 = 0.0f64;
-        for &t in comp.iter() {
-            let v = tv(t);
-            let (i0, i1, i2) = if flip[t] {
-                (v[0], v[2], v[1])
-            } else {
-                (v[0], v[1], v[2])
-            };
-            let (a, b, c) = (vpos[i0 as usize], vpos[i1 as usize], vpos[i2 as usize]);
-            vol6 += a[0] * (b[1] * c[2] - b[2] * c[1]) + a[1] * (b[2] * c[0] - b[0] * c[2])
-                + a[2] * (b[0] * c[1] - b[1] * c[0]);
-        }
-        if vol6 < 0.0 {
-            for &t in comp.iter() {
-                flip[t] = !flip[t];
-            }
-        }
+        // Which way it faces is decided once all are known (`nesting`); only its
+        // signed volume (AABB-centred, `kernel::signed_volume`) is taken here.
+        let vol6 = signed_volume6_of(comp.iter().map(|&t| corners(t, flip[t])));
+        closed_spans.push(nesting::ClosedSpan::new(closed_tris.len(), comp, flip, vol6));
+        closed_tris.extend_from_slice(comp);
     }
+
+    // Face every closed component outward; a nested cavity faces inward (#7755).
+    nesting::face_closed_components(closed_spans, closed_tris, flip, &corners);
 
     for t in 0..ntri {
         if flip[t] {

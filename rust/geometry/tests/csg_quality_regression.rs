@@ -16,7 +16,8 @@
 //! `issue_635_*` suites already). They are a single, fast cross-fixture
 //! gate: process a handful of known-CSG-heavy elements from AC20-FZK-Haus,
 //! duplex, advanced_model, and the issue-#780 bath, and assert that the
-//! emitted geometry has no extreme-aspect-ratio sliver triangles.
+//! emitted geometry has no sliver triangles the element's own shape does not
+//! call for, by the mesh census's measure (longest edge over altitude, 50:1).
 //!
 //! If this test starts failing, the CSG output-quality pipeline has
 //! regressed somewhere — most likely the coplanar consolidation or the
@@ -25,14 +26,21 @@
 use ifc_lite_core::{build_entity_index, EntityDecoder, EntityScanner};
 use ifc_lite_geometry::{propagate_voids_to_parts, GeometryRouter, Mesh};
 use rustc_hash::FxHashMap;
-use std::path::PathBuf;
 
+/// Load a fixture, distinguishing a genuinely absent file from a broken
+/// read. `NotFound` is the fresh-clone case (`pnpm fixtures` not run yet):
+/// skip unless `IFC_LITE_REQUIRE_FIXTURES=1`, in which case panic naming
+/// the path, matching every other skip-on-missing test in this crate. Any
+/// other `io::Error` (permission denied, corrupt read, ...) means the
+/// environment is broken rather than merely missing an optional download,
+/// so it panics unconditionally regardless of the flag.
 fn fixture(rel: &str) -> Option<String> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join(rel);
-    std::fs::read_to_string(p).ok()
+    // The one committed (non-catalogued) input lives under the repo root.
+    if let Some(committed) = rel.strip_prefix("rust/") {
+        let path = ifc_lite_testkit::repo_root().join("rust").join(committed);
+        return Some(std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display())));
+    }
+    ifc_lite_testkit::fixture_text(rel)
 }
 
 fn void_index(content: &str) -> FxHashMap<u32, Vec<u32>> {
@@ -65,6 +73,13 @@ fn process(content: &str, host_id: u32, use_voids: bool) -> Option<Mesh> {
     } else {
         router.process_element(&entity, &mut decoder).ok()
     }
+}
+
+/// Triangle shape by the mesh census's measure: longest edge over the altitude
+/// onto it, a sliver past 50:1. The spikes of #780 radiated from the cavity rim
+/// across a host face and read in the hundreds to thousands.
+fn shape(mesh: &Mesh) -> ifc_lite_testkit::mesh::TriangleShape {
+    ifc_lite_testkit::mesh::triangle_shape(&mesh.positions, &mesh.indices)
 }
 
 /// Aspect ratio of the worst triangle in a mesh (longest edge / shortest
@@ -113,11 +128,30 @@ fn worst_aspect_ratio(mesh: &Mesh) -> (f32, usize) {
 
 fn assert_no_spikes(mesh: &Mesh, label: &str) {
     assert!(!mesh.indices.is_empty(), "{}: empty mesh", label);
-    let (worst, n) = worst_aspect_ratio(mesh);
+    let shape = shape(mesh);
     assert_eq!(
-        n, 0,
+        shape.slivers, 0,
         "{}: {} spike triangles (aspect > 50:1, worst {:.1}:1) — CSG output quality regressed",
-        label, n, worst
+        label, shape.slivers, shape.max_aspect
+    );
+}
+
+/// A wall's opening cut adds no spike: the cut wall has no more slivers than
+/// the wall had before it, and none thinner than its thinnest.
+///
+/// Not "no sliver at all": a wall 115 mm thick and 5.9 m long has a top face
+/// that is 51:1 however it is split, so the uncut wall is the bar. A spike
+/// from the cut is one more sliver, or a thinner one.
+fn assert_cut_adds_no_spikes(content: &str, host_id: u32, label: &str) {
+    let cut = process(content, host_id, true).unwrap_or_else(|| panic!("process {label}"));
+    let uncut = process(content, host_id, false).unwrap_or_else(|| panic!("process {label} uncut"));
+    assert!(!cut.indices.is_empty(), "{label}: empty mesh");
+    let (cut, uncut) = (shape(&cut), shape(&uncut));
+    assert!(
+        cut.slivers <= uncut.slivers && cut.max_aspect <= uncut.max_aspect * (1.0 + 1e-6),
+        "{label}: the cut left {} slivers (worst {:.1}:1) where the uncut wall has {} (worst {:.1}:1) \
+         — CSG output quality regressed",
+        cut.slivers, cut.max_aspect, uncut.slivers, uncut.max_aspect
     );
 }
 
@@ -174,7 +208,7 @@ fn find_first_entity_id(content: &str, type_upper: &str) -> Option<u32> {
 /// consolidation should deliver both watertight AND sliver-free.
 #[test]
 fn fzk_haus_gable_wall_60012_is_watertight() {
-    let Some(content) = fixture("tests/models/ara3d/AC20-FZK-Haus.ifc") else {
+    let Some(content) = fixture("ara3d/AC20-FZK-Haus.ifc") else {
         return;
     };
     let mesh = process(&content, 60012, true).expect("process wall #60012");
@@ -189,7 +223,7 @@ fn fzk_haus_gable_wall_60012_is_watertight() {
 
 #[test]
 fn fzk_haus_gable_wall_67828_is_watertight() {
-    let Some(content) = fixture("tests/models/ara3d/AC20-FZK-Haus.ifc") else {
+    let Some(content) = fixture("ara3d/AC20-FZK-Haus.ifc") else {
         return;
     };
     let mesh = process(&content, 67828, true).expect("process wall #67828");
@@ -204,19 +238,14 @@ fn fzk_haus_gable_wall_67828_is_watertight() {
 
 // ────────────────────── known-bad: opening-cut path ───────────────────
 //
-// The next three elements all currently emit sliver triangles that the
-// CSG output-quality guard would flag, but the slivers come from BEFORE
-// the CSG kernel — either the input profile tessellation
-// (multi-extrusion windows) or the rectangular-box cut helper
-// (`cut_multiple_rectangular_openings` in `router/voids.rs`), which has
-// its own clipping that bypasses `ClippingProcessor::consolidate_coplanar`.
-//
+// The duplex window below still emits sliver triangles that the CSG
+// output-quality guard flags, but the slivers come from BEFORE the CSG
+// kernel: the input profile tessellation of overlapping narrow extrusions.
 // Identical spike counts appeared under both deleted legacy kernels (BSP and
-// Manifold), confirming the kernel is not at fault. Left `#[ignore]`d with the
-// current spike-count baseline so the suite documents the issue and
-// becomes a tightening gate when the upstream paths are cleaned up
-// (mirrors the same convention as the `#[ignore]`d cases in
-// `wall_opening_cut_regression.rs`).
+// Manifold), confirming the kernel is not at fault. It stays `#[ignore]`d so
+// the suite documents the issue and becomes a tightening gate when the
+// upstream path is cleaned up. The two advanced_model walls that used to sit
+// here no longer produce spikes and run as ordinary tests.
 
 /// duplex window #6426 — multi-extrusion (frame + sash + glass + lining)
 /// produces 72 spike triangles (worst ratio ~392:1) on both kernels.
@@ -225,37 +254,40 @@ fn fzk_haus_gable_wall_67828_is_watertight() {
 #[test]
 #[ignore = "pre-existing: 72 spike tris from multi-extrusion profile tessellation, not the CSG kernel"]
 fn duplex_window_6426_no_spike_triangles() {
-    let Some(content) = fixture("tests/models/ara3d/duplex.ifc") else {
+    let Some(content) = fixture("ara3d/duplex.ifc") else {
         return;
     };
     let mesh = process(&content, 6426, false).expect("process window #6426");
     assert_no_spikes(&mesh, "duplex window #6426");
 }
 
-/// advanced_model wall #553010 — 8 spike tris (worst ~198:1), produced
-/// in the rectangular-opening clip path.
+/// advanced_model wall #553010 — 8 spike tris (worst ~198:1 by edge ratio),
+/// produced in the rectangular-opening clip path. Now 2 slivers at 248:1
+/// where the uncut wall has 6 at 278:1.
 #[test]
-#[ignore = "pre-existing: 8 spike tris from `cut_multiple_rectangular_openings`, not the CSG kernel"]
 fn advanced_model_wall_553010_no_spike_triangles() {
-    let Some(content) = fixture("tests/models/ara3d/advanced_model.ifc") else {
+    let Some(content) = fixture("ara3d/advanced_model.ifc") else {
         return;
     };
+    assert_cut_adds_no_spikes(&content, 553010, "advanced_model wall #553010");
+    // And the original bar, by edge ratio: none past 50:1 (worst 41.7:1).
     let mesh = process(&content, 553010, true).expect("process wall #553010");
-    assert_no_spikes(&mesh, "advanced_model wall #553010");
+    let (worst, spikes) = worst_aspect_ratio(&mesh);
+    assert_eq!(spikes, 0, "advanced_model wall #553010: {spikes} triangles past 50:1 by edge ratio, worst {worst:.1}:1");
 }
 
 /// advanced_model wall #612315 — 23 spike tris with worst ratio
-/// ~3077:1 (!). The opening-cut path leaves long degenerate slivers in
-/// the MW 11.5 wall. Worth fixing as a separate follow-up, but unrelated
-/// to the CSG kernel and to this audit.
+/// ~3077:1 (!). The opening-cut path left long degenerate slivers in
+/// the MW 11.5 wall. Now 56 triangles, the count IfcOpenShell 0.8.2 gives,
+/// with 4 slivers at 51:1: the two halves of the 115 mm top face either side
+/// of the slot, which are that thin however they are split. The uncut wall
+/// has 4 at 103:1.
 #[test]
-#[ignore = "pre-existing: 23 spike tris (worst 3077:1) in the opening-cut helper, not the CSG kernel"]
 fn advanced_model_wall_612315_no_spike_triangles() {
-    let Some(content) = fixture("tests/models/ara3d/advanced_model.ifc") else {
+    let Some(content) = fixture("ara3d/advanced_model.ifc") else {
         return;
     };
-    let mesh = process(&content, 612315, true).expect("process wall #612315");
-    assert_no_spikes(&mesh, "advanced_model wall #612315");
+    assert_cut_adds_no_spikes(&content, 612315, "advanced_model wall #612315");
 }
 
 // ─────────────────────────────── bath #780 ────────────────────────────

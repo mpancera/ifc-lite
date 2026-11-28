@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import { entityClip } from './section-exclusions.js';
 /**
  * Raycasting utilities extracted from Scene.
  *
@@ -9,17 +10,25 @@
  * No dependency on Scene internal state.
  */
 
+import type { MeshData } from '@ifc-lite/geometry';
 import type { Vec3, PickClipState } from './types.js';
 import { MathUtils } from './math.js';
+import { reportableItemId } from './pick-resolve.js';
+import { boxBehindPlane, clipRayByPlanes, extraPlanesClip } from './extra-clip-planes.js';
 
 export interface BoundingBox {
   min: Vec3;
   max: Vec3;
 }
 
-/** True when `clip` actually clips anything (a section plane or an enabled box). */
+/** The `MeshData` fields the triangle raycast reads. Taken from the real type,
+ *  never re-spelled inline: an ad-hoc structural copy is why `geometryItemId`
+ *  was invisible here in the first place (#2985), after two hand-widenings. */
+export type RaycastPiece = Pick<MeshData, 'positions' | 'indices' | 'entityIds' | 'modelIndex' | 'origin' | 'geometryItemId'>;
+
+/** True when `clip` actually clips anything (a section plane, an extra plane or an enabled box). */
 export function clipIsActive(clip?: PickClipState | null): boolean {
-  return !!(clip && (clip.sectionPlane || clip.clipBox?.enabled));
+  return !!(clip && (clip.sectionPlane || clip.extraPlanes?.length || clip.clipBox?.enabled));
 }
 
 /**
@@ -34,6 +43,7 @@ export function pointClipped(clip: PickClipState | null | undefined, x: number, 
     const side = sp.flipped ? -1 : 1;
     if ((x * sp.normal[0] + y * sp.normal[1] + z * sp.normal[2] - sp.distance) * side > 0) return true;
   }
+  if (extraPlanesClip(clip?.extraPlanes, x, y, z)) return true;
   const b = clip?.clipBox;
   if (b?.enabled) {
     if (x < b.min[0] || y < b.min[1] || z < b.min[2] || x > b.max[0] || y > b.max[1] || z > b.max[2]) return true;
@@ -49,15 +59,8 @@ export function pointClipped(clip: PickClipState | null | undefined, x: number, 
  */
 export function boxFullyClipped(clip: PickClipState | null | undefined, box: BoundingBox): boolean {
   const sp = clip?.sectionPlane;
-  if (sp) {
-    const side = sp.flipped ? -1 : 1;
-    const [nx, ny, nz] = sp.normal;
-    // Corner that minimises (dot(p,n) - dist)*side: per axis pick min/max by sign.
-    const px = nx * side >= 0 ? box.min.x : box.max.x;
-    const py = ny * side >= 0 ? box.min.y : box.max.y;
-    const pz = nz * side >= 0 ? box.min.z : box.max.z;
-    if ((px * nx + py * ny + pz * nz - sp.distance) * side > 0) return true; // every corner cut
-  }
+  if (sp && boxBehindPlane(box, sp)) return true;
+  if (clip?.extraPlanes?.some((plane) => boxBehindPlane(box, plane))) return true;
   const b = clip?.clipBox;
   if (b?.enabled) {
     if (
@@ -225,27 +228,10 @@ export function clippedBoxEntryDistance(
   if (!iv) return null;
   let { tmin, tmax } = iv;
 
-  // Section plane: visible where f(t) = (dot(P(t),n) - dist) * side <= 0.
-  const sp = clip?.sectionPlane;
-  if (sp) {
-    const side = sp.flipped ? -1 : 1;
-    const [nx, ny, nz] = sp.normal;
-    const f0 = (rayOrigin.x * nx + rayOrigin.y * ny + rayOrigin.z * nz - sp.distance) * side;
-    const slope = (rayDir.x * nx + rayDir.y * ny + rayDir.z * nz) * side;
-    if (Math.abs(slope) < 1e-12) {
-      if (f0 > 0) return null; // ray runs parallel on the cut-away side
-    } else {
-      const tCross = -f0 / slope;
-      if (slope > 0) {
-        if (tmin > tCross) return null;       // whole interval cut away
-        if (tmax > tCross) tmax = tCross;      // visible only up to the plane
-      } else {
-        if (tmax < tCross) return null;
-        if (tmin < tCross) tmin = tCross;      // visible only beyond the plane
-      }
-    }
-    if (tmax < tmin) return null;
-  }
+  // Section plane(s): visible where f(t) = (dot(P(t),n) - dist) * side <= 0, for every plane.
+  const interval = clipRayByPlanes(clip, rayOrigin, rayDir, tmin, tmax);
+  if (!interval) return null;
+  ({ tmin, tmax } = interval);
   return tmin < 0 ? 0 : tmin;
 }
 
@@ -291,6 +277,13 @@ export interface RaycastHit {
   expressId: number;
   distance: number;
   modelIndex?: number;
+  /** Source `MeshData.geometryItemId` of the piece hit, so the CPU pick fallback
+   *  reports the same representation item the GPU path does rather than
+   *  collapsing to the product on any model over the pick-mesh budget (#2985).
+   *  `undefined` where there is nothing to report: this is an internal hit, so
+   *  `PickingManager` is what turns that into a missing KEY on the PickResult.
+   *  Which absences, and why: {@link PickResult.geometryItemId}. */
+  geometryItemId?: number;
 }
 
 /**
@@ -336,7 +329,7 @@ export function raycastBoundingBoxes(
     // Entry into the VISIBLE part of the box, so a box clipped (fully or
     // partially) by the section plane / crop box can't win the pick.
     const tNear = hasClip
-      ? clippedBoxEntryDistance(rayOrigin, rayDir, rayDirInv, rayDirSign, bbox, clip)
+      ? clippedBoxEntryDistance(rayOrigin, rayDir, rayDirInv, rayDirSign, bbox, entityClip(clip, expressId))
       : rayBoxDistance(rayOrigin, rayDirInv, rayDirSign, bbox);
     if (tNear !== null && tNear < closestDistance) {
       closestDistance = tNear;
@@ -351,7 +344,7 @@ export function raycastBoundingBoxes(
  *
  * @param rayOrigin  - Ray origin in world space
  * @param rayDir     - Normalised ray direction
- * @param meshDataMap - Map expressId -> MeshData[] (positions, normals, indices, entityIds)
+ * @param meshDataMap - Map expressId -> the {@link RaycastPiece} slice of each MeshData
  * @param getEntityBoundingBox - Function to obtain/cache a bounding box per entity
  * @param hiddenIds  - Optional set of hidden expressIds to skip
  * @param isolatedIds - Optional set; when non-null only these expressIds are tested
@@ -361,7 +354,7 @@ export function raycastTriangles(
   rayDir: Vec3,
   rayDirInv: Vec3,
   rayDirSign: [number, number, number],
-  meshDataMap: Map<number, { positions: Float32Array; indices: Uint32Array; entityIds?: Uint32Array; modelIndex?: number; origin?: [number, number, number] }[]>,
+  meshDataMap: Map<number, RaycastPiece[]>,
   getEntityBoundingBox: (expressId: number) => BoundingBox | null,
   hiddenIds?: Set<number>,
   isolatedIds?: Set<number> | null,
@@ -381,7 +374,7 @@ export function raycastTriangles(
     const bbox = getEntityBoundingBox(expressId);
     if (!bbox) continue;
     // Skip entities the section plane / crop box fully hides.
-    if (hasClip && boxFullyClipped(clip, bbox)) continue;
+    if (hasClip && boxFullyClipped(entityClip(clip, expressId), bbox)) continue;
 
     if (rayIntersectsBox(rayOrigin, rayDirInv, rayDirSign, bbox)) {
       candidates.push(expressId);
@@ -397,6 +390,9 @@ export function raycastTriangles(
       const positions = piece.positions;
       const indices = piece.indices;
       const pieceEntityIds = piece.entityIds;
+      // A piece holding entities beyond `expressId` — the map key, who this hit
+      // attributes to — has an id belonging to none of them. Shared with hydration.
+      const pieceItemId = reportableItemId(piece, expressId);
 
       // Positions are in the element's local frame (world = origin + position).
       // Rather than offset every triangle vertex, shift the ray origin into the
@@ -429,13 +425,13 @@ export function raycastTriangles(
           // through to the nearest VISIBLE surface behind the cut. World hit =
           // rayOrigin + t*rayDir (the local-frame origin offset cancels).
           if (hasClip && pointClipped(
-            clip,
+            entityClip(clip, expressId),
             rayOrigin.x + t * rayDir.x,
             rayOrigin.y + t * rayDir.y,
             rayOrigin.z + t * rayDir.z,
           )) continue;
           closestDistance = t;
-          closestHit = { expressId, distance: t, modelIndex: piece.modelIndex };
+          closestHit = { expressId, distance: t, modelIndex: piece.modelIndex, geometryItemId: pieceItemId };
         }
       }
     }

@@ -38,6 +38,7 @@ import { formatRoomArea } from '@/lib/plan/roomLabels';
 import { toGlobalIdFromModels } from '@/store/globalId';
 import { useViewerStore } from '@/store';
 import { toast } from '@/components/ui/toast';
+import { mutationPermission, mutationDenialMessage } from '@/store/mutation-permission';
 
 export interface RoomTriagePanelProps {
   onClose: () => void;
@@ -160,7 +161,11 @@ export function RoomTriagePanel({ onClose }: RoomTriagePanelProps): React.ReactE
     if (!modelId) return;
     ensureMutationView(modelId);
     if (!removeEntity(modelId, finding.record.expressId)) {
-      toast.error('Der Raum liess sich nicht entfernen.');
+      // Say why: upstream refuses deletes outside Edit mode, which is not a failure.
+      const permission = mutationPermission(useViewerStore.getState(), modelId);
+      toast.error(permission.allowed
+        ? 'Der Raum liess sich nicht entfernen.'
+        : `Der Raum liess sich nicht entfernen: ${mutationDenialMessage(permission.reason)}.`);
       return;
     }
     toast.success(`Raum verworfen — mit Strg+Z zurückholbar.`);

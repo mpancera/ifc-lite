@@ -42,7 +42,7 @@ export function hasStandardGeoreferencing(
   return Boolean(
     georef
     && georef.source !== 'siteLocation'
-    && georef.projectedCRS?.name
+    && hasDeclaredCrs(georef.projectedCRS)
     && georef.mapConversion
     // PR #1965 review: presence alone isn't enough -- a malformed
     // IfcMapConversion with a NaN eastings/northings/orthogonalHeight must
@@ -98,7 +98,7 @@ export function supportsStandardGeoreferencing(
   if (
     georef
     && georef.source !== 'siteLocation'
-    && (georef.projectedCRS?.name || georef.mapConversion)
+    && (hasDeclaredCrs(georef.projectedCRS) || georef.mapConversion)
   ) {
     return true;
   }
@@ -106,6 +106,7 @@ export function supportsStandardGeoreferencing(
 }
 
 export function getIfcLengthUnitScale(dataStore: IfcDataStore | null | undefined): number {
+  if (dataStore?.lengthUnitScale !== undefined) return dataStore.lengthUnitScale;
   if (!dataStore?.source?.length || !dataStore.entityIndex) return 1;
   return extractLengthUnitScale(dataStore.source, dataStore.entityIndex);
 }
@@ -149,7 +150,29 @@ export function mergeProjectedCRS(
     mapZone: mutations?.mapZone ?? original?.mapZone,
     mapUnit,
     mapUnitScale,
+    // An edited Name replaces the authored CRS, including its WKT definition
+    // (which would otherwise stay authoritative in `resolveProjection`).
+    ...(mutations?.name === undefined && original?.wellKnownText ? { wellKnownText: original.wellKnownText } : {}),
+    ...(mutations?.name === undefined && original?.kind ? { kind: original.kind } : {}),
   };
+}
+
+/**
+ * Whether the Cesium globe can be offered for a model. A named CRS is enough:
+ * a missing conversion can still be added in the editor. A CRS defined only
+ * by IfcWellKnownText is read-only and places nothing without its parsed
+ * coordinate operation, so it needs one.
+ */
+export function offersCesium(
+  georef: Pick<GeoreferenceInfo, 'source' | 'projectedCRS' | 'mapConversion'> | null | undefined,
+): boolean {
+  if (!georef || georef.source === 'siteLocation') return false;
+  return Boolean(georef.projectedCRS?.name?.trim() || (hasDeclaredCrs(georef.projectedCRS) && georef.mapConversion));
+}
+
+/** A CRS is declared by a non-blank Name or, in IFC4X3, an IfcWellKnownText (WHERE NameOrWKT). */
+export function hasDeclaredCrs(crs: Pick<ProjectedCRS, 'name' | 'wellKnownText'> | null | undefined): boolean {
+  return Boolean(crs?.name?.trim() || crs?.wellKnownText?.trim());
 }
 
 /**
@@ -174,6 +197,8 @@ export function mergeMapConversion(
   if (!original && !mutations) return undefined;
   return {
     id: original?.id ?? 0,
+    // Still a pure translation only while nothing was edited.
+    ...(original?.operation && !mutations ? { operation: original.operation } : {}),
     sourceCRS: original?.sourceCRS ?? 0,
     targetCRS: original?.targetCRS ?? 0,
     eastings: finiteOr0(mutations?.eastings ?? original?.eastings),
@@ -182,6 +207,9 @@ export function mergeMapConversion(
     xAxisAbscissa: mutations?.xAxisAbscissa ?? original?.xAxisAbscissa,
     xAxisOrdinate: mutations?.xAxisOrdinate ?? original?.xAxisOrdinate,
     scale: mutations?.scale ?? original?.scale,
+    factorX: mutations?.factorX ?? original?.factorX,
+    factorY: mutations?.factorY ?? original?.factorY,
+    factorZ: mutations?.factorZ ?? original?.factorZ,
   };
 }
 
@@ -242,4 +270,14 @@ export function getEffectiveGeoreference(
     source: original?.source,
     transformMatrix: original?.transformMatrix,
   };
+}
+
+/** Display suffix for the map unit declared by an IfcProjectedCRS. */
+export function mapUnitDisplaySuffix(unit: string | undefined): 'm' | 'mm' | 'ftUS' | 'ft' {
+  const mapUnit = unit?.toUpperCase();
+  if (!mapUnit) return 'm';
+  if (/^MILLI(?:METRE|METER)S?$/.test(mapUnit)) return 'mm';
+  if (mapUnit.includes('US') && mapUnit.includes('FOOT')) return 'ftUS';
+  if (mapUnit.includes('FOOT') || mapUnit.includes('FEET')) return 'ft';
+  return 'm';
 }

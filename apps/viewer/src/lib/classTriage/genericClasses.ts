@@ -40,7 +40,7 @@
  * modelling, not about which schema version the exporter happened to write.
  */
 
-import { ENTITIES_IFC4X3 } from '@ifc-lite/data';
+import { getEntitiesIfc4x3 } from '@ifc-lite/data';
 
 /** Why a class is being asked about. */
 export type GenericClassKind = 'abstract' | 'intermediate';
@@ -72,10 +72,10 @@ function schema(): Tree {
   if (tree) return tree;
   const byName = new Map<string, { parent?: string; abstract: boolean }>();
   const subtypeCount = new Map<string, number>();
-  for (const entity of ENTITIES_IFC4X3) {
+  for (const entity of getEntitiesIfc4x3()) {
     byName.set(entity.name, { parent: entity.parent, abstract: entity.abstract });
   }
-  for (const entity of ENTITIES_IFC4X3) {
+  for (const entity of getEntitiesIfc4x3()) {
     if (!entity.parent || DEPRECATED_CASE_SUBTYPE.test(entity.name)) continue;
     subtypeCount.set(entity.parent, (subtypeCount.get(entity.parent) ?? 0) + 1);
   }
@@ -123,7 +123,7 @@ export function genericClassKind(entity: string): GenericClassKind | null {
  */
 export function candidateSubclasses(entity: string): string[] {
   const children = new Map<string, string[]>();
-  for (const item of ENTITIES_IFC4X3) {
+  for (const item of getEntitiesIfc4x3()) {
     if (!item.parent || DEPRECATED_CASE_SUBTYPE.test(item.name)) continue;
     const list = children.get(item.parent);
     if (list) list.push(item.name);

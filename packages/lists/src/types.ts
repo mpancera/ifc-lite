@@ -2,11 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-/**
- * Types for the Lists feature - configurable property tables from IFC data
- */
-
+/** Types for the Lists feature - configurable property tables from IFC data */
+import type { ListModelTagScope } from './model-tag-scope.js';
+import type { DiscoveredColumns } from './result-types.js';
 import type { IfcTypeEnum, PropertySet, QuantitySet } from '@ifc-lite/data';
+import type { CapturedEntityScope, CustomGroupingRef, FilterGroup, ListConditionOperator, ListConditionSource } from '@ifc-lite/rules';
 
 // ============================================================================
 // Data Provider Interface
@@ -33,6 +33,8 @@ import type { IfcTypeEnum, PropertySet, QuantitySet } from '@ifc-lite/data';
  * ```
  */
 export interface ListDataProvider {
+  /** Resolve pinned membership to this model's local ids; required for scoped definitions. */
+  resolveCapturedScope?(scope: CapturedEntityScope, modelId: string): ReadonlySet<number>;
   /** Get all entity IDs matching the given IFC type */
   getEntitiesByType(type: IfcTypeEnum): number[];
 
@@ -93,6 +95,8 @@ export interface ListDataProvider {
   getClassifications?(expressId: number): ListClassificationRef[];
   /** Building-storey name the element belongs to, or '' when unplaced. */
   getStoreyName?(expressId: number): string;
+  /** The element's `IfcRelAggregates` parents (whole of which it is a part), for `inherit: 'aggregation'` (#5433). */
+  getAggregateParents?(expressId: number): number[];
   /** Name of the element's IMMEDIATE spatial container — the direct
    *  IfcRelContainedInSpatialStructure parent (a storey, or for infrastructure
    *  the IfcBridgePart / IfcRoadPart / IfcSpatialZone it sits in). Falls back to
@@ -123,6 +127,10 @@ export interface ListDataProvider {
   /** IFC `PredefinedType` enum token (e.g. "FLOOR", "FLOORING"), or '' when
    *  the element has none. Used by the `PredefinedType` attribute column. */
   getEntityPredefinedType?(expressId: number): string;
+  /** IFC `LongName` (e.g. an IfcSpace's room name "Schlafzimmer" next to its
+   *  number "4" in `Name`), or '' when the class declares no LongName or it is
+   *  unset. Used by the `LongName` attribute column (issue #7385). */
+  getEntityLongName?(expressId: number): string;
   /**
    * `LongName` — the readable label on spatial elements and groups
    * (`IfcSpace`, `IfcZone`, `IfcBuildingStorey`, …), where `Name` is usually
@@ -191,6 +199,11 @@ export interface ListDataProvider {
     homeValue: number | null;
     shares: Array<{ zoneName: string; value: number }>;
   } | null;
+  /** Rendered triangle occurrences for an entity; null means geometry is unavailable, not empty (#10370). */
+  getTriangleCount?(expressId: number): number | null;
+  getWorldPosition?(expressId: number): { x: number; y: number; z: number } | null; // World Coordinate, PROJECT-space not map/WGS84 (#3671)
+  /** The element's group in a custom grouping (#8425), the same first match the `customGrouping` rule applies; `null` when in none. */
+  getCustomGroup?(expressId: number, grouping: CustomGroupingRef): string | null;
 }
 
 /** A classification reference exposed to the list engine (code + name). */
@@ -218,13 +231,27 @@ export interface ListDefinition {
    * Optional explicit element scope — a snapshot of express IDs per model
    * (e.g. from a search/filter result), keyed by modelId. When present, the
    * list targets exactly these elements per model and `entityTypes` is
-   * ignored; `conditions` still apply on top. Keyed by model so federated
+   * ignored; filter groups still apply on top. Keyed by model so federated
    * snapshots don't over-select when local express IDs collide across files.
    */
   expressIdsByModel?: Record<string, number[]>;
+  /** Durable captured population, intersected with the list's existing source criteria. */
+  capturedScope?: CapturedEntityScope;
 
-  /** Optional property-based filter conditions */
-  conditions: PropertyCondition[];
+  /** Optional MODEL scope by model tag (#4215, `model-tag-scope.ts`); absent = every model. */
+  modelTagScope?: ListModelTagScope;
+
+  /** Canonical Rules filters for migrated and newly-authored lists. */
+  groups: FilterGroup[];
+
+  /** Flat predicates for provider-only `executeList` callers (the SDK). Saved
+   *  lists carry every predicate in `groups` instead (`listCondition`, #6190). */
+  legacyConditions?: PropertyCondition[];
+
+  /** Saved filters migration could not read (malformed, unknown operator or
+   *  source, a rule this build does not know). Kept visible; a list with any
+   *  cannot run until they are removed. */
+  unreadableConditions?: UnreadableListCondition[];
 
   /** Columns to display */
   columns: ColumnDefinition[];
@@ -282,13 +309,9 @@ export interface PropertyCondition {
    * - `zone` — a location-zone assignment (issue #1810); `psetName` holds the
    *   zone-SET id, `propertyName` selects `Zone` (default, the zone name —
    *   or the straddled zones joined when the element crosses a boundary) or
-   *   `Straddles` (boolean)
-   * - `group` — IFC group membership via `IfcRelAssignsToGroup`;
-   *   `propertyName` narrows the class (`Zone` (default) | `System` | `All`).
-   *   Not to be confused with `zone` above: these are real IFC entities that
-   *   survive an export, those are viewer-side boxes
+   *   `Straddles` (boolean); `geometry` is the World Coordinate (#3671) — `propertyName` selects axis `X` (default) | `Y` | `Z`, or `TriangleCount` (unitless occurrence count)
    */
-  source: 'attribute' | 'property' | 'quantity' | 'material' | 'classification' | 'spatial' | 'model' | 'zone' | 'group' | 'colour';
+  source: ListConditionSource;
   /** Property set name (for property/quantity sources); the zone-SET id for `zone`. */
   psetName?: string;
   /** Attribute / property / quantity name, the spatial level for `spatial`
@@ -299,30 +322,31 @@ export interface PropertyCondition {
   propertyName: string;
   operator: ConditionOperator;
   value: string | number | boolean;
+  /** property/quantity only: `'aggregation'` takes the nearest aggregate parent's value when the element has none (#5433). Type values are always read. */
+  inherit?: 'type' | 'aggregation';
 }
 
-export type ConditionOperator =
-  | 'equals'
-  | 'notEquals'
-  | 'contains'
-  | 'gt'
-  | 'lt'
-  | 'gte'
-  | 'lte'
-  | 'exists'
-  /**
-   * The value is absent — no property, no material, no zone membership.
-   *
-   * `exists` alone could not express it: it is a pure presence check and the
-   * builder hides the value field for it, so "which rooms have no zone yet"
-   * — the question you ask right after assigning some — had no way to be
-   * written down.
-   */
-  | 'notExists';
+/** One vocabulary with the Rules `listCondition` adapter (#6190), which carries these predicates in groups. */
+export type ConditionOperator = ListConditionOperator;
+
+export type UnreadableListCondition =
+  | { condition: PropertyCondition; reason: 'unsupported-source' | 'unsupported-attribute' | 'name-pattern' | 'inherit' | 'operator' | 'invalid-value' | 'mixed-groups' }
+  | { condition: unknown; reason: 'invalid-condition' };
 
 // ============================================================================
 // Column Definitions
 // ============================================================================
+
+/** Every `ColumnDefinition.source`; the saved-list reader validates against this one list. */
+export const COLUMN_SOURCES = [
+  'attribute', 'property', 'quantity', 'material', 'classification', 'spatial', 'model', 'zone', 'geometry', 'customGrouping',
+  // Fork additions: `group` is IFC group membership (`IfcRelAssignsToGroup`),
+  // multi-valued and joined like `material`; `propertyName` narrows the class
+  // (`Zone` (default) | `System` | `All`). `colour` has no value in the model:
+  // the engine returns null and the viewer paints the row's lens colour.
+  'group', 'colour',
+] as const;
+export type ColumnSource = (typeof COLUMN_SOURCES)[number];
 
 export interface ColumnDefinition {
   id: string;
@@ -330,23 +354,14 @@ export interface ColumnDefinition {
    * Where the column value comes from. `material` / `classification` are
    * multi-valued (joined with ", "); `spatial` is a spatial-container name at
    * the level named by `propertyName` (`Container` | `Storey` (default) |
-   * `Building` | `Site` | `Project`); `model` is the source model / file name
-   * (federation identity); `zone` is a location-zone assignment (issue
-   * #1810) — see `PropertyCondition.source` for the exact `psetName`/
-   * `propertyName` contract, shared verbatim between conditions and columns.
-   *
-   * `group` is IFC group membership (`IfcRelAssignsToGroup`), multi-valued and
-   * joined like `material`; `propertyName` narrows the class (`Zone` (default)
-   * | `System` | `All`).
-   *
-   * `colour` has no value in the model at all: it paints the row's lens colour
-   * as the cell background. The engine returns null for it and the viewer fills
-   * it in, because a colour is a property of the current *view*, not of the
-   * element — two people looking at the same list under different lenses are
-   * both right.
+   * `Building` | `Site` | `Project`); `model`/`zone`/`geometry` — see
+   * `PropertyCondition.source` for the exact `psetName`/`propertyName`
+   * contract, shared verbatim between conditions and columns.
+   * `customGrouping` (column only, #8425) is the element's group: the
+   * grouping's name in `propertyName`, its id hint in `psetName`.
    */
-  source: 'attribute' | 'property' | 'quantity' | 'material' | 'classification' | 'spatial' | 'model' | 'zone' | 'group' | 'colour';
-  /** For property: pset name. For quantity: qset name. For zone: the zone-SET id. */
+  source: ColumnSource;
+  /** For property: pset name. For quantity: qset name. For zone: the zone-SET id. For customGrouping: the grouping id hint. */
   psetName?: string;
   /** Attribute / property / quantity name, the spatial level for `spatial`
    *  (`Container` | `Storey` | `Building` | `Site` | `Project`), the zone
@@ -378,103 +393,7 @@ export interface ColumnDefinition {
 // List Execution Results
 // ============================================================================
 
-export interface ListResult {
-  columns: ColumnDefinition[];
-  rows: ListRow[];
-  /** Total matched entities before pagination */
-  totalCount: number;
-  /** Execution time in ms */
-  executionTime: number;
-  /** Per-group breakdown — present only when `grouping` is configured. */
-  groups?: ListGroup[];
-  /** Whole-result aggregates (count + per-column sums). Present when
-   *  `grouping` is configured. */
-  summary?: ListSummary;
-}
+export type { ListResult, ListGroup, ListSummary, ListScheduleRow, ListRow, CellValue, DiscoveredColumns } from './result-types.js';
 
-/** One group in a grouped list result. With multi-criteria grouping (issue
- *  #1790) groups are emitted as a FLAT pre-order list: each parent group is
- *  immediately followed by its subgroups (`level` gives the nesting depth). */
-export interface ListGroup {
-  /** Opaque unique group key - the JSON encoding of `path` (see
-   *  `groupPathKey`), collision-free even when a model-derived label contains
-   *  separator-like characters. */
-  key: string;
-  /** Display label for the group header (this level's value only). */
-  label: string;
-  /** Number of rows in the group (the Count aggregate, issue #1790). */
-  count: number;
-  /** columnId → summed numeric value, for the configured sum columns. */
-  sums: Record<string, number>;
-  /** 0-based nesting depth (0 = outermost grouping column). Always emitted by
-   *  `summariseListRows`; optional for backward type compatibility. */
-  level?: number;
-  /** Group-by labels from the outermost level down to this group. */
-  path?: string[];
-}
-
-/** Whole-result aggregates. */
-export interface ListSummary {
-  count: number;
-  sums: Record<string, number>;
-}
-
-/**
- * One row of the `schedule` presentation (issue #1790 round 2) — a single
- * group-value tuple (a leaf group combination) carrying its Count and sums,
- * projected from the LEAF entries of `ListGroup[]` (see `toScheduleRows`).
- * Unlike `ListGroup`, a schedule row is never a parent: there is exactly one
- * row per distinct combination of group-by values, matching Bonsai's
- * "Building | Storey | Type | Count" schedule format.
- */
-export interface ListScheduleRow {
-  /** Collision-free key — `groupPathKey(path)`, matching the source `ListGroup.key`. */
-  key: string;
-  /** Group-by values, outermost first — one per active grouping level. */
-  path: string[];
-  /** Count aggregate: number of matched elements in this group combination. */
-  count: number;
-  /** columnId -> summed numeric value, for the configured sum columns. */
-  sums: Record<string, number>;
-}
-
-export interface ListRow {
-  /** Entity reference for 3D selection */
-  entityId: number;
-  modelId: string;
-  /** Column values in same order as ListResult.columns */
-  values: CellValue[];
-}
-
-export type CellValue = string | number | boolean | null;
-
-// ============================================================================
-// Column Discovery
-// ============================================================================
-
-/** Available columns discovered from the model */
-export interface DiscoveredColumns {
-  attributes: string[];
-  properties: Map<string, string[]>; // psetName -> propNames[]
-  quantities: Map<string, string[]>; // qsetName -> quantNames[]
-}
-
-// ============================================================================
-// Built-in Attributes
-// ============================================================================
-
-export const ENTITY_ATTRIBUTES = [
-  'Name',
-  // Rooms carry their readable label here ("Büro") while `Name` holds the
-  // number ("01"). A room list without it is a list of numbers.
-  'LongName',
-  'GlobalId',
-  'Class',
-  'Type',
-  'Description',
-  'ObjectType',
-  'PredefinedType',
-  'Tag',
-] as const;
-
-export type EntityAttribute = typeof ENTITY_ATTRIBUTES[number];
+/* Result row and schedule shapes live in result-types.ts so the persisted
+ * definition and provider contracts remain below the module-size limit. */

@@ -25,6 +25,7 @@ import {
   addViewpointToTopic,
   addTopicToProject,
   toARGBColor,
+  translateViewpoint,
   type BCFProject,
   type BCFTopic,
   type BCFHeaderFile,
@@ -70,6 +71,8 @@ export interface ClashBcfOptions {
   maxMembersPerTopic?: number;
   cameraDistanceFactor?: number;
   snapshotProvider?: (group: ClashGroup) => Promise<Uint8Array | undefined>;
+  /** Clash-bounds (render) frame -> IFC world, Z-up metres: `renderFrameWorldOffset(coordinateInfo)` from `@ifc-lite/geometry/world-frame` (#4806, #4879). */
+  worldOffset?: { x: number; y: number; z: number };
 }
 
 const DEFAULT_MAX_TOPICS = 1000;
@@ -168,7 +171,7 @@ function cameraForBounds(bounds: AABB, distanceFactor: number): ViewerCameraStat
 
 /** Count members by a string-valued key. */
 function tally(members: Clash[], pick: (c: Clash) => string): Record<string, number> {
-  const out: Record<string, number> = {};
+  const out: Record<string, number> = Object.create(null);
   for (const m of members) {
     const k = pick(m);
     out[k] = (out[k] ?? 0) + 1;
@@ -245,7 +248,7 @@ function buildDescription(
  */
 function headerFilesForGroup(
   group: ClashGroup,
-  date: string,
+  date: string | undefined,
   modelNameOf?: (model: string) => string,
 ): BCFHeaderFile[] {
   const ids = unique(
@@ -301,13 +304,8 @@ async function buildTopicForGroup(
   const bounds = toViewerBounds(group.bounds);
   const snapshotData = opts.snapshotProvider ? await opts.snapshotProvider(group) : undefined;
 
-  const viewpoint = createViewpoint({
-    camera,
-    bounds,
-    selectedGuids,
-    coloredGuids,
-    snapshotData,
-  });
+  const localViewpoint = createViewpoint({ camera, bounds, selectedGuids, coloredGuids, snapshotData });
+  const viewpoint = opts.worldOffset ? translateViewpoint(localViewpoint, opts.worldOffset) : localViewpoint;
 
   addViewpointToTopic(topic, viewpoint);
   addTopicToProject(project, topic);

@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! #1623 Phase 2 don't-bake: proves the orphan-recovery fallback in
-//! `processor/instancing.rs::recover_orphan_occurrences` actually fires and
+//! `processor/instancing.rs::recover_occurrences_flat` actually fires and
 //! recovers geometry when the plan's designated TEMPLATE occurrence (the
 //! min-id `IfcMappedItem` for a repeated source) never materializes.
 //!
@@ -18,19 +18,22 @@
 //! `jobs::process_entity_job`). If the plan's chosen template id belongs to
 //! an `IfcWindow`/`IfcDoor` job the filter skips, that job's `EntityDecoder`
 //! path returns before the router ever sees mapped item — so
-//! `is_template` (`geometry/src/router/processing.rs`) is `item.id ==
+//! the template decision (`GeometryRouter::claim_template`) is `item.id ==
 //! template_item_id` for every SURVIVING occurrence too, and none of them
 //! is ever `true`. Every occurrence of that source becomes a don't-bake
 //! placeholder, `template_by_rep.get(&rep)` finds no non-empty template mesh,
-//! and the whole group must fall to `recover_orphan_occurrences` or its
+//! and the whole group must fall to `recover_occurrences_flat` or its
 //! geometry is silently dropped.
 //!
 //! Before this test, NO test in the suite exercised
-//! `recover_orphan_occurrences`: deleting its body (returning before the
+//! `recover_occurrences_flat`: deleting its body (returning before the
 //! bake loop, so every orphan occurrence is silently dropped) left all other
 //! processing tests green.
 
-use ifc_lite_processing::{OpeningFilterMode, ProcessingResult, StreamingOptions};
+use ifc_lite_processing::style::SpecularMaterial;
+use ifc_lite_processing::{
+    process, MeshData, OpeningFilterMode, ProcessingRequest, ProcessingResult, ProcessingSink,
+};
 
 /// The synthetic mapped-instances fixture (one `IfcRepresentationMap`
 /// instanced by 64 `IfcBuildingElementProxy` occurrences at distinct
@@ -53,22 +56,109 @@ fn fixture_with_template_owner_as_window() -> Vec<u8> {
 }
 
 fn run(content: &[u8], mode: OpeningFilterMode, enable_instancing: bool) -> ProcessingResult {
-    ifc_lite_processing::process_geometry_streaming_filtered_with_options(
+    process(
         content,
-        mode,
-        StreamingOptions {
-            enable_instancing,
-            ..StreamingOptions::default()
-        },
-        |_, _, _| {},
-        |_| {},
-        |_| {},
+        &ProcessingRequest::default().opening_filter(mode).instancing(enable_instancing),
+        &mut (),
     )
+}
+
+#[test]
+fn recovered_occurrences_are_announced_as_meshes_with_finishes_10995() {
+    #[derive(Default)]
+    struct Recorder {
+        pending: Vec<Option<SpecularMaterial>>,
+        meshes: Vec<(u32, Option<SpecularMaterial>)>,
+    }
+    impl ProcessingSink for Recorder {
+        fn on_finishes(&mut self, finishes: &[Option<SpecularMaterial>]) {
+            assert!(self.pending.is_empty());
+            self.pending.extend_from_slice(finishes);
+        }
+
+        fn on_batch(&mut self, meshes: &[MeshData], _processed: usize, _total: usize) {
+            assert_eq!(self.pending.len(), meshes.len());
+            self.meshes.extend(meshes.iter().map(|mesh| mesh.express_id).zip(self.pending.drain(..)));
+        }
+    }
+
+    let bytes = String::from_utf8(fixture_with_template_owner_as_window()).unwrap();
+    let styled = bytes.replace("ENDSEC;\nEND-ISO-10303-21;", r#"
+#900=IFCCOLOURRGB($,0.6,0.5,0.4);
+#901=IFCSURFACESTYLERENDERING(#900,$,$,$,$,$,IFCNORMALISEDRATIOMEASURE(0.75),$,.NOTDEFINED.);
+#902=IFCSURFACESTYLE($,.BOTH.,(#901));
+#903=IFCSTYLEDITEM(#12,(#902),$);
+ENDSEC;
+END-ISO-10303-21;"#);
+    let request = ProcessingRequest::full_pass().opening_filter(OpeningFilterMode::IgnoreAll).instancing(true);
+    let features = request.features.finishes(true);
+    let mut recorder = Recorder::default();
+    let result = process(styled.as_bytes(), &request.features(features), &mut recorder);
+    assert!(result.instances.is_empty(), "the filtered template forces flat recovery");
+    assert_eq!(result.meshes.len(), 63);
+    let expected = Some(SpecularMaterial { roughness: Some(0.25), metallic: None });
+    let meshes = result.meshes.iter().map(|mesh| (mesh.express_id, expected)).collect::<Vec<_>>();
+    assert_eq!(recorder.meshes, meshes, "recovered mesh finishes must follow result order");
 }
 
 /// Flat baseline (instancing off): #31 (now `IfcWindow`) is skipped by
 /// `IgnoreAll`, and the other 63 `IfcBuildingElementProxy` occurrences each
 /// materialize their own geometry normally.
+#[test]
+fn cancellation_suppresses_callbacks_for_recovered_meshes_10995() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    struct CancelAfterBatch {
+        cancelled: Arc<AtomicBool>,
+        batches: usize,
+        finish_batches: usize,
+    }
+
+    impl ProcessingSink for CancelAfterBatch {
+        fn on_finishes(&mut self, _finishes: &[Option<SpecularMaterial>]) {
+            self.finish_batches += 1;
+        }
+
+        fn on_batch(&mut self, meshes: &[MeshData], _processed: usize, _total: usize) {
+            if self.batches == 0 {
+                assert_eq!(meshes.len(), 1);
+                assert_eq!(meshes[0].express_id, 38);
+            }
+            self.batches += 1;
+            self.cancelled.store(true, Ordering::Relaxed);
+        }
+    }
+
+    // Give Proxy_1 a direct solid so a normal batch can request cancellation
+    // after the other occurrences have been collected in the same chunk.
+    let bytes = String::from_utf8(fixture_with_template_owner_as_window()).unwrap();
+    let bytes = bytes.replace(
+        "#33=IFCSHAPEREPRESENTATION(#5,'Body','MappedRepresentation',(#32));",
+        "#33=IFCSHAPEREPRESENTATION(#5,'Body','SweptSolid',(#12));",
+    );
+    let mut sink = CancelAfterBatch {
+        cancelled: Arc::new(AtomicBool::new(false)),
+        batches: 0,
+        finish_batches: 0,
+    };
+    let req = ProcessingRequest::full_pass()
+        .opening_filter(OpeningFilterMode::IgnoreAll)
+        .instancing(true)
+        .cancel(sink.cancelled.clone());
+    let features = req.features.finishes(true);
+    let result = process(bytes.as_bytes(), &req.features(features), &mut sink);
+    assert!(result.instances.is_empty());
+    assert_eq!(result.meshes.len(), 63, "collected geometry is still finalized");
+    assert_eq!(
+        (sink.batches, sink.finish_batches),
+        (1, 1),
+        "cancellation should suppress the recovered batch and its finishes",
+    );
+}
+
 #[test]
 fn flat_baseline_skips_the_window_and_meshes_the_rest() {
     let bytes = fixture_with_template_owner_as_window();
@@ -90,7 +180,7 @@ fn flat_baseline_skips_the_window_and_meshes_the_rest() {
 
 /// The regression gate: with instancing ON and the plan's template-owning job
 /// skipped by the opening filter, every surviving occurrence's geometry must
-/// still show up in the instanced result — via `recover_orphan_occurrences`
+/// still show up in the instanced result — via `recover_occurrences_flat`
 /// — not vanish. This is the exact production shape the doc comment claims
 /// is "effectively unreachable"; it is reachable, and today's fallback
 /// (correctly) recovers it. A regression that deletes the fallback body would
@@ -124,7 +214,7 @@ fn instancing_recovers_orphaned_occurrences_when_the_template_job_is_skipped() {
     assert_eq!(
         instanced_occurrence_ids, flat_occurrence_ids,
         "instancing must not silently drop occurrences when the plan's template-owning \
-         job is filtered out before the router ever sees it (recover_orphan_occurrences \
+         job is filtered out before the router ever sees it (recover_occurrences_flat \
          must fire for this source)"
     );
     assert!(

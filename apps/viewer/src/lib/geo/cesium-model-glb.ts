@@ -3,10 +3,24 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import type { GeometryResult, MeshData } from '@ifc-lite/geometry';
-import { isEntityVisible, DEFAULT_GHOST_ALPHA } from '@ifc-lite/renderer';
+import { isEntityVisible, DEFAULT_GHOST_ALPHA, DEFAULT_MIN_CAST_ALPHA } from '@ifc-lite/renderer';
 import { getGlobalRenderer } from '../../hooks/useBCF.js';
-import { withInstancedMeshes } from '../../utils/instancedExport.js';
+import { withInstancedMeshes, withReleasedExportGeometry, type ReleasedExportContext } from '../../utils/instancedExport.js';
+import { useViewerStore } from '@/store';
+import { modelIndices } from '../model-placement/model-indices';
 import { buildMergedGLB } from './cesium-glb.js';
+import { bakeGlobeTiles } from './globe-glb.js';
+import type { GeoMapping } from './geo-warp.js';
+import { displayedTranslation, type PlacementState } from '../model-placement/state';
+
+/** Locks, anchor picks and no-op previews do not alter the world-view GLB. */
+export function cesiumPlacementKey(state: PlacementState): string {
+  const ids = new Set([...state.placements.keys(), ...(state.preview?.modelIds ?? [])]);
+  return JSON.stringify([...ids].sort().flatMap((id) => {
+    const delta = displayedTranslation(state, id);
+    return delta.some((value) => value !== 0) ? [[id, delta]] : [];
+  }));
+}
 
 /** Everything the world-view GLB is a function of. */
 export interface CesiumModelGLBInput {
@@ -14,6 +28,7 @@ export interface CesiumModelGLBInput {
   /** Store counter for in-place mesh mutation (a gizmo move rewrites positions
    *  in the SAME arrays, moving no count). */
   geometryContentVersion: number;
+  placementKey?: string;
   /** Hide/isolate exactly as the renderer receives them, in federated global
    *  id space — the same space flat and instanced mesh ids use (#1912). */
   hiddenIds: ReadonlySet<number> | null | undefined;
@@ -36,12 +51,13 @@ export interface CesiumModelGLBInput {
 }
 
 /**
- * Cheap identity for the mesh set {@link buildCesiumModelGLB} would build from.
+ * Cheap identity for the mesh set {@link buildCesiumModelGLBParts} would build from.
  * O(1): the in-place-mutation counter, the flat mesh count, the scene's
  * instanced-entity census, and the visibility epoch.
  *
  * The overlay caches the built GLB and must not rebuild it on every camera or
- * placement change, but counts alone are not enough of a key. Three changes
+ * globe-anchor change, but counts alone are not enough of a key. Manual model
+ * placement is part of the GLB; its displayed-position key changes on moves. Three changes
  * slip past them:
  *
  *  - A geometry batch whose occurrences are ALL instanced adds no flat meshes,
@@ -52,15 +68,19 @@ export interface CesiumModelGLBInput {
  *  - Hiding or isolating changes which meshes belong in the GLB while every
  *    count above holds still. `visibilityVersion` catches that one.
  */
-export function cesiumModelGLBKey(input: CesiumModelGLBInput): string {
+export function cesiumModelGLBKey(input: CesiumModelGLBInput, globe?: CesiumGlobeBake | null): string {
   const instancedEntities = getGlobalRenderer()?.getScene()?.getInstancedEntityCount() ?? 0;
-  return [
+  const key = [
     input.geometryContentVersion,
+    input.placementKey ?? '[]',
     input.geometryResult.meshes.length,
     instancedEntities,
     input.visibilityVersion,
     input.ghostVersion,
   ].join(':');
+  // An Exact GLB is baked from the georeference, so a georeference change
+  // rebuilds it; an Anchor GLB keeps its key and only its matrix moves.
+  return globe ? `${key}:${globe.key}` : key;
 }
 
 /**
@@ -82,22 +102,89 @@ export function cesiumModelGLBKey(input: CesiumModelGLBInput): string {
  *    map. Both halves are now filtered with `isEntityVisible`, the same rule
  *    the flat and instanced draw paths answer with.
  *
- * `isPrimary` is `true` for `withInstancedMeshes` because — unlike the
+ * `withInstancedMeshes` gets `null` (no per-model filter) because — unlike the
  * per-model exporters that share it — the world view renders the whole merged
  * federation. Its mesh list already spans every loaded model, the scene only
  * holds templates for models still present (a hidden or removed model's are
  * torn down by `removeInstancedTemplatesForModel`, #2258), and shard entity ids
- * are re-homed onto their owning model's id space at upload (#1912).
+ * are re-homed onto their owning model's id space at upload (#1912) — every
+ * model's instanced occurrences belong in this merged view, not just the
+ * primary's (GPU instancing stopped being primary-only on 2026-08-06, #2255).
  */
-export function buildCesiumModelGLB(input: CesiumModelGLBInput): {
+/** A native Cesium Model has one shadow policy for all its primitives. */
+export interface CesiumModelGLBPart {
   glb: Uint8Array;
+  castsShadows: boolean;
+}
+
+/** An Exact-placement bake: the mapping and the plan key that identifies it. */
+export interface CesiumGlobeBake {
+  mapping: GeoMapping;
+  key: string;
+}
+
+/**
+ * Split by the same MATERIAL-alpha policy as the WebGPU shadow pass (#7562).
+ * Classify before ghost styling: X-Ray must not erase opaque wall shadows.
+ * Each canonical visible mesh belongs to exactly one part, including instanced
+ * occurrences and federated meshes; opaque window frames stay in the caster.
+ */
+export function buildCesiumModelGLBParts(input: CesiumModelGLBInput, globe?: CesiumGlobeBake | null, context?: ReleasedExportContext): {
+  parts: CesiumModelGLBPart[];
   key: string;
 } {
-  const key = cesiumModelGLBKey(input);
-  const complete = withInstancedMeshes(input.geometryResult, true);
-  const visible = filterVisibleMeshes(complete.meshes, input.hiddenIds, input.isolatedIds);
-  const shaded = applyGhostAlpha(visible, input.ghostExceptIds, input.selectedIds);
-  return { glb: buildMergedGLB(shaded), key };
+  const visible = prepareVisibleMeshes(input, context);
+  const casting: MeshData[] = [];
+  const receiving: MeshData[] = [];
+  for (const mesh of visible) {
+    if (!mesh.positions?.length || !mesh.indices?.length) continue;
+    ((mesh.color?.[3] ?? 1) >= DEFAULT_MIN_CAST_ALPHA ? casting : receiving).push(mesh);
+  }
+  const parts: CesiumModelGLBPart[] = [];
+  for (const [meshes, castsShadows] of [[casting, true], [receiving, false]] as const) {
+    if (!meshes.length) continue;
+    const styled = applyGhostAlpha(meshes, input.ghostExceptIds, input.selectedIds);
+    if (!globe) {
+      parts.push({ glb: buildMergedGLB(styled), castsShadows });
+      continue;
+    }
+    // Exact placement: one GLB per tile, positions in anchor ENU relative to the tile centre.
+    const tiles = bakeGlobeTiles(styled, globe.mapping);
+    if (!tiles) throw new Error('globe placement: the model could not be projected point by point');
+    for (const tile of tiles) parts.push({ glb: buildMergedGLB(tile.meshes, tile.translation), castsShadows });
+  }
+  return { parts, key: cesiumModelGLBKey(input, globe) };
+}
+
+/**
+ * The models a world-view build reads (#10264 r4647377537): the owners of the flat meshes in its (merged,
+ * visibility-filtered) geometry, plus any model with no flat meshes of its own (all-instanced), which the
+ * view may still show. A released model outside the view needs no readback, so its missing or incomplete
+ * backing cannot refuse or skew this build. `undefined` (unscoped, as before) when an owner cannot be told.
+ */
+export function cesiumModelScope(geometryResult: GeometryResult,
+  models: ReadonlyMap<string, { geometryResult?: { meshes: readonly MeshData[] } | null }> = useViewerStore.getState().models): string[] | undefined {
+  if (models.size === 0) return undefined;
+  const byIndex = new Map([...modelIndices(models as never)].map(([id, index]) => [index, id]));
+  const sole = models.size === 1 ? [...models.keys()][0] : undefined;
+  const scope = new Set<string>();
+  for (const mesh of geometryResult.meshes) {
+    const owner = mesh.modelIndex !== undefined ? byIndex.get(mesh.modelIndex) : sole;
+    if (owner === undefined) return undefined;
+    scope.add(owner);
+  }
+  for (const [id, model] of models) if (!model.geometryResult?.meshes.length) scope.add(id);
+  return [...scope];
+}
+
+/** Build the world-view GLB parts, reading back exactly the released models the view shows. */
+export function buildCesiumModelForView(input: CesiumModelGLBInput, globe?: CesiumGlobeBake | null): Promise<{ parts: CesiumModelGLBPart[]; key: string }> {
+  return withReleasedExportGeometry((context) => buildCesiumModelGLBParts(input, globe, context), cesiumModelScope(input.geometryResult));
+}
+
+function prepareVisibleMeshes(input: CesiumModelGLBInput, context?: ReleasedExportContext): MeshData[] {
+  const complete = withInstancedMeshes(input.geometryResult, null, context);
+  return filterVisibleMeshes(complete.meshes, input.hiddenIds, input.isolatedIds);
 }
 
 /**

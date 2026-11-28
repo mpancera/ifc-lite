@@ -1,0 +1,131 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/**
+ * WGSL half of the per-entity colour table (#6076; layout, anchor rule and
+ * memory bound in `entity-color-table.ts`, whose `lookupEntityColor` and
+ * `resolveLaneEntityId` are the CPU mirrors of the functions below).
+ *
+ * Inlined into main.wgsl.ts after the Uniforms struct and the colour-transfer
+ * helpers, so it reads `uniforms.overrideParams` and reuses `srgbToLinear`,
+ * `neutralCompress` and `linearToSrgb`. The table sits at group(1) binding 5,
+ * beside the lighting environment, because it is scene-global.
+ */
+import { ENTITY_COLOR_EMPTY_KEY, ENTITY_COLOR_HEADER_WORDS, OVERRIDE_PARAM_EMPHASIZE, OVERRIDE_PARAM_PAINT } from '../entity-color-table.js';
+import { PAINTED_DEPTH_NUDGE_BIT } from './depth-nudge.wgsl.js';
+
+export const entityColorTableWgsl = `
+        @binding(5) @group(1) var<storage, read> entityColorTable: array<u32>;
+        const ENTITY_COLOR_EMPTY: u32 = ${ENTITY_COLOR_EMPTY_KEY}u;
+        const ENTITY_COLOR_HEADER: u32 = ${ENTITY_COLOR_HEADER_WORDS}u;
+        const OVERRIDE_PAINT: u32 = ${OVERRIDE_PARAM_PAINT}u;
+        const OVERRIDE_EMPHASIZE: u32 = ${OVERRIDE_PARAM_EMPHASIZE}u;
+        // Declared here, not beside nudgedClipZ: the unbiased depth prepass replaces that block.
+        const PAINTED_DEPTH_NUDGE_BIT: u32 = ${PAINTED_DEPTH_NUDGE_BIT}u;
+
+        fn entityColorSlotHash(key: u32) -> u32 {
+          var h = key;
+          h = h ^ (h >> 16u);
+          h = h * 0x85ebca6bu;
+          h = h ^ (h >> 13u);
+          h = h * 0xc2b2ae35u;
+          h = h ^ (h >> 16u);
+          return h;
+        }
+
+        // Full scene id behind a 24-bit lane, given the draw's smallest id.
+        fn resolveLaneEntityId(anchor: u32, lane: u32) -> u32 {
+          return anchor + ((lane - anchor) & 0x00FFFFFFu);
+        }
+
+        // The override colour for this fragment's entity; alpha < 0 = none.
+        fn entityOverrideColor(lane: u32) -> vec4<f32> {
+          if ((uniforms.overrideParams.y & OVERRIDE_PAINT) == 0u) {
+            return vec4<f32>(0.0, 0.0, 0.0, -1.0);
+          }
+          return entityOverrideById(resolveLaneEntityId(uniforms.overrideParams.x, lane));
+        }
+
+        // PAINTED_DEPTH_NUDGE_BIT when the scene id is in the table, whatever the draw: the
+        // batch, its selection redraw and the masks all rank it alike (depth-nudge.wgsl.ts).
+        fn paintedNudgeBit(id: u32) -> u32 {
+          return select(0u, PAINTED_DEPTH_NUDGE_BIT, entityColorSlot(id) != ENTITY_COLOR_NO_SLOT);
+        }
+
+        // The flat path's lane: a draw without an id anchor cannot name the entity (its
+        // colour is not painted either), so it ranks unpainted, as sectionEntityFromLane does.
+        fn lanePaintedNudgeBit(lane: u32) -> u32 {
+          if (uniforms.overrideParams.x == 0xFFFFFFFFu) { return 0u; }
+          return paintedNudgeBit(resolveLaneEntityId(uniforms.overrideParams.x, lane));
+        }
+
+        const ENTITY_COLOR_NO_SLOT: u32 = 0xFFFFFFFFu;
+
+        // The table slot holding a full scene id, or ENTITY_COLOR_NO_SLOT.
+        fn entityColorSlot(id: u32) -> u32 {
+          if (entityColorTable[2] == 0u) {
+            return ENTITY_COLOR_NO_SLOT;
+          }
+          let capacity = entityColorTable[0];
+          let maxProbe = entityColorTable[1];
+          let mask = capacity - 1u;
+          var slot = entityColorSlotHash(id) & mask;
+          for (var i = 0u; i <= maxProbe && i < capacity; i = i + 1u) {
+            let key = entityColorTable[ENTITY_COLOR_HEADER + slot];
+            if (key == id) {
+              return slot;
+            }
+            if (key == ENTITY_COLOR_EMPTY) {
+              break;
+            }
+            slot = (slot + 1u) & mask;
+          }
+          return ENTITY_COLOR_NO_SLOT;
+        }
+
+        // The one depth-nudge hash of a flat-path vertex (vs_main, shadeFlatVertex: the batch, the stream,
+        // the selection redraw and masks): an 8-bit Knuth hash of the entity lane, salted with the material
+        // colour byte (main.wgsl.ts vs_main explains why), plus the painted bit (depth-nudge.wgsl.ts).
+        fn flatNudgeHash(lane: u32) -> u32 {
+          let colorSalt = (lane >> 24u) * 2654435761u;
+          return ((((lane & 0x00FFFFFFu) ^ colorSalt) * 2654435761u) & 255u) | lanePaintedNudgeBit(lane);
+        }
+
+        // The instanced vertex's: the raw scene id (no second draw colour), plus the painted bit.
+        fn instanceNudgeHash(id: u32) -> u32 {
+          return (((id & 0x00FFFFFFu) * 2654435761u) & 255u) | paintedNudgeBit(id);
+        }
+
+        // The table's colour for a full scene id; alpha < 0 = none.
+        fn entityOverrideById(id: u32) -> vec4<f32> {
+          let slot = entityColorSlot(id);
+          if (slot == ENTITY_COLOR_NO_SLOT) {
+            return vec4<f32>(0.0, 0.0, 0.0, -1.0);
+          }
+          let c = entityColorTable[3] + slot * 4u;
+          return vec4<f32>(
+            bitcast<f32>(entityColorTable[c]),
+            bitcast<f32>(entityColorTable[c + 1u]),
+            bitcast<f32>(entityColorTable[c + 2u]),
+            bitcast<f32>(entityColorTable[c + 3u])
+          );
+        }
+
+        // Composite an override over the fragment's own encoded colour exactly
+        // as the retired equal-depth overlay pass blended it (src-alpha over
+        // the base draw): the override albedo lit by the same irradiance, no
+        // specular, the same roll-off and edge darkening, mixed by its alpha.
+        // Emphasized overrides are unlit, faintly faceted and opaque (#1277).
+        fn paintEntityOverride(base: vec4<f32>, ov: vec4<f32>, irradiance: vec3<f32>, N: vec3<f32>) -> vec4<f32> {
+          let albedo = srgbToLinear(ov.rgb);
+          var lit = albedo * irradiance;
+          var a = ov.a;
+          if ((uniforms.overrideParams.y & OVERRIDE_EMPHASIZE) != 0u) {
+            lit = albedo * (0.85 + 0.15 * abs(dot(N, normalize(vec3<f32>(0.3, 1.0, 0.2)))));
+            a = 1.0;
+          }
+          let encoded = linearToSrgb(clamp(neutralCompress(lit), vec3<f32>(0.0), vec3<f32>(1.0)));
+          return vec4<f32>(mix(base.rgb, encoded, a), a + (1.0 - a) * base.a);
+        }
+`;

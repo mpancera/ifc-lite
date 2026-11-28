@@ -7,7 +7,7 @@
  *
  * Single source of truth for the panels the unified sidebar switches
  * between, floats, and pops out. Each entry carries its id, labels, icon,
- * an activity-bar `group` (for divider clustering) and a `prefersWide`
+ * a task `group` shared by panel surfaces and a `prefersWide`
  * hint (code/table/timeline panels want a wider sidebar + bigger pop-out).
  *
  * The panel switcher, the activity bar, the keyboard shortcuts (Alt+N by
@@ -17,36 +17,14 @@
  * which keeps this module free of heavy imports.
  */
 
-import { Cable,
-  Info,
-  GitCompareArrows,
-  MessageSquare,
-  ClipboardCheck,
-  ClipboardList,
-  Boxes,
-  Blocks,
-  DoorClosed,
-  DoorOpen,
-  Palette,
-  Crosshair,
-  Puzzle,
-  Terminal,
-  CalendarRange,
-  Table2,
-  ListTree,
-  Users,
-  Cloud,
-  Layers as LayersIcon,
-  Box,
-  Ruler,
-  Workflow,
-  PackageCheck,
-  Radio,
-  type LucideIcon,
-} from 'lucide-react';
+// lucide only, never `@/icons`: the store imports this module, so it sits in
+// the viewer-embed bundle too, which has no unplugin-icons resolver for the
+// `~icons/viewer/*` virtual modules (#6315 broke that build).
+import { BarChart3, Blocks, Bot, Box, Boxes, Cable, ClipboardList, DoorClosed, DoorOpen, PackageCheck, Radio, CalendarRange, ChartLine, ClipboardCheck, ClipboardPen, Cloud, Coins, Crosshair, DraftingCompass, FileText, FileWarning, GitBranch, GitCompareArrows, History, Info, Link2, Layers as LayersIcon, ListChecks, ListTree, MessageSquare, Move3d, MoveVertical, Network, Paintbrush, Palette, PencilRuler, Presentation, Puzzle, Ruler, Scan, Sun, Table2, Terminal, type LucideIcon, Users, Workflow } from 'lucide-react';
+import type { TranslationKey } from '@/i18n';
 
 /** Every panel reachable from the unified sidebar rail. `properties` is the
- *  Information panel (the right pane's default fallback). Each panel opens in
+ *  Properties panel (the right pane's default fallback). Each panel opens in
  *  its home {@link WorkspacePanelDef.region} — `side` panels in the right pane,
  *  `bottom` panels (Script / Schedule / Lists) in the bottom strip, and the
  *  `left` panel (Hierarchy) in the left navigation slot (#1267). */
@@ -55,7 +33,7 @@ export type WorkspacePanelId =
   | 'properties'
   | 'compare'
   | 'bcf'
-  | 'ids'
+  | 'validation'
   | 'lens'
   | 'clash'
   | 'extensions'
@@ -66,7 +44,28 @@ export type WorkspacePanelId =
   | 'collab'
   | 'layers'
   | 'zones'
-  | 'exports'
+  | 'loadReport'
+  | 'appearance'
+  | 'charts'
+  | 'flow'
+  | 'document'
+  | 'cost'
+  | 'environment'
+  | 'drawing'
+  | 'pointclouds'
+  | 'measurements'
+  | 'placement'
+  | 'presentation'
+  | 'changes'
+  | 'model'
+  | 'changeSets'
+  | 'semantic'
+  | 'review'
+  | 'assistant'
+  | 'idsStudio'
+  | 'influx'
+  // Fork panels (appended, see WORKSPACE_PANELS).
+  | 'planProducts'
   | 'heights'
   | 'graph'
   | 'housekeeping'
@@ -77,8 +76,23 @@ export type WorkspacePanelId =
   | 'detectorGroups'
   | 'wiring';
 
-/** Activity-bar clustering — a divider is drawn whenever the group changes. */
-export type PanelGroup = 'navigate' | 'inspect' | 'review' | 'author' | 'work';
+/** Shared task grouping for the rail, ribbon panel browser, and palette commands (#5873). */
+export type PanelGroup = 'coordinate' | 'check' | 'quantify' | 'automate' | 'site' | 'author';
+
+export const PANEL_GROUPS = [
+  { id: 'coordinate', labelKey: 'shellChrome.panelGroups.coordinate', descriptionKey: 'shellChrome.panelGroups.coordinateDescription' },
+  { id: 'check', labelKey: 'shellChrome.panelGroups.check', descriptionKey: 'shellChrome.panelGroups.checkDescription' },
+  { id: 'quantify', labelKey: 'shellChrome.panelGroups.quantify', descriptionKey: 'shellChrome.panelGroups.quantifyDescription' },
+  { id: 'automate', labelKey: 'shellChrome.panelGroups.automate', descriptionKey: 'shellChrome.panelGroups.automateDescription' },
+  { id: 'site', labelKey: 'shellChrome.panelGroups.site', descriptionKey: 'shellChrome.panelGroups.siteDescription' },
+  { id: 'author', labelKey: 'shellChrome.panelGroups.author', descriptionKey: 'shellChrome.panelGroups.authorDescription' },
+] as const satisfies readonly { id: PanelGroup; labelKey: TranslationKey; descriptionKey: TranslationKey }[];
+
+export function panelGroupDefinition(id: PanelGroup): (typeof PANEL_GROUPS)[number] {
+  const definition = PANEL_GROUPS.find((group) => group.id === id);
+  if (!definition) throw new Error(`Unknown panel group ${id}`);
+  return definition;
+}
 
 /** Where a panel docks when opened from the rail. `left` is the dedicated
  *  hierarchy navigation slot, toggled via `leftPanelCollapsed` (#1267). */
@@ -86,12 +100,10 @@ export type PanelRegion = 'side' | 'bottom' | 'left';
 
 export interface WorkspacePanelDef {
   id: WorkspacePanelId;
-  /** Full label (tooltip / floating-window title / sidebar header). */
-  title: string;
-  /** Short label for menus / the switcher dropdown. */
-  short: string;
+  /** One name for every panel surface, translated at the rendering boundary. */
+  titleKey: TranslationKey;
   Icon: LucideIcon;
-  /** Activity-bar group used to cluster icons with dividers. */
+  /** Task group shared by the rail, ribbon, and panel commands. */
   group: PanelGroup;
   /** Home dock: the right pane (`side`) or the bottom strip (`bottom`). */
   region: PanelRegion;
@@ -101,100 +113,184 @@ export interface WorkspacePanelDef {
 
 export const WORKSPACE_PANELS: readonly WorkspacePanelDef[] = [
   // Alt+1..9 / Alt+0 — order frozen since #1200 for the first seven.
-  { id: 'properties', title: 'Information', short: 'Info', Icon: Info, group: 'inspect', region: 'side' },
-  { id: 'compare', title: 'Compare models', short: 'Compare', Icon: GitCompareArrows, group: 'inspect', region: 'side' },
-  { id: 'bcf', title: 'BCF issues', short: 'BCF', Icon: MessageSquare, group: 'review', region: 'side' },
-  { id: 'ids', title: 'IDS validation', short: 'IDS', Icon: ClipboardCheck, group: 'review', region: 'side' },
-  { id: 'lens', title: 'Lens rules', short: 'Lens', Icon: Palette, group: 'review', region: 'side' },
-  { id: 'clash', title: 'Clash detection', short: 'Clash', Icon: Crosshair, group: 'review', region: 'side' },
-  { id: 'extensions', title: 'Extensions', short: 'Extensions', Icon: Puzzle, group: 'author', region: 'side' },
+  { id: 'properties', titleKey: 'properties.panel.title', Icon: Info, group: 'coordinate', region: 'side' },
+  { id: 'compare', titleKey: 'comparePanel.panel.title', Icon: GitCompareArrows, group: 'check', region: 'side' },
+  { id: 'bcf', titleKey: 'bcf.panel.title', Icon: MessageSquare, group: 'check', region: 'side' },
+  // Renamed from 'ids' (#5138): the panel now covers both IDS validation and
+  // rule-based information validation. Supersede = delete — `migratePanelId`
+  // below is the only place the retired id is still spelled out.
+  { id: 'validation', titleKey: 'validationPanel.title', Icon: ClipboardCheck, group: 'check', region: 'side' },
+  { id: 'lens', titleKey: 'lensPanel.title', Icon: Palette, group: 'check', region: 'side' },
+  { id: 'clash', titleKey: 'clashPanel.title', Icon: Crosshair, group: 'check', region: 'side' },
+  { id: 'extensions', titleKey: 'extensionsFlavors.extensionsPanel.heading', Icon: Puzzle, group: 'automate', region: 'side' },
   // Bottom-strip panels — launched from the rail, open at the bottom by default.
-  { id: 'script', title: 'Script editor', short: 'Script', Icon: Terminal, group: 'work', region: 'bottom', prefersWide: true },
-  { id: 'gantt', title: 'Construction schedule', short: 'Schedule', Icon: CalendarRange, group: 'work', region: 'bottom', prefersWide: true },
-  { id: 'lists', title: 'Entity lists', short: 'Lists', Icon: Table2, group: 'work', region: 'bottom', prefersWide: true },
+  { id: 'script', titleKey: 'scriptPanel.header.defaultTitle', Icon: Terminal, group: 'automate', region: 'bottom', prefersWide: true },
+  { id: 'gantt', titleKey: 'workspacePanels.bottom.gantt', Icon: CalendarRange, group: 'quantify', region: 'bottom', prefersWide: true },
+  { id: 'lists', titleKey: 'lists.panel.title', Icon: Table2, group: 'quantify', region: 'bottom', prefersWide: true },
   // Left-slot nav panel (#1267), APPENDED so the frozen Alt+1..0 mapping above
   // is untouched (it gets no Alt shortcut). Its default *display* position is the
   // top of the rail (see DEFAULT_ORDER in sidebarSlice); the activity bar toggles
   // its left slot via `leftPanelCollapsed` rather than the right-pane flags.
-  { id: 'hierarchy', title: 'Hierarchy', short: 'Tree', Icon: ListTree, group: 'navigate', region: 'left' },
+  { id: 'hierarchy', titleKey: 'hierarchy.panel.title', Icon: ListTree, group: 'coordinate', region: 'left' },
   // Collaboration room roster (link-based multiuser). APPENDED so the frozen
   // Alt+1..0 mapping stays intact (no Alt shortcut). The activity bar hides it
   // while the collab feature flag is off (see ActivityBar).
-  { id: 'collab', title: 'Collaboration room', short: 'Room', Icon: Users, group: 'review', region: 'side' },
+  { id: 'collab', titleKey: 'workspacePanels.panel.collab', Icon: Users, group: 'coordinate', region: 'side' },
   // Cloud sources (CDE integrations). APPENDED — no Alt shortcut. Always on
   // the rail; providers that failed to register are reported inside the panel.
-  { id: 'sources', title: 'Cloud sources', short: 'Sources', Icon: Cloud, group: 'inspect', region: 'side' },
+  { id: 'sources', titleKey: 'sources.sourcesPanel.title', Icon: Cloud, group: 'coordinate', region: 'side' },
   // IFCX layer stack + per-layer diff (#1717). APPENDED so the frozen
   // Alt+1..0 mapping stays intact (no Alt shortcut). The activity bar only
   // surfaces it while a federated layer stack is loaded.
-  { id: 'layers', title: 'Layer stack', short: 'Layers', Icon: LayersIcon, group: 'review', region: 'side' },
-  // Location zones (construction sections / takt areas, #1810) — spatial
-  // sections with their own geometry, which the fork's Fire and Security tabs
-  // use as compartments. APPENDED so the frozen Alt+1..0 mapping stays intact
-  // (no Alt shortcut). Name and id as upstream: the id is persisted in the
-  // sidebar layout and in exported flavors, and the name is what the base
-  // tabs call it.
-  { id: 'zones', title: 'Location zones', short: 'Zones', Icon: Box, group: 'review', region: 'side' },
-  // The project's reference height system: storey levels and heights that every
-  // discipline model has to agree on. APPENDED so the frozen Alt+1..0 mapping
+  { id: 'layers', titleKey: 'workspacePanels.panel.layers', Icon: LayersIcon, group: 'check', region: 'side' },
+  // Location zones (construction sections / takt areas, #1810). APPENDED so
+  // the frozen Alt+1..0 mapping stays intact (no Alt shortcut).
+  { id: 'zones', titleKey: 'zonesPanel.header.title', Icon: Box, group: 'coordinate', region: 'side' },
+  // Flag-free like 'zones' above (#1869 precedent) — no dedicated
+  // `loadReportPanelVisible` boolean; `openWorkspacePanel`'s generic
+  // non-SIDEBAR_PANEL_FLAGS branch adopts it directly (issue #3927).
+  { id: 'loadReport', titleKey: 'loadReportPanel.title', Icon: FileWarning, group: 'check', region: 'side' },
+  { id: 'appearance', titleKey: 'appearance.panelView.heading', Icon: Paintbrush, group: 'site', region: 'side' },
+  // Charts bound to the model, bidirectional with the 3D view (#3944). Bottom
+  // strip like Lists / Schedule; the table in `bottom-panels.ts` carries it.
+  { id: 'charts', titleKey: 'workspacePanels.bottom.charts', Icon: BarChart3, group: 'quantify', region: 'bottom', prefersWide: true },
+  // Node-graph editor over the SDK (#5167): the same `*.flow.json` the CLI runs. Bottom strip, table-driven like Charts.
+  { id: 'flow', titleKey: 'flowPanel.title', Icon: Workflow, group: 'automate', region: 'bottom', prefersWide: true },
+  // A free-form page over the model — text with bindings, logos, charts, BCF topics — printed to PDF (#4594).
+  { id: 'document', titleKey: 'workspacePanels.bottom.document', Icon: FileText, group: 'site', region: 'bottom', prefersWide: true },
+  // Read-only IFC 5D cost inspector: schedule/item tree + detail (#4858). APPENDED
+  // so the frozen Alt+1..0 mapping stays intact (no Alt shortcut). Flag-free
+  // like 'zones'/'loadReport' above (#1869 precedent) — docks in the right
+  // pane, no dedicated costPanelVisible boolean or bottom-strip wiring.
+  { id: 'cost', titleKey: 'costPanel.title', Icon: Coins, group: 'quantify', region: 'side', prefersWide: true },
+  // Environment — sky, lighting presets and the sun-path study (#5506: the
+  // docked side panel that replaced the floating "Sun & Sky" panel).
+  // APPENDED so the frozen Alt+1..0 mapping stays intact (no Alt shortcut).
+  // Flag-free like 'zones'/'loadReport'/'cost' above (#1869 precedent) —
+  // docks in the right pane, no dedicated envPanelOpen visibility flag.
+  { id: 'environment', titleKey: 'viewportLighting.sunSkyPanel.header.title', Icon: Sun, group: 'site', region: 'side' },
+  // The 2D drawing of the current section (#5493): docks in the bottom strip
+  // instead of floating over the 3D view, so it can float or pop out like any
+  // other panel. APPENDED (no Alt shortcut); its runtime is DrawingRuntimeHost.
+  { id: 'drawing', titleKey: 'section2d.heading', Icon: PencilRuler, group: 'site', region: 'bottom', prefersWide: true },
+  // Point cloud rendering controls + BIM<->scan deviation heatmap (#5507).
+  // Replaces the floating `PointCloudPanel` card that used to sit at
+  // `bottom-4 left-4`, colliding with the axis/scale cluster there. Flag-free
+  // like 'zones'/'loadReport'/'cost' above (#1869 precedent) — driven purely
+  // by `sidebarActivePanel`, no dedicated visibility boolean. APPENDED so the
+  // frozen Alt+1..0 mapping stays intact (no Alt shortcut). The activity bar
+  // keeps its rail icon available before an asset loads; the panel explains
+  // what to load. The Session icon still follows the collaboration flag.
+  { id: 'pointclouds', titleKey: 'pointCloudPanel.title', Icon: Scan, group: 'site', region: 'side' },
+  // The Measure tool's LIST / POINT / QTY readouts (#5502): they used to expand
+  // out of a floating card over the model; the tool's bar now lives on the
+  // HUD and opens this docked panel instead. Flag-free like 'environment' /
+  // 'pointclouds' (#1869 precedent). APPENDED so the frozen Alt+1..0 mapping
   // stays intact (no Alt shortcut).
-  // Bottom strip, like Lists: it is a verification view — a wide table one
-  // consults occasionally, not a tool one works beside. Reached from File ▸
-  // Settings rather than an authoring tab, for the same reason.
-  { id: 'heights', title: 'Höhen & Lage', short: 'Heights', Icon: Ruler, group: 'review', region: 'bottom' },
-  // The schematic view: elements arranged by what they belong to rather than by
-  // where they are (PROJECT.md §V35). APPENDED so the frozen Alt+1..0 mapping
-  // stays intact (no Alt shortcut).
-  //
-  // Bottom strip, like Lists, and for the same reason — it is read ALONGSIDE
-  // the model, not instead of it. It was briefly a third view mode covering the
-  // viewport, which was wrong: the drawing and the building answer each other,
-  // and a schematic that hides the thing it describes cannot do that.
-  { id: 'graph', title: 'Graph', short: 'Graph', Icon: Workflow, group: 'review', region: 'bottom', prefersWide: true },
-  // The model's Prüfplan: every housekeeping check as a row, worked through
-  // one at a time. APPENDED so the frozen Alt+1..0 mapping stays intact (no
-  // Alt shortcut).
-  //
-  // Side panel and not bottom: its rows select elements in the model, and a
-  // checklist you consult WHILE looking at what it points at has to stand
-  // beside the viewport rather than under it.
-  { id: 'housekeeping', title: 'Housekeeping', short: 'Prüfplan', Icon: ClipboardList, group: 'review', region: 'side' },
-  // The two class-cleaning tools. APPENDED so the frozen Alt+1..0 mapping
-  // stays intact (no Alt shortcut).
-  //
-  // Side panels and not dialogs, which is what they were first: deciding what
-  // a group of elements IS means looking at them, and a dialog covers the one
-  // thing that would settle the question (Marc, 2026-08-15). As panels they
-  // isolate their selection in the viewport and stand beside it.
-  { id: 'proxyTriage', title: 'Clean Proxy', short: 'Proxy', Icon: Boxes, group: 'author', region: 'side' },
-  { id: 'classTriage', title: 'Clean Classes', short: 'Klassen', Icon: Blocks, group: 'author', region: 'side' },
-  // Rooms are the exception to the grouping the two above are built on: a
-  // number belongs to ONE room, so this one is a queue rather than a grouping.
-  { id: 'roomTriage', title: 'Clean Rooms', short: 'Räume', Icon: DoorOpen, group: 'author', region: 'side' },
-  { id: 'doorNumbers', title: 'Türnummern', short: 'Türen', Icon: DoorClosed, group: 'author', region: 'side' },
-  // Deliverables: what this project gets issued as, and the batch that
-  // produces them. `work` rather than `author` — it is the step after the
-  // model is authored, not part of authoring it.
-  //
-  // APPENDED, like everything since #1200. It sat at position eight for a
-  // while, which silently moved Alt+8 off the Script editor and onto this
-  // panel — the frozen mapping is positional, so an insertion anywhere in the
-  // first ten renames somebody's shortcut without saying so.
-  { id: 'exports', title: 'Exportprodukte', short: 'Exporte', Icon: PackageCheck, group: 'work', region: 'side', prefersWide: true },
-  // Meldergruppen: derived from the Auslösezonen, so it belongs beside the
-  // other derivations rather than in the zone tool that feeds it.
-  // APPENDED, for the reason above it.
-  { id: 'wiring', title: 'Verkabeln', short: 'Kabel', Icon: Cable, group: 'author', region: 'side' },
-  { id: 'detectorGroups', title: 'Meldergruppen', short: 'Melder', Icon: Radio, group: 'author', region: 'side' },
+  { id: 'measurements', titleKey: 'measure.panel.title', Icon: Ruler, group: 'quantify', region: 'side' },
+  // Local reposition + georeference editing (#5505): replaces the floating
+  // `RepositionPanel` (`absolute top-32 right-4`) and the floating
+  // `CesiumPlacementEditor` card with one docked panel, Local / Georeference
+  // tabs. Flag-free like 'zones'/'loadReport'/'cost'/'pointclouds' above
+  // (#1869 precedent) — driven by `repositionOpen` / `cesiumPlacementEditMode`,
+  // no dedicated visibility boolean. APPENDED so the frozen Alt+1..0 mapping
+  // stays intact (no Alt shortcut). The gizmos stay scene overlays.
+  { id: 'placement', titleKey: 'placementPanel.title', Icon: Move3d, group: 'coordinate', region: 'side' },
+  // A filmstrip of saved basket views (#5508). Replaces `BasketPresentationDock`,
+  // which drew an always-on "Presentation 0" pill at the viewport's
+  // bottom-center even with an empty basket, and opened as its own
+  // draggable / resizable floating card. Bottom strip like Charts/Document/
+  // Flow/Drawing above — table-driven; the bottom-strip flag it reuses is
+  // `basketPresentationVisible` (`lib/panels/bottom-panels.ts`), unchanged
+  // from the floating dock so saved views and their transitions are
+  // unaffected. APPENDED so the frozen Alt+1..0 mapping stays intact (no Alt
+  // shortcut). Entry points: the status bar and the ribbon's Present button.
+  { id: 'presentation', titleKey: 'workspacePanels.panel.presentation', Icon: Presentation, group: 'site', region: 'bottom', prefersWide: true },
+  // Active model edits and their undoable operations (#5902). Appended so
+  // existing Alt+digit panel shortcuts remain stable.
+  { id: 'changes', titleKey: 'changesPanel.title', Icon: History, group: 'check', region: 'side' },
+  // The Model workspace's inspector (#6232 M2): shown on entry, the previous
+  // panel restored on exit (`authoringSessionSidebar.ts`). Flag-free like
+  // 'changes' / 'zones' (#1869 precedent). APPENDED (no Alt shortcut).
+  { id: 'model', titleKey: 'modelInspector.panel.title', Icon: DraftingCompass, group: 'author', region: 'side' },
+  // Named change sets (#6232 D4): the active set collects new edits; export /
+  // import as files. Flag-free like 'changes' / 'model'. APPENDED (no Alt shortcut).
+  { id: 'changeSets', titleKey: 'changeSets.panel.title', Icon: GitBranch, group: 'author', region: 'side' },
+  { id: 'assistant', titleKey: 'assistant.title', Icon: Bot, group: 'coordinate', region: 'side', prefersWide: true },
+  { id: 'semantic', titleKey: 'semantic.title', Icon: Link2, group: 'coordinate', region: 'side', prefersWide: true },
+  { id: 'review', titleKey: 'reviewWorkspace.title', Icon: ListChecks, group: 'coordinate', region: 'side', prefersWide: true },
+  // IDS Studio (IDS-030): authoring of IDS documents through the typed ops of
+  // `@ifc-lite/ids-authoring`. Results stay in Data validation. APPENDED (no
+  // Alt shortcut). Flag-free like 'review'; no model gate, an IDS is
+  // authored before any model is loaded.
+  { id: 'influx', titleKey: 'influx.title', Icon: ChartLine, group: 'site', region: 'side' },
+  { id: 'idsStudio', titleKey: 'idsStudio.title', Icon: ClipboardPen, group: 'check', region: 'side', prefersWide: true },
+  // ── Fork panels. APPENDED so every upstream position (and the frozen
+  // Alt+1..0 mapping) stays intact; none has an Alt shortcut.
+  // The project's reference height system. Bottom strip, like Lists: a wide
+  // verification table consulted occasionally.
+  { id: 'heights', titleKey: 'forkPanels.heights', Icon: MoveVertical, group: 'coordinate', region: 'bottom' },
+  // The schematic view: elements by what they belong to. Bottom strip, read
+  // ALONGSIDE the model rather than instead of it.
+  { id: 'graph', titleKey: 'forkPanels.graph', Icon: Network, group: 'coordinate', region: 'bottom', prefersWide: true },
+  // The model's Prüfplan. Side panel: its rows select elements in the model.
+  { id: 'housekeeping', titleKey: 'forkPanels.housekeeping', Icon: ClipboardList, group: 'check', region: 'side' },
+  // Class-cleaning tools: side panels so they can isolate and stand beside the viewport.
+  { id: 'proxyTriage', titleKey: 'forkPanels.proxyTriage', Icon: Boxes, group: 'author', region: 'side' },
+  { id: 'classTriage', titleKey: 'forkPanels.classTriage', Icon: Blocks, group: 'author', region: 'side' },
+  { id: 'roomTriage', titleKey: 'forkPanels.roomTriage', Icon: DoorOpen, group: 'author', region: 'side' },
+  { id: 'doorNumbers', titleKey: 'forkPanels.doorNumbers', Icon: DoorClosed, group: 'author', region: 'side' },
+  // Deliverables: what this project gets issued as.
+  { id: 'planProducts', titleKey: 'forkPanels.exports', Icon: PackageCheck, group: 'site', region: 'side', prefersWide: true },
+  { id: 'wiring', titleKey: 'forkPanels.wiring', Icon: Cable, group: 'author', region: 'side' },
+  { id: 'detectorGroups', titleKey: 'forkPanels.detectorGroups', Icon: Radio, group: 'author', region: 'side' },
 ];
 
-/** The bottom-strip panel ids, mapped to their store visibility flag + setter
- *  names — these stay independent of the single-tenant right pane. */
-export type BottomPanelId = Extract<WorkspacePanelId, 'script' | 'gantt' | 'lists' | 'heights' | 'graph'>;
+/** How a panel opened on an empty viewer offers a way to a model
+ *  (`components/viewer/PanelModelGate.tsx`). */
+export type PanelModelGateMode = 'takeover' | 'banner';
 
-export function isBottomPanel(id: WorkspacePanelId): id is BottomPanelId {
-  return id === 'script' || id === 'gantt' || id === 'lists' || id === 'heights' || id === 'graph';
+/**
+ * Panels that mean nothing without a model. `takeover`: the whole panel is
+ * model-derived (a lens over no elements, a chart of nothing), so it shows a
+ * no-model state instead. `banner`: the panel also holds work that exists
+ * before a model (list and document definitions, a schedule imported from MS
+ * Project or CSV, zone sets imported from JSON), so one quiet line sits above
+ * it and the panel stays mounted across the load.
+ *
+ * Left out on purpose: panels that are themselves a way in (Cloud sources,
+ * Layers' demo stack), that carry their own demo empty state (Compare,
+ * Clash, Data validation), that work on a model-independent artifact (BCF
+ * topics, IDS / rule sets, scripts, extensions, a collaboration room),
+ * Measurements (only the Measure tool opens it, and that needs a model), and
+ * Properties / Hierarchy, whose own no-model states the welcome tour anchors.
+ */
+const PANEL_MODEL_GATE: Partial<Record<WorkspacePanelId, PanelModelGateMode>> = {
+  lens: 'takeover',
+  charts: 'takeover',
+  environment: 'takeover',
+  presentation: 'takeover',
+  drawing: 'takeover',
+  model: 'takeover',
+  changes: 'takeover',
+  changeSets: 'takeover',
+  cost: 'takeover',
+  placement: 'takeover',
+  loadReport: 'takeover',
+  lists: 'banner',
+  document: 'banner',
+  flow: 'banner',
+  gantt: 'banner',
+  zones: 'banner',
+};
+
+export function panelModelGateMode(id: WorkspacePanelId): PanelModelGateMode | undefined {
+  return PANEL_MODEL_GATE[id];
 }
+
+// The bottom strip (Script / Schedule / Lists) is table-driven; the id union and
+// the type guard are re-exported here so registry consumers keep one import.
+export { isBottomPanel, type BottomPanelId } from './bottom-panels';
 
 /** The left-slot nav panel (Hierarchy, #1267): toggled via `leftPanelCollapsed`,
  *  never floated / popped / docked into the right pane. */
@@ -208,9 +304,49 @@ export function getPanelDef(id: WorkspacePanelId): WorkspacePanelDef | undefined
   return PANEL_BY_ID.get(id);
 }
 
+export function panelGroupFor(id: WorkspacePanelId): PanelGroup {
+  const group = PANEL_BY_ID.get(id)?.group;
+  if (!group) throw new Error(`Workspace panel ${id} is missing its task group`);
+  return group;
+}
+
+
+/** All built-in panel entry points share this one translated name. */
+export function panelTitleKey(id: WorkspacePanelId): TranslationKey {
+  const key = PANEL_BY_ID.get(id)?.titleKey;
+  if (!key) throw new Error(`Workspace panel ${id} is missing its title key`);
+  return key;
+}
+
 /** Type guard for narrowing arbitrary strings to a known panel id. */
 export function isWorkspacePanelId(id: string): id is WorkspacePanelId {
   return PANEL_BY_ID.has(id as WorkspacePanelId);
+}
+
+/** Panel ids retired by a rename, mapped to their replacement (#5138: the
+ *  IDS panel became the Data validation panel, `'ids'` -> `'validation'`). */
+const LEGACY_PANEL_ID_MIGRATIONS: Readonly<Record<string, WorkspacePanelId>> = {
+  ids: 'validation',
+};
+
+/**
+ * Resolve a persisted panel id (sidebar order/hidden set, dock/float layout)
+ * to a live {@link WorkspacePanelId}, migrating a retired id to its
+ * replacement instead of silently dropping it. `undefined` means the id is
+ * neither current nor a known legacy alias — genuinely unrecognised, and the
+ * caller's existing "drop it" handling applies.
+ */
+export function migratePanelId(id: string): WorkspacePanelId | undefined {
+  if (isWorkspacePanelId(id)) return id;
+  return LEGACY_PANEL_ID_MIGRATIONS[id];
+}
+
+/** The panels Alt+1..9 / Alt+0 open, in key order (Alt+0 is the tenth). */
+export const ALT_SHORTCUT_PANELS: readonly WorkspacePanelDef[] = WORKSPACE_PANELS.slice(0, 10);
+
+/** The digit of the Alt shortcut for `ALT_SHORTCUT_PANELS[position]`. */
+export function altShortcutDigit(position: number): number {
+  return (position + 1) % 10;
 }
 
 /**
@@ -224,12 +360,12 @@ export function isWorkspacePanelId(id: string): id is WorkspacePanelId {
 export function workspacePanelForShortcutCode(code: string): WorkspacePanelId | undefined {
   const m = /^(?:Digit|Numpad)([0-9])$/.exec(code);
   if (!m) return undefined;
-  const n = Number(m[1]);
-  return WORKSPACE_PANELS[n === 0 ? 9 : n - 1]?.id;
+  const digit = Number(m[1]);
+  return ALT_SHORTCUT_PANELS.find((_, position) => altShortcutDigit(position) === digit)?.id;
 }
 
 /** The analysis / tool panels that toggle in the sidebar (everything except
- *  the Information fallback, which shows when no other panel is open). */
+ *  the Properties fallback, which shows when no other panel is open). */
 export type AnalysisPanelId = Exclude<WorkspacePanelId, 'properties'>;
 
 export function isAnalysisPanel(id: WorkspacePanelId): id is AnalysisPanelId {

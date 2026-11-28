@@ -39,29 +39,28 @@ describe('parseCapability — happy path', () => {
   it('parses prefix glob within a segment', () => {
     const r = parseCapability('model.mutate:Pset_*');
     expect(r.ok).toBe(true);
-    if (r.ok && r.value.target) {
-      expect(r.value.target.segments).toEqual([{ kind: 'literal', value: 'Pset_*' }]);
-    }
+    // Read through `?.` so a dropped target fails the assertion instead of skipping it.
+    expect(r.ok ? r.value.target?.segments : undefined).toEqual([{ kind: 'literal', value: 'Pset_*' }]);
   });
 
   it('parses dotted target with mixed literals and globs', () => {
     const r = parseCapability('model.mutate:Pset_*.FireRating');
     expect(r.ok).toBe(true);
-    if (r.ok && r.value.target) {
-      expect(r.value.target.segments).toHaveLength(2);
-    }
+    expect(r.ok ? r.value.target?.segments : undefined).toHaveLength(2);
   });
 
   it('parses bare-* segments', () => {
     const r = parseCapability('command.invoke:*.export');
     expect(r.ok).toBe(true);
-    if (r.ok && r.value.target) {
-      expect(r.value.target.segments[0]).toEqual({ kind: 'glob' });
-      expect(r.value.target.segments[1]).toEqual({ kind: 'literal', value: 'export' });
-    }
+    expect(r.ok ? r.value.target?.segments : undefined).toEqual([
+      { kind: 'glob' },
+      { kind: 'literal', value: 'export' },
+    ]);
   });
 
   it('parses each scope', () => {
+    // `secret` is excluded: unlike the others, `secret.read` always
+    // requires a target (see the dedicated `secret` grammar tests below).
     const scopes = ['model', 'viewer', 'export', 'storage', 'network', 'command', 'ui'];
     for (const s of scopes) {
       const r = parseCapability(`${s}.read`);
@@ -72,6 +71,47 @@ describe('parseCapability — happy path', () => {
   it('accepts identifiers with hyphens and underscores', () => {
     const r = parseCapability('storage.local-cache');
     expect(r.ok).toBe(true);
+  });
+});
+
+describe('parseCapability — secret grammar', () => {
+  it('accepts an exact env-var-shaped secret name', () => {
+    const r = parseCapability('secret.read:API_TOKEN');
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.target?.segments).toEqual([{ kind: 'literal', value: 'API_TOKEN' }]);
+      expect(r.value.target?.isUniversalWildcard).toBe(false);
+    }
+  });
+
+  it('rejects a secret capability with no target', () => {
+    const r = parseCapability('secret.read');
+    expect(r.ok).toBe(false);
+  });
+
+  it('rejects a universal wildcard secret target', () => {
+    const r = parseCapability('secret.read:*');
+    expect(r.ok).toBe(false);
+  });
+
+  it('rejects a glob-suffixed secret target', () => {
+    const r = parseCapability('secret.read:API_*');
+    expect(r.ok).toBe(false);
+  });
+
+  it('rejects a multi-segment (dotted) secret target', () => {
+    const r = parseCapability('secret.read:API.TOKEN');
+    expect(r.ok).toBe(false);
+  });
+
+  it('rejects a lowercase secret name', () => {
+    const r = parseCapability('secret.read:api_token');
+    expect(r.ok).toBe(false);
+  });
+
+  it('rejects a secret name starting with a digit', () => {
+    const r = parseCapability('secret.read:1TOKEN');
+    expect(r.ok).toBe(false);
   });
 });
 

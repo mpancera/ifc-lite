@@ -2,7 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import type { GeometryDiagnostics, TessellationQuality } from '@ifc-lite/geometry';
+import type { GeometryDiagnostics, SkippedHungElements, StallPhase, StallPhaseHandle, TessellationQuality } from '@ifc-lite/geometry';
+import { resolve } from '@/i18n/registry';
+
+/**
+ * Read the phase a #4902 `stallPhaseHandle` reports, if any. Extracted as its
+ * own function (rather than inlined at the `geometry_processing`
+ * `captureException` call in `useIfcLoader.ts`) so its behaviour — not just
+ * its presence near that call — is unit-testable directly: `undefined` before
+ * the pool has wired a reader in, `undefined` when no handle was passed at
+ * all, and the pool's own reported phase once one exists.
+ */
+export function geometryProcessingStallPhase(handle: StallPhaseHandle | undefined): StallPhase | undefined {
+  return handle?.getStallPhase?.();
+}
 
 /**
  * Geometry-attribution properties for the `ifc_model_loaded` event (issue #2388).
@@ -33,6 +46,8 @@ import type { GeometryDiagnostics, TessellationQuality } from '@ifc-lite/geometr
 export interface ModelLoadedGeometryPropsInputs {
   /** `diagnostics` from the geometry stream's `complete` event, if any producer emitted it. */
   diagnostics: GeometryDiagnostics | null | undefined;
+  /** Elements skipped because their geometry call hung (#4884); absent when none were. */
+  skippedHungElements?: SkippedHungElements;
   /** The tier handed to the GeometryProcessor; `undefined`/`null` = engine default (medium). */
   tessellationTier: TessellationQuality | null | undefined;
   /** The small-cut skip the load actually ran with (viewer `geometryMode === 'fast'`). */
@@ -65,6 +80,11 @@ export function buildModelLoadedGeometryProps(
     // `failuresByReason` is sorted desc by count by the producer/merger, so [0]
     // is the dominant reason. Omitted when nothing failed.
     csg_top_failure_reason: d?.failuresByReason?.[0]?.reason,
+    // #4884: which models still carry an element whose geometry never finishes,
+    // and of what IFC type (schema keywords only, never ids or names). Absent,
+    // not 0, when nothing was skipped, like the CSG counts above.
+    hung_elements_skipped: inputs.skippedHungElements?.expressIds.length,
+    hung_element_types: inputs.skippedHungElements?.byType.map((t) => `${t.ifcType}:${t.count}`).join(','),
     // `undefined` from `resolveLoadTessellationTier` IS the engine default —
     // report it by name so it is distinguishable from a build that sent nothing.
     tessellation_tier: inputs.tessellationTier ?? 'medium',
@@ -74,4 +94,102 @@ export function buildModelLoadedGeometryProps(
     // large-file load that resolved to the same tier on its own.
     is_resource_retry: inputs.isResourceRetry,
   };
+}
+
+/**
+ * Surface the main-thread console summary for a streaming `complete` event's
+ * geometry diagnostics: CSG failures / silent no-ops as info, and dropped
+ * representation items (unsupported type or failed geometry, so the affected
+ * elements are missing or incomplete) as a warning. Each half is independently
+ * guarded, so a load with only one kind of trouble reports only that one.
+ *
+ * One entry point rather than one per surface, so the caller in `useIfcLoader`
+ * does not have to know how many surfaces there are: adding a third is a change
+ * here, not in the hook whose module-size budget put these functions in this
+ * file in the first place. `fileName` disambiguates the primary model from a
+ * federated add.
+ */
+export function warnGeometryDiagnostics(
+  fileName: string,
+  diagnostics: GeometryDiagnostics,
+): void {
+  if (diagnostics.totalCsgFailures > 0 || diagnostics.silentNoOps > 0) {
+    console.info(
+      `[useIfc] ${fileName} geometry diagnostics: ${diagnostics.totalCsgFailures} CSG failure(s) ` +
+        `across ${diagnostics.productsWithFailures} product(s), ${diagnostics.silentNoOps} silent no-op(s)`,
+      diagnostics,
+    );
+  }
+  for (const refusal of (diagnostics.budgetRefusals ?? []).slice(0, 16)) {
+    console.warn(`[useIfc] ${fileName}: work budget refusal: ${refusal.budget} ` +
+      `limit=${refusal.limit} reached=${refusal.reached} product=#${refusal.productId ?? 'unknown'} ` +
+      `${refusal.productType ?? 'unknown'} GlobalId=${refusal.GlobalId ?? 'unavailable'} source=#${refusal.sourceId}`);
+  }
+  const moreRefusals = (diagnostics.totalBudgetRefusals ?? diagnostics.budgetRefusals?.length ?? 0)
+    - Math.min(16, diagnostics.budgetRefusals?.length ?? 0);
+  if (moreRefusals > 0) {
+    console.warn(`[useIfc] ${fileName}: work budget refusals: and ${moreRefusals} more`);
+  }
+  if ((diagnostics.totalUnsupportedItems ?? 0) > 0) {
+    console.warn(
+      `[useIfc] ${fileName}: ${diagnostics.totalUnsupportedItems} representation item(s) dropped ` +
+        `(unsupported type or failed geometry) — these elements are missing or incomplete`,
+      diagnostics.unsupportedItemsByType,
+    );
+  }
+}
+
+/**
+ * Tell the user that some elements are missing because their geometry never
+ * finished (#4884). The load itself completed: before recovery existed, one such
+ * element failed the whole model with "Geometry stream stalled". Express ids go
+ * to the console only, where the user can look them up in their own model.
+ */
+export function reportSkippedHungElements(
+  fileName: string,
+  skipped: SkippedHungElements,
+  notify: (message: string) => void,
+): void {
+  const count = skipped.expressIds.length;
+  console.warn(
+    `[useIfc] ${fileName}: ${count} element(s) skipped because their geometry never finished ` +
+      `(#${skipped.expressIds.join(', #')})`,
+    skipped.byType,
+  );
+  notify(
+    `"${fileName}" loaded without ${count} element${count === 1 ? '' : 's'} whose geometry could not be computed ` +
+      `(${skipped.byType.map((t) => t.ifcType).join(', ')}).`,
+  );
+}
+
+/**
+ * Tell the user that some type geometry is missing because the type records
+ * that carry it could not be decoded (F2, #8341). `count` comes from the
+ * geometry stream's `complete` event; an absent (unknown) or zero count says
+ * nothing. Only type-library geometry is affected, so the message says no more.
+ */
+export function reportOmittedTypeRecords(
+  fileName: string,
+  count: number | undefined,
+  notify: (message: string) => void,
+): void {
+  if (count === undefined || count <= 0) return;
+  notify(resolve('loadReportPanel.omittedTypeRecords', { name: fileName, count }));
+}
+
+/**
+ * Tell the user that a model draws nothing because its length unit is unusable
+ * (#7678). The geometry stream carries a `unitRefused` event instead of silently
+ * completing empty. Properties, hierarchy and the other data panels still work:
+ * the data model keeps its own scale, so only the 3D view is affected.
+ */
+export function reportRefusedLengthUnit(
+  fileName: string,
+  notify: (message: string) => void,
+): void {
+  console.warn(`[useIfc] ${fileName}: length unit is unusable; geometry was refused (#7678)`);
+  notify(
+    `"${fileName}" has an unusable length unit (zero, negative or non-numeric), so its 3D geometry was not drawn. ` +
+      'Its properties and hierarchy are still available.',
+  );
 }

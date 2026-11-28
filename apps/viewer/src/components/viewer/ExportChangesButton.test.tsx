@@ -12,8 +12,12 @@ import { PropertyValueType } from '@ifc-lite/data';
 import { useViewerStore } from '@/store/index.js';
 import type { FederatedModel } from '@/store/types.js';
 import { toast } from '@/components/ui/toast';
+import { posthog } from '@/lib/analytics';
+import { downloadedNames, clearDownloads } from '@/test/download-capture';
+import { advance, waitFor } from '@/test/render';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { ExportChangesButton } from './ExportChangesButton.js';
+import { FIXTURE_WALL_A, parseFixtureModel } from './anonymized-export/anonymized-export-fixture.test-support';
 
 function makeModel(): FederatedModel {
   return {
@@ -44,15 +48,21 @@ function makeView(): MutablePropertyView {
 }
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+function unmountAll(): void {
+  for (const { root, container } of mounted.splice(0)) {
+    act(() => root.unmount());
+    container.remove();
+  }
+}
 
-function renderButton(): HTMLElement {
+function renderButton(surface: 'classic' | 'ribbon' | 'palette' = 'ribbon'): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
       <TooltipProvider>
-        <ExportChangesButton />
+        <ExportChangesButton surface={surface} />
       </TooltipProvider>,
     );
   });
@@ -62,15 +72,15 @@ function renderButton(): HTMLElement {
 
 /** The toolbar trigger — distinguishable from the dialog's own "Export" button by its badge text. */
 function findToolbarButton(container: HTMLElement): HTMLButtonElement {
-  const btn = [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Export Changes'));
-  assert.ok(btn, 'toolbar "Export Changes" button must render');
+  const btn = [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Export modified IFC'));
+  assert.ok(btn, 'toolbar "Export modified IFC" button must render');
   return btn;
 }
 
 /** The dialog's confirm button — Radix portals it into `document.body`. */
 function findDialogExportButton(): HTMLButtonElement {
   const btn = [...document.body.querySelectorAll('button')].find(
-    (b) => b.textContent?.includes('Export') && !b.textContent?.includes('Export Changes'),
+    (b) => b.textContent?.includes('Export') && !b.textContent?.includes('Export modified IFC'),
   );
   assert.ok(btn, 'the dialog Export (confirm) button must render once the review is open');
   return btn;
@@ -82,12 +92,8 @@ function dialogText(): string {
 
 describe('ExportChangesButton — review/export divergence (issue: detect-and-require re-review)', () => {
   beforeEach(() => {
-    for (const { root, container } of mounted.splice(0)) {
-      act(() => {
-        root.unmount();
-      });
-      container.remove();
-    }
+    clearDownloads();
+    unmountAll();
     useViewerStore.setState({
       models: new Map([['model-1', makeModel()]]),
       mutationViews: new Map(),
@@ -98,6 +104,37 @@ describe('ExportChangesButton — review/export divergence (issue: detect-and-re
       scheduleSourceModelId: null,
       ifcDataStore: null,
     });
+  });
+
+  it('records one completion for the reviewed IFC file after the browser download (#5844)', async () => {
+    const ifcDataStore = await parseFixtureModel();
+    const model = { ...makeModel(), ifcDataStore };
+    const view = new MutablePropertyView(null, model.id);
+    view.setAttribute(FIXTURE_WALL_A, 'Name', 'Reviewed edit');
+    useViewerStore.setState({
+      models: new Map([[model.id, model]]),
+      mutationViews: new Map([[model.id, view]]),
+      mutationVersion: 1,
+    });
+    const completions: Record<string, unknown>[] = [];
+    const analytics = mock.method(posthog, 'capture', (event: string, properties: Record<string, unknown>) => {
+      if (event === 'export_completed') completions.push(properties);
+    });
+    try {
+      for (const [index, surface] of (['classic', 'ribbon', 'palette'] as const).entries()) {
+        const container = renderButton(surface);
+        await act(async () => { findToolbarButton(container).click(); });
+        assert.ok(dialogText().includes('Reviewed edit'), 'the review displays the authored change');
+        await act(async () => { findDialogExportButton().click(); });
+        await waitFor(() => downloadedNames().length === index + 1, 'reviewed IFC file did not download');
+        assert.match(downloadedNames()[index], /\.ifc$/);
+        assert.deepEqual(completions[index], { format: 'ifc', surface, model_count: 1, change_count: 1 });
+        assert.equal(completions.length, index + 1, 'one completion per browser download');
+        unmountAll();
+      }
+    } finally {
+      analytics.mock.restore();
+    }
   });
 
   it('refuses to export and keeps the dialog open when the overlay changes while the review is open, bypassing tracked set()', async () => {
@@ -345,5 +382,55 @@ describe('ExportChangesButton — review/export divergence (issue: detect-and-re
     renderButton();
     act(() => { useViewerStore.getState().requestChangesReview(); });
     assert.equal(dialogText().includes('Export'), false, dialogText());
+  });
+});
+
+/** Which result the toolbar button shows: its success tick, its error mark, or neither. */
+function toolbarIndicator(container: HTMLElement): 'success' | 'error' | 'idle' {
+  const icon = findToolbarButton(container).querySelector('svg');
+  if (icon?.classList.contains('text-ok')) return 'success';
+  if (icon?.classList.contains('text-danger')) return 'error';
+  return 'idle';
+}
+
+describe('ExportChangesButton — result indicator belongs to the latest export (#9487)', () => {
+  beforeEach(() => { clearDownloads(); unmountAll(); });
+
+  it('an export that fails 1 s after a success keeps its error mark past the success\'s 2 s reset, then clears ~3 s after the error', async () => {
+    const ifcDataStore = await parseFixtureModel();
+    const model = { ...makeModel(), ifcDataStore };
+    const view = new MutablePropertyView(null, model.id);
+    view.setAttribute(FIXTURE_WALL_A, 'Name', 'Reviewed edit');
+    useViewerStore.setState({ models: new Map([[model.id, model]]), mutationViews: new Map([[model.id, view]]), mutationVersion: 1 });
+    const toasts = [mock.method(toast, 'error', () => {}), mock.method(toast, 'success', () => {}), mock.method(toast, 'info', () => {})];
+    const analytics = mock.method(posthog, 'capture', () => {});
+    try {
+      const container = renderButton();
+      const exportOnce = async () => {
+        await act(async () => { findToolbarButton(container).click(); });
+        await act(async () => { findDialogExportButton().click(); });
+        await waitFor(() => toolbarIndicator(container) !== 'idle', 'the export never reported a result');
+      };
+
+      await exportOnce();
+      assert.equal(toolbarIndicator(container), 'success', 'the first export succeeds');
+      const succeededAt = Date.now();
+
+      // The model's data goes away, so the next export of the same edit is skipped: an error.
+      await advance(1000);
+      act(() => useViewerStore.setState({ models: new Map([[model.id, { ...model, ifcDataStore: null }]]) }));
+      await exportOnce();
+      assert.equal(toolbarIndicator(container), 'error', 'the second export fails');
+      const failedAt = Date.now();
+
+      await advance(Math.max(0, succeededAt + 2400 - Date.now()));
+      assert.equal(toolbarIndicator(container), 'error', 'the first export\'s 2 s reset must not clear the newer error');
+
+      await advance(Math.max(0, failedAt + 3400 - Date.now()));
+      assert.equal(toolbarIndicator(container), 'idle', 'the error clears on its own 3 s reset');
+    } finally {
+      for (const m of toasts) m.mock.restore();
+      analytics.mock.restore();
+    }
   });
 });

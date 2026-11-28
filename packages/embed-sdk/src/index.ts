@@ -34,40 +34,14 @@ import {
   type ModelStats,
   type EntityProperties,
   type ModelInfo,
+  type TypeVisibilityFlags,
 } from '@ifc-lite/embed-protocol';
+import { createWorkerRpc, type RpcReply } from '@ifc-lite/wasm-lifecycle';
+import { embedUrlSearchParams, type EmbedOptions } from './options.js';
 
 // ============================================================================
 // Public types
 // ============================================================================
-
-export interface EmbedOptions {
-  /** CSS selector or DOM element to mount the iframe into */
-  container: string | HTMLElement;
-  /** URL of the model to load on initialization */
-  modelUrl?: string;
-  /** Color theme */
-  theme?: 'light' | 'dark';
-  /** Custom background color (hex without #) */
-  bg?: string;
-  /** Camera controls mode */
-  controls?: 'orbit' | 'pan' | 'all' | 'none';
-  /** Hide the axis helper */
-  hideAxis?: boolean;
-  /** Hide the scale bar */
-  hideScale?: boolean;
-  /** IFC types to hide by default */
-  hideTypes?: string[];
-  /** Preset camera view */
-  view?: ViewPreset;
-  /** Initial camera position */
-  camera?: { azimuth: number; elevation: number; zoom?: number };
-  /** Origin of the hosted embed viewer (defaults to production) */
-  origin?: string;
-  /** Auth token (sent via postMessage, not URL) */
-  token?: string;
-  /** Handshake timeout in ms (default: 15000) */
-  timeout?: number;
-}
 
 export interface EventMap {
   'ready': { version: string };
@@ -84,13 +58,17 @@ export interface EventMap {
 type EventCallback<T> = (data: T) => void;
 
 // Re-export types consumers might need
-export type { ViewPreset, SectionAxis, ModelStats, EntityProperties, ModelInfo };
+export type { EmbedOptions };
+export type { ViewPreset, SectionAxis, ModelStats, EntityProperties, ModelInfo, TypeVisibilityFlags };
 
 // ============================================================================
 // Default embed origin
 // ============================================================================
 
 const DEFAULT_ORIGIN = 'https://embed.ifclite.com';
+
+/** How long a command may wait for its RESPONSE. */
+const REQUEST_TIMEOUT_MS = 30_000;
 
 // ============================================================================
 // IFCLiteEmbed class
@@ -100,11 +78,22 @@ export class IFCLiteEmbed {
   private iframe: HTMLIFrameElement;
   private origin: string;
   private expectedOrigin: string;
-  private pending = new Map<string, {
-    resolve: (data: unknown) => void;
-    reject: (err: Error) => void;
-    timeout: ReturnType<typeof setTimeout>;
-  }>();
+  /** Request/response correlation with a dead latch: `destroy()` rejects everything pending. */
+  private readonly rpc = createWorkerRpc<string>({
+    label: 'Embed viewer',
+    nextId: () => crypto.randomUUID(),
+    post: (message, transfer) => this.send(message as Partial<EmbedMessageEnvelope>, transfer),
+    decode: (data): RpcReply<string> | undefined => {
+      const msg = data as EmbedMessageEnvelope;
+      if (!msg.responseId) return undefined;
+      return msg.error
+        ? { id: msg.responseId, error: new Error(`${msg.error.code}: ${msg.error.message}`) }
+        : { id: msg.responseId, value: msg.data };
+    },
+    requestTimeoutMs: REQUEST_TIMEOUT_MS,
+    // A slow command fails alone; the viewer may still answer the next one.
+    onRequestTimeout: 'reject',
+  });
   private listeners = new Map<string, Set<EventCallback<unknown>>>();
   private readyPromise: Promise<void>;
   private destroyed = false;
@@ -125,20 +114,7 @@ export class IFCLiteEmbed {
     this.expectedOrigin = new URL(this.origin).origin;
 
     // Build URL with non-sensitive params
-    const params = new URLSearchParams();
-    if (opts.modelUrl) params.set('modelUrl', opts.modelUrl);
-    if (opts.theme) params.set('theme', opts.theme);
-    if (opts.bg) params.set('bg', opts.bg);
-    if (opts.controls) params.set('controls', opts.controls);
-    if (opts.hideAxis) params.set('hideAxis', 'true');
-    if (opts.hideScale) params.set('hideScale', 'true');
-    if (opts.hideTypes?.length) params.set('hideTypes', opts.hideTypes.join(','));
-    if (opts.view) params.set('view', opts.view);
-    if (opts.camera) {
-      const parts = [opts.camera.azimuth, opts.camera.elevation];
-      if (opts.camera.zoom !== undefined) parts.push(opts.camera.zoom);
-      params.set('camera', parts.join(','));
-    }
+    const params = embedUrlSearchParams(opts);
 
     // Create iframe
     this.iframe = document.createElement('iframe');
@@ -160,7 +136,13 @@ export class IFCLiteEmbed {
     // Handshake: READY -> INIT -> INIT_ACK
     const handshakeTimeout = opts.timeout ?? 15_000;
     this.readyPromise = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Embed viewer handshake timed out')), handshakeTimeout);
+      const timer = setTimeout(() => {
+        // create() never hands a timed-out instance to the caller, so nobody
+        // else can destroy it: tear it down here so a late READY cannot pull
+        // the token into an iframe the host gave up on, and retries don't stack.
+        this.destroy();
+        reject(new Error('Embed viewer handshake timed out'));
+      }, handshakeTimeout);
 
       const waitForReady = (msg: EmbedMessageEnvelope) => {
         if (msg.type === 'READY') {
@@ -254,7 +236,11 @@ export class IFCLiteEmbed {
     return this.request('FIT_TO_VIEW', { ids }) as Promise<void>;
   }
 
-  /** Set camera orientation */
+  /**
+   * Set the camera's absolute orientation, in degrees, around whatever it is
+   * currently looking at. `zoom` is reserved and ignored by the viewer — see
+   * `InboundPayloads['SET_CAMERA']`.
+   */
   setCamera(azimuth: number, elevation: number, zoom?: number): Promise<void> {
     return this.request('SET_CAMERA', { azimuth, elevation, zoom }) as Promise<void>;
   }
@@ -274,8 +260,12 @@ export class IFCLiteEmbed {
     return this.request('SET_THEME', { theme, bg }) as Promise<void>;
   }
 
-  /** Toggle IFC type visibility */
-  setTypeVisibility(opts: { spaces?: boolean; openings?: boolean; site?: boolean }): Promise<void> {
+  /**
+   * Toggle IFC type visibility: `spaces`, `spatialZones`, `openings`,
+   * `virtualElements`, `site`, `ifcAnnotations`, `ifcGrid`, `structuralGlyphs`.
+   * Omitted flags are left as they are. See `TypeVisibilityFlags` for the classes each one gates.
+   */
+  setTypeVisibility(opts: TypeVisibilityFlags): Promise<void> {
     return this.request('SET_TYPE_VISIBILITY', opts) as Promise<void>;
   }
 
@@ -309,11 +299,7 @@ export class IFCLiteEmbed {
   destroy() {
     this.destroyed = true;
     window.removeEventListener('message', this.onMessage);
-    for (const p of this.pending.values()) {
-      clearTimeout(p.timeout);
-      p.reject(new Error('Embed destroyed'));
-    }
-    this.pending.clear();
+    this.rpc.dispose(new Error('Embed destroyed'));
     this.listeners.clear();
     this.iframe.remove();
   }
@@ -329,17 +315,7 @@ export class IFCLiteEmbed {
     const msg = event.data as EmbedMessageEnvelope;
 
     // Handle response to a pending request
-    if (msg.responseId && this.pending.has(msg.responseId)) {
-      const req = this.pending.get(msg.responseId)!;
-      clearTimeout(req.timeout);
-      this.pending.delete(msg.responseId);
-      if (msg.error) {
-        req.reject(new Error(`${msg.error.code}: ${msg.error.message}`));
-      } else {
-        req.resolve(msg.data);
-      }
-      return;
-    }
+    if (this.rpc.receive(msg)) return;
 
     // Broadcast event to external listeners
     const kebab = msg.type.toLowerCase().replace(/_/g, '-');
@@ -363,16 +339,9 @@ export class IFCLiteEmbed {
   }
 
   private request(type: string, data?: unknown, transfer?: Transferable[]): Promise<unknown> {
-    if (this.destroyed) return Promise.reject(new Error('Embed destroyed'));
-
-    const requestId = crypto.randomUUID();
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pending.delete(requestId);
-        reject(new Error(`${type} timed out (30s)`));
-      }, 30_000);
-      this.pending.set(requestId, { resolve, reject, timeout });
-      this.send({ type, requestId, data }, transfer);
+    return this.rpc.request((requestId) => ({ type, requestId, data }), {
+      transfer,
+      timeoutError: () => new Error(`${type} timed out (30s)`),
     });
   }
 

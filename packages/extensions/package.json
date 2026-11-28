@@ -1,6 +1,6 @@
 {
   "name": "@ifc-lite/extensions",
-  "version": "0.4.2",
+  "version": "0.12.0",
   "description": "Extension manifest, capability grammar, and slot registry for ifc-lite user customization",
   "type": "module",
   "main": "./dist/index.js",
@@ -19,6 +19,10 @@
       "import": "./dist/capability/index.js",
       "types": "./dist/capability/index.d.ts"
     },
+    "./authority": {
+      "import": "./dist/authority/index.js",
+      "types": "./dist/authority/index.d.ts"
+    },
     "./when": {
       "import": "./dist/when/index.js",
       "types": "./dist/when/index.d.ts"
@@ -35,14 +39,16 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "acorn": "^8.18.0",
+    "@ifc-lite/regex-guard": "workspace:^",
+    "acorn": "^8.19.0",
     "acorn-walk": "^8.3.0",
     "fflate": "^0.8.2"
   },
   "devDependencies": {
-    "@types/node": "^26.2.0",
+    "@mergifyio/vitest": "^2026.11.8",
+    "@types/node": "^26.6.6",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^5.1.0"
   },
   "license": "MPL-2.0",
   "author": "Louis True",

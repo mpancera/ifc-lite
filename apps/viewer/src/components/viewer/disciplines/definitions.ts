@@ -316,7 +316,7 @@ export const DISCIPLINE_TABS: readonly DisciplineTab[] = [
           {
             id: 'exportProducts',
             kind: 'panel',
-            panel: 'exports',
+            panel: 'planProducts',
             label: 'Exportprodukte',
             ribbonLabel: 'Export\u00ADprodukte',
             tooltip: 'Was aus diesem Projekt herausgegeben wird — Pläne, Listen, Graph, Struktur — und der Stapellauf, der es erzeugt',

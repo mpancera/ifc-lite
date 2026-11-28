@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Profile helpers generic over the scalar (B4.4).
+//! Profile helpers generic over the scalar.
 //!
 //! `Profile2D::triangulate` and `create_rectangle` are the `f64`
 //! instantiations of the functions here. Split out of `profile.rs` to keep it
@@ -12,14 +12,17 @@ use crate::error::{Error, Result};
 use crate::scalar::GeomScalar;
 use nalgebra::Point2;
 
-/// The body of [`Profile2D::triangulate`], generic over the scalar (B4.4).
+#[path = "profile_cap.rs"]
+mod cap;
+
+/// The body of [`Profile2D::triangulate`], generic over the scalar.
 ///
 /// Ear clipping is a **discrete** map: its output is a list of integer indices,
 /// constant on an open neighbourhood of almost every input. It is therefore run
 /// on the primal values, and the returned `points` are the ring vertices
 /// verbatim (`safe_earcut` adds no Steiner points, it only reorders and remaps
 /// indices). The derivative that flows on from here is the derivative of the
-/// branch the real ear clipper selected, which is the only thing a derivative
+/// branch the triangulator selected, which is the only thing a derivative
 /// of a piecewise-smooth map can mean.
 pub(crate) fn triangulate_rings<S: GeomScalar>(
     outer: &[Point2<S>],
@@ -55,18 +58,26 @@ pub(crate) fn triangulate_rings<S: GeomScalar>(
     }
 
     // Triangulate (guarded — see `triangulation::safe_earcut`)
-    let indices = if hole_indices.is_empty() {
+    let mut indices = if hole_indices.is_empty() {
         crate::triangulation::safe_earcut(&vertices, &[], 2).map_err(Error::TriangulationError)?
     } else {
         crate::triangulation::safe_earcut(&vertices, &hole_indices, 2)
             .map_err(Error::TriangulationError)?
     };
 
+    // #7631 (from #6940): a multi-hole earcut can omit profile edges at a nearly collinear
+    // hole bridge. Its cap then cannot close against the unchanged side walls.
+    // The constrained retry returns only ORIGINAL point indices; scalar values
+    // (including their derivatives) and the ordinary successful earcut stay intact.
+    if let Some(constrained) = cap::recover_missing_boundaries(&vertices, &hole_indices, &indices) {
+        indices = constrained;
+    }
+
     Ok(TriangulationOf { points, indices })
 }
 
 /// Rectangle ring builder shared by [`create_rectangle`] and the
-/// `IfcRectangleProfileDef` processor, generic over the scalar (B4.4).
+/// `IfcRectangleProfileDef` processor, generic over the scalar.
 #[inline]
 pub(crate) fn rectangle_ring<S: GeomScalar>(width: S, height: S) -> Vec<Point2<S>> {
     let two = S::from_f64(2.0);
@@ -92,3 +103,7 @@ pub struct TriangulationOf<S: nalgebra::Scalar> {
 
 /// Triangulated profile result over `f64` (the production instantiation).
 pub type Triangulation = TriangulationOf<f64>;
+
+#[cfg(test)]
+#[path = "profile_cap_tests.rs"]
+pub(crate) mod tests;

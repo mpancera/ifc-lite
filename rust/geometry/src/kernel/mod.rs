@@ -14,6 +14,7 @@
 //! bounds). The EXACT (BigRational) tier is correct by construction and is the
 //! oracle for the faster interval/fixed-width tiers, each verified `≡` exact.
 
+pub(crate) mod abutting;
 pub mod arrangement;
 pub mod broadphase;
 pub mod budget;
@@ -29,6 +30,7 @@ pub mod manifest;
 pub mod mesh_bridge;
 pub mod mesh_volume;
 pub(crate) mod near_band;
+pub(crate) mod plane_weld;
 pub mod predicates;
 pub mod rational;
 pub(crate) mod signed_volume;

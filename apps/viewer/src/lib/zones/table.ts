@@ -32,7 +32,7 @@
  * the same call the pset write-back makes. Nothing here recomputes a volume.
  */
 
-import { neutralizeSpreadsheetFormula } from '@/lib/lists/export/model';
+import { tableToCsv } from '@ifc-lite/export';
 import { volumeBasisLabel, type VolumeBasis } from './volume-basis.js';
 import type { ElementZoneFacts, WriteBackRefusal } from './writeback.js';
 
@@ -89,6 +89,9 @@ export interface ZoneTableElement {
 export function refusalText(refusal: WriteBackRefusal): string {
   switch (refusal) {
     case 'no-geometry': return 'no geometry loaded for this element';
+    case 'writeback-unit-unavailable': return 'the target project volume unit is unavailable for physical writeback';
+    case 'declared-unit-unavailable': return 'the native quantity is present but its physical unit is unavailable';
+    case 'declared-quantity-unavailable': return 'current native quantities are unavailable';
     case 'no-declared-quantity': return 'the model declares no quantity on this basis';
     case 'unproved-solid': return 'the mesh is not a proven closed solid';
     case 'overlapping-zones': return 'the zones of this set overlap, so shares would double-count';
@@ -151,29 +154,12 @@ export function zoneTableRows(
  * ("Basic Wall:SW 200,0"), German decimal commas appear in type names, and a
  * zone a user called `Takt "A"` is legal. A file that shifts every column right
  * on one row is worse than no file, because the shift is invisible until
- * someone sums the wrong column.
+ * someone sums the wrong column. The repo's one table writer (`tableToCsv`)
+ * routes every cell through the one escaper, quotes whitespace-padded cells so
+ * an importer cannot trim the padding away, and ends the file with a newline.
  */
 export function toCsv(rows: readonly ZoneTableRow[], delimiter = ','): string {
-  const cell = (value: unknown): string => {
-    if (value === null || value === undefined) return '';
-    const raw = typeof value === 'boolean' ? (value ? 'true' : 'false') : String(value);
-    // Quoting stops a comma breaking the COLUMNS; it does nothing about a cell
-    // a spreadsheet re-reads as a FORMULA. An IFC Name is attacker-controlled
-    // in any federated project, and this file exists to be opened in Excel, so
-    // it goes through the viewer's existing neutralizer rather than a second
-    // rule invented here.
-    const text = neutralizeSpreadsheetFormula(raw);
-    return /["\n\r]|^\s|\s$/.test(text) || text.includes(delimiter)
-      ? `"${text.replace(/"/g, '""')}"`
-      : text;
-  };
-  const lines = [ZONE_TABLE_COLUMNS.join(delimiter)];
-  for (const row of rows) {
-    lines.push(ZONE_TABLE_COLUMNS.map((column) => cell(row[column])).join(delimiter));
-  }
-  // Trailing newline: POSIX text files end with one, and its absence makes
-  // `cat a.csv b.csv` silently join two rows.
-  return `${lines.join('\n')}\n`;
+  return tableToCsv(ZONE_TABLE_COLUMNS, rows, { delimiter });
 }
 
 /** The same rows as columns, for the Parquet writer. Column-major because

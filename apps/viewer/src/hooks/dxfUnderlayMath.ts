@@ -2,55 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-/**
- * DXF underlay → 2D drawing space, pure mapping math (issue #1782).
- *
- * Converted DXF underlays are, BY DEFAULT, assumed to already be in world
- * plan coordinates (metres, IFC XY — DXF and IFC are both Z-up). The 2D
- * drawing pipeline works in the render frame: RTC/origin-shifted, projected
- * via `projectTo2D` (plan: `x_d = worldX`, `y_d = -worldY_ifc`), with a
- * flipped section mirroring X. These helpers apply that mapping, then the
- * per-underlay placement (offset/rotation/scale in drawing space), and
- * filter by layer visibility. Kept free of React/store imports so they are
- * unit-testable; the `useDxfUnderlaysForDrawing` hook wraps them.
- *
- * Issue #1929 challenges the "already in world coordinates" assumption: a
- * surveyor's DXF is typically drawn in map/CRS coordinates (eastings,
- * northings), not the IFC model's local frame. When a per-underlay entry's
- * EFFECTIVE `georeferenced` state is true, the underlay's raw coordinates
- * are first passed through a caller-supplied `mapToWorld` transform — the
- * inverse IfcMapConversion, built by `dxfExportGeoref.ts`'s
- * `buildDxfMapToWorldTransform` — before the world→drawing mapping below
- * runs.
- *
- * `entry.georeferenced` is TRI-STATE (PR #1965 review, closing an import
- * race — see `dxfIngest.ts`'s module doc for the full race description):
- *   - `true` / `false`: explicit, only ever written by the user flipping
- *     the "Align to model georeference" checkbox
- *     (`setDxfUnderlayGeoreferenced`). Always wins regardless of anchor
- *     availability.
- *   - `undefined` ("auto"): follow anchor georeference availability,
- *     resolved HERE at render/call time via the `georeferenceAvailable`
- *     parameter — not baked in at import time. `resolveEffectiveGeoreferenced`
- *     below is the single place that resolves the tri-state.
- * `addDxfUnderlay` (drawing2DSlice.ts) defaults an entry's `georeferenced`
- * to `false`, NOT auto, unless the caller explicitly opts into `'auto'` —
- * so anything constructing an entry outside the DXF-ingest feature
- * (including a hypothetical future load/migration path for entries that
- * predate this issue) is conservative by construction: it never starts
- * following the anchor's georeference on its own. Only `ingestDxfFile`
- * opts a freshly-imported entry into `'auto'`. That is how "created before
- * this feature existed" (`false`) stays distinct from "created by this
- * feature in auto mode" (`undefined`) even though both currently apply the
- * SAME identity transform the instant a session starts with no anchor
- * georeference loaded — the difference only shows up once a georeferenced
- * model appears, at which point auto entries follow it and explicit-`false`
- * entries do not, by design.
- */
+/** DXF underlay mapping: legacy IFC XY site plans and explicit section frames. */
 
 import { applyDxfPlacement, type DxfPlacement, type Point2D } from '@ifc-lite/drawing-2d';
 import type { GeometryResult } from '@ifc-lite/geometry';
 import type { DxfUnderlayState } from '@/store/slices/drawing2DSlice';
+import { ifcToViewerAxes } from '@/lib/geo/coordinate-frame';
+import {
+  dxfUnderlayToWorldLines3D as toWorldLines3D,
+  dxfUnderlayToWorldLines3DAnchored as toWorldLines3DAnchored,
+} from './dxfUnderlayWorldLines.js';
+import type { RendererLineVertices } from '@/lib/renderer/line-overlay-rte';
+export type { AnchoredDxfLines3D } from './dxfUnderlayWorldLines.js';
 
 export interface DxfUnderlayRenderLine {
   points: Point2D[];
@@ -80,6 +43,12 @@ export interface DxfUnderlayRenderText {
   color: string;
   align: 'left' | 'center' | 'right';
   valign: 'baseline' | 'bottom' | 'middle' | 'top';
+  lineSpacingFactor?: number;
+  widthScale?: number;
+  /** Aligned/fit span length in metres; measuring renderers stretch to exactly this. */
+  fitWidth?: number;
+  /** Aligned text: scale height with width to reach fitWidth. */
+  fitUniform?: boolean;
 }
 
 /** One underlay pre-mapped to drawing space, ready for canvas/SVG. */
@@ -92,6 +61,7 @@ export interface DxfUnderlayRenderData {
 }
 
 interface WorldToDrawingParams {
+  pointMap?: (p: Point2D) => Point2D;
   shiftX: number;
   shiftY: number;
   mirrorX: boolean;
@@ -106,6 +76,7 @@ interface WorldToDrawingParams {
 }
 
 function worldToDrawing(p: Point2D, t: WorldToDrawingParams): Point2D {
+  if (t.pointMap) return t.pointMap(p);
   // Map/CRS → IFC world (issue #1929), only for underlays flagged
   // georeferenced. Then: world → plan drawing space (render-frame shift +
   // y-flip), then the flipped-section mirror, then the user placement.
@@ -185,9 +156,11 @@ export function dxfElevationRenderY(
   coordinateInfo: GeometryResult['coordinateInfo'] | undefined,
   elevationIfcZ = 0,
 ): number {
-  const rtc = coordinateInfo?.wasmRtcOffset;
   const shift = coordinateInfo?.originShift;
-  return elevationIfcZ - (shift?.y ?? 0) - (rtc?.z ?? 0);
+  const rtcYup = ifcToViewerAxes(
+    coordinateInfo?.wasmRtcOffset ?? { x: 0, y: 0, z: 0 },
+  );
+  return elevationIfcZ - (shift?.y ?? 0) - rtcYup.y;
 }
 
 /**
@@ -227,13 +200,15 @@ export function dxfUnderlayToDrawing(
   mirrorX: boolean,
   mapToWorld: (p: Point2D) => Point2D = (p) => p,
   georeferenceAvailable = false,
+  pointMap?: (p: Point2D) => Point2D,
 ): DxfUnderlayRenderData {
   const t: WorldToDrawingParams = {
+    pointMap,
     shiftX: shift.x,
     shiftY: shift.y,
     mirrorX,
     placement: entry.placement,
-    mapToWorld: resolveEffectiveGeoreferenced(entry, georeferenceAvailable) ? mapToWorld : undefined,
+    mapToWorld: !pointMap && resolveEffectiveGeoreferenced(entry, georeferenceAvailable) ? mapToWorld : undefined,
   };
   const lines: DxfUnderlayRenderLine[] = [];
   const fills: DxfUnderlayRenderFill[] = [];
@@ -272,16 +247,30 @@ export function dxfUnderlayToDrawing(
         { x: text.position.x + text.dirX, y: text.position.y + text.dirY },
         t,
       );
+      // Glyph height follows the mapped area over the baseline scale (the local scale for a
+      // uniform map); a map that changes the aspect also fits aligned text horizontally, like convert.ts.
+      const d2 = text.dirX ** 2 + text.dirY ** 2 || 1;
+      const normal = worldToDrawing({ x: text.position.x - text.dirY, y: text.position.y + text.dirX }, t);
+      const along = Math.hypot(tip.x - anchor.x, tip.y - anchor.y) / Math.sqrt(d2);
+      const area = Math.abs((tip.x - anchor.x) * (normal.y - anchor.y) - (tip.y - anchor.y) * (normal.x - anchor.x)) / d2;
+      const keepsAspect = along <= 1e-12 || Math.abs(along * along - area) <= 1e-9 * Math.max(1, area);
       texts.push({
         x: anchor.x,
         y: anchor.y,
         dirX: tip.x - anchor.x,
         dirY: tip.y - anchor.y,
-        height: text.height * entry.placement.scale * textMapScale,
+        height: along > 1e-12 ? text.height * area / along : text.height * entry.placement.scale * textMapScale,
         text: text.text,
         color: text.color ?? layer.color,
         align: text.align,
         valign: text.valign,
+        lineSpacingFactor: text.lineSpacingFactor,
+        // A stretched axis widens glyphs by the baseline scale over the glyph-height scale.
+        widthScale: keepsAspect || area <= 0 ? text.widthScale : (text.widthScale ?? 1) * along * along / area,
+        // The span follows the same mapped baseline as dirX/dirY (exact under any linear map).
+        fitWidth: text.fitWidth === undefined ? undefined
+          : text.fitWidth * Math.hypot(tip.x - anchor.x, tip.y - anchor.y) / (Math.hypot(text.dirX, text.dirY) || 1),
+        fitUniform: text.fitUniform && keepsAspect,
       });
     }
   }
@@ -297,7 +286,7 @@ export function dxfUnderlayToDrawing(
  * Returns `null` (not NaN bounds) whenever any corner is non-finite (PR
  * #1965 review): a malformed `IfcMapConversion` that slips a NaN into
  * `mapToWorld` used to make `Math.min`/`Math.max` return NaN silently, and
- * the caller (`Section2DPanel.handleCenterDxfUnderlay`) would then write
+ * the caller (`useDrawingLayers`'s `handleCenterDxfUnderlay`) would then write
  * `offsetX: NaN, offsetY: NaN` straight into the stored placement — a
  * corruption that survives even toggling georeferencing back off, since the
  * NaN is now IN the placement, not just in the transform. A NaN bound is a
@@ -309,15 +298,17 @@ export function dxfUnderlayDrawingBounds(
   mirrorX: boolean,
   mapToWorld: (p: Point2D) => Point2D = (p) => p,
   georeferenceAvailable = false,
+  pointMap?: (p: Point2D) => Point2D,
 ): { min: Point2D; max: Point2D } | null {
   const b = entry.underlay.bounds;
   if (!b) return null;
   const t: WorldToDrawingParams = {
+    pointMap,
     shiftX: shift.x,
     shiftY: shift.y,
     mirrorX,
     placement: { ...entry.placement, offsetX: 0, offsetY: 0 },
-    mapToWorld: resolveEffectiveGeoreferenced(entry, georeferenceAvailable) ? mapToWorld : undefined,
+    mapToWorld: !pointMap && resolveEffectiveGeoreferenced(entry, georeferenceAvailable) ? mapToWorld : undefined,
   };
   // Rotation in the placement makes axis-aligned min/max insufficient:
   // map all four corners.
@@ -355,9 +346,10 @@ export function dxfUnderlayDrawingBounds(
  * this first iteration; fills (hatches) and text labels are not (tracked as
  * follow-up, not silently dropped — see the PR description). Per-DXF-layer
  * color is also not carried through: the renderer's 3D reference-line
- * pipeline (`uploadDxfLines3D` / `Renderer.setOverlayLineColor`) shares one
- * color across the grid/alignment/annotation/DXF overlay family, the same
- * way grid and alignment already do — see `section-2d-overlay.ts`.
+ * pipeline (`setLineOverlay('dxf', …)` / `Renderer.setOverlayTheme`'s
+ * `overlayLine` field) shares one color across the grid/alignment/annotation/DXF
+ * overlay family, the same way grid and alignment already do — see
+ * `section-2d-overlay.ts`.
  */
 export function dxfUnderlayToWorldLines3D(
   entry: DxfUnderlayState,
@@ -366,31 +358,20 @@ export function dxfUnderlayToWorldLines3D(
   mapToWorld: (p: Point2D) => Point2D = (p) => p,
   georeferenceAvailable = false,
 ): Float32Array {
-  const t: WorldToDrawingParams = {
-    shiftX: shift.x,
-    shiftY: shift.y,
-    mirrorX: false,
-    placement: entry.placement,
-    mapToWorld: resolveEffectiveGeoreferenced(entry, georeferenceAvailable) ? mapToWorld : undefined,
-  };
-  const verts: number[] = [];
-  for (const layer of entry.underlay.layers) {
-    if (!(entry.layerVisibility[layer.name] ?? layer.visible)) continue;
-    for (const path of layer.paths) {
-      if (path.points.length < 2) continue;
-      const mapped = path.points.map((p) => worldToDrawing(p, t));
-      for (let i = 0; i < mapped.length - 1; i++) {
-        verts.push(mapped[i].x, elevationRenderY, mapped[i].y);
-        verts.push(mapped[i + 1].x, elevationRenderY, mapped[i + 1].y);
-      }
-      if (path.closed && mapped.length > 2) {
-        const a = mapped[mapped.length - 1];
-        const b = mapped[0];
-        verts.push(a.x, elevationRenderY, a.y);
-        verts.push(b.x, elevationRenderY, b.y);
-      }
-    }
-  }
-  return new Float32Array(verts);
+  return toWorldLines3D(entry, shift, elevationRenderY, mapToWorld, resolveEffectiveGeoreferenced(entry, georeferenceAvailable));
 }
 
+/**
+ * Build one DXF underlay directly into a local frame. Both DXF paths share
+ * the same georeference/mirror/placement walk; only this final render-boundary
+ * variant avoids narrowing national-grid coordinates before RTE can rebase.
+ */
+export function dxfUnderlayToWorldLines3DAnchored(
+  entry: DxfUnderlayState,
+  shift: { x: number; y: number },
+  elevationRenderY: number,
+  mapToWorld: (p: Point2D) => Point2D = (p) => p,
+  georeferenceAvailable = false,
+): RendererLineVertices | null {
+  return toWorldLines3DAnchored(entry, shift, elevationRenderY, mapToWorld, resolveEffectiveGeoreferenced(entry, georeferenceAvailable));
+}

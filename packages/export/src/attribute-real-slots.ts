@@ -37,7 +37,7 @@ export function isTypedMarker(value: IfcAttributeValue): boolean {
     typeof value === 'object' &&
     value !== null &&
     !Array.isArray(value) &&
-    ('real' in value || 'typed' in value)
+    ('real' in value || 'typed' in value || 'literal' in value)
   );
 }
 
@@ -58,7 +58,12 @@ export function serializeAttributeSlot(
   if (isTypedMarker(value)) return serializeStepValue(value);
   const qualified = serializeQualifiedSelectSlot(entityType, index, value);
   if (qualified !== null) return qualified;
-  return serializeStepValue(value, getRealTypedSlots(entityType, version).has(index));
+  try {
+    return serializeStepValue(value, getRealTypedSlots(entityType, version).has(index));
+  } catch (error) {
+    // Name the record the unwritable value came from (#5217).
+    throw new Error(`${entityType} attribute ${index}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
 }
 
 /**

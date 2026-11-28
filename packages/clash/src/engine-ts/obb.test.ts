@@ -23,7 +23,7 @@
  * `it.each` below reproduces that table bit-for-bit against the OLD metric
  * (skipped/kept as a historical record via `oldMaxPenetrationInto`, a local
  * reimplementation — the production method was deleted, see `tri-mesh.ts`)
- * and proves the NEW metric (`obbPenetrationDepth`, see `obb.ts`) reports the
+ * and proves the NEW metric (`obbPenetration`, see `obb.ts`) reports the
  * true 1.5 m at every tessellation, in both the TS and the WASM/Rust kernel.
  */
 
@@ -32,7 +32,14 @@ import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { testPair } from './narrow.js';
 import { TriMesh } from './tri-mesh.js';
-import { detectObb, obbPenetrationDepth, type Obb } from './obb.js';
+import { isThroughPenetration, obbPenetration, AXIS_NOISE_ULPS, OBB_EPS, type Obb } from './obb.js';
+import * as obbDetect from './obb-detect.js';
+import { detectObb } from './obb-detect.js';
+
+/** The MTD alone; most tests here are about the depth, not its axis. */
+function obbDepth(a: Obb, b: Obb): number | null {
+  return obbPenetration(a, b)?.depth ?? null;
+}
 import { cross, dot } from '../math/vec3.js';
 import { createClashEngine } from '../engine.js';
 import { WasmClashEngine, initClashWasm } from '../engine-wasm/index.js';
@@ -123,7 +130,7 @@ function oldMaxPenetrationInto(mesh: TriMesh, other: TriMesh, crossFlags: Uint8A
     if (crossFlags[t] === 0) continue;
     for (const v of mesh.tri(t)) {
       if (!other.containsPoint(v)) continue;
-      const d = other.distanceToSurface(v);
+      const d = other.closestOnSurface(v)[0];
       if (d > depth) depth = d;
     }
   }
@@ -281,7 +288,7 @@ function rotatedCubeAboutZ(key: string, tag: string, center: Vec3, half: number,
   return { key, ref: nextRef++, model: 'm', tag, positions: new Float32Array(positions), indices, bounds: { min, max } };
 }
 
-describe('analytic oracle: detectObb / obbPenetrationDepth unit behaviour', () => {
+describe('analytic oracle: detectObb / obbPenetration unit behaviour', () => {
   it('detects a plain axis-aligned box regardless of tessellation', () => {
     // `detectObb` discovers axes in triangle-traversal order, not fixed x/y/z
     // order, so compare the half-extents/center as sets, not positional
@@ -355,10 +362,10 @@ describe('analytic oracle: detectObb / obbPenetrationDepth unit behaviour', () =
     // SKIPPED rather than treated as a separation.
     const a: Obb = { center: [0, 0, 0], axes: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], half: [1, 2, 3] };
     const b: Obb = { center: [1.5, 0, 0], axes: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], half: [1, 2, 3] };
-    expect(obbPenetrationDepth(a, b)).toBe(0.5);
+    expect(obbDepth(a, b)).toBe(0.5);
   });
 
-  it('obbPenetrationDepth returns null (not a wrong number) for boxes that do not actually overlap', () => {
+  it('obbDepth returns null (not a wrong number) for boxes that do not actually overlap', () => {
     const a = subdividedBox('A', 'X', [0, 0, 0], [1, 1, 1], 1);
     const b = subdividedBox('B', 'Y', [5, 5, 5], [6, 6, 6], 1);
     const meshA = new TriMesh(a.positions!, a.indices!);
@@ -367,7 +374,97 @@ describe('analytic oracle: detectObb / obbPenetrationDepth unit behaviour', () =
     const obbB = detectObb(meshB);
     expect(obbA).not.toBeNull();
     expect(obbB).not.toBeNull();
-    expect(obbPenetrationDepth(obbA!, obbB!)).toBeNull();
+    expect(obbDepth(obbA!, obbB!)).toBeNull();
+  });
+});
+
+/**
+ * Boundary-pinning tests found by mutation testing: flipping the operator at
+ * each of these three sites kills zero tests in the suite above. Each test
+ * below sits EXACTLY on its boundary — a fixture merely near it passes under
+ * both operators and pins nothing.
+ */
+describe('boundary pinning: exact thresholds in detectObb / obbDepth / isThroughPenetration', () => {
+  it('declines a box whose thickness is inside the OBB_EPS band (obb.ts:148, half[i] > OBB_EPS)', () => {
+    // The existing "open shell" fixture above has EXACTLY zero extent on the
+    // degenerate axis, so it survives a mutated `half[i] > 0` just as well
+    // as the real `half[i] > OBB_EPS` check — it doesn't distinguish them.
+    // This fixture is a genuine closed box (6 faces, so the "2 offset
+    // planes per axis" check passes cleanly) whose z-thickness is exactly
+    // OBB_EPS, i.e. half[2] = OBB_EPS/2 — strictly between 0 and OBB_EPS.
+    // `half[i] > OBB_EPS` correctly still rejects it (a wafer this thin is
+    // not a certifiable box); a mutated `half[i] > 0` would accept it.
+    //
+    // x/y are 1e6 (not 1) so the SIDE faces' triangle normals stay well
+    // clear of `normalize()`'s own `len > OBB_EPS` guard (a face's normal
+    // magnitude before normalisation is ~ the product of its two edge
+    // lengths, here ~1e6 * OBB_EPS = 1, comfortably above OBB_EPS) — with a
+    // 1x1 footprint that cross product is itself ~OBB_EPS, so those faces
+    // get discarded as "degenerate" before this line is ever reached and
+    // the box is rejected for an unrelated reason (only 1 face-normal
+    // family survives), which was verified to happen and pin nothing.
+    expect(OBB_EPS / 2).toBeGreaterThan(0);
+    expect(OBB_EPS / 2).toBeLessThan(OBB_EPS);
+    const el = subdividedBox('A', 'X', [0, 0, 0], [1e6, 1e6, OBB_EPS], 1);
+    const mesh = new TriMesh(el.positions!, el.indices!);
+    expect(detectObb(mesh)).toBeNull();
+  });
+
+  it('an axis at the noise bound cannot separate and contributes zero depth (obb.ts:250, Math.abs(overlap) <= noise)', () => {
+    // Construct two axis-aligned boxes so the x-face candidate's overlap is
+    // an EXACT float equality with its own noise bound (not merely close):
+    // solved algebraically from the production formula
+    // `noise = extentSum * AXIS_NOISE_ULPS * EPSILON` with dist = 0, so
+    // `overlap = rA + rB` and `extentSum = rA + rB + 2*hy + 2*hz`, giving
+    // `S := rA + rB = (2*hy + 2*hz) * K / (1 - K)`, `K = AXIS_NOISE_ULPS *
+    // EPSILON` — verified by direct computation to satisfy `overlap ===
+    // noise` bit-for-bit (not just approximately).
+    //
+    // Under the real `<=` check this axis (and its duplicates reached via
+    // the 9 cross-product candidates) is inconclusive: it may not separate,
+    // and it contributes a depth candidate of exactly 0, which wins the
+    // minimum. A mutated `<` would instead treat the boundary axis as a
+    // genuine separating-axis candidate and report its own overlap
+    // (~= S, ~7e-15), so the mutation is still exactly assertable —
+    // 0 vs ~7e-15.
+    //
+    // #5355 CHANGED THE EXPECTED VALUE from 2, and the old one is worth
+    // recording because it was the bug in miniature: these boxes overlap by
+    // ~7e-15 along x, yet the assertion was the y/z FACE EXTENT, because the
+    // unresolvable x axis was dropped from the minimum outright. Same defect
+    // that reported 0.85 m of penetration for a 0.05 m curtain-wall panel
+    // lying flush against a mullion.
+    const hy = 1;
+    const hz = 1;
+    const K = AXIS_NOISE_ULPS * Number.EPSILON;
+    const S = ((2 * hy + 2 * hz) * K) / (1 - K);
+    const IDENTITY: [Vec3, Vec3, Vec3] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    const a: Obb = { center: [0, 0, 0], axes: IDENTITY, half: [0, hy, hz] };
+    const b: Obb = { center: [0, 0, 0], axes: IDENTITY, half: [S, hy, hz] };
+    // Sanity check the algebra actually lands exactly on the boundary
+    // before trusting the depth assertion below.
+    const extentSum = 0 + hy + hz + S + hy + hz;
+    const noise = extentSum * K;
+    expect(S).toBe(noise);
+    expect(obbDepth(a, b)).toBe(0);
+  });
+
+  it('does not report a through-penetration when the far side lands exactly flush (obb.ts:325, p.half[k] > rQk + |offK| + margin(rQk))', () => {
+    // A thin "duct" (p) whose cross-section fits inside a "wall" (q) and
+    // whose length is constructed to be EXACTLY flush with the wall's far
+    // face — not past it. `half[0]` is built from the identical expression
+    // `piercesAlong` itself evaluates (rQk + |offK| + margin(rQk)), so the
+    // comparison is a bit-exact tie, not an approximation.
+    const rQk = 0.1; // wall half-thickness
+    const offK = 0.05; // duct center offset from wall center, along the pierce axis
+    const margin = OBB_EPS * Math.max(1, rQk);
+    const halfK = rQk + Math.abs(offK) + margin;
+    const IDENTITY: [Vec3, Vec3, Vec3] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    const duct: Obb = { center: [0, 0, 0], axes: IDENTITY, half: [halfK, 0.05, 0.05] };
+    const wall: Obb = { center: [offK, 0, 0], axes: IDENTITY, half: [rQk, 5, 5] };
+    // `>` (strictly past the far face) correctly reports no through-
+    // penetration at exact flushness; a mutated `>=` would report one.
+    expect(isThroughPenetration(duct, wall)).toBe(false);
   });
 });
 
@@ -441,7 +538,7 @@ function skewBeams(separation: number): { a: Obb; b: Obb } {
 describe('axis conditioning: near-parallel cross axes at large operand scale', () => {
   it('measures the true depth of skew near-parallel beams on their common normal', () => {
     const { a, b } = skewBeams(-0.02);
-    const d = obbPenetrationDepth(a, b);
+    const d = obbDepth(a, b);
     expect(d).not.toBeNull();
     // True MTD = 0.02 (the constructed embedding along the common normal;
     // confirmed by exact rational arithmetic over all 15 candidates - the
@@ -458,7 +555,7 @@ describe('axis conditioning: near-parallel cross axes at large operand scale', (
     // reported penetration; a scale-relative guard keeps the axis because
     // its 0.5 m verdict is far above the ~4.5e-3 noise bound.
     const { a, b } = skewBeams(0.5);
-    expect(obbPenetrationDepth(a, b)).toBeNull();
+    expect(obbDepth(a, b)).toBeNull();
   });
 });
 
@@ -523,5 +620,246 @@ describe('analytic oracle: TS/WASM kernel parity on the held fixture', () => {
     expect(resTs.clashes[0].distance).toBeCloseTo(-1.5, 6);
     expect(resWasm.clashes[0].distance).toBeCloseTo(-1.5, 6);
     expect(Math.abs(resTs.clashes[0].distance - resWasm.clashes[0].distance)).toBeLessThan(1e-6);
+  });
+});
+
+/**
+ * #5355. Mirrors `rust/clash/src/obb_tests.rs`
+ * (`a_flush_face_contact_reports_zero_depth_not_a_face_extent_5355`) and
+ * `rust/clash/src/tests.rs` (`a_translated_box_is_still_a_box_5355` /
+ * `a_non_box_is_still_not_a_box_5355`). Same fixtures, same expectations, so
+ * the two kernels stay pinned to the same behaviour.
+ */
+describe('#5355: flush contacts and origin-independent box detection', () => {
+  const IDENTITY: [Vec3, Vec3, Vec3] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+
+  it('reports zero depth for a flush face contact, not the shared face extent', () => {
+    // A 0.05 m curtain-wall panel resting flush against a mullion: x-overlap
+    // is exactly zero, which lands inside the axis noise band. Dropping that
+    // axis from the minimum handed the MTD to the y faces (0.75 + 0.1), so a
+    // zero-volume contact reported 0.85 m — 17x the panel's own thickness.
+    const mullion: Obb = { center: [0, 0, 0], axes: IDENTITY, half: [0.1, 0.1, 1.5] };
+    const panel: Obb = { center: [0.125, 0, 0], axes: IDENTITY, half: [0.025, 0.75, 1.5] };
+    expect(obbDepth(mullion, panel)).toBe(0);
+
+    // Companion: a genuine overlap far below the panel thickness must still
+    // be measured. Without this, `depth = 0` unconditionally would pass.
+    const pressed: Obb = { center: [0.125 - 1e-3, 0, 0], axes: IDENTITY, half: [0.025, 0.75, 1.5] };
+    expect(obbDepth(mullion, pressed)).toBeCloseTo(1e-3, 9);
+  });
+
+  /** Thin rotated panel as an f32 triangle soup, centred at `[ox, oy, oz]`. */
+  function rotatedPanel(ox: number, oy: number, oz: number): TriMesh {
+    const theta = Math.fround(0.4);
+    const c = Math.fround(Math.cos(theta));
+    const s = Math.fround(Math.sin(theta));
+    const [hx, hy, hz] = [0.025, 0.75, 1.5];
+    const local: [number, number, number][] = [
+      [-hx, -hy, -hz], [hx, -hy, -hz], [hx, hy, -hz], [-hx, hy, -hz],
+      [-hx, -hy, hz], [hx, -hy, hz], [hx, hy, hz], [-hx, hy, hz],
+    ];
+    const positions = new Float32Array(24);
+    local.forEach(([x, y, z], i) => {
+      positions[i * 3] = Math.fround(c * x - s * y + ox);
+      positions[i * 3 + 1] = Math.fround(s * x + c * y + oy);
+      positions[i * 3 + 2] = Math.fround(z + oz);
+    });
+    const indices = new Uint32Array([
+      0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 5, 1, 0, 4, 5,
+      3, 2, 6, 3, 6, 7, 0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2,
+    ]);
+    return new TriMesh(positions, indices);
+  }
+
+  it('still recognises a box after a rigid translation', () => {
+    // The orthogonality gate compared `|dot(nᵢ, nⱼ)|` against an ABSOLUTE
+    // OBB_EPS = 1e-6. Normals come from f32 vertices, so their direction
+    // error grows with coordinate magnitude and shrinks with feature size:
+    // for this 0.05 m panel the worst |dot| measured 2.25e-7 at the origin,
+    // 1.19e-6 at 7.4 m and 2.67e-4 at 1 km. A perfect box stopped being a
+    // box because it had been moved. Every offset is a rigid translation of
+    // identical geometry, so every answer must be identical.
+    for (const off of [0, 7.4, -55.6, 123.456, 500, 1000]) {
+      const obb = detectObb(rotatedPanel(off, off * 0.5, -off * 0.25));
+      expect(obb, `a rigid translation to ${off} m must not stop a box being a box`).not.toBeNull();
+      // A tolerance loose enough to accept anything would pass the null check
+      // above while recovering nonsense extents.
+      const half = [...obb!.half].sort((x, y) => x - y);
+      expect(half[0]).toBeCloseTo(0.025, 3);
+      expect(half[1]).toBeCloseTo(0.75, 3);
+      expect(half[2]).toBeCloseTo(1.5, 3);
+    }
+  });
+
+  it('still declines a non-box, so the looser tolerance is not vacuous', () => {
+    // Guards the other direction: a bound with no `sin` denominator, or no
+    // orthogonality test at all, would make the test above pass vacuously.
+    const positions = new Float32Array([
+      0, 0, 0, 1, 0, 0, 0, 1, 0,
+      0, 0, 1, 1, 0, 1, 0, 1, 1,
+    ]);
+    const indices = new Uint32Array([
+      0, 1, 2, 3, 4, 5, 0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4, 2, 0, 3, 2, 3, 5,
+    ]);
+    expect(detectObb(new TriMesh(positions, indices))).toBeNull();
+  });
+});
+
+/**
+ * Box recognition far from the origin (#5474). One-for-one mirror of
+ * `rust/clash/src/obb_detect_tests.rs`.
+ */
+describe('detectObb: independent of where the box sits (#5474)', () => {
+  const BOX_IDX = [
+    0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 5, 1, 0, 4, 5, 3, 2, 6, 3, 6, 7, 0, 3, 7, 0, 7, 4, 1,
+    5, 6, 1, 6, 2,
+  ];
+  /** Yaw about Z, translate, bake through f32. */
+  const place = (p: Vec3, yaw: number, t: Vec3): Vec3 => {
+    const [c, s] = [Math.cos(yaw), Math.sin(yaw)];
+    const w = [c * p[0] - s * p[1], s * p[0] + c * p[1], p[2]];
+    return [0, 1, 2].map((k) => Math.fround(w[k]! + t[k]!)) as unknown as Vec3;
+  };
+  const meshOf = (corners: Vec3[], idx: number[], yaw: number, t: Vec3) => {
+    const v = corners.map((p) => place(p, yaw, t));
+    const tris: [Vec3, Vec3, Vec3][] = [];
+    for (let i = 0; i < idx.length; i += 3) tris.push([v[idx[i]!]!, v[idx[i + 1]!]!, v[idx[i + 2]!]!]);
+    return { count: tris.length, tri: (k: number) => tris[k]! };
+  };
+  const boxCorners = (h: Vec3): Vec3[] =>
+    [
+      [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
+      [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1],
+    ].map((s) => [s[0]! * h[0], s[1]! * h[1], s[2]! * h[2]] as Vec3);
+  const OFFSETS: Vec3[] = [[0, 0, 0], [123.456, -45.678, 9.1], [1000, 0, 0], [0, 1000, 0], [10_000, 0, 0]];
+  const ulp32 = (m: number) => 2 ** (Math.floor(Math.log2(m)) - 23);
+
+  it('recovers a thin rotated panel to its own f32 resolution at any distance', () => {
+    for (const t of OFFSETS) {
+      const o = detectObb(meshOf(boxCorners([0.025, 0.75, 1.5]), BOX_IDX, 0.3, t));
+      if (!o) throw new Error(`offset ${t}: a box is still a box`);
+      const tol = 8 * ulp32(Math.max(Math.abs(t[0]), Math.abs(t[1]), Math.abs(t[2])) + 2);
+      const centre = place([0, 0, 0], 0.3, t);
+      for (let k = 0; k < 3; k += 1) expect(Math.abs(o.center[k]! - centre[k]!), `offset ${t}`).toBeLessThanOrEqual(tol);
+      const got = [...o.half].sort((a, b) => a - b);
+      [0.025, 0.75, 1.5].forEach((want, i) => expect(Math.abs(got[i]! - want), `offset ${t}`).toBeLessThanOrEqual(tol));
+      for (let i = 0; i < 3; i += 1) {
+        for (let j = i + 1; j < 3; j += 1) expect(Math.abs(dot(o.axes[i]!, o.axes[j]!))).toBeLessThan(1e-12);
+      }
+    }
+  });
+
+  // Shared parity vectors: the same table is `TINY_BOX_HALVES` in
+  // `rust/clash/src/obb_detect_tests.rs` (EDGE-CLASH-4, F2a X5).
+  const TINY_BOX_HALVES: Vec3[] = [
+    [0.0005, 0.0005, 0.0005],
+    [0.00025, 0.00025, 0.00025],
+    [0.0005, 0.001, 0.002],
+    [0.00005, 0.00005, 0.00005],
+    [0.0001, 0.01, 0.5],
+  ];
+
+  it('certifies a box under a millimetre, scale-free (EDGE-CLASH-4)', () => {
+    for (const h of TINY_BOX_HALVES) {
+      for (const t of [[0, 0, 0], [12.5, -3.25, 1]] as Vec3[]) {
+        const o = detectObb(meshOf(boxCorners(h), BOX_IDX, 0.3, t));
+        if (!o) throw new Error(`half ${h} offset ${t}: a box is still a box`);
+        const tol = 8 * ulp32(Math.max(Math.abs(t[0]), Math.abs(t[1]), Math.abs(t[2])) + 2);
+        const got = [...o.half].sort((a, b) => a - b);
+        const want = [...h].sort((a, b) => a - b);
+        for (let k = 0; k < 3; k += 1) expect(Math.abs(got[k]! - want[k]!), `half ${h} offset ${t}`).toBeLessThanOrEqual(tol);
+      }
+    }
+  });
+
+  it('still rejects a millimetre L prism (EDGE-CLASH-4)', () => {
+    const l: Vec3[] = (
+      [
+        [0, 0, 0], [2, 0, 0], [2, 1, 0], [1, 1, 0], [1, 2, 0], [0, 2, 0],
+        [0, 0, 1], [2, 0, 1], [2, 1, 1], [1, 1, 1], [1, 2, 1], [0, 2, 1],
+      ] as Vec3[]
+    ).map((p) => [p[0] * 0.001, p[1] * 0.001, p[2] * 0.001] as Vec3);
+    const idx = [
+      0, 2, 1, 0, 3, 2, 0, 4, 3, 0, 5, 4, 6, 7, 8, 6, 8, 9, 6, 9, 10, 6, 10, 11, 0, 1, 7, 0, 7, 6,
+      1, 2, 8, 1, 8, 7, 2, 3, 9, 2, 9, 8, 3, 4, 10, 3, 10, 9, 4, 5, 11, 4, 11, 10, 5, 0, 6, 5, 6, 11,
+    ];
+    expect(detectObb(meshOf(l, idx, 0.3, [0, 0, 0]))).toBeNull();
+  });
+
+  // Shared parity vectors with `rust/clash/src/obb_detect_tests.rs`
+  // (`ACUTE_START_IDX`, `THIN_BOX_HALVES`, `NEEDLE_CASES`; review of #7813).
+  // BOX_IDX with each face's 2nd triangle re-started at its other diagonal
+  // corner: same triangles and winding, both starting at an acute corner.
+  const ACUTE_START_IDX = [
+    0, 1, 2, 2, 3, 0, 4, 6, 5, 6, 4, 7, 0, 5, 1, 5, 0, 4, 3, 2, 6, 6, 7, 3, 0, 3, 7, 7, 4, 0, 1,
+    5, 6, 6, 2, 1,
+  ];
+  const THIN_BOX_HALVES: Vec3[] = [[5, 0.5, 0.0025], [6, 0.004, 0.004], [0.0001, 0.01, 0.5]];
+
+  it('certifies a long thin member whatever vertex its triangles start at', () => {
+    for (const idx of [BOX_IDX, ACUTE_START_IDX]) {
+      for (const h of THIN_BOX_HALVES) {
+        for (const t of [[0, 0, 0], [12.5, -3.25, 1]] as Vec3[]) {
+          const o = detectObb(meshOf(boxCorners(h), idx, 0.3, t));
+          if (!o) throw new Error(`half ${h} offset ${t}: a thin plate is a box`);
+          const tol = 8 * ulp32(Math.max(Math.abs(t[0]), Math.abs(t[1]), Math.abs(t[2])) + 6);
+          const got = [...o.half].sort((a, b) => a - b);
+          const want = [...h].sort((a, b) => a - b);
+          for (let k = 0; k < 3; k += 1) expect(Math.abs(got[k]! - want[k]!), `half ${h} offset ${t}`).toBeLessThanOrEqual(tol);
+        }
+      }
+    }
+  });
+
+  /** `normalAngleError`, or NaNs where the module has no such export (so a
+   * build without it fails the assertions instead of failing to load). */
+  const normalAngleError = (a: Vec3, b: Vec3, c: Vec3): [number, number] => {
+    const f = (obbDetect as Partial<typeof obbDetect>).normalAngleError;
+    return f ? f(a, b, c) : [Number.NaN, Number.NaN];
+  };
+  const rotations = (a: Vec3, b: Vec3, c: Vec3): [Vec3, Vec3, Vec3][] => [[a, b, c], [b, c, a], [c, a, b]];
+
+  it('bounds normal noise scale-free and independent of vertex order', () => {
+    const unitErr = 2 ** -22;
+    for (const s of [1, 0.5, 0.25]) {
+      for (const [p, q, r] of rotations([0, 0, 0], [s, 0, 0], [0, s / 256, 0])) {
+        const [err, coordErr] = normalAngleError(p, q, r);
+        expect(coordErr).toBe(unitErr);
+        expect(err, `scale ${s}`).toBe((unitErr * 257) / s);
+      }
+    }
+  });
+
+  const NEEDLE_CASES: [number, boolean][] = [[0, false], [1e-6, false], [0.9999e-3, false], [1.0001e-3, true], [0.01, true]];
+
+  it('gives a needle no noise bound and a kept triangle a finite one', () => {
+    for (const [h, keep] of NEEDLE_CASES) {
+      expect(h / Math.sqrt(1 + h * h) >= 1e-3, `fixture h ${h}`).toBe(keep);
+      for (const [p, q, r] of rotations([0, 0, 0], [1, 0, 0], [2, h, 0])) {
+        expect(Number.isFinite(normalAngleError(p, q, r)[0]), `h ${h} start ${p}`).toBe(keep);
+      }
+    }
+  });
+
+  it('still rejects an L prism at any distance', () => {
+    const l: Vec3[] = [
+      [0, 0, 0], [2, 0, 0], [2, 1, 0], [1, 1, 0], [1, 2, 0], [0, 2, 0],
+      [0, 0, 1], [2, 0, 1], [2, 1, 1], [1, 1, 1], [1, 2, 1], [0, 2, 1],
+    ];
+    const idx = [
+      0, 2, 1, 0, 3, 2, 0, 4, 3, 0, 5, 4, 6, 7, 8, 6, 8, 9, 6, 9, 10, 6, 10, 11, 0, 1, 7, 0, 7, 6,
+      1, 2, 8, 1, 8, 7, 2, 3, 9, 2, 9, 8, 3, 4, 10, 3, 10, 9, 4, 5, 11, 4, 11, 10, 5, 0, 6, 5, 6, 11,
+    ];
+    for (const t of OFFSETS) expect(detectObb(meshOf(l, idx, 0.3, t)), `offset ${t}`).toBeNull();
+  });
+
+  it('still rejects a thin rhombic prism 100 km out (the 0.1 rad angle cap)', () => {
+    const [c, s] = [Math.cos((80 * Math.PI) / 180), Math.sin((80 * Math.PI) / 180)];
+    const foot = [[0, 0], [1, 0], [1 + c, s], [c, s]];
+    const corners: Vec3[] = [];
+    for (const z of [0, 0.05]) for (const p of foot) corners.push([p[0]!, p[1]!, z]);
+    for (const t of [...OFFSETS, [100_000, 0, 0] as Vec3]) {
+      expect(detectObb(meshOf(corners, BOX_IDX, 0.3, t)), `offset ${t}`).toBeNull();
+    }
   });
 });

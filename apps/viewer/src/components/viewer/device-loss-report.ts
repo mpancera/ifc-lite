@@ -2,13 +2,22 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import { reportCorrelation } from '@/lib/error-reports/correlation';
+import { offerErrorReport, attachContextCorrelation } from '@/lib/error-reports/context';
 import type { RenderDegradationInfo } from '@ifc-lite/renderer';
 import { posthog } from '@/lib/analytics';
+import { recoveryFailureProperties } from './device-loss-recovery-failure.js';
 import {
   buildDeviceLossContext,
   type DeviceLossContext,
   type DeviceLossContextSource,
 } from './device-loss-context.js';
+import { createRecoveryBudget, startDeviceLossRecovery, type DeviceRecoverySource } from './device-loss-recovery.js';
+import { notifyDeviceHealth } from './device-loss-notification.js';
+import { reportDeviceRecovery, reportRecoveryBudgetExhausted } from './device-loss-recovery-report.js';
+import { useViewerStore } from '@/store';
+import { noteGaussianDeviceEvent } from '@/hooks/ingest/gaussianTelemetry';
+export { modelsWithoutOmittedPointCloudHandles } from './device-loss-recovery-report.js';
 
 /**
  * What the user and error tracking are told when the GPU device dies.
@@ -27,36 +36,84 @@ import {
  * than as raw stack frames nobody can attribute.
  */
 
-// Session-scoped latch. Module state is deliberate: the loss is a property of
-// the device, not of a component instance, so a remount must not re-toast.
+/**
+ * The reasons a device loss can carry, and the ONLY strings allowed into a
+ * fingerprint.
+ *
+ * Two sources feed `info.reason`, and only one of them is ours. The WebGPU spec
+ * bounds `GPUDeviceLostInfo.reason` to `'unknown'` and `'destroyed'` (and
+ * `device.ts` excludes owned teardown by lifetime, not reason), while `Renderer`
+ * synthesises `'render-exception'` / `'render-encode-exception'` for the
+ * synchronous-throw path Safari takes instead of resolving `device.lost`.
+ *
+ * The point of the allowlist is that a fingerprint must have a CEILING. The
+ * browser-supplied half is a string we do not control: a future spec value, a
+ * non-conforming engine, or a vendor that puts driver text where a reason
+ * belongs would each mint a new issue group per wording, which is exactly the
+ * unbounded grouping that made #3767 and #3774 two issues for one failure.
+ * Anything not on this list folds into `other`, so the ceiling is five groups
+ * whatever an engine hands us, and no vendor or driver text can ever reach a
+ * fingerprint. The raw reason is not lost: it stays on the event as
+ * `device_lost_reason`, queryable inside whichever group it landed in.
+ *
+ * A single `ifc-lite:device_lost` would have been simpler and is what one
+ * reading of the review asks for, but it merges failures with different fixes:
+ * a driver-side loss on Windows and a Safari frame throwing a DOMException are
+ * not the same bug, and that is the same argument that keeps `render_degraded`
+ * out of the loss group below.
+ */
+const DEVICE_LOST_FINGERPRINT_REASONS: ReadonlySet<string> = new Set([
+  'unknown',
+  'destroyed',
+  'render-exception',
+  'render-encode-exception',
+]);
+
+/** Bounded fingerprint for a device loss. Never carries engine-supplied text. */
+function deviceLostFingerprint(reason: string): string {
+  const bucket = DEVICE_LOST_FINGERPRINT_REASONS.has(reason) ? reason : 'other';
+  return `ifc-lite:device_lost:${bucket}`;
+}
+
+// Loss-episode latch. Module state is deliberate: a component remount must not
+// re-toast the same lost device. Successful recovery re-arms it because the
+// replacement device can independently be lost later in the same session.
 let reported = false;
 // The same, for the neighbouring "degraded and never recovered" signal. A
 // separate latch: the two are different failures and one must not mute the
 // other (a session can degrade for a while and THEN lose the device).
 let degradationReported = false;
+// Per document, like the latches above: `Viewport` subscribes again on remount,
+// and a fresh budget per subscription would let a remount skip the limit.
+let admitRecovery = createRecoveryBudget();
 
 /** Reset the once-per-session latches. Test seam — not used in production. */
 export function resetDeviceLossReportForTests(): void {
   reported = false;
   degradationReported = false;
+  admitRecovery = createRecoveryBudget();
 }
 
 /**
- * Report a GPU device loss to the user and to error tracking, once per
- * session. Never throws: it runs from a renderer callback whose other
+ * Report a GPU device loss to the user and to error tracking, once per loss
+ * episode. Never throws: it runs from a renderer callback whose other
  * listeners must still fire.
  */
 export function reportDeviceLost(
   info: { message: string; reason: string },
   context?: DeviceLossContext,
+  recoveryAvailable = false,
 ): void {
   if (reported) return;
   reported = true;
+  noteGaussianDeviceEvent('lost');
+  const reportContext = { errorCode: 'gpu_device_lost' };
+  offerErrorReport(reportContext);
 
   console.warn('[Viewport] GPU device lost:', info.reason, info.message);
 
   try {
-    posthog.captureException(
+    const captured = posthog.captureException(
       new Error(`GPU device lost (${info.reason}): ${info.message}`),
       {
         // Enrichment (issue #2624) FIRST, base fields LAST: whatever keys a
@@ -78,34 +135,43 @@ export function reportDeviceLost(
         // scrub-path test in device-loss-report.test.ts, which runs the real
         // `scrubEvent` so this cannot regress unnoticed.
         device_lost_detail: info.message,
+        // One issue per LOSS REASON, chosen here because nothing downstream
+        // can choose it. PostHog groups an exception by type + message + stack
+        // unless the client supplies this, and both halves vary for a device
+        // loss: the message is Dawn's driver text (a D3D12 hang, a Vulkan VRAM
+        // exhaustion and a Metal timeout word themselves differently) and the
+        // stack names the hashed bundle, so it moves on every deploy — the
+        // same reason #2354's fixed-string WebGL report still minted a fresh
+        // issue per release. What was OBSERVED: #3767 and #3774 carry the same
+        // DXGI_ERROR_DEVICE_HUNG text six hours apart and were filed as two
+        // separate GitHub issues, with a dozen merges to main (so several
+        // viewer deploys) in between; #3207's Vulkan loss is a third issue for
+        // the same family. The `stampFingerprint` pass in
+        // lib/analytics-scrub.ts cannot cover this: it fingerprints only the
+        // kinds `classifyLoadError` recognises, and a GPU loss is deliberately
+        // not one of them. It DOES honour a fingerprint set at the capture
+        // site, which is what this is.
+        //
+        // The reason, and NOTHING else, discriminates — see
+        // `DEVICE_LOST_FINGERPRINT_REASONS` for why it is allowlisted rather
+        // than interpolated raw. The driver text and the whole enrichment
+        // block stay queryable inside whichever group they landed in.
+        $exception_fingerprint: deviceLostFingerprint(info.reason),
       },
     );
+    const correlation = reportCorrelation(captured);
+    if (correlation) attachContextCorrelation(reportContext, correlation);
   } catch (err) {
     // Telemetry must never be the thing that breaks the loss path.
     console.warn('[Viewport] device-loss capture failed:', err);
   }
 
-  // Imported lazily to keep the render-path module free of UI imports (same
-  // pattern as gpu-upload-guard). Wording follows that guard's toast, but says
-  // "stopped drawing" rather than its "part of the model may not be drawn":
-  // a lost device stops the WHOLE view, not one batch, and it does not come
-  // back without a reload.
-  void import('@/components/ui/toast').then((m) => {
-    m.toast.error(
-      'The graphics device was lost, so the 3D view has stopped drawing. ' +
-      'Reload the page to restore rendering.',
-    );
-  }).catch((err) => {
-    // Best-effort: a failed toast must never mask the device loss itself. But
-    // swallow it SILENTLY and the one case that matters — the toast chunk
-    // failing to load, so the user gets no notification at all about a view
-    // that has stopped — becomes invisible to us too. Log, do not rethrow.
-    // `[Viewport]`, like every other line this module logs. The `[device-loss]`
-    // it used to carry was the only prefix in the file that named a failure
-    // rather than the subsystem, which made the module ungreppable as a whole
-    // and invited its copy on the degradation path to be wrong outright.
-    console.warn('[Viewport] device-loss toast unavailable; loss reported to telemetry only:', err);
-  });
+  notifyDeviceHealth('error',
+    'The graphics device was lost, so the 3D view has stopped drawing. ' +
+    (recoveryAvailable
+      ? 'Automatic recovery is starting; reload the page if it does not return.'
+      : 'Reload the page to restore rendering.'),
+  );
 }
 
 /**
@@ -129,6 +195,8 @@ export function reportPersistentRenderDegradation(
 ): void {
   if (degradationReported) return;
   degradationReported = true;
+  const reportContext = { errorCode: 'persistent_render_degradation' };
+  offerErrorReport(reportContext);
 
   console.warn(
     '[Viewport] rendering degraded without recovering:',
@@ -138,7 +206,7 @@ export function reportPersistentRenderDegradation(
   );
 
   try {
-    posthog.captureException(
+    const captured = posthog.captureException(
       new Error(
         `Rendering persistently degraded (${info.origin}, ${info.consecutiveDegradedFrames} consecutive frames): ${info.detail}`,
       ),
@@ -162,8 +230,15 @@ export function reportPersistentRenderDegradation(
         // scrub-path test in device-loss-report.test.ts runs the real
         // `scrubEvent` over these keys so that cannot regress unnoticed.
         render_degraded_detail: info.detail,
+        // Its own fingerprint, not the loss's — see the note there. A live
+        // device that stopped drawing and a dead device are different bugs
+        // with different fixes, so they must not share an issue even though
+        // they share this module and their user-visible outcome.
+        $exception_fingerprint: 'ifc-lite:render_degraded',
       },
     );
+    const correlation = reportCorrelation(captured);
+    if (correlation) attachContextCorrelation(reportContext, correlation);
   } catch (err) {
     // Telemetry must never be the thing that breaks the render path.
     console.warn('[Viewport] render-degradation capture failed:', err);
@@ -197,6 +272,7 @@ export function reportPersistentRenderDegradation(
 export interface ViewportHealthSource extends DeviceLossContextSource {
   onDeviceLost(listener: (info: { message: string; reason: string }) => void): () => void;
   onPersistentRenderDegradation(listener: (info: RenderDegradationInfo) => void): () => void;
+  recoverDevice?: DeviceRecoverySource['recoverDevice'];
 }
 
 /**
@@ -232,26 +308,75 @@ function buildContextSafely(
  * adding a third one, or forgetting the second, is a change to a tested unit
  * instead of an invisible omission inside a 400-line effect.
  *
- * `buildContext` is a TEST SEAM, nothing else: production callers pass only
- * the renderer, and the parameter exists so a test can hand in a builder that
- * throws and prove the base report survives it (`buildContextSafely` above).
+ * `buildContext` is a TEST SEAM: a test can hand in a builder that throws and
+ * prove the base report survives it (`buildContextSafely` above). The optional
+ * recovery callback lets GPU-only overlays rebuild after a replacement device.
  */
 export function subscribeViewportHealth(
   renderer: ViewportHealthSource,
   buildContext: (source: DeviceLossContextSource) => DeviceLossContext = buildDeviceLossContext,
+  onRecovered?: () => void,
 ): () => void {
+  let recovery: ReturnType<typeof startDeviceLossRecovery> | null = null;
+  let refusalCaptured = false;
   const unsubscribes = [
     // The context is built AT LOSS TIME, inside the listener, not at subscribe
     // time: `ms_since_last_frame`, `gpu_resident_mb` and the last-load fields
     // must describe the moment the device died, not the Viewport mount.
-    renderer.onDeviceLost((info) =>
-      reportDeviceLost(info, buildContextSafely(buildContext, renderer)),
-    ),
+    renderer.onDeviceLost((info) => {
+      // A failed recovery reports the GPU that was lost, not whatever the
+      // replacement attempt left behind (often no adapter at all).
+      const lossContext = buildContextSafely(buildContext, renderer);
+      const store = useViewerStore.getState();
+      const cancelStream = store.activeStreamCanceller;
+      if (cancelStream) {
+        // A streamed scan does not publish its model handle until `done`.
+        // Cancel before recovery tears down the old point-cloud renderer so
+        // that late completion cannot publish a handle for a vanished asset.
+        store.setActiveStreamCanceller(null);
+        try {
+          cancelStream();
+        } catch (error) {
+          console.warn('[Viewport] failed to cancel point-cloud ingest during device loss:', error);
+        }
+      }
+      const attemptRecovery = !recovery && Boolean(renderer.recoverDevice);
+      const admitted = attemptRecovery && admitRecovery();
+      reportDeviceLost(info, lossContext, Boolean(renderer.recoverDevice) && (admitted || !attemptRecovery));
+      // Once per subscription: a second signal for the same lost device
+      // (synchronous, then `device.lost`) must not capture a second refusal, but
+      // a remounted viewport's new renderer still reports its own.
+      if (attemptRecovery && !admitted && !refusalCaptured) {
+        refusalCaptured = true;
+        reportRecoveryBudgetExhausted();
+      }
+      if (admitted) refusalCaptured = false;
+      if (admitted && renderer.recoverDevice) {
+        const run = startDeviceLossRecovery(
+          { recoverDevice: () => renderer.recoverDevice!() },
+          {
+            recovered: (result) => {
+              reportDeviceRecovery(result, () => { reported = false; });
+              onRecovered?.();
+            },
+            failed: (result, attempts) => reportDeviceRecovery(result, () => { reported = false; }, recoveryFailureProperties(
+              result, attempts, lossContext,
+            )),
+          },
+        );
+        recovery = run;
+        const clearRecovery = () => {
+          if (recovery === run) recovery = null;
+        };
+        void run.promise.then(clearRecovery, clearRecovery);
+      }
+    }),
     renderer.onPersistentRenderDegradation((info) =>
       reportPersistentRenderDegradation(info, buildContextSafely(buildContext, renderer)),
     ),
   ];
   return () => {
+    recovery?.cancel();
     for (const unsubscribe of unsubscribes) unsubscribe();
   };
 }

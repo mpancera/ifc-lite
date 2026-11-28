@@ -18,6 +18,12 @@
  * out of these sources and fails if either drifts from the slot table.
  */
 
+import { overlayDepthLiftWgsl } from './depth-nudge.wgsl.js';
+import { MAX_CAP_CLIP_PLANES, extraClipWgslFor } from '../extra-clip-planes.js';
+
+/** The cap shaders' clip block: every other cutting plane and the section-box faces (#8696). */
+const capClipWgsl = extraClipWgslFor(MAX_CAP_CLIP_PLANES);
+
 /**
  * Float32 indices of each field in the shared uniform buffer.
  *
@@ -41,10 +47,15 @@ export const SECTION_2D_UNIFORM_SLOTS = {
   params2: 32,
   /** vec4<f32> overlay / section-cut line colour — floats 36..39 (bytes 144..159) */
   lineColor: 36,
+  /** mat4 camera-relative projection for opt-in anchored overlays. */
+  rteViewProj: 40,
+  /** split f64-like (origin - eye) delta; w = 1 enables RTE. */
+  originDeltaHigh: 56,
+  originDeltaLow: 60,
 } as const;
 
 /** Total float count of one uniform record (40 floats = 160 bytes). */
-export const SECTION_2D_UNIFORM_FLOATS = 40;
+export const SECTION_2D_UNIFORM_FLOATS = 64;
 
 /** Total byte size of one uniform record. */
 export const SECTION_2D_UNIFORM_BYTES = SECTION_2D_UNIFORM_FLOATS * 4;
@@ -52,12 +63,12 @@ export const SECTION_2D_UNIFORM_BYTES = SECTION_2D_UNIFORM_FLOATS * 4;
 /**
  * One uniform slot per draw site.
  *
- * The overlay renderer issues up to six draws into a **single** render pass —
- * the section cut cap plus five world-space line families — and every one of
+ * The overlay renderer issues up to seven draw sites into a **single** render pass —
+ * the section cut cap plus six world-space line families — and every one of
  * them needs a different `lineColor` (and, for the cap, a different
  * `planeOffset` and the whole cap-style tail). With one record shared between
  * them the last `queue.writeBuffer` before submit is what the GPU sees for all
- * six: `writeBuffer` is a *queue* operation, so it is applied before the
+ * seven: `writeBuffer` is a *queue* operation, so it is applied before the
  * command buffer that references it executes, no matter where in the encoding
  * it was issued. Every earlier draw therefore rendered with the last draw's
  * uniforms — most visibly, the clash box's colour bleeding onto the annotation,
@@ -65,23 +76,41 @@ export const SECTION_2D_UNIFORM_BYTES = SECTION_2D_UNIFORM_FLOATS * 4;
  * hatch to the zeroed tail the line draws write.
  *
  * Each site owning a fixed slot, addressed with a dynamic bind-group offset,
- * is what makes the six draws independent while keeping the buffer, the layout
+ * is what makes the seven draw sites independent while keeping the buffer, the layout
  * and the bind group under the single owner issue #2456 insisted on. A slot per
  * site (rather than a bump allocator) needs no per-frame reset hook: each site
  * draws at most once per pass.
  */
+/**
+ * Max independently-anchored line partitions per channel in one pass.
+ *
+ * Spatial batching normally keeps this close to one.  The explicit 256-record
+ * ceiling still bounds the shared dynamic-uniform allocation (384 KiB at the
+ * WebGPU-guaranteed 256-byte stride) while accepting genuinely disjoint survey
+ * features instead of making the old 32-record implementation throw midway
+ * through a render submission.
+ */
+export const SECTION_2D_MAX_LINE_PARTITIONS = 256;
+
 export const SECTION_2D_UNIFORM_SLOT_INDEX = {
   /** The section cut cap: fill + outline, which share one record by design. */
   sectionCut: 0,
   annotation: 1,
-  alignment: 2,
-  grid: 3,
-  dxf: 4,
-  clashBox: 5,
+  alignment: 1 + SECTION_2D_MAX_LINE_PARTITIONS,
+  grid: 1 + SECTION_2D_MAX_LINE_PARTITIONS * 2,
+  dxf: 1 + SECTION_2D_MAX_LINE_PARTITIONS * 3,
+  terrain: 1 + SECTION_2D_MAX_LINE_PARTITIONS * 4,
+  centreline: 1 + SECTION_2D_MAX_LINE_PARTITIONS * 5,
+  clashBox: 1 + SECTION_2D_MAX_LINE_PARTITIONS * 6,
+  /** The cut caps of the cutting planes beyond the first (#7545): one record per plane, after every line range. */
+  extraCap: 1 + SECTION_2D_MAX_LINE_PARTITIONS * 7,
 } as const;
 
-/** How many uniform records the shared buffer holds. */
-export const SECTION_2D_UNIFORM_SLOT_COUNT = 6;
+/** Caps beyond the first: one per extra plane (`MAX_EXTRA_CLIP_PLANES`) and one per section-box face (#8696). */
+export const SECTION_2D_MAX_EXTRA_CAPS = 7 + 6;
+
+/** One cap record, a partition range for every line family, and a cap record per extra plane. */
+export const SECTION_2D_UNIFORM_SLOT_COUNT = 1 + SECTION_2D_MAX_LINE_PARTITIONS * 7 + SECTION_2D_MAX_EXTRA_CAPS;
 
 /**
  * Byte stride between uniform slots for `device`.
@@ -106,9 +135,12 @@ export function sectionUniformSlotStride(device: GPUDevice): number {
  * wall/slab fills each layer with its own IfcMaterial colour, matching the 3D
  * build-up. Polygons that pass the sentinel alpha -1 fall back to the uniform
  * cap style, so single-material cuts read as one architectural section exactly
- * as before. Hatch + stroke apply over either base.
+ * as before. Hatch + stroke apply over either base; a polygon's own hatch
+ * fields (`CutPolygon2D.hatch`, flagged per field in the override mask) replace
+ * the uniform ones, so each material layer can carry its own cut pattern.
  */
 export const SECTION_2D_CAP_FILL_WGSL = /* wgsl */ `
+        ${capClipWgsl}
         struct Uniforms {
           viewProj:       mat4x4<f32>,
           planeOffset:    vec4<f32>,    // Small offset to render slightly in front of section plane
@@ -118,25 +150,48 @@ export const SECTION_2D_CAP_FILL_WGSL = /* wgsl */ `
           params:         vec4<f32>,
           // x=secondaryAngleRad, y,z,w reserved
           params2:        vec4<f32>,
+          lineColor:       vec4<f32>,
+          rteViewProj:     mat4x4<f32>,
+          originDeltaHigh: vec4<f32>,
+          originDeltaLow:  vec4<f32>,
         }
         @binding(0) @group(0) var<uniform> uniforms: Uniforms;
+        // The cutting planes that remove this cap's fragments (#7545): every other plane,
+        // in the frame clipPos is expressed in. Count 0 = nothing to clip against.
+        @binding(0) @group(1) var<uniform> extraClip: ExtraClip;
 
+        // Mirrors CAP_FILL_VERTEX_ATTRIBUTES (section-2d-lift.ts).
         struct VertexInput {
-          @location(0) position: vec3<f32>,
-          @location(1) color:    vec4<f32>,
+          @location(0) position:    vec3<f32>,
+          @location(1) color:       vec4<f32>,
+          // Per-polygon hatch: x=patternId, y=spacingPx, z=angleRad, w=widthPx
+          @location(2) hatchA:      vec4<f32>,
+          // x=secondaryAngleRad, y=override mask (CAP_HATCH_OVERRIDE), z,w unused
+          @location(3) hatchB:      vec4<f32>,
+          @location(4) hatchStroke: vec4<f32>,
         }
 
         struct VertexOutput {
           @builtin(position) position: vec4<f32>,
           @location(0)       color:    vec4<f32>,
+          @location(1)       clipPos:  vec3<f32>,
+          @location(2) @interpolate(flat) hatchA:      vec4<f32>,
+          @location(3) @interpolate(flat) hatchB:      vec4<f32>,
+          @location(4) @interpolate(flat) hatchStroke: vec4<f32>,
         }
 
         @vertex
         fn vs_main(input: VertexInput) -> VertexOutput {
           var output: VertexOutput;
           let offsetPos = input.position + uniforms.planeOffset.xyz;
-          output.position = uniforms.viewProj * vec4<f32>(offsetPos, 1.0);
+          let global = uniforms.viewProj * vec4<f32>(offsetPos, 1.0);
+          let relative = (offsetPos + uniforms.originDeltaHigh.xyz) + uniforms.originDeltaLow.xyz;
+          output.position = select(global, uniforms.rteViewProj * vec4<f32>(relative, 1.0), uniforms.originDeltaHigh.w == 1.0);
           output.color = input.color;
+          output.clipPos = relative;
+          output.hatchA = input.hatchA;
+          output.hatchB = input.hatchB;
+          output.hatchStroke = input.hatchStroke;
           return output;
         }
 
@@ -206,11 +261,18 @@ export const SECTION_2D_CAP_FILL_WGSL = /* wgsl */ `
 
         @fragment
         fn fs_main(input: VertexOutput) -> FragOut {
-          let patternId = u32(uniforms.params.x + 0.5);
-          let spacing   = max(2.0, uniforms.params.y);
-          let angle     = uniforms.params.z;
-          let width     = max(1.0, uniforms.params.w);
-          let angle2    = uniforms.params2.x;
+          if (extraClipClipped(extraClip, input.clipPos)) { discard; }
+          // Per-polygon hatch (CutPolygon2D.hatch): each field whose override
+          // bit is set replaces the uniform cap style; mask 0 (no hatch) keeps
+          // the uniform values exactly.
+          let mask      = u32(input.hatchB.y + 0.5);
+          let params    = select(uniforms.params, input.hatchA, (vec4<u32>(mask) & vec4<u32>(1u, 2u, 4u, 8u)) != vec4<u32>(0u));
+          let stroke    = select(uniforms.capStrokeColor, input.hatchStroke, (mask & 32u) != 0u);
+          let patternId = u32(params.x + 0.5);
+          let spacing   = max(2.0, params.y);
+          let angle     = params.z;
+          let width     = max(1.0, params.w);
+          let angle2    = select(uniforms.params2.x, input.hatchB.x, (mask & 16u) != 0u);
 
           let h = hatchIntensity(input.position.xy, patternId, spacing, angle, width, angle2);
           // Per-polygon colour (a material-layer slab fills with its own
@@ -220,8 +282,8 @@ export const SECTION_2D_CAP_FILL_WGSL = /* wgsl */ `
           // whichever base is chosen, so the architectural hatch still works.
           let useVertex = input.color.a >= 0.0;
           let baseFill = select(uniforms.capFillColor, input.color, useVertex);
-          let rgb = mix(baseFill.rgb, uniforms.capStrokeColor.rgb, h * uniforms.capStrokeColor.a);
-          let a   = max(baseFill.a, h * uniforms.capStrokeColor.a);
+          let rgb = mix(baseFill.rgb, stroke.rgb, h * stroke.a);
+          let a   = max(baseFill.a, h * stroke.a);
 
           var out: FragOut;
           out.color    = vec4<f32>(rgb, a);
@@ -234,7 +296,8 @@ export const SECTION_2D_CAP_FILL_WGSL = /* wgsl */ `
  * Line shader for the section-cut outline and the standalone world-space line
  * overlays (annotation / alignment / grid / DXF / clash box).
  */
-export const SECTION_2D_OVERLAY_LINE_WGSL = /* wgsl */ `
+function lineShaderWgsl(clipped: boolean): string {
+  return /* wgsl */ `
         // Mirrors the fill shader's uniform layout so both pipelines can share
         // one buffer; the line shader only reads viewProj, planeOffset and the
         // appended lineColor (byte offset 144). capFillColor/… are unused here but
@@ -247,30 +310,38 @@ export const SECTION_2D_OVERLAY_LINE_WGSL = /* wgsl */ `
           params: vec4<f32>,
           params2: vec4<f32>,
           lineColor: vec4<f32>,
+          rteViewProj: mat4x4<f32>,
+          originDeltaHigh: vec4<f32>,
+          originDeltaLow: vec4<f32>,
         }
         @binding(0) @group(0) var<uniform> uniforms: Uniforms;
+        ${clipped ? `${capClipWgsl}
+        @binding(0) @group(1) var<uniform> extraClip: ExtraClip;` : ''}
+        ${overlayDepthLiftWgsl}
 
         struct VertexInput {
           @location(0) position: vec3<f32>,
         }
 
         struct VertexOutput {
-          @builtin(position) position: vec4<f32>,
+          @builtin(position) position: vec4<f32>,${clipped ? `
+          @location(0) clipPos: vec3<f32>,` : ''}
         }
 
         @vertex
         fn vs_main(input: VertexInput) -> VertexOutput {
           var output: VertexOutput;
           let offsetPos = input.position + uniforms.planeOffset.xyz;
-          let clip = uniforms.viewProj * vec4<f32>(offsetPos, 1.0);
-          // Reverse-Z decal nudge for lines coplanar with model faces
+          let global = uniforms.viewProj * vec4<f32>(offsetPos, 1.0);
+          let relative = (offsetPos + uniforms.originDeltaHigh.xyz) + uniforms.originDeltaLow.xyz;
+          let clip = select(global, uniforms.rteViewProj * vec4<f32>(relative, 1.0), uniforms.originDeltaHigh.w == 1.0);
+          // Reverse-Z decal lift for lines coplanar with model faces
           // (issue #812). WebGPU forbids depthStencil.depthBias on non-
-          // triangle topologies, so we do the equivalent in clip space:
-          // adding a small positive multiple of clip.w raises NDC z by a
-          // constant after the w-divide, which under reverse-Z means
-          // "slightly closer" — enough to beat MSAA jitter on annotation
+          // triangle topologies, so we do the equivalent in clip space —
+          // enough to beat MSAA jitter and the mesh depth nudge on annotation
           // lines that ride exactly on a wall/floor.
-          output.position = vec4<f32>(clip.x, clip.y, clip.z + 5e-5 * clip.w, clip.w);
+          output.position = vec4<f32>(clip.x, clip.y, overlayLiftedClipZ(clip, uniforms.viewProj), clip.w);${clipped ? `
+          output.clipPos = relative;` : ''}
           return output;
         }
 
@@ -281,9 +352,20 @@ export const SECTION_2D_OVERLAY_LINE_WGSL = /* wgsl */ `
 
         @fragment
         fn fs_main(input: VertexOutput) -> FragOutLine {
+          ${clipped ? 'if (extraClipClipped(extraClip, input.clipPos)) { discard; }' : ''}
           var out: FragOutLine;
           out.color    = uniforms.lineColor;  // consumer-themeable (defaults black)
           out.objectId = vec4<f32>(0.0, 0.0, 0.0, 0.0);
           return out;
         }
       `;
+}
+
+export const SECTION_2D_OVERLAY_LINE_WGSL = lineShaderWgsl(false);
+
+/**
+ * The section-cut outline's line shader, clipped like the cap fill it rides on:
+ * an outline must vanish where another cutting plane (#7545) removes its cap.
+ * The world-space line families keep the unclipped shader above.
+ */
+export const SECTION_2D_CAP_LINE_WGSL = lineShaderWgsl(true);

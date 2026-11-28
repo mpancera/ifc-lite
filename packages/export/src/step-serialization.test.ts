@@ -3,20 +3,29 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { describe, expect, it } from 'vitest';
-import { PropertyValueType } from '@ifc-lite/data';
-import { decodeStepStringLiteral } from '@ifc-lite/encoding';
+import { PropertyValueType, stepString, serializeValue } from '@ifc-lite/data';
 import {
-  escapeStepString,
-  serializePropertyValue,
   serializeAttributeValue,
   serializeStepValue,
   serializeTypedMarker,
   resolveExpressBase,
   tokenIsRealLiteral,
   toStepReal,
+  toStepInteger,
+  escapeStepString,
 } from './step-serialization.js';
-import { assembleStepBlob, assembleStepBytes } from './step-file-assembly.js';
+import { SCHEMA_REGISTRY } from '@ifc-lite/parser';
+import { serializePropertyValue } from './property-value-serialization.js';
 import { toStepRealScaled } from './unit-normalize.js';
+
+describe('literal authoring strings (#9876)', () => {
+  it.each(['$', '*', '#42', '.AREA.', "O'Brien"])('preserves %j without changing intentional markers', value => {
+    expect(serializeStepValue(stepString(value))).toBe(serializeValue(stepString(value)));
+    expect(serializeStepValue([stepString(value)])).toBe(`(${serializeValue(stepString(value))})`);
+    expect(serializeStepValue('$')).toBe('$');
+    expect(serializeStepValue('*')).toBe('*');
+  });
+});
 
 describe('resolveExpressBase', () => {
   it('resolves defined types to their EXPRESS primitive, following alias chains', () => {
@@ -99,9 +108,27 @@ describe('toStepReal', () => {
     expect(toStepReal(-0.35)).toBe('-0.35');
   });
 
-  it('maps non-finite input to 0.', () => {
-    expect(toStepReal(NaN)).toBe('0.');
-    expect(toStepReal(Infinity)).toBe('0.');
+  // EXPORT-STEP-5 (#7679): a NaN measure used to be written as a real zero.
+  it('refuses non-finite input instead of writing a made-up 0.', () => {
+    for (const v of [NaN, Infinity, -Infinity]) {
+      expect(() => toStepReal(v)).toThrow(/no finite value/);
+    }
+  });
+
+  it('writes an INTEGER only for a finite value below 1e21', () => {
+    expect(toStepInteger(-0)).toBe('0');
+    expect(toStepInteger(2 ** 53 - 1)).toBe('9007199254740991');
+    // Beyond 2^53 the digits are still a STEP INTEGER (an i64 such as 1e16).
+    expect(toStepInteger(1e16)).toBe('10000000000000000');
+    expect(toStepInteger(1e20)).toBe('100000000000000000000');
+    for (const v of [NaN, Infinity, 1e21, -1e21]) expect(toStepInteger(v)).toBeNull();
+  });
+
+  it('serializePropertyValue omits an Integer that has no STEP spelling', () => {
+    expect(serializePropertyValue('abc', PropertyValueType.Integer)).toBe('$');
+    expect(serializePropertyValue(1e21, PropertyValueType.Integer)).toBe('$');
+    expect(serializePropertyValue(Infinity, PropertyValueType.Integer)).toBe('$');
+    expect(serializePropertyValue(2.6, PropertyValueType.Integer)).toBe('IFCINTEGER(3)');
   });
 
   it('every output matches the STEP REAL grammar', () => {
@@ -157,10 +184,8 @@ describe('serializeAttributeValue (string attributes)', () => {
   });
 
   it('escapes quotes and backslashes together', () => {
-    // A backslash is an ISO-10303-21 escape introducer, so it is encoded as
-    // `\X\5C` — not doubled. Quotes are still doubled.
-    expect(serializeAttributeValue("a'b\\c", stringToken)).toBe("'a''b\\X\\5Cc'");
-    expect(serializeAttributeValue("\\'", stringToken)).toBe("'\\X\\5C'''");
+    expect(serializeAttributeValue("a'b\\c", stringToken)).toBe("'a''b\\\\c'");
+    expect(serializeAttributeValue("\\'", stringToken)).toBe("'\\\\'''");
   });
 
   it("treats a value of two literal quote chars ('') as content, not empty", () => {
@@ -184,95 +209,6 @@ describe('serializeAttributeValue (string attributes)', () => {
   });
 });
 
-/**
- * ISO-10303-21 string literals are ASCII-only. Every writer in this package must
- * emit `\X\` / `\X2\` / `\X4\` escapes rather than raw UTF-8 bytes — German
- * authored names and property values ("Löschung", "Automation Primäranlagen")
- * and CSV-imported property data hit this on every export.
- *
- * `decodeStepStringLiteral` is the canonical reader (`parseSourceHeader` and
- * `@ifc-lite/data`'s `parseStepValue` both use it), so the round trips below
- * prove the escaper against the reader that actually consumes its output.
- */
-describe('STEP string escaping (non-ASCII)', () => {
-  /** Strip the outer quotes of a STEP literal and decode it back. */
-  const readBack = (literal: string): string =>
-    decodeStepStringLiteral(literal.slice(1, -1));
-
-  it('encodes umlauts as \\X\\ escapes instead of writing raw UTF-8', () => {
-    expect(escapeStepString('Löschung')).toBe('L\\X\\F6schung');
-    expect(escapeStepString('Automation Primäranlagen')).toBe('Automation Prim\\X\\E4ranlagen');
-  });
-
-  it('encodes BMP and non-BMP characters as \\X2\\ / \\X4\\', () => {
-    expect(escapeStepString('Ω')).toBe('\\X2\\03A9\\X0\\');
-    expect(escapeStepString('😀')).toBe('\\X4\\0001F600\\X0\\');
-  });
-
-  it('escapes a literal backslash exactly once (no doubling on top of \\X\\5C)', () => {
-    // The trap: `encodeIfcString` already escapes `\`, so a leftover
-    // `\` -> `\\` doubling would emit `\X\5C\X\5C` for ONE backslash.
-    expect(escapeStepString('C:\\temp')).toBe('C:\\X\\5Ctemp');
-  });
-
-  it('still doubles single quotes and still collapses control characters', () => {
-    expect(escapeStepString("O'Brien")).toBe("O''Brien");
-    expect(escapeStepString('A\r\nB')).toBe('A B');
-  });
-
-  it('emits only printable ASCII for any input', () => {
-    for (const v of ['Löschung', 'Ω 温度', '😀', 'C:\\x', "q'q", 'A\nB']) {
-      expect(escapeStepString(v)).toMatch(/^[\x20-\x7E]*$/);
-    }
-  });
-
-  const cases: Array<[label: string, value: string]> = [
-    ['umlauts', 'Löschung'],
-    ['umlauts in a phrase', 'Automation Primäranlagen'],
-    ['all German umlauts plus sharp s', 'ÄÖÜäöüß'],
-    ['BMP characters', 'Ω 温度センサー'],
-    ['non-BMP emoji', 'Sensor 😀 ok'],
-    ['literal backslash', 'C:\\temp\\modell.ifc'],
-    ['single quote', "O'Brien's Wall"],
-    ['text that looks like a directive', 'a\\X2\\0041\\X0\\b'],
-    ['everything at once', "Löschung 😀 C:\\x 'q' Ω"],
-    ['plain ASCII', 'Basic Wall 200mm'],
-  ];
-
-  for (const [label, value] of cases) {
-    it(`round-trips ${label} through escape -> decode`, () => {
-      expect(decodeStepStringLiteral(escapeStepString(value))).toBe(value);
-    });
-
-    it(`round-trips ${label} through serializeStepValue`, () => {
-      expect(readBack(serializeStepValue(value))).toBe(value);
-    });
-  }
-
-  it('is byte-stable across a second write (a backslash never grows)', () => {
-    const value = 'C:\\temp';
-    const once = escapeStepString(value);
-    expect(decodeStepStringLiteral(once)).toBe(value);
-    expect(escapeStepString(decodeStepStringLiteral(once))).toBe(once);
-  });
-
-  it('round-trips an umlaut through serializePropertyValue (IFCLABEL)', () => {
-    const literal = serializePropertyValue('Löschung', PropertyValueType.Label);
-    expect(literal).toBe("IFCLABEL('L\\X\\F6schung')");
-    expect(readBack(literal.slice('IFCLABEL('.length, -1))).toBe('Löschung');
-  });
-
-  it('round-trips an umlaut through serializeAttributeValue', () => {
-    expect(readBack(serializeAttributeValue('Löschung', "'Old Name'"))).toBe('Löschung');
-  });
-
-  it('round-trips an umlaut through a STRING-typed marker', () => {
-    // IfcLabel bottoms out in STRING, so the inner value is a quoted literal.
-    const token = serializeTypedMarker('IfcLabel', 'Löschung');
-    expect(token).toBe("IFCLABEL('L\\X\\F6schung')");
-  });
-});
-
 describe('toStepRealScaled', () => {
   it('formats scaled values through the shared STEP REAL rewrite', () => {
     expect(toStepRealScaled(5e-8)).toBe('5.E-8');
@@ -286,5 +222,95 @@ describe('toStepRealScaled', () => {
     for (const v of [Number.MAX_VALUE, Number.MIN_VALUE, -1.5e-300, 1e-7, 123.456]) {
       expect(toStepRealScaled(v)).toMatch(STEP_REAL_RE);
     }
+  });
+});
+
+/**
+ * `escapeStepString` no longer has an implementation here (#3300): this
+ * package re-exports `@ifc-lite/data`'s. Full coverage -- non-ASCII `\X2\`/
+ * `\X4\` directives, one-space-per-control-char (#3284), and the vector
+ * comparison against `ifc_lite_export::step_text::escape` -- lives once, in
+ * `packages/data/src/step-serializers.test.ts`. This is a wiring check that
+ * the re-export resolves to a working function, not a second copy of that
+ * suite.
+ */
+describe('escapeStepString (re-exported from @ifc-lite/data, #3300)', () => {
+  it('escapes quotes, backslashes and non-ASCII the way @ifc-lite/data does', () => {
+    expect(escapeStepString("O'Brien\\x")).toBe("O''Brien\\\\x");
+    expect(escapeStepString('\u00C4')).toBe('\\X2\\00C4\\X0\\');
+  });
+});
+
+/**
+ * F4 M-export-a (CORE-6): numbers are recognised by core's one grammar, in the
+ * value AND in the token being replaced. The same rows, with the same expected
+ * text, are `attribute_value_reads_numbers_by_the_core_grammar` in
+ * `rust/export/src/step_log/attrs_tests.rs`.
+ */
+describe('serializeAttributeValue (the shared number grammar)', () => {
+  it.each([
+    ['3', '.5', '3.'],
+    ['.5', '1', '0.5'],
+    ['+1', '2', '1'],
+    ['1.E5', '2.', '100000.'],
+    ['2.5', '+1.', '2.5'],
+    ['7', '1.E3', '7.'],
+    ['1E400', '2', '$'],
+    ['1..2', '2', "'1..2'"],
+    ['12abc', '2', "'12abc'"],
+    ['5', "'x'", "'5'"],
+    ['5', '$', "'5'"],
+  ])('%j over %j is %j', (value, current, expected) => {
+    expect(serializeAttributeValue(value, current)).toBe(expected);
+  });
+});
+
+describe('serializeTypedMarker type-name guard', () => {
+  it('refuses a type name that would break out of the attribute list', () => {
+    for (const bad of ["IfcLabel('x'));\n#999=IFCWALL(", 'IfcLabel(', 'Ifc Label', 'Ifc;', '', '1abc']) {
+      expect(() => serializeTypedMarker(bad, 'x')).toThrow(/not an IFC identifier/);
+    }
+    expect(serializeTypedMarker('IfcLabel', 'x')).toBe("IFCLABEL('x')");
+  });
+});
+
+describe('defined-type base lookup ignores spelling (#8312)', () => {
+  it('resolves upper-case and prefix-less names to the same base', () => {
+    for (const name of ['IfcLengthMeasure', 'IFCLENGTHMEASURE', 'ifclengthmeasure', 'LengthMeasure', 'LENGTHMEASURE']) {
+      expect(resolveExpressBase(name)).toBe('REAL');
+    }
+    expect(resolveExpressBase('IFCPOSITIVELENGTHMEASURE')).toBe('REAL');
+    expect(resolveExpressBase('IFCNOSUCHTYPE')).toBeNull();
+    expect(resolveExpressBase('CONSTRUCTOR')).toBeNull();
+  });
+
+  it('sees a type added to a registry after an earlier lookup', () => {
+    const registry = { ...SCHEMA_REGISTRY, types: { ...SCHEMA_REGISTRY.types } };
+    expect(resolveExpressBase('IFCCUSTOMMEASURE', registry)).toBeNull();
+    registry.types.IfcCustomMeasure = 'REAL';
+    expect(resolveExpressBase('IFCCUSTOMMEASURE', registry)).toBe('REAL');
+  });
+
+  it('encodes the inner value from the base, not the JSON shape', () => {
+    for (const name of ['IfcLengthMeasure', 'IFCLENGTHMEASURE', 'LengthMeasure']) {
+      expect(serializeTypedMarker(name, 3)).toBe('IFCLENGTHMEASURE(3.)');
+    }
+    expect(serializeTypedMarker('LABEL', 42)).toBe("IFCLABEL('42')");
+    expect(serializeTypedMarker('ifcboolean', 'false')).toBe('IFCBOOLEAN(.F.)');
+    expect(serializeTypedMarker('COUNTMEASURE', 3)).toBe('IFCCOUNTMEASURE(3.)');
+  });
+});
+
+// #8447: indexed-polycurve segments must keep their defined aggregate type.
+describe('typed indexed segments', () => {
+  it('writes line and arc indices without converting integers into references', () => {
+    expect(serializeTypedMarker('IfcLineIndex', [1, 2, 3])).toBe('IFCLINEINDEX((1,2,3))');
+    expect(serializeTypedMarker('IfcArcIndex', [2, 3, 4])).toBe('IFCARCINDEX((2,3,4))');
+  });
+  it('refuses invalid segment aggregates instead of emitting malformed STEP', () => {
+    expect(() => serializeTypedMarker('IfcArcIndex', [1, 2])).toThrow(/segment indices/);
+    expect(() => serializeTypedMarker('IfcLineIndex', [0, 2])).toThrow(/segment indices/);
+    expect(() => serializeTypedMarker('IfcLineIndex', [1, Infinity])).toThrow(/segment indices/);
+    expect(() => serializeTypedMarker('IfcLabel', [1, 2])).toThrow(/segment indices/);
   });
 });

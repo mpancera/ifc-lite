@@ -61,7 +61,48 @@ export function storeyFloorsFromMeshes(
   meshes: ReadonlyArray<StoreyFloorMesh>,
   elementToStorey: ReadonlyMap<number, number>,
 ): number[] {
-  return [...storeyFloorLevelsFromMeshes(meshes, elementToStorey).values()].sort((a, b) => a - b);
+  const levels = new StoreyFloorLevels(elementToStorey);
+  levels.add(meshes);
+  return levels.floors();
+}
+
+/**
+ * {@link storeyFloorsFromMeshes}, folded one batch of meshes at a time, so a
+ * drawing whose geometry is read back in chunks (#10264) needs no whole list.
+ * Keeps one minimum per storey, never a mesh.
+ */
+export class StoreyFloorLevels {
+  private readonly storeyMinY = new Map<number, number>();
+
+  constructor(private readonly elementToStorey: ReadonlyMap<number, number>) {}
+
+  add(meshes: ReadonlyArray<StoreyFloorMesh>): void {
+    for (const mesh of meshes) {
+      const storeyId = this.elementToStorey.get(mesh.expressId);
+      if (storeyId === undefined) continue;
+      const pos = mesh.positions;
+      // Fold the per-element origin so minY is world-Y, matching the section cut
+      // position / axisMin / axisMax (which are world-frame). No-op when absent.
+      const oy = mesh.origin ? mesh.origin[1] : 0;
+      let minY = Infinity;
+      for (let i = 1; i < pos.length; i += 3) {
+        const y = pos[i] + oy;
+        if (y < minY) minY = y;
+      }
+      if (!Number.isFinite(minY)) continue;
+      const cur = this.storeyMinY.get(storeyId);
+      if (cur === undefined || minY < cur) this.storeyMinY.set(storeyId, minY);
+    }
+  }
+
+  floors(): number[] {
+    return [...this.storeyMinY.values()].sort((a, b) => a - b);
+  }
+
+  /** The floor level per storey id (see {@link storeyFloorLevelsFromMeshes}). */
+  byStorey(): Map<number, number> {
+    return new Map(this.storeyMinY);
+  }
 }
 
 /**
@@ -73,8 +114,7 @@ export function storeyFloorsFromMeshes(
  * a plan cut computed from `IfcBuildingStorey.Elevation` while the projection
  * bands come from mesh geometry would put the cut and the band boundary at
  * different heights on a georeferenced model, and the plan would silently show
- * the wrong storey's contents. So this is the single home and
- * `storeyFloorsFromMeshes` is a view onto it.
+ * the wrong storey's contents. So both go through {@link StoreyFloorLevels}.
  *
  * Same frame, same caveats, same single-model restriction as above.
  */
@@ -82,24 +122,9 @@ export function storeyFloorLevelsFromMeshes(
   meshes: ReadonlyArray<StoreyFloorMesh>,
   elementToStorey: ReadonlyMap<number, number>,
 ): Map<number, number> {
-  const storeyMinY = new Map<number, number>();
-  for (const mesh of meshes) {
-    const storeyId = elementToStorey.get(mesh.expressId);
-    if (storeyId === undefined) continue;
-    const pos = mesh.positions;
-    // Fold the per-element origin so minY is world-Y, matching the section cut
-    // position / axisMin / axisMax (which are world-frame). No-op when absent.
-    const oy = mesh.origin ? mesh.origin[1] : 0;
-    let minY = Infinity;
-    for (let i = 1; i < pos.length; i += 3) {
-      const y = pos[i] + oy;
-      if (y < minY) minY = y;
-    }
-    if (!Number.isFinite(minY)) continue;
-    const cur = storeyMinY.get(storeyId);
-    if (cur === undefined || minY < cur) storeyMinY.set(storeyId, minY);
-  }
-  return storeyMinY;
+  const levels = new StoreyFloorLevels(elementToStorey);
+  levels.add(meshes);
+  return levels.byStorey();
 }
 
 /**

@@ -16,24 +16,20 @@
  * where no handle exists and Refresh is simply not offered.
  */
 
-/** Accept filter mirroring the `<input type="file">` accept list. */
+import { PICKER_FILE_EXTENSIONS } from './supported-model-files.js';
+import { markLoadIntent } from '../lib/load-intent.js';
+import { isFeatureEnabled } from '../lib/features/index.js';
+
+/**
+ * Accept filter for the picker. Derived from the same list the
+ * `<input type="file">` accept strings and the ingest guard use, so the
+ * dialog can never hide a format the viewer would happily load.
+ */
 const IFC_ACCEPT_TYPES: FilePickerAcceptType[] = [
   {
     description: 'BIM models & point clouds',
     accept: {
-      'application/octet-stream': [
-        '.ifc',
-        '.ifcx',
-        '.glb',
-        '.las',
-        '.laz',
-        '.ply',
-        '.pcd',
-        '.e57',
-        '.pts',
-        '.xyz',
-        '.dxf',
-      ],
+      'application/octet-stream': [...PICKER_FILE_EXTENSIONS],
     },
   },
 ];
@@ -58,6 +54,9 @@ export function supportsFileSystemAccess(): boolean {
  * `<input type="file">`.
  */
 export async function openIfcFilesWithHandles(): Promise<OpenedFile[] | null> {
+  // Every File System Access picker opens here; a host can switch local files off (`lib/features`).
+  if (!isFeatureEnabled('files.local')) return null;
+  markLoadIntent(); // the picker may stay open for seconds (load-intent.ts)
   if (!supportsFileSystemAccess()) return null;
 
   let handles: FileSystemFileHandle[];
@@ -157,5 +156,8 @@ export function handlesFromDataTransfer(dataTransfer: DataTransfer): Promise<Ope
       }
     }
     return opened.length > 0 ? opened : null;
-  })();
+  })().catch((err) => {
+    console.warn('[file-system-access] drag handle request failed; using dropped files instead', err);
+    return null;
+  });
 }

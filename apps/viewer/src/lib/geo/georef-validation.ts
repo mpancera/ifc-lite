@@ -231,7 +231,7 @@ export function validateGeoreference(input: GeorefValidationInput): GeorefFindin
   // Delegated so the rule lives in one place; surfaced here so the panel can
   // show a single list instead of two competing warnings.
   const scaleMismatch = mapConversion
-    ? detectScaleUnitMismatch(mapConversion.scale, projectedCRS?.mapUnitScale, input.lengthUnitScale)
+    ? detectScaleUnitMismatch(mapConversion, projectedCRS?.mapUnitScale, input.lengthUnitScale)
     : null;
   if (scaleMismatch) {
     findings.push({
@@ -239,7 +239,7 @@ export function validateGeoreference(input: GeorefValidationInput): GeorefFindin
       severity: 'warning',
       title: 'Scale passt nicht zu den Einheiten',
       detail:
-        `Scale ${scaleMismatch.rawScale}, erwartet ≈ ${scaleMismatch.expectedScale.toPrecision(4)}. `
+        `${scaleMismatch.attribute} ${scaleMismatch.authoredValue}, erwartet ≈ ${scaleMismatch.expectedValue.toPrecision(4)}. `
         + `Die Geometrie wird mit dem ${scaleMismatch.effectiveScale.toPrecision(4)}-fachen `
         + 'ihrer wahren Grösse platziert.',
     });

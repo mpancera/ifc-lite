@@ -7,6 +7,17 @@
  * Based on buildingSMART IFC5-development schema
  */
 
+import {
+  eagerSchemaTable,
+  getEntitiesIfc2x3,
+  getEntitiesIfc4Express,
+  getEntitiesIfc4x3,
+  IfcTypeEnumToString,
+  PropertyValueType,
+  SPATIAL_STRUCTURE_TYPE_ENUMS,
+} from '@ifc-lite/data';
+import type { IfcEntityInfo } from '@ifc-lite/data';
+
 // ============================================================================
 // Core IFCX File Structure
 // ============================================================================
@@ -91,6 +102,15 @@ export interface ComposedNode {
   path: string;
   attributes: Map<string, unknown>;
   children: Map<string, ComposedNode>;
+  /**
+   * The node's own `inherits` references (edge name to the inherited node's
+   * path), null removal masks dropped. Composition copies an inherited node's
+   * attributes and children INTO this node and forgets where they came from;
+   * this keeps the reference, which is what says "this node is typed by that
+   * one" or "this node is made of that material". Absent when the node
+   * inherits nothing.
+   */
+  inherits?: Record<string, string>;
 }
 
 // ============================================================================
@@ -158,6 +178,25 @@ export const IFCLITE_ATTR = {
   CLASSIFICATIONS: 'ifclite::classifications',
   MATERIALS: 'ifclite::materials',
   GEOMETRY_REF: 'ifclite::geometryRef',
+  /**
+   * Per-entity provenance carrier (`createdBy` / `createdAt` /
+   * `lastEditedBy` / `lastEditedAt` / `previousPath`). IFCX nodes have
+   * no provenance slot of their own, so without this key a snapshot
+   * round trip loses whoever authored an entity — and the reader then
+   * back-fills the FILE header's author and the read clock, which is
+   * fabricated attribution wearing the shape of the real thing.
+   *
+   * Every field carried here is written once, when the entity is
+   * created, and never re-stamped — `lastEditedBy` / `lastEditedAt`
+   * included (only `promoteEntityType` writes them, on the new entity).
+   * That is load-bearing, not incidental: a field re-stamped on each
+   * edit would make this attribute change whenever anything else on the
+   * entity does, putting it in every minimal layer and handing the merge
+   * engine a component that conflicts on every concurrent edit. If a
+   * per-edit stamp is ever wanted, give it its own key rather than
+   * adding it here.
+   */
+  META: 'ifclite::meta',
 } as const;
 
 /** Header key carrying the provenance manifest (see provenance.ts). */
@@ -195,6 +234,25 @@ export interface TypedPropertyValue {
   unit?: string;
   source?: string;
 }
+
+/**
+ * The IFC defined type a {@link TypedPropertyValue} names for each
+ * `PropertyValueType`. Shared by every writer of typed records: collab's
+ * mutation bridge and the IFCX exporter's pset-qualified keys (#5376).
+ */
+export const PROPERTY_TYPE_NAMES: Record<PropertyValueType, string> = {
+  [PropertyValueType.String]: 'IfcText',
+  [PropertyValueType.Real]: 'IfcReal',
+  [PropertyValueType.Integer]: 'IfcInteger',
+  [PropertyValueType.Boolean]: 'IfcBoolean',
+  [PropertyValueType.Logical]: 'IfcLogical',
+  [PropertyValueType.Label]: 'IfcLabel',
+  [PropertyValueType.Identifier]: 'IfcIdentifier',
+  [PropertyValueType.Text]: 'IfcText',
+  [PropertyValueType.Enum]: 'IfcLabel',
+  [PropertyValueType.Reference]: 'IfcLabel',
+  [PropertyValueType.List]: 'IfcText',
+};
 
 const TYPED_PROPERTY_KEYS = new Set(['type', 'value', 'unit', 'source']);
 
@@ -249,28 +307,84 @@ export interface IfcClass {
 // Spatial Types
 // ============================================================================
 
-export const SPATIAL_TYPES = new Set([
-  'IfcProject',
-  'IfcSite',
-  'IfcBuilding',
-  'IfcBuildingStorey',
-  'IfcSpace',
-]);
+/**
+ * The IFC classes that are LEVELS of the spatial tree rather than contents of
+ * one. `hierarchy-builder.ts` recurses into a child in this set and stops
+ * collecting elements at one, so a class missing here is not merely absent
+ * from the tree — it and everything beneath it are flattened into the
+ * parent's element list.
+ *
+ * Derived from `@ifc-lite/data`'s `SPATIAL_STRUCTURE_TYPE_ENUMS`, this repo's
+ * single answer to "is this entity part of the spatial tree", rather than
+ * listed again here. The hand-written list this replaced named the five
+ * building-storey levels and none of IFC4.3's twelve: `IfcSpatialZone` and
+ * the facility classes (`IfcRoad`, `IfcBridge`, `IfcRailway`,
+ * `IfcMarineFacility`, `IfcFacility` and their `*Part` counterparts), so an
+ * infrastructure model's whole hierarchy collapsed onto its site.
+ */
+export const SPATIAL_TYPES: Set<string> = new Set(
+  SPATIAL_STRUCTURE_TYPE_ENUMS.map((typeEnum) => IfcTypeEnumToString(typeEnum)),
+);
 
-export const BUILDING_ELEMENT_TYPES = new Set([
-  'IfcWall',
-  'IfcWallStandardCase',
-  'IfcDoor',
-  'IfcWindow',
-  'IfcSlab',
-  'IfcColumn',
-  'IfcBeam',
-  'IfcStair',
-  'IfcRamp',
-  'IfcRoof',
-  'IfcCovering',
-  'IfcCurtainWall',
-  'IfcRailing',
-  'IfcOpeningElement',
-  'IfcBuildingElementProxy',
-]);
+/** `root` itself plus every descendant of it in one schema's entity table. */
+function elementUniverse(entities: readonly IfcEntityInfo[], root: string): Set<string> {
+  const children = new Map<string, string[]>();
+  for (const entity of entities) {
+    if (!entity.parent) continue;
+    const siblings = children.get(entity.parent) ?? [];
+    siblings.push(entity.name);
+    children.set(entity.parent, siblings);
+  }
+  const out = new Set<string>([root]);
+  const walk = (node: string): void => {
+    for (const child of children.get(node) ?? []) {
+      if (out.has(child)) continue;
+      out.add(child);
+      walk(child);
+    }
+  };
+  walk(root);
+  return out;
+}
+
+/**
+ * The IFC classes recognized as physical building elements.
+ *
+ * Derived from `@ifc-lite/data`'s generated entity tables rather than
+ * hand-listed: the 15-name hand list this replaced missed `IfcFooting`,
+ * `IfcPile`, `IfcMember`, `IfcPlate`, `IfcShadingDevice`, `IfcChimney`,
+ * `IfcStairFlight`, `IfcRampFlight` and the `*StandardCase` door/window
+ * variants even for IFC4 alone, and wrongly included `IfcOpeningElement`
+ * (a subtraction feature under `IfcFeatureElement`, not a building
+ * element). It also could not have covered IFC4X3 correctly by adding more
+ * names: IFC4X3 replaced the family root `IfcBuildingElement` with
+ * `IfcBuiltElement`, adding a family of civil/infrastructure elements
+ * (`IfcBearing`, `IfcCaissonFoundation`, `IfcCourse`, `IfcDeepFoundation`,
+ * `IfcEarthworksFill`, `IfcKerb`, `IfcMooringDevice`,
+ * `IfcNavigationElement`, `IfcPavement`, `IfcRail`, `IfcReinforcedSoil`,
+ * `IfcTrackElement`) under the new name, so this walks both root names
+ * across all three generated schemas (see `SPATIAL_TYPES` above for the
+ * same fix applied to the neighboring hand-list gap).
+ *
+ * Each root is a member of its own family, not just the walk's starting
+ * point. That matters for IFC4X3: `IfcBuildingElement` is abstract in
+ * IFC2X3/IFC4, but its replacement `IfcBuiltElement` is concrete
+ * (`abstract: false` in the generated IFC4X3 table), so a file may carry
+ * an `IFCBUILTELEMENT` instance and dropping the root would classify it
+ * as not a building element. The set carries abstract classes anyway
+ * (`IfcBuildingElementComponent`, `IfcReinforcingElement`), so keeping the
+ * roots is also what makes it a consistent family-membership test.
+ */
+//
+// Built when its chunk loads only where the constant is referenced
+// (`@__PURE__`; the `eagerSchemaTable` marker lets the viewer's build-tail
+// gate see where it was kept). Same contents, in the same order, as before.
+export const BUILDING_ELEMENT_TYPES: Set<string> = /* @__PURE__ */ eagerSchemaTable('ifc-lite-eager-table:BUILDING_ELEMENT_TYPES', buildBuildingElementTypes);
+
+function buildBuildingElementTypes(): Set<string> {
+  return new Set([
+    ...elementUniverse(getEntitiesIfc2x3(), 'IfcBuildingElement'),
+    ...elementUniverse(getEntitiesIfc4Express(), 'IfcBuildingElement'),
+    ...elementUniverse(getEntitiesIfc4x3(), 'IfcBuiltElement'),
+  ]);
+}

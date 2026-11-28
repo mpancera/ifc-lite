@@ -38,7 +38,12 @@ export interface StreamPointCloudOptions {
    * fit. Default: 25 million (~600 MB GPU at the 24-byte/point format).
    */
   maxPointsInMemory?: number;
-  /** Hard size ceiling — if `blob.size` exceeds, the call rejects. */
+  /**
+   * Hard size ceiling — if `blob.size` exceeds, the call rejects. Default:
+   * 4 GB for formats whose source reads the whole file (PCD, PTS, XYZ,
+   * LAZ); no ceiling for formats that stream from bounded windows (E57,
+   * PLY, LAS), whose peak memory does not grow with file size (#8773).
+   */
   maxFileSize?: number;
   /** Points per chunk during streaming decode. Default: 200_000. */
   chunkSize?: number;
@@ -51,9 +56,11 @@ export interface StreamPointCloudOptions {
    * `computePointCloudAlignment().decodeOriginOffset`.
    */
   originOffset?: readonly [number, number, number];
+  /** Choose a local decode origin when no explicit alignment is supplied (#4226). */
+  autoOrigin?: boolean;
 
   /** Called once after the source's header parses. */
-  onOpen?: (info: PointSourceInfo & { stride: number }) => void;
+  onOpen?: (info: PointSourceInfo & { stride: number; originOffset?: readonly [number, number, number] }) => void;
   /** Called for each decoded chunk. */
   onChunk: (chunk: DecodedPointChunk) => void;
   /** Periodic progress signal in 0..1. */
@@ -76,6 +83,12 @@ export interface StreamPointCloudOptions {
 
 const DEFAULT_MAX_POINTS = 25_000_000;
 const DEFAULT_MAX_FILE = 4 * 1024 * 1024 * 1024; // 4 GB
+/**
+ * Formats whose source decodes from bounded byte windows (each source's
+ * window constant sets the bound). Every other format loads the whole blob,
+ * so only those keep {@link DEFAULT_MAX_FILE}.
+ */
+const WINDOWED_FORMATS: ReadonlySet<DecodeWorkerFormat> = new Set(['e57', 'ply', 'las']);
 const DEFAULT_CHUNK = 200_000;
 
 export interface StreamHandle {
@@ -87,8 +100,11 @@ export interface StreamHandle {
 
 export function streamPointCloud(opts: StreamPointCloudOptions): StreamHandle {
   const maxPoints = opts.maxPointsInMemory ?? DEFAULT_MAX_POINTS;
-  const maxFile = opts.maxFileSize ?? DEFAULT_MAX_FILE;
+  const maxFile = opts.maxFileSize ?? (WINDOWED_FORMATS.has(opts.format) ? Infinity : DEFAULT_MAX_FILE);
   const chunkSize = opts.chunkSize ?? DEFAULT_CHUNK;
+  if (!Number.isFinite(maxPoints) || maxPoints <= 0) {
+    throw new Error('streamPointCloud: maxPointsInMemory must be a positive finite number');
+  }
   // chunkSize <= 0 would let the source.next() loop emit empty chunks
   // forever without advancing its cursor. Fail loudly so callers can't
   // accidentally lock up the worker.
@@ -129,20 +145,36 @@ export function streamPointCloud(opts: StreamPointCloudOptions): StreamHandle {
       });
       info = await source.open(composed);
 
-      if (info.totalPointCount > maxPoints) {
-        stride = Math.ceil(info.totalPointCount / maxPoints);
-        source.close();
-        source = probeFactory({
-          format: opts.format,
-          blob: opts.blob,
-          label: opts.label,
-          stride,
-          originOffset: opts.originOffset,
-        });
-        info = await source.open(composed);
+      stride = Math.max(1, Math.ceil(info.totalPointCount / maxPoints));
+      let originOffset = opts.originOffset;
+      let consumedProbe = false;
+      if (opts.autoOrigin && !originOffset && info.totalPointCount > 0) {
+        const { min, max } = info.bbox;
+        if ([...min, ...max].every(Number.isFinite) && [...min, ...max].some((v) => v !== 0)) {
+          originOffset = [min[0] / 2 + max[0] / 2, min[1] / 2 + max[1] / 2, min[2] / 2 + max[2] / 2];
+        } else {
+          // Formats without header bounds (notably E57) can probe one sample.
+          // Its rounded position only CHOOSES a nearby frame. Reopen and decode
+          // from the original bytes so this first sample loses no precision.
+          const probe = await source.next(1, composed);
+          consumedProbe = true;
+          if (probe && probe.pointCount > 0 && probe.positions.subarray(0, 3).every(Number.isFinite)) {
+            originOffset = [probe.positions[0], probe.positions[1], probe.positions[2]];
+          }
+        }
+      }
+      if (stride > 1 || consumedProbe || originOffset !== opts.originOffset) {
+        if (source.reopen) {
+          // Keeps what the probe learnt: a PLY is not scanned again (#8777).
+          info = await source.reopen({ stride, originOffset }, composed);
+        } else {
+          source.close();
+          source = probeFactory({ format: opts.format, blob: opts.blob, label: opts.label, stride, originOffset });
+          info = await source.open(composed);
+        }
       }
 
-      opts.onOpen?.({ ...info, stride });
+      opts.onOpen?.({ ...info, stride, originOffset });
 
       while (true) {
         if (composed.aborted) break;

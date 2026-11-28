@@ -67,8 +67,8 @@ describe('section 2D uniform layout: WGSL vs SECTION_2D_UNIFORM_SLOTS', () => {
 
   it('the fill shader struct is a prefix of the same layout', () => {
     const fill = uniformFieldOffsets(SECTION_2D_CAP_FILL_WGSL);
-    // The fill shader stops at params2 — it never reads lineColor.
-    assert.ok(!('lineColor' in fill), 'fill shader must not declare lineColor');
+    // The shared RTE tail makes the records deliberately identical.
+    assert.ok('lineColor' in fill, 'fill shader retains the shared line/RTE tail');
     for (const [name, offset] of Object.entries(fill)) {
       assert.strictEqual(
         offset,
@@ -133,7 +133,7 @@ describe('section 2D shader sources', () => {
     assert.ok(/select\(uniforms\.capFillColor, input\.color, useVertex\)/.test(SECTION_2D_CAP_FILL_WGSL));
   });
 
-  it('the line shader keeps the #812 reverse-Z decal nudge', () => {
-    assert.ok(/clip\.z \+ 5e-5 \* clip\.w/.test(SECTION_2D_OVERLAY_LINE_WGSL));
+  it('the line shader keeps the #812 reverse-Z decal lift', () => {
+    assert.ok(/overlayLiftedClipZ\(clip, uniforms\.viewProj\)/.test(SECTION_2D_OVERLAY_LINE_WGSL));
   });
 });

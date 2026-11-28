@@ -18,7 +18,39 @@
 
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 
+// Node's own `AbortSignal.timeout`, captured before registration swaps the
+// global for happy-dom's class.
+const platformTimeoutSignal = AbortSignal.timeout.bind(AbortSignal);
+
 GlobalRegistrator.register({ url: 'http://localhost/' });
+
+// Fork: the app opens in the read-only Viewer role. Upstream's component tests
+// edit models without picking a role, so the suite starts as Editor; role tests
+// set their role explicitly.
+// Same for the fork's privacy switch (external requests off by default): the
+// suite never reaches the network (`no-external-network.mjs`), and upstream's
+// map and bSDD tests stub the requests the switch would refuse.
+try {
+  window.localStorage.setItem('ifclite.authoring.discipline-role', 'editor');
+  window.localStorage.setItem('ifclite.privacy.allow-external-requests', 'true');
+} catch { /* storage blocked */ }
+
+// happy-dom re-implements `AbortSignal.timeout` on a plain window timer, so
+// every request bounded by `AbortSignal.timeout(ms)` held the test process
+// open for the full `ms` after the request had finished (a minute per file for
+// the OpenCDE and sandbox network clients). No platform behaves that way: a
+// browser timeout signal does not outlive its page and Node's does not keep
+// the process alive. Keep happy-dom's AbortSignal class and its TimeoutError
+// reason, which code under test sees, and take only the timing from Node.
+AbortSignal.timeout = (ms: number): AbortSignal => {
+  const controller = new AbortController();
+  platformTimeoutSignal(ms).addEventListener(
+    'abort',
+    () => controller.abort(new DOMException('signal timed out', 'TimeoutError')),
+    { once: true },
+  );
+  return controller.signal;
+};
 
 // React 19's `act()` (and `createRoot` in tests) requires the environment
 // to opt in explicitly; without this flag every act() call warns and

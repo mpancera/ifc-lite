@@ -108,6 +108,21 @@ describe('formatQuantityUnit', () => {
   it('returns the SI default for an unrecognized quantity type', () => {
     assert.strictEqual(formatQuantityUnit(999, ProjectUnits.empty()), null);
   });
+
+  // Mutation-sweep finding: only Length and Count were exercised here.
+  // Swapping QUANTITY_TYPE_UNIT[Weight]'s unitType from MASSUNIT to
+  // VOLUMEUNIT (a Weight quantity silently resolving/converting against the
+  // file's declared VOLUME unit instead of its MASS unit) survived the full
+  // suite before this test existed.
+  it('resolves a Weight quantity against MASSUNIT ("kg"), not any other unit-type', () => {
+    assert.strictEqual(formatQuantityUnit(QuantityType.Weight, ProjectUnits.empty()), 'kg');
+    assert.strictEqual(QUANTITY_TYPE_UNIT[QuantityType.Weight]?.unitType, 'MASSUNIT');
+  });
+
+  it('resolves a Time quantity against TIMEUNIT ("s")', () => {
+    assert.strictEqual(formatQuantityUnit(QuantityType.Time, ProjectUnits.empty()), 's');
+    assert.strictEqual(QUANTITY_TYPE_UNIT[QuantityType.Time]?.unitType, 'TIMEUNIT');
+  });
 });
 
 describe('resolveMeasureDisplay', () => {
@@ -126,6 +141,19 @@ describe('resolveMeasureDisplay', () => {
     const disp = resolveMeasureDisplay(3000, 'IFCLENGTHMEASURE', units, { VOLUMETRICFLOWRATEUNIT: 'm3h' });
     assert.strictEqual(disp.unit, 'mm');
     assert.strictEqual(disp.converted, null);
+  });
+
+  // #9958: a declared unit whose scale cannot be read (#4690) must not be taken
+  // for the SI default; the raw value stays unconverted and unlabelled.
+  it('does not convert a value whose declared unit scale is unreadable', () => {
+    const units = new ProjectUnits(new Map([['FORCEUNIT', null]]), null);
+    assert.deepStrictEqual(resolveMeasureDisplay(1000, 'IFCFORCEMEASURE', units, { FORCEUNIT: 'kn' }), { unit: null, converted: null });
+  });
+
+  it('still converts from the SI default when the file declares no unit for the type', () => {
+    const disp = resolveMeasureDisplay(1000, 'IFCFORCEMEASURE', ProjectUnits.empty(), { FORCEUNIT: 'kn' });
+    assert.strictEqual(disp.unit, 'kN');
+    assert.strictEqual(disp.converted, 1);
   });
 
   it('adds the offset when overriding a temperature measure to Kelvin', () => {
@@ -169,6 +197,14 @@ describe('resolveQuantityDisplay', () => {
     assert.ok(disp.converted !== null && Math.abs(disp.converted - 3) < 1e-9);
   });
 
+  it('converts a Weight quantity into an overridden unit (kg -> g), exercising MASSUNIT end to end', () => {
+    // Complements the QUANTITY_TYPE_UNIT table pin above: this drives the
+    // actual conversion pipeline for Weight, which nothing did before.
+    const disp = resolveQuantityDisplay(2.5, QuantityType.Weight, ProjectUnits.empty(), { MASSUNIT: 'g' });
+    assert.strictEqual(disp.unit, 'g');
+    assert.ok(disp.converted !== null && Math.abs(disp.converted - 2500) < 1e-9);
+  });
+
   it('returns no unit/conversion for Count', () => {
     const disp = resolveQuantityDisplay(5, QuantityType.Count, ProjectUnits.empty(), { LENGTHUNIT: 'mm' });
     assert.strictEqual(disp.unit, null);
@@ -180,5 +216,20 @@ describe('formatConverted', () => {
   it('formats with up to 4 fraction digits', () => {
     assert.strictEqual(formatConverted(50), '50');
     assert.strictEqual(formatConverted(1 / 3), '0.3333');
+  });
+});
+
+describe('an edited quantity keeps labelling its own Unit (#11592)', () => {
+  it('shows the explicit unit after an overlay edit of the value', async () => {
+    const { MutablePropertyView } = await import('@ifc-lite/mutations');
+    const view = new MutablePropertyView(null, 'm');
+    view.setQuantityExtractor(() => [{
+      name: 'Qto_SpaceBaseQuantities',
+      quantities: [{ name: 'NetFloorArea', type: QuantityType.Area, value: 250_000, explicitUnit: 'cm²', explicitUnitSiScale: 1e-4 }],
+    }]);
+    view.setQuantity(1, 'Qto_SpaceBaseQuantities', 'NetFloorArea', 300_000, QuantityType.Area);
+    const edited = view.getQuantitiesForEntity(1)[0].quantities[0];
+    const display = resolveQuantityDisplay(edited.value, edited.type, ProjectUnits.empty(), {}, edited);
+    assert.strictEqual(display.unit, 'cm²');
   });
 });

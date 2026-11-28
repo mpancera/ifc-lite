@@ -48,7 +48,8 @@
  *   1. pnpm install --frozen-lockfile (build/typecheck/lint/node-tests/
  *      viewer-e2e/plato-check/docs-checks — first real step of each)
  *   2. check:bim-globals         (node-tests, before `pnpm test`)
- *   3. check:server-attr-indices (node-tests, before `pnpm test`)
+ *   3. (retired: the server attr-index and relationship-slot tables are no longer
+ *      generated; core's EXPRESS registry answers them, C6-4)
  *   4. generate-docs-sections.mjs --check (node-tests, before `pnpm test`;
  *      also docs-checks — the docs-only-PR twin of the same command)
  *   5. check-unused-locals.mjs   (lint job, via `pnpm lint`)
@@ -56,6 +57,8 @@
  *   7. cargo metadata --locked   (rust-tests job, before Clippy/`cargo test`)
  *   8. plato clash-math freshness (plato-check job)          -- INFO only, see below
  *   9. committed wasm .d.ts vs Rust source (build job)        -- INFO only, see below
+ *   10. generate-coverage-ledger.mjs --check (node-tests, alongside gate 4; #4207)
+ *   11. generate-structural-coverage-ledger.mjs --check (node-guards, after the coverage ledger step)
  *
  * Steps deliberately NOT treated as a generated-artifact gate here, and why:
  *   - `pnpm fixtures:check` (build job) compares downloaded test-fixture
@@ -116,22 +119,18 @@
  *     setup, cargo + fixture caches, `rustup show`, artifact upload/download):
  *     no artifact comparison in any of them.
  *
- * (1)-(7) each need only a lockfile resolve (frozen-lockfile), a
- * single-package `turbo build` (bim-globals -> @ifc-lite/sandbox,
- * server-attr-indices -> @ifc-lite/parser), an already-built `dist/` across
- * all published packages (api-surface, unused-locals), or nothing at all
- * (docs-sections, cargo metadata), and run in well under two minutes total,
- * so they run unconditionally here — (7) is SKIPPED rather than run when
- * `cargo` isn't on PATH, since a frontend-only contributor's machine may not
- * have the Rust toolchain installed at all, and an absent binary is not
- * evidence of a stale lockfile. (2)-(4) are likewise SKIPPED on a tree with
- * no node_modules: they shell out through `pnpm run`, and without an install
- * they fail with `Command "turbo" not found`, which this script used to
- * report under the headline "Stale generated file(s) — regenerate and
- * commit". That named the wrong cause and offered a fix that could not
- * possibly work (#2664 review). (1) deliberately has no such precondition —
- * it is exactly the gate that still works, and still matters, on an
- * uninstalled tree.
+ * (1)-(7) each need only a lockfile resolve (frozen-lockfile), a single-package `turbo build`
+ * (bim-globals -> @ifc-lite/sandbox), an already-built
+ * `dist/` across all published packages (api-surface, unused-locals), or nothing at all
+ * (docs-sections, cargo metadata), and run in well under two minutes total, so they run
+ * unconditionally here — (7) is SKIPPED rather than run when `cargo` isn't on PATH, since a
+ * frontend-only contributor's machine may not have the Rust toolchain installed at all, and an
+ * absent binary is not evidence of a stale lockfile. (2)-(4) are likewise SKIPPED on a tree with
+ * no node_modules: they shell out through `pnpm run`, and without an install they fail with
+ * `Command "turbo" not found`, which this script used to report under the headline "Stale
+ * generated file(s) — regenerate and commit". That named the wrong cause and offered a fix that
+ * could not possibly work (#2664 review). (1) deliberately has no such precondition — it is
+ * exactly the gate that still works, and still matters, on an uninstalled tree.
  *
  * (8) and (9) are deliberately NOT run by default:
  *   - Plato clones `plato` + `ara3d-sdk` at pinned SHAs and does a `dotnet
@@ -162,7 +161,10 @@
  *   pnpm check:generated --build  # + `pnpm build` first, so api-surface is certain
  *   pnpm check:generated --full   # + actually run plato/wasm gates (needs their toolchains)
  *
- * Exit code: non-zero if any gate FAILS. INFO/SKIP notices never fail the run.
+ * @unwired-by-design a pre-push aggregator of gates CI already runs.
+ * Every gate in the list above is a CI step in its own right (that is how
+ * the list is derived), so this exists to move those failures earlier, not
+ * to add coverage: in CI it would re-run them and report nothing new.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -173,6 +175,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BUILD_FIRST = process.argv.includes('--build');
 const FULL = process.argv.includes('--full');
+const ONLY_GATE = process.env.IFC_LITE_GENERATED_GATE;
 
 const results = [];
 
@@ -247,6 +250,7 @@ function record(name, status, detail, fix) {
 }
 
 function runGate(name, cmd, args, fix, opts = {}) {
+  if (ONLY_GATE && name !== ONLY_GATE) return;
   hr();
   console.log(`Running ${name}: ${[cmd, ...args].join(' ')}`);
   try {
@@ -300,7 +304,7 @@ runGate(
 // without it they report a missing `turbo` as a stale generated file.
 if (!nodeModulesInstalled()) {
   record(
-    'check:bim-globals / check:server-attr-indices / docs:check-generated',
+    'check:bim-globals / docs:check-generated',
     'skip',
     'No root node_modules — these gates run through `pnpm run`, which cannot resolve\n' +
       '`turbo` or the generators on an uninstalled tree. This is a SKIP, not a pass:\n' +
@@ -314,14 +318,6 @@ if (!nodeModulesInstalled()) {
     'pnpm',
     ['run', 'check:bim-globals'],
     'pnpm generate:bim-globals   (then commit apps/viewer/src/lib/scripts/templates/bim-globals.d.ts)',
-  );
-
-  // 3. Server attr-indices — single-package build, fast.
-  runGate(
-    'check:server-attr-indices',
-    'pnpm',
-    ['run', 'check:server-attr-indices'],
-    'pnpm generate:server-attr-indices   (then `cargo fmt -p ifc-lite-server` and commit attr_indices.rs)',
   );
 
   // 4. Generated doc sections (docs/api/typescript.md package index,
@@ -499,6 +495,21 @@ if (FULL) {
   );
 }
 
+// 10. Coverage ledger (#4207): stale output regenerates; missing/zero source data must be fixed.
+runGate('check:coverage-ledger', 'node', ['scripts/generate-coverage-ledger.mjs', '--check'],
+  'if the output says "is stale": node scripts/generate-coverage-ledger.mjs   (then commit docs/architecture/coverage-ledger.md); ' +
+    'if it names a missing source file or an extractor that found ZERO entries, fix that file/extractor first — regenerating cannot');
+
+// 11. Structural coverage ledger: rendered from the newest tests/structural-coverage/baseline summary.
+runGate('check:structural-coverage-ledger', 'node', ['scripts/generate-structural-coverage-ledger.mjs', '--check'],
+  'if the output says "is stale": node scripts/generate-structural-coverage-ledger.mjs   (then commit docs/architecture/structural-coverage-ledger.md); ' +
+    'if it says "does not match the derived catalogue": verify the catalogue change, then re-score and re-baseline deliberately; ' +
+    'if it says "stored totals or applicability disagree": re-score to recompute totals and applicability, then re-baseline; ' +
+    'if it says "was scored offline": fetch the missing corpus fixtures and re-score without --offline, then re-baseline; ' +
+    'if it says "no r<N>.json summary", "ledger: missing", "is not JSON", "is not an" (ifclite-structural-coverage/1 summary) or "has no rows": restore the file with git checkout, or re-score and re-baseline; ' +
+    'to re-score: node tests/structural-coverage/score.mjs; to re-baseline after reviewing every changed cell: cp tests/structural-coverage/.out/summary.json tests/structural-coverage/baseline/r<N>.json, ' +
+    'point the ratchet step in .github/workflows/test.yml at r<N>.json, ' +
+    'then node scripts/generate-structural-coverage-ledger.mjs and commit the new baseline, workflow and ledger');
 hr();
 const failed = results.filter((r) => r.status === 'fail');
 const skipped = results.filter((r) => r.status === 'skip');

@@ -12,176 +12,117 @@
  * - Orphan entity detection
  * - GlobalId uniqueness
  * - Reference integrity (#N references that point at no entity)
+ * - Physical vs structural analysis model consistency (#9668)
  */
 
 import { loadIfcFile } from '../loader.js';
 import { hasFlag, fatal, printJson } from '../output.js';
 import { EntityNode } from '@ifc-lite/query';
-import { getInheritanceChainAcrossSchemas, asSourceBytes, type IfcDataStore, type EntityRef, type IfcSourceBytes } from '@ifc-lite/parser';
+import { expandTypes, getInheritanceChainAcrossSchemas, structuralConsistencyReport, type IfcDataStore, type StructuralSkipReason, type StructuralSkippedMember } from '@ifc-lite/parser';
+import { structuralPhysicalAxes } from '@ifc-lite/create';
+import { resolvedTypeName } from '@ifc-lite/data';
+import { collectDanglingReferences } from './validate-references.js';
 
 export interface ValidationIssue {
   severity: 'error' | 'warning' | 'info';
   rule: string;
   message: string;
-  /** Referencing entity's expressId (set by per-reference rules like reference-integrity). */
+  /** The entity the issue is about: the referencing entity for reference-integrity. */
   entityId?: number;
+  /** GlobalId of `entityId`, set by the structural-consistency rules. */
+  globalId?: string;
   /** Zero-based top-level attribute slot of the offending value within the referencing entity. */
   attributeIndex?: number;
-  /** The referenced expressId that does not exist in the file. */
+  /** The other entity: the missing referenced id for reference-integrity, the linked physical element for structural-class-mismatch. */
   target?: number;
-}
-
-/** One `#N` reference whose target expressId does not exist in the file. */
-interface DanglingReference {
-  /** expressId of the entity containing the reference. */
-  entityId: number;
-  /** STEP type name of the referencing entity (UPPERCASE, as scanned). */
-  entityType: string;
-  /** Zero-based top-level attribute slot the reference sits in (nested refs report their containing slot). */
-  attributeIndex: number;
-  /** The missing expressId being referenced. */
-  target: number;
-}
-
-/** Cap on individually-reported dangling references; the remainder is rolled into one summary issue. */
-const DANGLING_REF_ISSUE_CAP = 50;
-
-const CH_QUOTE = 0x27; // '
-const CH_LPAREN = 0x28; // (
-const CH_RPAREN = 0x29; // )
-const CH_COMMA = 0x2c; // ,
-const CH_HASH = 0x23; // #
-const CH_SLASH = 0x2f; // /
-const CH_STAR = 0x2a; // *
-
-/**
- * Scan one entity record's source bytes for `#N` attribute references and
- * report the ones whose target expressId is not indexed. Operates directly on
- * the raw bytes the parser already indexed (`store.entityIndex.byId` spans),
- * so it is a single pass over each record with no string allocation. Quote
- * tracking (including STEP's doubled-quote escape) keeps `#N` sequences inside
- * string literals from being read as references; embedded STEP comments are
- * skipped.
- */
-function scanEntityForDanglingRefs(
-  src: Uint8Array | IfcSourceBytes,
-  ref: EntityRef,
-  exists: (id: number) => boolean,
-  out: DanglingReference[],
-): void {
-  // Narrow to this record before scanning. `slice` is a `subarray` on a
-  // contiguous source, so the byte walk below is unchanged and zero-copy.
-  const record = asSourceBytes(src).slice(ref.byteOffset, ref.byteOffset + ref.byteLength);
-  scanRecordForDanglingRefs(record, ref, exists, out);
-}
-
-/** The byte walk itself, over one already-narrowed entity record. */
-function scanRecordForDanglingRefs(
-  source: Uint8Array,
-  ref: EntityRef,
-  exists: (id: number) => boolean,
-  out: DanglingReference[],
-): void {
-  const end = source.length;
-  // References only occur inside the attribute list; skip the "#id = TYPE" prefix.
-  let i = 0;
-  while (i < end && source[i] !== CH_LPAREN) i++;
-  if (i >= end) return; // malformed record, nothing to scan
-
-  let depth = 1; // we are inside the outermost '(' now
-  let attrIndex = 0;
-  i++;
-
-  while (i < end) {
-    const c = source[i];
-    if (c === CH_QUOTE) {
-      // String literal: skip to the closing quote, honouring '' escapes.
-      i++;
-      while (i < end) {
-        if (source[i] === CH_QUOTE) {
-          if (i + 1 < end && source[i + 1] === CH_QUOTE) {
-            i += 2; // escaped quote, still inside the string
-            continue;
-          }
-          break; // closing quote
-        }
-        i++;
-      }
-    } else if (c === CH_SLASH && i + 1 < end && source[i + 1] === CH_STAR) {
-      // STEP comment inside a record (rare but legal): skip to closing marker.
-      i += 2;
-      while (i + 1 < end && !(source[i] === CH_STAR && source[i + 1] === CH_SLASH)) i++;
-      i++; // lands on '/', loop increment moves past it
-    } else if (c === CH_LPAREN) {
-      depth++;
-    } else if (c === CH_RPAREN) {
-      depth--;
-      if (depth === 0) return; // end of attribute list
-    } else if (c === CH_COMMA && depth === 1) {
-      attrIndex++;
-    } else if (c === CH_HASH) {
-      let id = 0;
-      let digits = 0;
-      let j = i + 1;
-      while (j < end) {
-        const d = source[j] - 0x30;
-        if (d < 0 || d > 9) break;
-        id = id * 10 + d;
-        digits++;
-        j++;
-      }
-      if (digits > 0) {
-        if (!exists(id)) {
-          out.push({ entityId: ref.expressId, entityType: ref.type, attributeIndex: attrIndex, target: id });
-        }
-        i = j - 1; // loop increment moves past the last digit
-      }
-    }
-    i++;
-  }
+  /** GlobalId of `target`, when it exists. */
+  targetGlobalId?: string;
 }
 
 /**
- * Walk every indexed entity record and collect `#N` references whose target
- * does not exist in the file (rule `reference-integrity`). Uses the parsed
- * entity index for both iteration and existence checks; entities held in the
- * deferred index (lazily-parsed property entities) count as existing and are
- * scanned too.
+ * The building-element types the `named-elements` and `quantity-completeness`
+ * rules scan, as base types only.
+ *
+ * Which base types appear here is a **policy** choice and deliberately narrow:
+ * neither rule claims to cover every `IfcProduct`, and widening either list is
+ * a decision about what the report should say, not a bug fix. The two lists are
+ * not identical — `IfcRailing` is scanned for a missing Name but not for a
+ * missing quantity set — and that asymmetry is preserved here unchanged.
+ *
+ * What is *not* a policy choice is whether a listed type's own concrete
+ * subtypes are scanned. `entityIndex.byType` is keyed by the raw STEP type
+ * name, so an `IfcWallStandardCase` sits in its own bucket; a rule that says it
+ * looks at walls and reads only `IFCWALL` walks straight past it. That is why
+ * the scanned lists below are `expandTypes(...)` of these bases rather than
+ * hand-written: the quantity list used to spell six subtypes out by hand and
+ * had drifted four short (`IfcWallElementedCase`, `IfcSlabElementedCase`,
+ * `IfcMemberStandardCase`, `IfcPlateStandardCase`), and the naming list spelled
+ * out none of the ten at all. `expandTypes` is the same expansion every
+ * `byType()` backend uses, so these rules and a `byType('IfcWall')` query
+ * cannot disagree about what counts as a wall.
+ * Which is why they are computed PER STORE, not once at module load:
+ * `expandTypes` reads the model's own `schemaVersion`, and a list frozen at the
+ * IFC4 answer counts records on an IFC2X3 or IFC4X3 file that `byType` does not.
  */
-export function collectDanglingReferences(store: IfcDataStore): DanglingReference[] {
-  const source = store.source;
-  const byId = store.entityIndex.byId;
-  const deferred = store.deferredEntityIndex;
-  if (!source || source.byteLength === 0 || !byId) return [];
+export const NAMED_ELEMENT_BASE_TYPES: readonly string[] = ['IFCWALL', 'IFCSLAB', 'IFCCOLUMN', 'IFCBEAM',
+  'IFCDOOR', 'IFCWINDOW', 'IFCSTAIR', 'IFCROOF', 'IFCSPACE', 'IFCRAILING', 'IFCMEMBER', 'IFCPLATE', 'IFCFOOTING'];
 
-  const exists = (id: number): boolean => byId.has(id) || deferred?.has(id) === true;
+/** @see NAMED_ELEMENT_BASE_TYPES */
+export const QUANTIFIABLE_BASE_TYPES: readonly string[] = ['IFCWALL', 'IFCSLAB', 'IFCCOLUMN', 'IFCBEAM',
+  'IFCDOOR', 'IFCWINDOW', 'IFCSTAIR', 'IFCROOF', 'IFCSPACE', 'IFCMEMBER', 'IFCPLATE', 'IFCFOOTING'];
 
-  const out: DanglingReference[] = [];
-  for (const ref of byId.values()) {
-    scanEntityForDanglingRefs(source, ref, exists, out);
-  }
-  if (deferred) {
-    for (const ref of deferred.values()) {
-      if (byId.has(ref.expressId)) continue; // already scanned above
-      scanEntityForDanglingRefs(source, ref, exists, out);
-    }
-  }
-  return out;
-}
+/** `NAMED_ELEMENT_BASE_TYPES` plus every subtype this store's schema declares under one. */
+export const namedElementTypes = (schemaVersion: string | undefined): readonly string[] =>
+  expandTypes([...NAMED_ELEMENT_BASE_TYPES], schemaVersion);
+
+/** `QUANTIFIABLE_BASE_TYPES` plus every subtype this store's schema declares under one. */
+export const quantifiableTypes = (schemaVersion: string | undefined): readonly string[] =>
+  expandTypes([...QUANTIFIABLE_BASE_TYPES], schemaVersion);
+
+/** Why a geometry rule passed over a member, as the end of a sentence. */
+const SKIP_REASON: Record<StructuralSkipReason, string> = {
+  'axis-unusable': 'the available axis data could not produce a usable measurement',
+  'derivation-record-unreadable': 'its derivation record could not be read',
+  'linked-element-identity-unreadable': 'a linked element has no readable GlobalId to match against its derivation record',
+  'edge-unreadable': 'its edge could not be read',
+  'no-derivation-record': 'it has no derivation record',
+  'element-without-axis': 'no axis was read for its physical element',
+  'recorded-element-unlinked': 'the element its derivation record names is no longer linked to it',
+};
+
+const onlyRecordMissing = ({ axisDrift, stale }: StructuralSkippedMember) => !axisDrift && stale === 'no-derivation-record';
 
 /**
- * Run the structural validation checks (required entities, storeys, GlobalId
- * uniqueness, naming, schema version, quantity completeness, reference
- * integrity) against an already-parsed store. Pulled out of
- * {@link validateCommand} so other consumers (tests, harnesses) reuse the
- * exact same rules instead of re-implementing them.
+ * One `structural-unchecked-member` issue for a curve member the axis-drift or
+ * movement rule did not compare. A warning, except when the only gap is a
+ * missing derivation record.
  */
+function uncheckedMember(member: StructuralSkippedMember): ValidationIssue {
+  const { memberId, globalId, type, axisDrift, stale } = member;
+  const parts = axisDrift === 'element-without-axis'
+    ? [`movement and axis drift not checked: ${SKIP_REASON[axisDrift]}`]
+    : [axisDrift && `axis drift not checked: ${SKIP_REASON[axisDrift]}`, stale && `movement not checked: ${SKIP_REASON[stale]}`].filter((part): part is string => !!part);
+  return {
+    severity: onlyRecordMissing(member) ? 'info' : 'warning',
+    rule: 'structural-unchecked-member', entityId: memberId, globalId,
+    message: `#${memberId} ${type}${globalId ? ` (${globalId})` : ''}: ${parts.join('; ')}`,
+  };
+}
+
+/** Cap on individually-reported dangling references and unlinked load-bearing elements; the remainder is rolled into one summary issue. */
+const ISSUE_LIST_CAP = 50;
+
+/** Shared structural checks for a parsed store: required entities, storeys,
+ * GlobalId uniqueness, naming, schema, quantities, reference integrity, and
+ * (as warnings) physical vs structural analysis model consistency (#9668).
+ * {@link validateCommand}, delivery, tests and harnesses all use these rules. */
 export function computeValidationIssues(store: IfcDataStore): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
 
   // 1. Check required spatial entities
   const requiredTypes = ['IFCPROJECT', 'IFCSITE', 'IFCBUILDING'];
   for (const reqType of requiredTypes) {
+    // @raw-entity-enumeration-ok CLI validation reads a freshly loaded file without a mutation view
     const ids = store.entityIndex.byType.get(reqType) ?? [];
     if (ids.length === 0) {
       issues.push({ severity: 'error', rule: 'required-entity', message: `Missing required entity: ${reqType}` });
@@ -191,6 +132,7 @@ export function computeValidationIssues(store: IfcDataStore): ValidationIssue[] 
   }
 
   // 2. Check storeys
+  // @raw-entity-enumeration-ok structural validation reports the parsed file snapshot
   const storeyIds = store.entityIndex.byType.get('IFCBUILDINGSTOREY') ?? [];
   if (storeyIds.length === 0) {
     issues.push({ severity: 'warning', rule: 'has-storeys', message: 'No IfcBuildingStorey entities found' });
@@ -222,6 +164,7 @@ export function computeValidationIssues(store: IfcDataStore): ValidationIssue[] 
   // `IfcMaterial` or `IfcSurfaceStyle` here would report two same-named
   // materials as a duplicate GlobalId.
   const globalIds = new Map<string, number[]>();
+  // @raw-entity-enumeration-ok GlobalId uniqueness is checked on the parsed file being validated
   for (const [typeName, ids] of store.entityIndex.byType) {
     const chain = getInheritanceChainAcrossSchemas(typeName);
     if (!chain.includes('IfcRoot')) continue;
@@ -248,10 +191,9 @@ export function computeValidationIssues(store: IfcDataStore): ValidationIssue[] 
   }
 
   // 4. Check for unnamed elements
-  const productTypes = ['IFCWALL', 'IFCSLAB', 'IFCCOLUMN', 'IFCBEAM', 'IFCDOOR', 'IFCWINDOW',
-    'IFCSTAIR', 'IFCROOF', 'IFCSPACE', 'IFCRAILING', 'IFCMEMBER', 'IFCPLATE', 'IFCFOOTING'];
   let unnamedCount = 0;
-  for (const pt of productTypes) {
+  for (const pt of namedElementTypes(store.schemaVersion)) {
+    // @raw-entity-enumeration-ok naming validation scans the parsed file with no overlay
     const ids = store.entityIndex.byType.get(pt) ?? [];
     for (const id of ids) {
       const node = new EntityNode(store, id);
@@ -268,13 +210,10 @@ export function computeValidationIssues(store: IfcDataStore): ValidationIssue[] 
   }
 
   // 6. Quantity completeness — check if product entities have quantity sets
-  const quantifiableTypes = ['IFCWALL', 'IFCSLAB', 'IFCCOLUMN', 'IFCBEAM', 'IFCDOOR', 'IFCWINDOW',
-    'IFCSTAIR', 'IFCROOF', 'IFCSPACE', 'IFCMEMBER', 'IFCPLATE', 'IFCFOOTING',
-    'IFCWALLSTANDARDCASE', 'IFCSLABSTANDARDCASE', 'IFCBEAMSTANDARDCASE',
-    'IFCCOLUMNSTANDARDCASE', 'IFCDOORSTANDARDCASE', 'IFCWINDOWSTANDARDCASE'];
   let withQuantities = 0;
   let withoutQuantities = 0;
-  for (const qt of quantifiableTypes) {
+  for (const qt of quantifiableTypes(store.schemaVersion)) {
+    // @raw-entity-enumeration-ok quantity completeness scans the parsed source file
     const ids = store.entityIndex.byType.get(qt) ?? [];
     for (const id of ids) {
       const node = new EntityNode(store, id);
@@ -301,10 +240,10 @@ export function computeValidationIssues(store: IfcDataStore): ValidationIssue[] 
   // broken data (consumers following it get nothing, or worse, garbage), so
   // it reports as an error like unique-globalid does.
   const dangling = collectDanglingReferences(store);
-  for (const d of dangling.slice(0, DANGLING_REF_ISSUE_CAP)) {
+  for (const d of dangling.slice(0, ISSUE_LIST_CAP)) {
     // Display names render in IFC PascalCase (IfcWall, not IFCWALL); the
     // collector carries the raw STEP token, so resolve through the table.
-    const typeName = store.entities.getTypeName(d.entityId) || d.entityType;
+    const typeName = resolvedTypeName(store.entities, d.entityId) ?? d.entityType;
     issues.push({
       severity: 'error',
       rule: 'reference-integrity',
@@ -314,12 +253,49 @@ export function computeValidationIssues(store: IfcDataStore): ValidationIssue[] 
       target: d.target,
     });
   }
-  if (dangling.length > DANGLING_REF_ISSUE_CAP) {
+  if (dangling.length > ISSUE_LIST_CAP) {
     issues.push({
       severity: 'error',
       rule: 'reference-integrity',
-      message: `${dangling.length - DANGLING_REF_ISSUE_CAP} more dangling reference(s) not listed (${dangling.length} total)`,
+      message: `${dangling.length - ISSUE_LIST_CAP} more dangling reference(s) not listed (${dangling.length} total)`,
     });
+  }
+
+  // 8. Where the physical and the structural analysis model disagree (#9668).
+  // The two per-element rules are capped like dangling references; the others are listed in full.
+  try {
+    // Axis drift compares each member with its element's line, one shape read per element.
+    // Read them only when the file has a curve member and a schema the reader supports.
+    // @raw-entity-enumeration-ok class census of the parsed file; no attribute decoding
+    const hasCurveMember = [...(store.entityIndex?.byType.keys() ?? [])].some((type) => /^ifcstructuralcurvemember/i.test(type));
+    const physicalAxes = hasCurveMember && store.schemaVersion !== 'IFC5' ? structuralPhysicalAxes(store) : undefined;
+    const { issues: structural, coverage } = structuralConsistencyReport(store, { physicalAxes });
+    const capped = new Map([
+      ['structural-unlinked-element', 'load-bearing element(s) with no structural item'],
+      ['structural-unconnected-member', 'structural member(s) with no connection'],
+    ]);
+    for (const [rule, what] of capped) {
+      const ofRule = structural.filter((issue) => issue.rule === rule);
+      for (const issue of ofRule.slice(0, ISSUE_LIST_CAP)) issues.push(issue);
+      if (ofRule.length > ISSUE_LIST_CAP) {
+        issues.push({ severity: 'warning', rule, message: `${ofRule.length - ISSUE_LIST_CAP} more ${what} not listed (${ofRule.length} total)` });
+      }
+    }
+    for (const issue of structural) if (!capped.has(issue.rule)) issues.push(issue);
+    // No finding is not a pass for the members the geometry rules passed over: say how many, then which.
+    const { linked, skipped } = coverage;
+    if (skipped.length > 0) {
+      issues.push({
+        severity: 'info', rule: 'structural-unchecked-member',
+        message: `Movement or axis drift was not checked on ${skipped.length} of ${linked} linked curve member(s)`,
+      });
+      issues.push(...skipped.slice(0, ISSUE_LIST_CAP).map(uncheckedMember));
+      if (skipped.length > ISSUE_LIST_CAP) {
+        issues.push({ severity: skipped.slice(ISSUE_LIST_CAP).every(onlyRecordMissing) ? 'info' : 'warning', rule: 'structural-unchecked-member', message: `${skipped.length - ISSUE_LIST_CAP} more unchecked curve member(s) not listed (${skipped.length} total)` });
+      }
+    }
+  } catch (err) {
+    issues.push({ severity: 'warning', rule: 'structural-consistency', message: `Structural consistency checks could not run: ${err instanceof Error ? err.message : String(err)}` });
   }
 
   return issues;

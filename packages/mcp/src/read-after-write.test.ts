@@ -26,12 +26,14 @@ import { DEFAULT_CONFIG, InMemoryModelRegistry, NOOP_PROGRESS, SILENT_LOGGER } f
 import { fullScope } from './auth/scope.js';
 import { loadIfcModel } from './loader.js';
 import { discoveryTools } from './tools/discovery.js';
-import { queryTools } from './tools/query.js';
+import { queryTools } from './tools/query-tools.js';
 import { mutationTools } from './tools/mutate.js';
 import { validationTools } from './tools/validation.js';
 import { findByGlobalId, resolveGlobalIds } from './tools/util.js';
+import { spatialRootId } from './spatial-tree.js';
 import { buildDefaultResourceRegistry } from './resources/index.js';
 import { diffTools } from './tools/diff.js';
+import { geometryTools } from './tools/geometry.js';
 
 /** A 22-character IFC GlobalId from a short mnemonic. */
 function guid(mnemonic: string): string {
@@ -71,6 +73,7 @@ interface EntityShape {
   globalId: string;
   name: string;
   type: string;
+  description?: string;
   attributes?: Array<{ name: string; value: string | number | boolean }>;
   properties?: Array<{ name: string; properties: Array<{ name: string; value: unknown }> }>;
   pendingMutations?: number;
@@ -124,7 +127,7 @@ interface CountShape {
 let tmp: string;
 let ctx: ToolContext;
 
-const ALL_TOOLS = [...discoveryTools, ...queryTools, ...mutationTools, ...validationTools, ...diffTools];
+const ALL_TOOLS = [...discoveryTools, ...queryTools, ...mutationTools, ...validationTools, ...diffTools, ...geometryTools];
 
 function tool(name: string) {
   const found = ALL_TOOLS.find((t) => t.name === name);
@@ -249,6 +252,28 @@ describe('get_entity after an edit', () => {
   }, 30_000);
 });
 
+describe('get_entity on a created entity that was then edited', () => {
+  it('returns the edited attributes, agreeing with entities() and attributes() (#5009 review)', async () => {
+    await session();
+    const created = await structured<{ expressId: number }>('entity_create', {
+      type: 'IfcWall',
+      attributes: [`'${guid('WALD')}'`, null, "'untitled'", null, null, '#40', null, "'tagD'", null],
+    });
+    await call('entity_set_attribute', { express_id: created.expressId, attribute: 'Name', value: 'Wall D' });
+    await call('entity_set_attribute', { express_id: created.expressId, attribute: 'Description', value: 'Edited after create' });
+
+    const entity = await structured<EntityShape>('get_entity', {
+      global_id: guid('WALD'), include: ['attributes'],
+    });
+    expect(entity.name).toBe('Wall D');
+    expect(entity.description).toBe('Edited after create');
+    expect(entity.attributes?.find((a) => a.name === 'Name')?.value).toBe('Wall D');
+    expect(entity.attributes?.find((a) => a.name === 'Description')?.value).toBe('Edited after create');
+    const walls = await structured<QueryShape>('query_entities', { type: 'IfcWall' });
+    expect(walls.entities.find((w) => w.globalId === guid('WALD'))?.name).toBe('Wall D');
+  }, 30_000);
+});
+
 describe('query_entities after an edit', () => {
   it('matches a property filter against the value that was just written', async () => {
     await session();
@@ -290,6 +315,28 @@ describe('query_entities after an edit', () => {
     expect(walls.count).toBe(2);
     expect(walls.entities.map((e) => e.globalId).sort()).toEqual([guid('WALA'), guid('WALC')].sort());
     expect(walls.pendingMutations).toBe(2);
+  }, 30_000);
+
+  it('moves a reclassified source entity into the requested class (#5249)', async () => {
+    await session();
+    await call('entity_set_attribute', {
+      global_id: guid('WALA'), attribute: 'Name', value: 'Door A',
+    });
+    const model = ctx.registry.get('m');
+    if (!model) throw new Error('model not loaded');
+    const view = model.backend.getMutationView();
+    if (!view) throw new Error('mutation view not created');
+    view.setEntityType(72, 'IfcDoor', null, 'IfcWall');
+
+    const doors = await structured<QueryShape>('query_entities', { type: 'IfcDoor' });
+    expect(doors.entities.map((entity) => entity.expressId)).toEqual([72]);
+    expect(doors.entities[0].type).toBe('IfcDoor');
+    const walls = await structured<QueryShape>('query_entities', { type: 'IfcWall' });
+    expect(walls.entities.map((entity) => entity.expressId)).toEqual([73]);
+    const info = await structured<InfoShape>('model_info', {});
+    const counts = new Map(info.typeCountsTop20.map(row => [row.type, row.count]));
+    expect(counts.get('IfcWall')).toBe(1);
+    expect(counts.get('IfcDoor')).toBe(1);
   }, 30_000);
 
   it('reports a renamed entity under its new name', async () => {
@@ -367,13 +414,19 @@ describe('model_info and count_entities after an edit', () => {
 
   it('applies the same fold to count_entities', async () => {
     await session();
+    // Measured either side of the create rather than pinned to a literal:
+    // `count_entities` counts BIM products, the same universe `query_entities`
+    // returns (#3765), so the fixture's absolute size is not the thing under
+    // test — that the queued entity joins the count is.
+    const before = await structured<CountShape>('count_entities', {});
+    expect(before.total).toBeTypeOf('number');
     await call('entity_create', {
       type: 'IfcWall',
       attributes: [`'${guid('WALC')}'`, null, "'Wall C'", null, null, '#40', null, "'tagC'", null],
     });
 
     const total = await structured<CountShape>('count_entities', {});
-    expect(total.total).toBe(19);
+    expect(total.total).toBe((before.total ?? 0) + 1);
     expect(total.pendingMutations).toBe(1);
 
     const byType = await structured<CountShape>('count_entities', { group_by: 'type' });
@@ -699,6 +752,42 @@ describe('one GlobalId resolves to one entity, whichever tool asks', () => {
   }, 30_000);
 });
 
+describe('geometry tools resolve GlobalId the same way get_entity does', () => {
+  it('finds a created entity by GlobalId, instead of reporting no selector matched', async () => {
+    await session();
+    await call('entity_create', {
+      type: 'IfcWall',
+      attributes: [`'${guid('WALC')}'`, null, "'Wall C'", null, null, '#40', null, "'tagC'", null],
+    });
+    const entity = await structured<EntityShape & { ref: { expressId: number } }>('get_entity', {
+      global_id: guid('WALC'),
+    });
+
+    // Before the fix, geometry_bbox's GlobalId resolution scanned the parsed
+    // store directly and never consulted the overlay, so a GlobalId
+    // get_entity had just found came back "no entity matched the selector"
+    // here — the two tools disagreed about the same session.
+    const bbox = await structured<{ boxes: Array<{ expressId: number }> }>('geometry_bbox', {
+      global_id: guid('WALC'),
+    });
+    expect(bbox.boxes).toHaveLength(1);
+    expect(bbox.boxes[0].expressId).toBe(entity.ref.expressId);
+  }, 30_000);
+
+  it('stops matching a deleted entity\'s GlobalId, as get_entity does', async () => {
+    await session();
+    await call('entity_delete', { global_id: guid('WALB') });
+
+    await expect(async () => tool('get_entity').handler({ global_id: guid('WALB') }, ctx))
+      .rejects.toThrow(/No entity with GlobalId/);
+
+    // Same GlobalId, same session: geometry_bbox's own selector-resolution
+    // must reach the same "gone" answer, not the raw (undeleted) store entry.
+    await expect(async () => tool('geometry_bbox').handler({ global_id: guid('WALB') }, ctx))
+      .rejects.toThrow(/Provide an entity selector/);
+  }, 30_000);
+});
+
 describe('created attributes are named in the model\'s schema', () => {
   it('uses the IFC2X3 spelling for a class IFC4 renamed a slot on', async () => {
     // `IfcRelCoversSpaces` slot 4 is `RelatedSpace` in IFC2X3 and
@@ -786,6 +875,7 @@ describe('the positional header read is gated on IfcRoot', () => {
     });
     expect(out.entityDiff.added).toEqual([]);
   }, 30_000);
+
 });
 
 describe('spatial tree traversal', () => {
@@ -860,6 +950,106 @@ describe('containment over queued relationships', () => {
     });
     return created.expressId;
   }
+
+  it('rehydrates parsed relationship endpoint metadata from the overlay', async () => {
+    await session();
+    const model = ctx.registry.get('m');
+    if (!model) throw new Error('model not loaded');
+    const wall = { modelId: 'm', expressId: 72 };
+
+    await call('entity_set_attribute', { global_id: guid('STOR'), attribute: 'Name', value: 'Level One' });
+    model.bim.store.setPositionalAttribute({ modelId: 'm', expressId: 41 }, 2, "'Positional Level'");
+
+    const edge = model.bim.relationships(wall).relations?.find((candidate) =>
+      candidate.relationshipId === 45 && candidate.entity.id === 41);
+    expect(edge?.entity.name).toBe('Positional Level');
+    expect(model.bim.entity({ modelId: 'm', expressId: 41 })?.name).toBe('Positional Level');
+    expect(model.bim.attributes({ modelId: 'm', expressId: 41 })
+      .find((attribute) => attribute.name === 'Name')?.value).toBe('Positional Level');
+
+    model.bim.store.setPositionalAttribute({ modelId: 'm', expressId: 41 }, 2, '$');
+    const cleared = model.bim.relationships(wall).relations?.find((candidate) =>
+      candidate.relationshipId === 45 && candidate.entity.id === 41);
+    expect(cleared?.entity.name).toBeUndefined();
+    expect(model.bim.entity({ modelId: 'm', expressId: 41 })?.name).toBe('');
+    expect(model.bim.attributes({ modelId: 'm', expressId: 41 })
+      .some((attribute) => attribute.name === 'Name')).toBe(false);
+  }, 30_000);
+
+  it('reports a queued exact relationship row and removes it after deletion', async () => {
+    await session();
+    const wall = await structured<{ expressId: number }>('entity_create', {
+      type: 'IfcWall',
+      attributes: [`'${guid('WALC')}'`, null, "'Wall C'", null, null, '#40', null, "'tagC'", null],
+    });
+    const relationship = await structured<{ expressId: number }>('entity_create', {
+      type: 'IfcRelContainedInSpatialStructure',
+      attributes: [`'${guid('RELZ')}'`, null, null, null, [`#${wall.expressId}`], '#41'],
+    });
+    const model = ctx.registry.get('m');
+    if (!model) throw new Error('model not loaded');
+
+    expect(model.bim.relationships({ modelId: 'm', expressId: wall.expressId }).relations)
+      .toContainEqual(expect.objectContaining({
+        relationshipId: relationship.expressId,
+        relationshipType: 'IfcRelContainedInSpatialStructure',
+        direction: 'inverse',
+        entity: expect.objectContaining({ id: 41, type: 'IfcBuildingStorey' }),
+      }));
+
+    const wallRef = { modelId: 'm', expressId: wall.expressId };
+    model.bim.store.setPositionalAttribute(wallRef, 2, "'Wall C renamed'");
+    await call('entity_set_attribute', {
+      express_id: wall.expressId, attribute: 'Name', value: 'Later named wall',
+    });
+    expect(model.bim.relationships({ modelId: 'm', expressId: 41 }).relations)
+      .toContainEqual(expect.objectContaining({
+        relationshipId: relationship.expressId,
+        direction: 'forward',
+        entity: expect.objectContaining({ id: wall.expressId, name: 'Wall C renamed' }),
+      }));
+    expect(model.bim.entity(wallRef)?.name).toBe('Wall C renamed');
+
+    await call('entity_set_attribute', {
+      global_id: guid('RELZ'), attribute: 'RelatedElements', value: '#73',
+    });
+    expect(model.bim.related({ modelId: 'm', expressId: 73 }, 'IfcRelContainedInSpatialStructure', 'inverse'))
+      .toContainEqual(expect.objectContaining({ ref: { modelId: 'm', expressId: 41 } }));
+    expect(model.bim.related({ modelId: 'm', expressId: wall.expressId }, 'IfcRelContainedInSpatialStructure', 'inverse'))
+      .toEqual([]);
+
+    await call('entity_delete', { global_id: guid('RELZ') });
+    expect(model.bim.relationships({ modelId: 'm', expressId: wall.expressId }).relations?.some(
+      (edge) => edge.relationshipId === relationship.expressId,
+    )).toBe(false);
+  }, 30_000);
+
+  it('keeps exact duplicate records without duplicating legacy void/fill endpoints (#5009)', async () => {
+    await session();
+    for (const [type, prefix] of [
+      ['IfcRelVoidsElement', 'VOID'],
+      ['IfcRelFillsElement', 'FILL'],
+    ] as const) {
+      for (const suffix of ['A', 'B']) {
+        await call('entity_create', {
+          type,
+          attributes: [`'${guid(`${prefix}${suffix}`)}'`, null, null, null, '#72', '#73'],
+        });
+      }
+    }
+    const model = ctx.registry.get('m');
+    if (!model) throw new Error('model not loaded');
+
+    const hostRelationships = model.bim.relationships({ modelId: 'm', expressId: 72 });
+    expect(hostRelationships.voids.map(entity => entity.id)).toEqual([73]);
+    expect(hostRelationships.relations?.filter(edge =>
+      edge.relationshipType === 'IfcRelVoidsElement' && edge.entity.id === 73)).toHaveLength(2);
+
+    const fillRelationships = model.bim.relationships({ modelId: 'm', expressId: 73 });
+    expect(fillRelationships.fills.map(entity => entity.id)).toEqual([72]);
+    expect(fillRelationships.relations?.filter(edge =>
+      edge.relationshipType === 'IfcRelFillsElement' && edge.entity.id === 72)).toHaveLength(2);
+  }, 30_000);
 
   it('keeps a session-placed entity in an in_storey query', async () => {
     await session();
@@ -961,6 +1151,18 @@ describe('containment over queued relationships', () => {
     expect(out.tree).toBeNull();
   }, 30_000);
 
+  it('finds a source entity reclassified into the live project type (#5249)', async () => {
+    await session();
+    await call('entity_delete', { global_id: guid('PROJ') });
+    const model = ctx.registry.get('m');
+    if (!model) throw new Error('model not loaded');
+    const view = model.backend.getMutationView();
+    if (!view) throw new Error('mutation view not created');
+    view.setEntityType(42, 'IfcProject', null, 'IfcBuilding');
+
+    expect(spatialRootId(model)).toBe(42);
+  }, 30_000);
+
   it('stops placing anything in a storey the session deleted', async () => {
     await session();
     await createPlacedWall();
@@ -976,6 +1178,46 @@ describe('containment over queued relationships', () => {
 });
 
 describe('model_audit over queued edits', () => {
+  it('uses the session GlobalId when checking identity (#5249)', async () => {
+    await session();
+    await call('entity_set_attribute', { global_id: guid('WALA'), attribute: 'Name', value: 'Wall A again' });
+    const view = ctx.registry.get('m')?.backend.getMutationView();
+    if (!view) throw new Error('mutation view not created');
+
+    view.setAttribute(73, 'GlobalId', guid('WALA'));
+    expect((await structured<AuditShape>('model_audit', {})).issues
+      .filter((issue) => issue.rule === 'duplicate-globalid').map((issue) => issue.message))
+      .toEqual([`Duplicate GlobalId ${guid('WALA')} on 2 entities`]);
+
+    // A positional edit is the other supported write path for the same slot.
+    view.setAttribute(73, 'GlobalId', guid('WALB'));
+    view.setPositionalAttribute(72, 0, guid('WALB'));
+    expect((await structured<AuditShape>('model_audit', {})).issues
+      .filter((issue) => issue.rule === 'duplicate-globalid').map((issue) => issue.message))
+      .toEqual([`Duplicate GlobalId ${guid('WALB')} on 2 entities`]);
+  }, 30_000);
+
+  it('scores the effective class and positional Name after source retypes (#5249)', async () => {
+    await session();
+    await call('entity_set_attribute', { global_id: guid('WALA'), attribute: 'Name', value: 'Wall A again' });
+    const view = ctx.registry.get('m')?.backend.getMutationView();
+    if (!view) throw new Error('mutation view not created');
+    const before = await structured<AuditShape>('model_audit', {});
+
+    view.setEntityType(72, 'IfcRelAggregates', null, 'IfcWall');
+    const withoutWall = await structured<AuditShape>('model_audit', {});
+    expect(withoutWall.totals.products).toBe(before.totals.products - 1);
+
+    view.setEntityType(84, 'IfcWall', null, 'IfcRelDefinesByProperties');
+    const withRetypedRel = await structured<AuditShape>('model_audit', {});
+    expect(withRetypedRel.totals.products).toBe(before.totals.products);
+    expect(withRetypedRel.totals.unnamed).toBe(before.totals.unnamed + 1);
+
+    view.setPositionalAttribute(73, 2, '');
+    const withUnnamedWall = await structured<AuditShape>('model_audit', {});
+    expect(withUnnamedWall.totals.unnamed).toBe(before.totals.unnamed + 2);
+  }, 30_000);
+
   it('catches a duplicate GlobalId this session created', async () => {
     await session();
     await call('entity_create', {
@@ -1123,6 +1365,48 @@ describe('pendingMutations rides on every payload that folds', () => {
     for (const [name, args] of NOT_FOLDING) {
       const out = await structured<Record<string, unknown>>(name, args);
       expect(out, name).not.toHaveProperty('pendingMutations');
+    }
+  }, 30_000);
+});
+
+/**
+ * `mutation_batch` re-validates each op's `args` with `validateInput` (the
+ * same call `MCPServer` makes before a direct, non-batched dispatch) but must
+ * then hand the *validated* value — the one with schema defaults filled in —
+ * to the sub-tool's handler, not the raw `args` it was given. A single-call
+ * `entity_set_property` already gets `validation.value`, via `server.ts`; a
+ * batched one must see the same value or the two dispatch paths silently
+ * disagree about what an omitted, defaulted field means.
+ *
+ * `entity_set_property`'s schema declares no default today, so this test
+ * grafts one on temporarily (restored in `finally`) to observe the
+ * dispatch path itself, independent of which tool happens to ship a
+ * `default` on a given day.
+ */
+describe('mutation_batch forwards validated (default-filled) args to its sub-tool', () => {
+  it('a defaulted field omitted from the op reaches the handler with its default, not undefined', async () => {
+    await session();
+    const setProperty = mutationTools.find((t) => t.name === 'entity_set_property');
+    if (!setProperty) throw new Error('entity_set_property not registered');
+    const valueSchema = (setProperty.inputSchema.properties as Record<string, { default?: unknown }>).value;
+    const hadDefault = 'default' in valueSchema;
+    const previousDefault = valueSchema.default;
+    valueSchema.default = 'grafted-default';
+    try {
+      const batch = await structured<{ results: Array<{ ok: boolean; result?: { mutation?: { value?: unknown } } }> }>(
+        'mutation_batch',
+        {
+          operations: [
+            // `value` is intentionally omitted so only the schema default can supply it.
+            { tool: 'entity_set_property', args: { global_id: guid('WALA'), pset: 'Pset_WallCommon', name: 'GraftedProp' } },
+          ],
+        },
+      );
+      expect(batch.results[0].ok).toBe(true);
+      expect(batch.results[0].result?.mutation?.value).toBe('grafted-default');
+    } finally {
+      if (hadDefault) valueSchema.default = previousDefault;
+      else delete valueSchema.default;
     }
   }, 30_000);
 });

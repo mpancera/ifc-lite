@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+// C4-5: preserve tuple-adapter coverage/consumption until C10.
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -19,7 +21,7 @@
 //! The reason this file exists at all: `ifc-lite-wasm` is excluded from the
 //! required CI lane (`cargo test --workspace --exclude ifc-lite-wasm`,
 //! `.github/workflows/test.yml:472`) and the only wasm-pack lane
-//! (`determinism.yml`, `wide-arithmetic.yml`) runs solely
+//! (`determinism.yml`) runs solely
 //! `--test mesh_determinism`. Neither of the two tests above is ever
 //! compiled or executed by any CI job -- they only ever ran locally. This
 //! test exercises `classify_type_name_with_content` through the SAME
@@ -35,6 +37,7 @@
 //! exceptionally non-null must still carry the geometry-job class flag, and
 //! one with a null `Representation` must NOT.
 
+use ifc_lite_core::parser::StepRecord;
 use ifc_lite_processing::{scan_shard_classified, PREPASS_CLASS_FLAG_GEOMETRY_JOB};
 
 const FIXTURE: &str = concat!(
@@ -46,18 +49,14 @@ fn read_fixture() -> String {
     std::fs::read_to_string(FIXTURE).expect("issue_1910 storey fixture must be present")
 }
 
-/// Parse the raw STEP keyword at a record start (`#id=KEYWORD(...`). Mirrors
-/// `prepass_discovery.rs::keyword_at` -- duplicated here rather than shared
-/// because that helper is private to the excluded wasm crate.
+/// The raw STEP keyword at a record start (`#id=KEYWORD(...`), read through
+/// core's `StepRecord` like the wasm prepass does (PROCESSING-15).
 fn keyword_at(content: &[u8], start: usize, end: usize) -> &str {
-    let span = &content[start..end.min(content.len())];
-    let eq = span.iter().position(|&b| b == b'=').map(|p| p + 1).unwrap_or(0);
-    let kw_end = span[eq..]
-        .iter()
-        .position(|&b| b == b'(')
-        .map(|p| eq + p)
-        .unwrap_or(span.len());
-    std::str::from_utf8(&span[eq..kw_end]).unwrap_or("").trim()
+    content
+        .get(start..end.min(content.len()))
+        .and_then(StepRecord::parse)
+        .and_then(|record| record.keyword())
+        .unwrap_or("")
 }
 
 #[test]

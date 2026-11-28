@@ -14,7 +14,8 @@
  * `09-implementation-plan.md` P1.T11 / T12.
  */
 
-import { useMemo, useState } from 'react';
+import { useAsyncRun } from '@/hooks/useAsyncRun';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronRight, Sparkles, X } from 'lucide-react';
 import {
   inferCapabilities,
@@ -41,6 +42,10 @@ import { useExtensionHost } from '@/sdk/ExtensionHostProvider';
 import type { ExtensionInstallSummary } from '@/services/extensions/host';
 import { ExtensionInstallError } from '@/services/extensions/host';
 import { toast } from '@/components/ui/toast';
+import { useTranslation } from '@/i18n';
+import { styleInterpolatedValues } from '@/i18n/richInterpolate';
+
+const MODEL_READ_CAPABILITY = 'model.read';
 
 interface PromoteToolDialogProps {
   open: boolean;
@@ -56,18 +61,30 @@ interface PromoteToolDialogProps {
 // is the icon that lands in the menubar.
 
 export function PromoteToolDialog({ open, source, initialName, onClose }: PromoteToolDialogProps) {
+  const { t } = useTranslation();
   const host = useExtensionHost();
-  const [name, setName] = useState(initialName ?? 'My tool');
+  const defaultName = t('extensionsPanels.promoteToolDialog.defaultName');
+  const [name, setName] = useState(initialName ?? defaultName);
+  const nameEditedRef = useRef(false);
   const [hotkey, setHotkey] = useState('');
   const [icon, setIcon] = useState<string>('sparkles');
   const [pending, setPending] = useState<{ bytes: Uint8Array; summary: ExtensionInstallSummary } | null>(null);
-  const [busy, setBusy] = useState(false);
+  const { busy, start } = useAsyncRun({ key: open });
 
   const inference = useMemo(() => inferCapabilities(source), [source]);
 
-  const handlePromote = async () => {
-    if (busy) return;
-    setBusy(true);
+  useEffect(() => {
+    if (!open) {
+      setPending(null);
+      nameEditedRef.current = false;
+      return;
+    }
+    if (!nameEditedRef.current) {
+      setName(initialName ?? defaultName);
+    }
+  }, [defaultName, initialName, open]);
+
+  const handlePromote = () => start(async ({ isCurrent }) => {
     try {
       const { bytes, summary } = await synthesiseBundle({
         name,
@@ -76,46 +93,54 @@ export function PromoteToolDialog({ open, source, initialName, onClose }: Promot
         icon,
         capabilities: inference.capabilities,
       });
-      setPending({ bytes, summary });
+      if (isCurrent()) setPending({ bytes, summary });
     } catch (err) {
-      toast.error(`Failed to package tool: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setBusy(false);
+      if (isCurrent()) toast.error(t('extensionsPanels.promoteToolDialog.packageFailedToast', {
+        error: err instanceof Error ? err.message : String(err),
+      }));
     }
-  };
+  });
 
   const handleApprove = async (grants: string[]) => {
     if (!pending || busy) return;
-    setBusy(true);
-    try {
-      const status = await host.installFromBytes(pending.bytes, grants);
-      // Point the user at the payoff — the actual button. The
-      // synthesised manifest puts the command on `toolbar.right`,
-      // so it shows up as an icon button at the top-right of the
-      // toolbar. Mention the hotkey too if they set one.
-      const where = hotkey.trim()
-        ? `It's now a button in the toolbar (top-right) — or press ${hotkey.trim()}.`
-        : `It's now a button in the toolbar (top-right).`;
-      toast.success(`Installed "${name}". ${where}`);
-      setPending(null);
-      onClose();
-      void status;
-    } catch (err) {
-      if (err instanceof ExtensionInstallError) {
-        toast.error(`Install rejected: ${err.validationErrors[0]?.message ?? err.message}`);
-      } else {
-        toast.error(`Install failed: ${err instanceof Error ? err.message : String(err)}`);
+    await start(async ({ isCurrent }) => {
+      try {
+        const status = await host.installFromBytes(pending.bytes, grants);
+        // Point the user at the payoff — the actual button. The
+        // synthesised manifest puts the command on `toolbar.right`,
+        // so it shows up as an icon button at the top-right of the
+        // toolbar. Mention the hotkey too if they set one.
+        const message = hotkey.trim()
+          ? t('extensionsPanels.promoteToolDialog.installedWithHotkey', { name, hotkey: hotkey.trim() })
+          : t('extensionsPanels.promoteToolDialog.installedNoHotkey', { name });
+        // Installation commits globally even when this dialog was externally closed.
+        toast.success(message);
+        if (!isCurrent()) return;
+        setPending(null);
+        onClose();
+        void status;
+      } catch (err) {
+        if (!isCurrent()) return;
+        if (err instanceof ExtensionInstallError) {
+          toast.error(t('extensionsPanels.promoteToolDialog.installRejectedToast', {
+            message: err.validationErrors[0]?.message ?? err.message,
+          }));
+        } else {
+          toast.error(t('extensionsPanels.promoteToolDialog.installFailedToast', {
+            error: err instanceof Error ? err.message : String(err),
+          }));
+        }
       }
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
+  if (!open) return null;
   if (pending) {
     return (
       <CapabilityReview
         open
         summary={pending.summary}
+        busy={busy}
         onApprove={handleApprove}
         onCancel={() => setPending(null)}
       />
@@ -123,54 +148,55 @@ export function PromoteToolDialog({ open, source, initialName, onClose }: Promot
   }
 
   return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+    <Dialog open={open} onOpenChange={(o) => { if (!o && !busy) onClose(); }}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <div className="flex items-center gap-2">
             <Sparkles className="h-5 w-5 text-primary" />
-            <DialogTitle>Promote script to a tool</DialogTitle>
+            <DialogTitle>{t('extensionsPanels.promoteToolDialog.title')}</DialogTitle>
           </div>
           <DialogDescription>
-            Turn this saved script into a persistent, sandboxed tool. The tool
-            appears in the command palette and on the toolbar. It runs in the
-            same sandbox as your scripts with only the capabilities you grant.
+            {t('extensionsPanels.promoteToolDialog.description')}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="tool-name">Name</Label>
+            <Label htmlFor="tool-name">{t('extensionsPanels.promoteToolDialog.nameLabel')}</Label>
             <Input
               id="tool-name"
               value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Fire-rating report"
+              onChange={(e) => {
+                nameEditedRef.current = true;
+                setName(e.target.value);
+              }}
+              placeholder={t('extensionsPanels.promoteToolDialog.namePlaceholder')}
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="tool-hotkey">Hotkey (optional)</Label>
+            <Label htmlFor="tool-hotkey">{t('extensionsPanels.promoteToolDialog.hotkeyLabel')}</Label>
             <Input
               id="tool-hotkey"
               value={hotkey}
               onChange={(e) => setHotkey(e.target.value)}
-              placeholder="Ctrl+Alt+F"
+              placeholder={t('extensionsPanels.promoteToolDialog.hotkeyPlaceholder')}
             />
           </div>
 
           <div className="space-y-2">
-            <Label>Icon</Label>
+            <Label>{t('extensionsPanels.promoteToolDialog.iconLabel')}</Label>
             <div
               role="radiogroup"
-              aria-label="Pick a toolbar icon"
+              aria-label={t('extensionsPanels.promoteToolDialog.iconGroupAriaLabel')}
               className="grid grid-cols-10 gap-1.5 p-2 rounded-md border bg-muted/40"
             >
               {ICON_CHOICES.map(({ key, Icon, label }) => {
                 const selected = icon === key;
                 return (
-                  <button
+                  // Icon choices are styled buttons with one-of-many radio semantics.
+                  // eslint-disable-next-line jsx-a11y/prefer-tag-over-role
+                  <button type="button" role="radio"
                     key={key}
-                    type="button"
-                    role="radio"
                     aria-checked={selected}
                     aria-label={label}
                     title={label}
@@ -190,11 +216,12 @@ export function PromoteToolDialog({ open, source, initialName, onClose }: Promot
           </div>
 
           <div className="rounded-md border bg-muted/40 p-3">
-            <div className="text-xs font-semibold mb-2">Inferred capabilities</div>
+            <div className="text-xs font-semibold mb-2">{t('extensionsPanels.promoteToolDialog.inferredCapabilitiesHeading')}</div>
             {inference.capabilities.length === 0 ? (
               <div className="text-xs text-muted-foreground">
-                No `bim.*` calls detected. The tool will request only
-                <code className="font-mono ml-1">model.read</code>.
+                {styleInterpolatedValues(t, 'extensionsPanels.promoteToolDialog.noCapabilitiesDetected', [
+                  ['capability', <code key="capability" className="font-mono">{MODEL_READ_CAPABILITY}</code>],
+                ])}
               </div>
             ) : (
               <ul className="space-y-1">
@@ -207,26 +234,26 @@ export function PromoteToolDialog({ open, source, initialName, onClose }: Promot
               </ul>
             )}
             {inference.observations.some((o) => o.unknown) && (
-              <div className="mt-2 text-[11px] text-amber-600 dark:text-amber-400">
-                Unknown `bim.*` calls detected — review the source before approving.
+              <div className="mt-2 text-xs text-warn">
+                {t('extensionsPanels.promoteToolDialog.unknownCallsWarning')}
               </div>
             )}
             {inference.parseErrors.length > 0 && (
-              <div className="mt-2 text-[11px] text-destructive">
-                Script does not parse cleanly — promotion may fail.
+              <div className="mt-2 text-xs text-destructive">
+                {t('extensionsPanels.promoteToolDialog.parseErrorWarning')}
               </div>
             )}
           </div>
         </div>
 
         <DialogFooter>
-          <Button variant="ghost" onClick={onClose}>
+          <Button variant="ghost" disabled={busy} onClick={onClose}>
             <X className="mr-1 h-4 w-4" />
-            Cancel
+            {t('extensionsPanels.promoteToolDialog.cancelButton')}
           </Button>
           <Button onClick={handlePromote} disabled={busy || name.trim().length === 0}>
             <Sparkles className="mr-1 h-4 w-4" />
-            Review & install
+            {t('extensionsPanels.promoteToolDialog.reviewInstallButton')}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -248,7 +275,7 @@ async function synthesiseBundle(
   const slug = slugFromName(args.name);
   const id = `com.local.tools.${slug}`;
   const commandId = `${id}.run`;
-  const caps = args.capabilities.length > 0 ? args.capabilities : ['model.read'];
+  const caps = args.capabilities.length > 0 ? args.capabilities : [MODEL_READ_CAPABILITY];
   // Engine range MUST match the running SDK or the loader skips the
   // bundle on install — the tool then never appears as a toolbar
   // button. Pin to ">=<currentSdk>" using the live app version

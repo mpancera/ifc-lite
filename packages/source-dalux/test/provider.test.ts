@@ -76,10 +76,14 @@ describe('DaluxBuildProvider', () => {
     expect(provider.manifest.capabilities).toEqual({
       containerListing: 'flat-subtree',
       listFilesIsRecursive: true,
-      revisionHistory: false,
+      // `listRevisions` now reconstructs history from version sets
+      // (`revision-methods.ts`) -- see `provider.test.ts`'s and
+      // `revision-methods.test.ts`'s own coverage of that method.
+      revisionHistory: true,
       downloadHistoricalRevisions: true,
       changeDetection: true,
       search: false,
+      writeBack: ['new-version', 'new-file', 'new-location'],
       // #2613: Dalux opts into the eager file sweep -- its own UI has no
       // per-folder "load more files" concept, so the host must keep draining
       // a folder's file listing in full rather than paging it incrementally.
@@ -87,10 +91,14 @@ describe('DaluxBuildProvider', () => {
     });
   });
 
-  it('declares only the apiKey preference', () => {
+  it('declares apiKey as required and baseUrl as optional', () => {
+    // baseUrl was deliberately absent until #2792: Dalux assigns each customer
+    // a node and prints its base URL beside the API key, so everyone not on
+    // node1 was locked out of Dalux Box entirely. It stays OPTIONAL so the
+    // node1 majority is unaffected and sends no node parameter at all.
     const prefs = provider.manifest.preferences;
     expect(prefs.find((p) => p.name === 'apiKey')?.required).toBe(true);
-    expect(prefs.find((p) => p.name === 'baseUrl')).toBeUndefined();
+    expect(prefs.find((p) => p.name === 'baseUrl')?.required).toBe(false);
   });
 
   describe('listProjects', () => {
@@ -440,6 +448,44 @@ describe('DaluxBuildProvider', () => {
 
       const buf = await provider.download(ctx, { projectId: 'proj1', containerId: fileAreaContainerId('fa1'), fileId: 'f1' });
       expect(buf.byteLength).toBe(8);
+    });
+
+    // #6375: the relay in front of Dalux can drop Content-Length, so the
+    // ring's total falls back to the file's own `fileSize`.
+    it('reports streamed progress with the file metadata size as the total when Content-Length is missing', async () => {
+      const bytes = new TextEncoder().encode('IFC-BYTES-STREAMED-IN-CHUNKS');
+      const mockFetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/5.0/projects/proj1/file_areas/fa1/files/f1')) {
+          return Promise.resolve(
+            mockResponse({
+              json: () =>
+                Promise.resolve({
+                  data: { fileId: 'f1', fileName: 'a.ifc', fileAreaId: 'fa1', deleted: false, fileSize: bytes.byteLength, downloadLink: 'https://cdn.dalux.com/x' },
+                }),
+            }),
+          );
+        }
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(bytes.slice(0, 10));
+            controller.enqueue(bytes.slice(10));
+            controller.close();
+          },
+        });
+        return Promise.resolve(new Response(body, { status: 200 }));
+      });
+      const ctx = createMockCtx(mockFetch as unknown as typeof fetch);
+      const calls: Array<readonly [number, number | undefined]> = [];
+
+      const buf = await provider.download(
+        ctx,
+        { projectId: 'proj1', containerId: fileAreaContainerId('fa1'), fileId: 'f1' },
+        { onProgress: (received, total) => calls.push([received, total]) },
+      );
+
+      expect(new Uint8Array(buf)).toEqual(bytes);
+      expect(calls[0]).toEqual([0, bytes.byteLength]);
+      expect(calls.at(-1)).toEqual([bytes.byteLength, bytes.byteLength]);
     });
 
     it('treats the LATEST_REVISION sentinel the same as an omitted revisionId, never hitting /revisions/.../content', async () => {
@@ -809,6 +855,47 @@ describe('DaluxBuildProvider', () => {
       expect(result.ok).toBe(false);
       expect(result.message).not.toContain('API identity lacks access');
       expect(result.message).toContain('500');
+    });
+  });
+
+  // ─── the baseUrl preference actually reaches the wire (#2792) ────────────
+  // The node plumbing is well covered on both sides, but the JOIN between them
+  // is one line in createClient. Reverting just that line left every other test
+  // in this PR green, which is the whole defect family this repo keeps hitting.
+
+  describe('baseUrl preference', () => {
+    it('sends the node selector on requests when a non-default base URL is set', async () => {
+      const seen: string[] = [];
+      const fetchImpl = vi.fn((url: string) => {
+        seen.push(String(url));
+        return Promise.resolve(mockResponse({ json: () => Promise.resolve({ data: [] }) }));
+      }) as unknown as typeof fetch;
+
+      const ctx = createMockCtx(fetchImpl, {
+        apiKey: 'test-key-123',
+        baseUrl: 'https://node2.field.dalux.com/service/api',
+      });
+      await provider.listProjects(ctx);
+
+      expect(seen.length, 'no request was made').toBeGreaterThan(0);
+      expect(
+        seen[0],
+        `the baseUrl preference never reached the request: ${seen[0]}`,
+      ).toContain('daluxNode=node2');
+    });
+
+    it('sends no selector at all when the preference is absent', async () => {
+      // The node1 majority must be byte-for-byte unaffected.
+      const seen: string[] = [];
+      const fetchImpl = vi.fn((url: string) => {
+        seen.push(String(url));
+        return Promise.resolve(mockResponse({ json: () => Promise.resolve({ data: [] }) }));
+      }) as unknown as typeof fetch;
+
+      await provider.listProjects(createMockCtx(fetchImpl, { apiKey: 'test-key-123' }));
+
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen[0]).not.toContain('daluxNode');
     });
   });
 });

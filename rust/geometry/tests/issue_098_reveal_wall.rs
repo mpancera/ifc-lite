@@ -5,7 +5,7 @@
 //! Issue #098: a plan-rotated Poroton wall (`IfcWallStandardCase` #928204,
 //! `2A8m$1B8T2VuclBPhPDl_W`) whose 7 window openings are `IfcFacetedBrep`
 //! stepped-reveal prisms carrying NO authored extrusion direction. Because the
-//! openings arrive with `depth = None`, `try_cut_wall_local_frame` (#1167)
+//! openings arrive with `depth = None`, `cut_in_wall_frame` (#1167)
 //! bails and the wall is cut in world space at ~1.5 Mm, fragmenting into flap
 //! triangles that bridge the openings (a 23 m edge spanning the whole wall
 //! face). This fixture is the wall isolated WITH its voids by
@@ -139,15 +139,26 @@ fn dump_wall_mesh() {
     }
 }
 
+// #3440/#3871: the accept gates (`csg_manifold_gate`, `csg_topology_gate`)
+// used to reject this wall's exact cut and fall back to a worse result, so
+// the gated builds carried measured pins instead of the bar (166 and 436
+// unpaired edges at their last reading). Cut in the frame of its site
+// placement, the kernel results pass both checks at the accept paths (no
+// torn result, no over-used edge), so no fallback runs: 12 unpaired edges,
+// which arise after those paths as in the default build, and IfcOpenShell
+// 0.8.2's volume (32.419 m3) in every build, so the bar below applies to
+// all of them.
+
 #[test]
 fn reveal_wall_openings_do_not_leave_flaps() {
     let voided = voided_wall();
     let open = open_edges(&voided);
     let mx = max_edge(&voided);
+    let vol = mesh_volume(&voided);
     println!(
         "[#098 wall] tris={} vol={:.3} openEdges={} maxEdge={:.3}",
         voided.triangle_count(),
-        mesh_volume(&voided),
+        vol,
         open,
         mx
     );
@@ -155,8 +166,10 @@ fn reveal_wall_openings_do_not_leave_flaps() {
     // NOTE: maxEdge ~23 m is the LEGIT uncut top/bottom-face diagonal of a 23 m
     // wall, not a defect — the real metric is unpaired (open) edges. Pre-fix the
     // exact-arrangement kernel left ~2534 (badly torn); the off-plane-constraint
-    // + weld-for-batching fixes bring it to ~42 (5 of 7 windows fully watertight,
-    // the reveals preserved). Guard against regression past that.
-    let _ = mx;
-    assert!(open < 60, "cut re-fragmented: {open} unpaired edges (was ~42)");
+    // + weld-for-batching fixes brought it to ~42 (5 of 7 windows fully
+    // watertight, the reveals preserved); the site-frame cut (#10435) to 12.
+    // Guard against regression past that.
+    assert!(open <= 12, "cut re-fragmented: {open} unpaired edges (was 12)");
+    // IfcOpenShell 0.8.2 reads 32.419 m3 for this cut wall (42.371 uncut).
+    assert!((vol - 32.419).abs() < 32.419 * 5.0e-4, "wall volume {vol:.3} m³, IfcOpenShell 32.419");
 }

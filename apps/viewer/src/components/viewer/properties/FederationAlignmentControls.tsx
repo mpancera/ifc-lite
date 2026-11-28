@@ -15,7 +15,9 @@ import { Anchor, RefreshCw, AlertTriangle, Check } from 'lucide-react';
 import { useViewerStore } from '@/store';
 import { useIfc } from '@/hooks/useIfc';
 import { toast } from '@/components/ui/toast';
+import { Button } from '@/components/ui/button';
 import { getEffectiveGeoreference } from '@/lib/geo/effective-georef';
+import { useTranslation, type TranslationKey } from '@/i18n';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import type { FederatedModel } from '@/store/types';
 
@@ -23,36 +25,37 @@ export interface FederationAlignmentControlsProps {
   modelId: string;
 }
 
-function statusLabel(status: FederatedModel['federationAlignmentStatus']): {
-  text: string;
+function statusLabelKey(status: FederatedModel['federationAlignmentStatus']): {
+  textKey: TranslationKey;
   tone: 'anchor' | 'ok' | 'warn' | 'neutral';
   icon: typeof Check;
 } {
   switch (status) {
     case 'anchor':
-      return { text: 'Federation anchor', tone: 'anchor', icon: Anchor };
+      return { textKey: 'properties.federationAlignment.anchor', tone: 'anchor', icon: Anchor };
     case 'same-crs':
-      return { text: 'Aligned (same CRS)', tone: 'ok', icon: Check };
+      return { textKey: 'properties.federationAlignment.sameCrs', tone: 'ok', icon: Check };
     case 'reprojected':
-      return { text: 'Reprojected to anchor CRS', tone: 'ok', icon: Check };
+      return { textKey: 'properties.federationAlignment.reprojected', tone: 'ok', icon: Check };
     case 'identity':
-      return { text: 'Aligned (identity)', tone: 'ok', icon: Check };
+      return { textKey: 'properties.federationAlignment.identity', tone: 'ok', icon: Check };
     case 'failed':
-      return { text: 'Alignment failed', tone: 'warn', icon: AlertTriangle };
+      return { textKey: 'properties.federationAlignment.failed', tone: 'warn', icon: AlertTriangle };
     case 'none':
     case undefined:
-      return { text: 'Not aligned', tone: 'neutral', icon: Anchor };
+      return { textKey: 'properties.federationAlignment.notAligned', tone: 'neutral', icon: Anchor };
   }
 }
 
 const toneClasses = {
   anchor: 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200',
-  ok: 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-200',
-  warn: 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/40 text-red-800 dark:text-red-200',
-  neutral: 'border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400',
+  ok: 'border-ok-border bg-ok-surface text-ok',
+  warn: 'border-danger-border bg-danger-surface text-danger',
+  neutral: 'border-border bg-muted text-muted-foreground',
 } as const;
 
 export function FederationAlignmentControls({ modelId }: FederationAlignmentControlsProps) {
+  const { t } = useTranslation();
   const models = useViewerStore((s) => s.models);
   const anchorModelIdOverride = useViewerStore((s) => s.anchorModelIdOverride);
   const setAnchorModelIdOverride = useViewerStore((s) => s.setAnchorModelIdOverride);
@@ -102,7 +105,7 @@ export function FederationAlignmentControls({ modelId }: FederationAlignmentCont
   const status: FederatedModel['federationAlignmentStatus'] = isAnchor
     ? 'anchor'
     : thisModel.federationAlignmentStatus ?? 'none';
-  const badge = statusLabel(status);
+  const badge = statusLabelKey(status);
   const Icon = badge.icon;
 
   const handleSetAnchor = useCallback(() => {
@@ -126,8 +129,8 @@ export function FederationAlignmentControls({ modelId }: FederationAlignmentCont
       console.error('[FederationAlignmentControls] re-align failed:', error);
       toast.error(
         error instanceof Error
-          ? `Re-align failed: ${error.message}`
-          : 'Re-align failed.',
+          ? t('properties.federationAlignment.realignFailedWithMessage', { message: error.message })
+          : t('properties.federationAlignment.realignFailed'),
       );
     } finally {
       setBusy(false);
@@ -135,44 +138,46 @@ export function FederationAlignmentControls({ modelId }: FederationAlignmentCont
   }, [realignFederation]);
 
   return (
-    <div className="px-2 py-1.5 border-b border-zinc-100 dark:border-zinc-900">
+    <div className="px-2 py-1.5 border-b border-border">
       <div className="flex items-center gap-2 flex-wrap">
         <div
-          className={`inline-flex items-center gap-1 px-1.5 py-0.5 border text-[10px] font-medium ${toneClasses[badge.tone]}`}
+          className={`inline-flex items-center gap-1 px-1.5 py-0.5 border text-2xs font-medium ${toneClasses[badge.tone]}`}
         >
           <Icon className="h-2.5 w-2.5" />
-          <span>{badge.text}</span>
+          <span>{t(badge.textKey)}</span>
         </div>
         {!isAnchor && (
-          <button
+          <Button
             type="button"
+            variant="outline"
+            size="segment"
             onClick={handleSetAnchor}
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-teal-600 dark:text-teal-400 hover:text-teal-800 dark:hover:text-teal-300 border border-teal-300/50 dark:border-teal-700/50 hover:bg-teal-50 dark:hover:bg-teal-950/50 transition-colors"
-            title="Use this model as the federation anchor. Click 'Re-align' afterwards to apply."
+            className="gap-1 px-1.5 [&_svg]:size-2.5"
+            title={t('properties.federationAlignment.makeAnchorTooltip')}
           >
-            <Anchor className="h-2.5 w-2.5" />
-            Make anchor
-          </button>
+            <Anchor />
+            {t('properties.federationAlignment.makeAnchor')}
+          </Button>
         )}
         {isAnchor && anchorModelIdOverride === modelId && (
           <button
             type="button"
             onClick={handleClearAnchor}
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 border border-zinc-300/50 dark:border-zinc-700/50 hover:bg-zinc-50 dark:hover:bg-zinc-900 transition-colors"
-            title="Stop pinning this model as the anchor; revert to the default (earliest-loaded with georef)."
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 text-2xs text-muted-foreground hover:text-foreground border border-zinc-300/50 dark:border-zinc-700/50 hover:bg-muted transition-colors"
+            title={t('properties.federationAlignment.unpinTooltip')}
           >
-            Unpin
+            {t('properties.federationAlignment.unpin')}
           </button>
         )}
         <button
           type="button"
           onClick={handleRealign}
           disabled={busy}
-          className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 border border-zinc-300/50 dark:border-zinc-700/50 hover:bg-zinc-50 dark:hover:bg-zinc-900 transition-colors disabled:opacity-50 disabled:cursor-not-allowed ml-auto"
-          title="Re-bake every model's geometry against the current anchor."
+          className="inline-flex items-center gap-1 px-1.5 py-0.5 text-2xs text-muted-foreground hover:text-foreground border border-zinc-300/50 dark:border-zinc-700/50 hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed ml-auto"
+          title={t('properties.federationAlignment.realignTooltip')}
         >
           <RefreshCw className={`h-2.5 w-2.5 ${busy ? 'animate-spin' : ''}`} />
-          Re-align
+          {t('properties.federationAlignment.realign')}
         </button>
       </div>
     </div>

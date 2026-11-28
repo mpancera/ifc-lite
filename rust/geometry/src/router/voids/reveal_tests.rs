@@ -501,12 +501,12 @@
         // overlapping on all three axes but coinciding on NONE. Collapsing them
         // into one bounding box punches a phantom hole through both walls (the
         // reported corner over-cut). They must stay separate.
-        let window = OpeningType::Rectangular(
+        let window = CutterKind::Rectangular(
             Point3::new(1.5, -1.2, 0.9),
             Point3::new(2.7, 1.2, 2.1),
             None,
         );
-        let door = OpeningType::Rectangular(
+        let door = CutterKind::Rectangular(
             Point3::new(-2.4, 0.55, 0.0),
             Point3::new(2.4, 2.95, 2.2),
             None,
@@ -554,12 +554,12 @@
         // The merge still collapses the O(2^N) case it exists for: openings that
         // tile a wall coincide on two axes per pair (here X and Y) and are
         // adjacent on the third (Z), so bbox(A,B) == A ∪ B with no phantom volume.
-        let lower = OpeningType::Rectangular(
+        let lower = CutterKind::Rectangular(
             Point3::new(1.0, 0.0, 0.0),
             Point3::new(2.0, 0.4, 1.0),
             None,
         );
-        let upper = OpeningType::Rectangular(
+        let upper = CutterKind::Rectangular(
             Point3::new(1.0, 0.0, 1.0),
             Point3::new(2.0, 0.4, 2.0),
             None,
@@ -567,7 +567,7 @@
         let merged = GeometryRouter::merge_rectangular_openings(&[lower, upper]);
         assert_eq!(merged.len(), 1, "aligned stacked openings should still merge");
         match &merged[0] {
-            OpeningType::Rectangular(mn, mx, _) => {
+            CutterKind::Rectangular(mn, mx, _) => {
                 assert!(mn.z.abs() < 1e-9 && (mx.z - 2.0).abs() < 1e-9, "merged Z span");
             }
             _ => panic!("expected a merged Rectangular opening"),
@@ -616,6 +616,33 @@
         assert_eq!(new_max.x, open_max.x);
         assert_eq!(new_min.z, open_min.z);
         assert_eq!(new_max.z, open_max.z);
+    }
+
+    #[test]
+    fn test_extend_opening_is_invariant_under_antiparallel_axis_3977() {
+        let router = crate::router::GeometryRouter::new();
+        let wall_min = Point3::new(0.0, 0.0, -0.05);
+        let wall_max = Point3::new(4.0, 3.0, 0.05);
+        let open_min = Point3::new(1.0, 1.0, -0.02);
+        let open_max = Point3::new(2.0, 2.0, 0.02);
+
+        let positive = router.extend_opening_along_direction(
+            open_min,
+            open_max,
+            wall_min,
+            wall_max,
+            Vector3::new(0.0, 0.0, 1.0),
+        );
+        let negative = router.extend_opening_along_direction(
+            open_min,
+            open_max,
+            wall_min,
+            wall_max,
+            Vector3::new(0.0, 0.0, -1.0),
+        );
+
+        assert_eq!(negative, positive, "axis sign must not change the extended AABB");
+        assert!(negative.0.z < wall_min.z && negative.1.z > wall_max.z);
     }
 
     #[test]
@@ -765,6 +792,49 @@
         assert_eq!(new_max, open_max, "a far-flush recess's max bound must be left unchanged");
     }
 
+    /// Issue #7920: a rebate flush with a wall face 51 m from the origin. The host bounds come
+    /// from f32-stored vertices: in the real model the wall faces at y = 51.48
+    /// and 51.73 read back as 51.479995728 and 51.729995728, 4.3 um off the
+    /// authored opening face. A tolerance of `thickness * 1e-5` (2.5 um for a
+    /// 250 mm wall) is below that f32 noise, so the 190 mm rebate was not read
+    /// as a recess and got extended through the remaining 60 mm of wall. Both
+    /// extrusion signs must leave it unchanged.
+    #[test]
+    fn test_extend_opening_recess_survives_f32_host_bounds_far_from_origin() {
+        let router = crate::router::GeometryRouter::new();
+        let wall_min = Point3::new(23.2479, 51.479995728, 10.84);
+        let wall_max = Point3::new(25.59, 51.729995728, 14.01);
+        let open_min = Point3::new(23.24, 51.48, 13.75);
+        let open_max = Point3::new(25.6068, 51.67, 14.01);
+
+        for dir in [Vector3::new(0.0, 1.0, 0.0), Vector3::new(0.0, -1.0, 0.0)] {
+            let (new_min, new_max) =
+                router.extend_opening_along_direction(open_min, open_max, wall_min, wall_max, dir);
+            assert_eq!(new_min, open_min, "rebate min bound changed for dir {dir:?}");
+            assert_eq!(new_max, open_max, "rebate extended through the wall for dir {dir:?}");
+        }
+    }
+
+    /// Review of #7921 / #7920: translating perpendicular to the extrusion
+    /// must not turn a genuinely interior opening into a flush recess.
+    #[test]
+    fn review_7921_perpendicular_translation_preserves_interior_opening() {
+        let router = crate::router::GeometryRouter::new();
+        for x in [0.0, 100.0] {
+            let wall_min = Point3::new(x, 0.0, 0.0);
+            let wall_max = Point3::new(x + 10.0, 1.0, 3.0);
+            let open_min = Point3::new(x, 1.1e-5, 1.0);
+            let open_max = Point3::new(x + 2.0, 0.5, 1.1);
+            for dir in [Vector3::new(0.0, 1.0, 0.0), Vector3::new(0.0, -1.0, 0.0)] {
+                let (new_min, new_max) = router.extend_opening_along_direction(
+                    open_min, open_max, wall_min, wall_max, dir,
+                );
+                assert!(new_min.y < wall_min.y && new_max.y > wall_max.y,
+                    "interior opening must extend through the wall at x={x}, dir={dir:?}; got {new_min:?}..{new_max:?}");
+            }
+        }
+    }
+
     /// DETERMINISM (CI-safe, no fixture): the parametric cut on a rotated, building-scale
     /// wall must FIRE, be watertight, emit a local-frame mesh (small positions + origin),
     /// and produce BIT-IDENTICAL output across runs. Bit-identical-across-runs + the
@@ -833,6 +903,6 @@
             .fold(0.0f32, |m, &v| m.max(v.abs()));
         assert!(max_abs < 10.0, "local-frame positions must stay small (got {max_abs})");
 
-        assert!(param_cut_watertight(&out1), "cut must be watertight");
+        assert!(crate::exact_topology::strict_closed_mesh(&out1), "cut must be watertight");
         assert!(out1.triangle_count() > 12, "the opening must add faces");
     }

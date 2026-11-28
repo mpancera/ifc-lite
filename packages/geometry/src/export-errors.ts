@@ -24,3 +24,30 @@ export function isNoRenderGeometryError(error: unknown): boolean {
       error.message.startsWith(`${NO_RENDER_GEOMETRY}:`))
   );
 }
+
+/** A LandXML terrain export refused its selection: not an authored
+ * triangulated terrain, or missing/ambiguous georeferencing (#7600). The
+ * message after the code names the product or attribute at fault. */
+export const TERRAIN_REFUSED = 'TERRAIN_REFUSED';
+
+/** The reason a terrain export was refused, or `null` when `error` is not a
+ * terrain refusal (a crash or any other failure). */
+export function terrainRefusalReason(error: unknown): string | null {
+  const prefix = `${TERRAIN_REFUSED}:`;
+  return error instanceof Error && error.message.startsWith(prefix)
+    ? error.message.slice(prefix.length).trim()
+    : null;
+}
+
+/** A CityJSON export had no building model to write: the model has no
+ * `IfcBuilding` in its spatial structure, or the options are invalid. */
+export const CITYJSON_REFUSED = 'CITYJSON_REFUSED';
+
+/** The reason a CityJSON export was refused, or `null` when `error` is not
+ * a CityJSON refusal. */
+export function cityJsonRefusalReason(error: unknown): string | null {
+  const prefix = `${CITYJSON_REFUSED}:`;
+  return error instanceof Error && error.message.startsWith(prefix)
+    ? error.message.slice(prefix.length).trim()
+    : null;
+}

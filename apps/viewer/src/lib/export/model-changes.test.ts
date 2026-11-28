@@ -13,8 +13,6 @@ import {
   collectChangedModels,
   totalChangeCount,
   buildChangedArtifacts,
-  uniqueArtifactBase,
-  mapStepSchema,
   LEGACY_MODEL_ID,
   type ChangesExportState,
   type BuildArtifactsDeps,
@@ -59,6 +57,8 @@ function mkState(partial: Partial<ChangesExportState>): ChangesExportState {
     scheduleData: null,
     scheduleIsEdited: false,
     scheduleSourceModelId: null,
+    collabRoomId: null,
+    collabRoomModels: new Map(),
     ...partial,
   };
 }
@@ -361,28 +361,6 @@ describe('badge-vs-dialog agreement (maintainer finding on #1967)', () => {
   });
 });
 
-// ── pure helpers ─────────────────────────────────────────────────────────────
-
-describe('uniqueArtifactBase', () => {
-  it('dedupes same name+ext, leaves different ext alone', () => {
-    const used = new Set<string>();
-    assert.strictEqual(uniqueArtifactBase('model', 'ifc', used), 'model');
-    assert.strictEqual(uniqueArtifactBase('model', 'ifc', used), 'model-2');
-    assert.strictEqual(uniqueArtifactBase('model', 'ifc', used), 'model-3');
-    // same base, different extension is a distinct filename -> no suffix.
-    assert.strictEqual(uniqueArtifactBase('model', 'ifcx', used), 'model');
-  });
-});
-
-describe('mapStepSchema', () => {
-  it('maps schema versions to STEP tokens', () => {
-    assert.strictEqual(mapStepSchema('IFC2X3'), 'IFC2X3');
-    assert.strictEqual(mapStepSchema('IFC4'), 'IFC4');
-    assert.strictEqual(mapStepSchema('IFC4X3'), 'IFC4X3');
-    assert.strictEqual(mapStepSchema('IFC5'), 'IFC4'); // caller routes IFC5 elsewhere
-  });
-});
-
 // ── buildChangedArtifacts ────────────────────────────────────────────────────
 
 interface StepCall {
@@ -498,6 +476,36 @@ describe('buildChangedArtifacts', () => {
     assert.strictEqual(result.scheduleSpliced, false);
   });
 
+  it('does not splice a schedule into, or STEP-export, a tabular model labelled IFC4', async () => {
+    // Its `source` is not STEP whatever the schema label says, so it is neither
+    // a schedule target nor handed to the STEP exporter.
+    const tabular = { sourceKind: 'tabular' } as IfcDataStore;
+    const models = new Map<string, FederatedModel>([['t', mkModel('t', 'model.3dm', 'IFC4', { ifcDataStore: tabular })]]);
+    const mutationViews = new Map<string, MutablePropertyView>([['t', mkView(1)]]);
+    const state = mkState({ models, mutationViews, scheduleData: mkSchedule([0, 0]), scheduleSourceModelId: 't' });
+    assert.strictEqual(collectChangedModels(state).scheduleTargetModelId, null);
+
+    const { deps, stepCalls, ifcxCalls } = fakeDeps({ resolveStepDataStore: async () => tabular });
+    const result = await buildChangedArtifacts(state, deps);
+    assert.strictEqual(stepCalls.length, 0);
+    assert.deepStrictEqual(ifcxCalls, []);
+    assert.deepStrictEqual(result.files, []);
+    assert.deepStrictEqual(result.skipped, [{ name: 'model.3dm', reason: 'Model has no IFC STEP source to export changes into' }]);
+  });
+
+  it('skips a model whose STEP store cannot be resolved', async () => {
+    // Unresolvable store (evicted, or never loaded) is a distinct skip from a
+    // tabular store: there are no bytes at all, not the wrong kind of bytes.
+    const models = new Map<string, FederatedModel>([['m', mkModel('m', 'model.ifc')]]);
+    const mutationViews = new Map<string, MutablePropertyView>([['m', mkView(1)]]);
+    const { deps, stepCalls, ifcxCalls } = fakeDeps({ resolveStepDataStore: async () => null });
+    const result = await buildChangedArtifacts(mkState({ models, mutationViews }), deps);
+    assert.strictEqual(stepCalls.length, 0);
+    assert.deepStrictEqual(ifcxCalls, []);
+    assert.deepStrictEqual(result.files, []);
+    assert.deepStrictEqual(result.skipped, [{ name: 'model.ifc', reason: 'Model data is unavailable for export' }]);
+  });
+
   it('dedupes colliding filenames across models', async () => {
     const models = new Map<string, FederatedModel>([
       ['a', mkModel('a', 'model.ifc')],
@@ -567,5 +575,70 @@ describe('buildChangedArtifacts', () => {
     assert.strictEqual(files[0].modelId, 'b');
     assert.strictEqual(skipped.length, 1);
     assert.strictEqual(skipped[0].reason, 'boom');
+  });
+
+  // #4444: a recipient's room model is keyed by `/<slotId>/<GlobalId>`; the
+  // one-click "Export changes" route must un-home it the same way the Export
+  // dialog does, and leave the owner's own model of the same room alone.
+  it('hands the IFCX exporter the room slot prefix for a recipient room model only', async () => {
+    const roomId = 'r1';
+    const guestId = `room:${roomId}:m1`;
+    const models = new Map<string, FederatedModel>([
+      [guestId, mkModel(guestId, 'shared.ifcx (2)', 'IFC5')],
+      ['own', mkModel('own', 'own.ifcx', 'IFC5')],
+    ]);
+    const mutationViews = new Map<string, MutablePropertyView>([
+      [guestId, mkView(1)],
+      ['own', mkView(1)],
+    ]);
+    const prefixes = new Map<string, string | undefined>();
+    const { deps } = fakeDeps({
+      exportIfcx: async (modelId, _ds, _view, inv): Promise<ChangesExportArtifact> => {
+        prefixes.set(modelId, inv.stripPathPrefix);
+        return { content: `IFCX:${modelId}`, ext: 'ifcx', mime: 'application/json' };
+      },
+    });
+    const state = mkState({
+      models,
+      mutationViews,
+      collabRoomId: roomId,
+      collabRoomModels: new Map([
+        [guestId, { slotId: 'm1', pathPrefix: '/m1' }],
+        ['own', { slotId: 'm0', pathPrefix: '/m0' }],
+      ]),
+    });
+    const { files } = await buildChangedArtifacts(state, deps);
+    assert.strictEqual(prefixes.get(guestId), '/m1');
+    assert.strictEqual(prefixes.get('own'), undefined);
+    // The copy suffix survives the extension strip, so the two files differ.
+    assert.deepStrictEqual(files.map((f) => `${f.base}.${f.ext}`).sort(), ['own.ifcx', 'shared -2.ifcx']);
+
+    // Off a session the same models export with their own paths untouched.
+    prefixes.clear();
+    await buildChangedArtifacts(mkState({ models, mutationViews }), deps);
+    assert.strictEqual(prefixes.get(guestId), undefined);
+  });
+
+  // #5201: an empty pset has no IFCX spelling, so the exporter counts it as
+  // skipped; that count must reach the file list the success toast reads,
+  // not stop at the exporter.
+  it('carries the IFCX exporter\'s skipped count onto the artifact file', async () => {
+    const models = new Map<string, FederatedModel>([
+      ['x', mkModel('x', 'x.ifcx', 'IFC5')],
+      ['s', mkModel('s', 's.ifc')],
+    ]);
+    const mutationViews = new Map<string, MutablePropertyView>([
+      ['x', mkView(1)],
+      ['s', mkView(1)],
+    ]);
+    const { deps } = fakeDeps({
+      exportIfcx: async (modelId): Promise<ChangesExportArtifact> => (
+        { content: `IFCX:${modelId}`, ext: 'ifcx', mime: 'application/json', skippedCount: 2 }
+      ),
+    });
+    const { files } = await buildChangedArtifacts(mkState({ models, mutationViews }), deps);
+    const byModel = new Map(files.map((f) => [f.modelId, f.skippedCount]));
+    assert.strictEqual(byModel.get('x'), 2);
+    assert.strictEqual(byModel.get('s'), 0);
   });
 });

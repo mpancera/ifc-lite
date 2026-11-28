@@ -101,7 +101,7 @@ impl GeometryHasher {
     /// The producer takes each segment's verdict where the orienter runs, which
     /// is necessarily BEFORE the per-`MeshData` funnel that finishes the mesh.
     /// One step in that funnel removes triangles: the f32-collapse degenerate
-    /// backstop (`Mesh::drop_degenerate_triangles`). A removed triangle takes
+    /// backstop (`Mesh::drop_degenerate_triangles_unless_closed`). A removed triangle takes
     /// its three welded edges with it, so each neighbour along them drops from
     /// two incidences to one — a BOUNDARY edge. A shell certified closed can
     /// therefore be handed back OPEN while still carrying `0x0F` and a finite
@@ -121,10 +121,16 @@ impl GeometryHasher {
     /// re-running the orienter and the whole hash pass on every affected
     /// element; refusing is sound, costs nothing, and moves no vertex.
     ///
-    /// The funnel's OTHER post-verdict edit, `mesh_weld::weld_indexed`, needs no
-    /// such treatment: it merges only vertices with bit-identical `f32`
-    /// positions, a strict refinement of the orienter's 10 µm weld grid, so the
-    /// welded edge graph the verdict was read off is unchanged.
+    /// The funnel's OTHER edit, the source vertex weld, needs no such treatment:
+    /// it merges only vertices with bit-identical `f32` positions, a strict
+    /// refinement of the orienter's 10 µm weld grid, so the welded edge graph the
+    /// verdict was read off is unchanged. Since #4103 it also mostly runs BEFORE
+    /// the verdict, in the object frame inside the router's placement appliers;
+    /// what `build_mesh_data` still welds post-verdict (`mesh_weld::weld`,
+    /// whose doc lists the two populations) is covered by the same argument, and
+    /// the reordering does not disturb the verdict either way: the orienter
+    /// derives its adjacency from a 10 µm quantized position grid, which an
+    /// exact-bit weld refines rather than changes.
     pub fn retract_closure_if_mesh_edited(&mut self, triangles_dropped: u64) {
         if triangles_dropped > 0 {
             self.closure.retract();
@@ -177,7 +183,7 @@ impl GeometryHasher {
     /// exporters routinely emit items that overlap: a window frame and its sash
     /// meeting at the rebate, lapped steel plates, a `Clearance` representation
     /// whose `RepresentationType` is `SweptSolid` (which passes the body filter
-    /// in `router/rep_filter.rs` — nothing filters on the representation
+    /// in `representation/select.rs` — nothing filters on the representation
     /// IDENTIFIER), or two `Body` representations in different subcontexts.
     /// A sum over overlapping items double-counts the intersection, and each
     /// item on its own is a perfectly ordinary closed solid, so nothing about

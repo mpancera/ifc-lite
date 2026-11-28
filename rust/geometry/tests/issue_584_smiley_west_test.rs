@@ -25,29 +25,10 @@
 //! `tests/models/ara3d/`. Tests skip cleanly when the fixture is absent.
 
 use ifc_lite_core::IfcType;
-use ifc_lite_geometry::{GeometryRouter, VoidIndex};
-use rustc_hash::FxHashMap;
+use ifc_lite_geometry::{void_index_from_content, GeometryRouter};
 
 fn read_fixture(rel: &str) -> Option<String> {
-    let path = format!("../../tests/models/{}", rel);
-    match std::fs::read_to_string(&path) {
-        Ok(s) if s.starts_with("version https://git-lfs.github.com/spec/") => {
-            eprintln!(
-                "skipping: fixture {path} is a Git LFS pointer; run `pnpm fixtures` from the repo root"
-            );
-            None
-        }
-        Ok(s) => Some(s),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!(
-                "skipping: fixture {path} not present. Source from ifcwiki.org and drop \
-                 under tests/models/ara3d/. See `rust/geometry/tests/issue_584_smiley_west_test.rs` \
-                 for the recipe."
-            );
-            None
-        }
-        Err(e) => panic!("failed to read fixture {path}: {e}"),
-    }
+    ifc_lite_testkit::fixture_text(rel)
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -66,11 +47,9 @@ fn run_geometry_pipeline(content: &str) -> PipelineStats {
     let mut decoder = ifc_lite_core::EntityDecoder::with_index(content, entity_index);
     let router = GeometryRouter::with_units(content, &mut decoder);
 
-    let void_idx = VoidIndex::from_content(content, &mut decoder);
-    let mut void_map: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
-    for (host_id, voids) in void_idx.iter() {
-        void_map.insert(host_id, voids.to_vec());
-    }
+    // The production void index (aggregate propagation + canonical order),
+    // not a direct-relationship copy (#8341 C4-15).
+    let void_map = void_index_from_content(content, &mut decoder);
 
     let mut scanner = ifc_lite_core::EntityScanner::new(content);
     let mut stats = PipelineStats::default();

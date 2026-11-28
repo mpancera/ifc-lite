@@ -17,8 +17,7 @@
 //! instanced path is WHICH occurrence carries the geometry, never a world triangle.
 
 use ifc_lite_processing::{
-    process_geometry_streaming_filtered_with_options, InstanceRecord, MeshData, OpeningFilterMode,
-    ProcessingResult, StreamingOptions,
+    process, InstanceRecord, MeshCoordinateSpace, MeshData, ProcessingRequest, ProcessingResult,
 };
 use rustc_hash::FxHashMap;
 
@@ -47,17 +46,7 @@ fn fixture_bytes(name: &str) -> Vec<u8> {
 }
 
 fn run(content: &[u8], enable_instancing: bool) -> ProcessingResult {
-    process_geometry_streaming_filtered_with_options(
-        content,
-        OpeningFilterMode::Default,
-        StreamingOptions {
-            enable_instancing,
-            ..StreamingOptions::default()
-        },
-        |_, _, _| {},
-        |_| {},
-        |_| {},
-    )
+    process(content, &ProcessingRequest::default().instancing(enable_instancing), &mut ())
 }
 
 /// World vertices of a mesh = `origin + position` per vertex (the renderer's
@@ -290,8 +279,8 @@ fn assert_georef_routes_to_flat(bytes: &[u8], label: &str) {
     let inst = run(bytes, true);
 
     assert_eq!(
-        inst.mesh_coordinate_space.as_deref(),
-        Some("site_local"),
+        inst.mesh_coordinate_space,
+        MeshCoordinateSpace::SiteLocal,
         "{label}: expected the site-local coordinate tier (the georef path under test)"
     );
     // The don't-bake plan must NOT have armed: no InstanceRecords on a site-local model.
@@ -327,8 +316,8 @@ fn assert_indexed_colour_palette_preserved(bytes: &[u8], label: &str) {
     let inst = run(bytes, true);
 
     assert_eq!(
-        inst.mesh_coordinate_space.as_deref(),
-        Some("raw_ifc"),
+        inst.mesh_coordinate_space,
+        MeshCoordinateSpace::RawIfc,
         "{label}: expected the origin tier so the don't-bake plan actually arms (only the \
          indexed-colour guard should keep this source flat)"
     );
@@ -405,8 +394,8 @@ fn assert_uniform_indexed_colour_instances(bytes: &[u8], label: &str, expected: 
     let flat = run(bytes, false);
     let inst = run(bytes, true);
     assert_eq!(
-        inst.mesh_coordinate_space.as_deref(),
-        Some("raw_ifc"),
+        inst.mesh_coordinate_space,
+        MeshCoordinateSpace::RawIfc,
         "{label}: expected the origin tier so the don't-bake plan arms (only the \
          indexed-colour guard could keep this source flat)"
     );

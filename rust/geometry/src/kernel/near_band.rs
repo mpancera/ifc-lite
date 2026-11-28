@@ -76,6 +76,13 @@ pub(crate) struct NearBand {
 }
 
 impl NearBand {
+    /// Exact binary64 basis of the existing coordinate-uncertainty body.
+    /// Consumers requiring a certificate must convert BEFORE multiplication;
+    /// the ordinary f64 band evaluation is not an outward arithmetic bound.
+    pub(super) fn uncertainty_basis(&self) -> ([f64; 3], f64, f64) {
+        (self.axis_extent, F32_ULP_SCALE, NEAR_BAND_FLOOR)
+    }
+
     /// Fold one point's coordinates into the per-axis extents.
     pub(crate) fn observe_point(&mut self, p: &[f64; 3]) {
         for k in 0..3 {
@@ -93,6 +100,13 @@ impl NearBand {
                 self.observe_point(v);
             }
         }
+    }
+
+    /// One shared quantization context for the two complete operand meshes.
+    pub(crate) fn from_operands(a: &[Tri], b: &[Tri]) -> Self {
+        let mut band = Self::from_tris(a);
+        band.observe_tris(b);
+        band
     }
 
     /// The band over `tris`.
@@ -175,4 +189,24 @@ impl NearBand {
 ///   folded in here.
 pub(crate) fn near_band_from_extent(extent: f64) -> f64 {
     NEAR_BAND_FLOOR.max(extent * F32_ULP_SCALE)
+}
+
+/// Bit-pattern key for exact (not near-) vertex equality: `HashSet`-able,
+/// unlike `[f64; 3]`.
+pub(crate) fn vertex_bits(v: &[f64; 3]) -> [u64; 3] {
+    [v[0].to_bits(), v[1].to_bits(), v[2].to_bits()]
+}
+
+/// The set of every vertex position in `tris`, as [`vertex_bits`] keys.
+///
+/// Used by `plane_weld::promote_cutter_verts_onto_host_faces` (#3353 N-ary
+/// half) to skip a cutter vertex already bit-identical to a host vertex: with
+/// `host` pooling several operands (`promote_operands_mutually`), the
+/// per-plane search there can otherwise pull an already-exact shared vertex a
+/// few µm onto an unrelated operand's near-parallel plane. Measured on the
+/// #960 segmented-roof cutter union: bit-identical vertex pairs shared
+/// between operands fell from (148, 4, 12, 248) to (88, 4, 5, 159) without
+/// this guard. See `mesh_bridge_tests::issue_3353_nary_near_coplanar`.
+pub(crate) fn exact_vertex_set(tris: &[Tri]) -> rustc_hash::FxHashSet<[u64; 3]> {
+    tris.iter().flat_map(|t| t.iter()).map(vertex_bits).collect()
 }

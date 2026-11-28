@@ -3,6 +3,8 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Deterministic per-boolean exact-predicate budget (issue #1109).
+//! Incidence traversal has a separate work allowance in `incidence_work`;
+//! its trip shares whole-boolean rejection, not exact-escalation telemetry.
 //!
 //! Every predicate over an implicit (intersection) point runs a cascade:
 //! `interval filter → fixed-width exact → BigRational` (`predicates.rs`). The
@@ -35,14 +37,25 @@
 //! #635 AABB box-cut fallback ("a square hole is dramatically less wrong than a
 //! missing void").
 
+pub(crate) mod incidence_work;
+#[cfg(test)]
+mod test_profile;
+#[cfg(test)]
+pub(crate) use test_profile::TestProfile;
+
+#[path = "budget_state.rs"]
+mod state;
+mod effective;
+pub use effective::{effective_element_cap, effective_op_cap};
+pub use state::ElementState;
+
 use std::cell::Cell;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Serialises every test that mutates the process-global `CAP` / `ELEMENT_CAP`
-/// atomics, so cargo's parallel runner can't race them. Shared crate-wide (not
-/// just this module's tests) so cap-mutating tests in OTHER modules — e.g. the
-/// voids-router engulf-suppression regression — take the SAME lock and never
-/// clobber each other's cap while a boolean runs. Test-only.
+/// Serialises tests that share peak counters or other process-wide test state.
+/// Exact-budget fixtures use `TestProfile` rather than changing global caps.
+/// Lock via `unwrap_or_else(PoisonError::into_inner)`: one panic must not fail every holder (#7982).
 #[cfg(test)]
 pub(crate) static GLOBAL_CAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -145,18 +158,20 @@ fn env_element_cap() -> Option<u64> {
 /// `n` BigRational escalations (the interactive viewer/wasm profile). The
 /// default is [`DEFAULT_CAP`], so the viewer is bounded out of the box.
 pub fn set_cap(cap: Option<u64>) {
-    CAP.store(cap.unwrap_or(0), Ordering::Relaxed);
+    crate::output_policy::mutate(|| CAP.store(cap.unwrap_or(0), Ordering::Release));
 }
 
 /// Set the global per-element escalation cap (#1109 follow-up). `None` =
 /// unbounded. The default is [`DEFAULT_ELEMENT_CAP`].
 pub fn set_element_cap(cap: Option<u64>) {
-    ELEMENT_CAP.store(cap.unwrap_or(0), Ordering::Relaxed);
+    crate::output_policy::mutate(|| ELEMENT_CAP.store(cap.unwrap_or(0), Ordering::Release));
 }
 
 /// The active per-boolean cap, as configured (`None` ⇒ unbounded).
 pub fn cap() -> Option<u64> {
-    match CAP.load(Ordering::Relaxed) {
+    #[cfg(test)]
+    if let Some(profile) = test_profile::configured() { return profile.cap(); }
+    match CAP.load(Ordering::Acquire) {
         0 => None,
         n => Some(n),
     }
@@ -164,7 +179,9 @@ pub fn cap() -> Option<u64> {
 
 /// The active per-element cap, as configured (`None` ⇒ unbounded).
 pub fn element_cap() -> Option<u64> {
-    match ELEMENT_CAP.load(Ordering::Relaxed) {
+    #[cfg(test)]
+    if let Some(profile) = test_profile::configured() { return profile.element_cap(); }
+    match ELEMENT_CAP.load(Ordering::Acquire) {
         0 => None,
         n => Some(n),
     }
@@ -174,24 +191,23 @@ pub fn element_cap() -> Option<u64> {
 /// the cap. Call once at every public boolean entry in [`crate::csg`].
 #[inline]
 pub fn begin() {
+    incidence_work::begin();
+    crate::progress::tick();
     // Fold the just-finished op's count into the global peak (calibration).
     let prev = COUNT.with(|c| c.get());
     if prev != 0 {
         PEAK.fetch_max(prev, Ordering::Relaxed);
     }
-    let cap = match env_cap() {
-        Some(v) => v, // env override wins (0 = unbounded)
-        None => CAP.load(Ordering::Relaxed),
-    };
-    OP_CAP.with(|c| c.set(if cap == 0 { u64::MAX } else { cap }));
+    OP_CAP.with(|c| c.set(effective_op_cap()));
     COUNT.with(|c| c.set(0));
 }
 
 /// Begin an ELEMENT scope (#1109 follow-up): reset the per-element accumulator
-/// and snapshot the per-element cap. Call once per element at the unified
-/// mesh-production entry (`ifc_lite_processing::element::produce_element_meshes`),
-/// BEFORE its booleans run, so every boolean the element issues accumulates into
-/// one budget and a hard element degrades as a whole.
+/// and snapshot the per-element cap, BEFORE the element's booleans run, so every
+/// boolean the element issues accumulates into one budget and a hard element
+/// degrades as a whole. Mesh production opens it through [`enter_element`],
+/// which also restores the enclosing element's scope; call this directly only
+/// where no element can be nested on the same thread.
 ///
 /// The per-element cap is unbounded whenever the per-boolean profile is unbounded
 /// (`set_cap(None)` / `IFC_LITE_CSG_BUDGET=0` — the server/offline-export
@@ -199,26 +215,81 @@ pub fn begin() {
 /// the configured [`ELEMENT_CAP`] (or its `IFC_LITE_CSG_ELEMENT_BUDGET` override).
 #[inline]
 pub fn begin_element() {
+    incidence_work::begin_element();
     // Fold the just-finished element's total into the per-element peak.
     let prev = ELEM_COUNT.with(|c| c.get());
     if prev != 0 {
         ELEM_PEAK.fetch_max(prev, Ordering::Relaxed);
     }
-    // Per-element cap is unbounded iff the per-boolean profile is unbounded.
-    let boolean_unbounded = match env_cap() {
-        Some(v) => v == 0,
-        None => CAP.load(Ordering::Relaxed) == 0,
-    };
-    let elem_cap = if boolean_unbounded {
-        0 // unbounded (server / offline export)
-    } else {
-        match env_element_cap() {
-            Some(v) => v, // override (0 = unbounded)
-            None => ELEMENT_CAP.load(Ordering::Relaxed),
-        }
-    };
-    ELEM_CAP.with(|c| c.set(if elem_cap == 0 { u64::MAX } else { elem_cap }));
+    ELEM_CAP.with(|c| c.set(effective_element_cap()));
     ELEM_COUNT.with(|c| c.set(0));
+}
+
+/// An open per-element budget scope. Returned by [`enter_element`]; dropping it
+/// restores every accumulator to the value it had when the scope opened.
+///
+/// A rayon worker blocked on a nested `par_iter` (faceted-brep triangulation)
+/// can steal another element job onto its own thread and run it to completion
+/// before resuming the first. The thread-locals are shared by both, so a bare
+/// [`begin_element`] in the stolen element zeroes the outer element's total and
+/// whether the outer element trips its cap depends on scheduling. Scopes nest
+/// in stack order, so a save on entry and a restore on drop keep each element's
+/// count its own.
+///
+/// The scope is not `Send`, so it cannot be dropped on a thread other than the
+/// one whose counters it saved (#4663):
+///
+/// ```compile_fail
+/// fn assert_send<T: Send>() {}
+/// assert_send::<ifc_lite_geometry::kernel::budget::ElementScope>();
+/// ```
+#[must_use = "dropping the scope immediately restores the enclosing element's budget"]
+pub struct ElementScope {
+    incidence: incidence_work::Snapshot,
+    count: u64,
+    op_cap: u64,
+    elem_count: u64,
+    elem_cap: u64,
+    /// Not `Send`: the scope restores the thread-locals of the thread that
+    /// opened it, so it must be dropped there.
+    _thread_bound: PhantomData<*const ()>,
+}
+
+/// Open a per-element budget scope ([`begin_element`]) that restores the
+/// enclosing scope's counters and caps when dropped. Use this, not a bare
+/// [`begin_element`], wherever element meshing can be re-entered on one thread.
+pub fn enter_element() -> ElementScope {
+    let scope = ElementScope {
+        incidence: incidence_work::snapshot(),
+        count: COUNT.with(Cell::get),
+        op_cap: OP_CAP.with(Cell::get),
+        elem_count: ELEM_COUNT.with(Cell::get),
+        elem_cap: ELEM_CAP.with(Cell::get),
+        _thread_bound: PhantomData,
+    };
+    begin_element();
+    scope
+}
+
+impl Drop for ElementScope {
+    fn drop(&mut self) {
+        incidence_work::restore(self.incidence);
+        // Fold the scope's last boolean and its element total into the peaks
+        // before the restore overwrites them (`begin` / `begin_element` fold a
+        // finished count only when the next one starts on this thread).
+        let last_op = COUNT.with(Cell::get);
+        if last_op != 0 {
+            PEAK.fetch_max(last_op, Ordering::Relaxed);
+        }
+        let finished = ELEM_COUNT.with(Cell::get);
+        if finished != 0 {
+            ELEM_PEAK.fetch_max(finished, Ordering::Relaxed);
+        }
+        COUNT.with(|c| c.set(self.count));
+        OP_CAP.with(|c| c.set(self.op_cap));
+        ELEM_COUNT.with(|c| c.set(self.elem_count));
+        ELEM_CAP.with(|c| c.set(self.elem_cap));
+    }
 }
 
 /// Highest single-boolean escalation count observed since process start (or the
@@ -261,7 +332,15 @@ pub fn reset_peak() {
 #[inline]
 pub fn note_escalation() {
     COUNT.with(|c| c.set(c.get().saturating_add(1)));
-    ELEM_COUNT.with(|c| c.set(c.get().saturating_add(1)));
+    let total = ELEM_COUNT.with(|c| {
+        let next = c.get().saturating_add(1);
+        c.set(next);
+        next
+    });
+    // A long exact-tier stretch inside ONE boolean is still progress.
+    if total & 0xFFF == 0 {
+        crate::progress::tick();
+    }
 }
 
 /// Whether the current boolean OR the current element has exceeded its
@@ -272,7 +351,7 @@ pub fn note_escalation() {
 /// not), so the element's remaining cuts bail to the #635 AABB fallback.
 #[inline]
 pub fn tripped() -> bool {
-    COUNT.with(|c| c.get()) >= OP_CAP.with(|c| c.get())
+    incidence_work::tripped() || COUNT.with(|c| c.get()) >= OP_CAP.with(|c| c.get())
         || ELEM_COUNT.with(|c| c.get()) >= ELEM_CAP.with(|c| c.get())
 }
 
@@ -292,109 +371,15 @@ pub fn element_count() -> u64 {
 
 /// Snapshot / restore the accumulators so a REFERENCE computation (`subtract_many`'s
 /// volume-safe oracle) can't charge or trip the caller's #1109 batch budget (codex P2).
-pub(crate) fn snapshot_counters() -> (u64, u64) {
-    (COUNT.with(|c| c.get()), ELEM_COUNT.with(|c| c.get()))
+pub(crate) fn snapshot_counters() -> (u64, u64, incidence_work::Snapshot) {
+    (COUNT.with(|c| c.get()), ELEM_COUNT.with(|c| c.get()), incidence_work::snapshot())
 }
-pub(crate) fn restore_counters((op, elem): (u64, u64)) {
+pub(crate) fn restore_counters((op, elem, incidence): (u64, u64, incidence_work::Snapshot)) {
+    incidence_work::restore(incidence);
     COUNT.with(|c| c.set(op));
     ELEM_COUNT.with(|c| c.set(elem));
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The cap counts escalations and trips at exactly the configured count,
-    /// deterministically; `begin()` resets; unbounded never trips.
-    #[test]
-    fn cap_counts_and_trips_deterministically() {
-        let _guard = GLOBAL_CAP_LOCK.lock().unwrap();
-        let restore = cap();
-
-        set_cap(Some(5));
-        begin();
-        assert_eq!(count(), 0);
-        assert!(!tripped(), "fresh op must not be tripped");
-        for _ in 0..4 {
-            note_escalation();
-        }
-        assert_eq!(count(), 4);
-        assert!(!tripped(), "4 < cap 5 must not trip");
-        note_escalation(); // the 5th reaches the cap
-        assert_eq!(count(), 5);
-        assert!(tripped(), "count == cap must trip");
-        note_escalation(); // stays tripped past the cap
-        assert!(tripped());
-
-        // begin() resets the per-op counter + trip latch.
-        begin();
-        assert_eq!(count(), 0);
-        assert!(!tripped());
-
-        // Unbounded never trips, no matter how many escalations.
-        set_cap(None);
-        begin();
-        for _ in 0..10_000 {
-            note_escalation();
-        }
-        assert_eq!(count(), 10_000);
-        assert!(!tripped(), "unbounded (cap None) must never trip");
-
-        set_cap(restore);
-    }
-
-    /// The per-element budget (#1109 follow-up) accumulates across an element's
-    /// booleans even though `begin()` resets the per-boolean counter, trips the
-    /// element as a whole, and is reset by `begin_element()`. It stays unbounded
-    /// for callers that never open an element scope (the kernel/router tests and
-    /// the server profile), which is what keeps the pinned snapshots unchanged.
-    #[test]
-    fn per_element_budget_accumulates_across_booleans() {
-        let _guard = GLOBAL_CAP_LOCK.lock().unwrap();
-        let restore_cap = cap();
-        let restore_ecap = element_cap();
-        // A bounded per-boolean profile so begin_element() activates the element
-        // cap (it is unbounded only when the per-boolean profile is unbounded).
-        set_cap(Some(1_000_000));
-        set_element_cap(Some(10));
-
-        begin_element();
-        assert_eq!(element_count(), 0);
-        assert!(!tripped(), "fresh element must not be tripped");
-
-        // Three booleans, 4 escalations each = 12 total > the element cap of 10,
-        // even though no single boolean's per-op count (4) reaches it.
-        for _ in 0..3 {
-            begin(); // per-boolean reset — does NOT reset the element accumulator
-            assert_eq!(count(), 0, "begin() resets the per-boolean counter");
-            for _ in 0..4 {
-                note_escalation();
-            }
-        }
-        assert_eq!(element_count(), 12);
-        assert!(tripped(), "element total 12 >= element cap 10 must trip");
-        // ...and it stays tripped through the NEXT boolean even after begin()
-        // zeroes the per-boolean counter — so the element's remaining cuts bail.
-        begin();
-        assert_eq!(count(), 0);
-        assert!(tripped(), "element budget stays blown across begin()");
-
-        // begin_element() opens a fresh scope and clears the trip.
-        begin_element();
-        assert_eq!(element_count(), 0);
-        assert!(!tripped());
-
-        // An unbounded per-boolean profile makes the element cap unbounded too
-        // (the single server/offline-export switch), so it never trips.
-        set_cap(None);
-        begin_element();
-        for _ in 0..100_000 {
-            note_escalation();
-        }
-        assert_eq!(element_count(), 100_000);
-        assert!(!tripped(), "unbounded per-boolean profile ⇒ unbounded element");
-
-        set_cap(restore_cap);
-        set_element_cap(restore_ecap);
-    }
-}
+#[path = "budget_tests.rs"]
+mod tests;

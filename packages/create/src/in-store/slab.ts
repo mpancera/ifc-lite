@@ -18,18 +18,28 @@
  *     last-point-of-first-point is appended only if the input doesn't
  *     already end where it started.
  *
- * Both modes extrude upward along local +Z by `Thickness`. Pure: no
- * I/O, no parser access.
+ * Both modes extrude by `Thickness` along `ExtrudedDirection`: local +Z
+ * unless the caller asks for -Z, which hangs the slab from `Position` so its
+ * top stays there when the depth changes. Pure: no I/O, no parser access.
  */
 
 import { generateIfcGuid } from '@ifc-lite/encoding';
 import type { StoreEditor } from '@ifc-lite/mutations';
+import { assertFinitePoint3 } from '../ifc-creator-math.js';
 import { toNativeLength, toNativePoint2, toNativePoint3, type SpatialAnchor } from './anchor.js';
-import { ownerHistoryRef } from './_emit-helpers.js';
+import { assertPositiveFinite, ownerHistoryRef, productGuid } from './_emit-helpers.js';
 
 export type SlabInStoreParams = SlabRectangleParams | SlabPolygonParams;
 
-export interface SlabRectangleParams {
+interface SlabExtrusionParams {
+  /**
+   * IfcExtrudedAreaSolid.ExtrudedDirection. Defaults to `[0, 0, 1]`: the slab
+   * sits on `Position`. `[0, 0, -1]` hangs it from `Position`.
+   */
+  ExtrudedDirection?: [0, 0, 1] | [0, 0, -1];
+}
+
+export interface SlabRectangleParams extends SlabExtrusionParams {
   Position: [number, number, number];
   Width: number;
   Depth: number;
@@ -40,9 +50,11 @@ export interface SlabRectangleParams {
   Description?: string;
   ObjectType?: string;
   Tag?: string;
+  /** Explicit GlobalId (22-char IFC GUID); generated when omitted. */
+  GlobalId?: string;
 }
 
-export interface SlabPolygonParams {
+export interface SlabPolygonParams extends SlabExtrusionParams {
   /** `'polygon'` discriminator selects the IfcArbitraryClosedProfileDef path. */
   Profile: 'polygon';
   /**
@@ -59,6 +71,8 @@ export interface SlabPolygonParams {
   Description?: string;
   ObjectType?: string;
   Tag?: string;
+  /** Explicit GlobalId (22-char IFC GUID); generated when omitted. */
+  GlobalId?: string;
 }
 
 export interface SlabBuildResult {
@@ -122,11 +136,19 @@ export function addSlabToStore(
 ): SlabBuildResult {
   const { ownerHistoryId, bodyContextId, storeyId, storeyPlacementId } = anchor;
 
-  if (params.Thickness <= 0) {
-    throw new Error('addSlabToStore: Thickness must be positive');
+  assertPositiveFinite([params.Thickness], 'addSlabToStore: Thickness must be positive');
+  if (params.Position !== undefined) {
+    assertFinitePoint3({ Position: params.Position }, 'addSlabToStore');
   }
-  if (!isPolygonParams(params) && (params.Width <= 0 || params.Depth <= 0)) {
-    throw new Error('addSlabToStore: Width and Depth must be positive');
+  const direction = params.ExtrudedDirection;
+  if (direction && !(direction[0] === 0 && direction[1] === 0 && Math.abs(direction[2]) === 1)) {
+    throw new Error('addSlabToStore: ExtrudedDirection must be [0, 0, 1] or [0, 0, -1]');
+  }
+  if (!isPolygonParams(params)) {
+    assertPositiveFinite(
+      [params.Width, params.Depth],
+      'addSlabToStore: Width and Depth must be positive',
+    );
   }
   // Params are metres; convert dimensioned fields to the file's native
   // length unit before emit (see SpatialAnchor.lengthUnitScale). A new
@@ -166,10 +188,10 @@ export function addSlabToStore(
     ? emitPolygonProfile(editor, p.OuterCurve)
     : emitRectangleProfile(editor, p.Width, p.Depth);
 
-  // Extruded along +Z by Thickness.
+  // Extruded along ExtrudedDirection by Thickness.
   const solidOriginPt = editor.addEntity('IfcCartesianPoint', [[0, 0, 0]]).expressId;
   const solidAxis = editor.addEntity('IfcAxis2Placement3D', [`#${solidOriginPt}`, null, null]).expressId;
-  const extrudeDirection = editor.addEntity('IfcDirection', [[0, 0, 1]]).expressId;
+  const extrudeDirection = editor.addEntity('IfcDirection', [params.ExtrudedDirection ?? [0, 0, 1]]).expressId;
   const solidId = editor.addEntity('IfcExtrudedAreaSolid', [
     `#${profileId}`,
     `#${solidAxis}`,
@@ -189,9 +211,8 @@ export function addSlabToStore(
     [`#${shapeRepId}`],
   ]).expressId;
 
-  // `IfcSlab.PredefinedType` only exists from IFC4 onward.
   const slabAttrs: Array<unknown> = [
-    generateIfcGuid(anchor.guidRandom),
+    productGuid(params, anchor.guidRandom),
     ownerHistoryRef(ownerHistoryId),
     params.Name ?? 'Slab',
     params.Description ?? null,
@@ -199,10 +220,8 @@ export function addSlabToStore(
     `#${placementId}`,
     `#${productShapeId}`,
     params.Tag ?? null,
+    '.FLOOR.',
   ];
-  if ((anchor.schema ?? 'IFC4') !== 'IFC2X3') {
-    slabAttrs.push('.FLOOR.');
-  }
   const slabId = editor.addEntity('IfcSlab', slabAttrs as Parameters<StoreEditor['addEntity']>[1]).expressId;
 
   const relContainedId = editor.addEntity('IfcRelContainedInSpatialStructure', [

@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, writeFile, stat, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { analyzeConversionLoss } from '@ifc-lite/export';
+import { loadIfcFile } from '../loader.js';
 import { convertCommand } from './convert.js';
 
 // Minimal but valid IFC2X3 model: project + geometric context + a real
@@ -148,5 +150,112 @@ describe('convertCommand', () => {
     // with the upper-cased schema -- read it back.
     const written = await readFile(out, 'utf-8');
     expect(written).toContain("FILE_SCHEMA(('IFC4'))");
+  });
+
+  // #4206: an entity type with no representation in the target schema, and
+  // no IfcRoot ancestor, cannot be dropped or proxied — `exportToStep` throws
+  // from inside `convertStepLine` rather than write a corrupt file. Before
+  // this fix, `convertCommand` let that exception surface raw (a stack trace,
+  // no indication of WHICH entity or that others share the problem). It
+  // should now refuse cleanly, before writing anything, naming the entity.
+  it('refuses an unrepresentable-and-unrooted target type before writing any file (structural load configuration → IFC2X3)', async () => {
+    captureStderr();
+    const { dir } = await makeInput();
+    const withLoadConfig = MODEL.replace(
+      'ENDSEC;\nEND-ISO-10303-21;',
+      "#326= IFCSTRUCTURALLOADCONFIGURATION($,(#327),((96.)));\n" +
+      "#327= IFCSTRUCTURALLOADSINGLEFORCE('F',1.,0.,0.,0.,0.,0.);\n" +
+      'ENDSEC;\nEND-ISO-10303-21;',
+    );
+    const out = join(dir, 'out.ifc');
+
+    // IfcStructuralLoadConfiguration is an IFC4-only type, so the source
+    // must declare an IFC4 header (MODEL's own FILE_SCHEMA claims IFC2X3).
+    const ifc4Src = join(dir, 'in-ifc4.ifc');
+    await writeFile(
+      ifc4Src,
+      withLoadConfig.replace("FILE_SCHEMA(('IFC2X3'));", "FILE_SCHEMA(('IFC4'));"),
+    );
+
+    await expect(convertCommand([ifc4Src, '--schema', 'IFC2X3', '--out', out])).rejects.toThrow();
+    expect(stderrBuf).toContain('IFCSTRUCTURALLOADCONFIGURATION');
+    expect(stderrBuf).toContain('#326');
+    expect(stderrBuf).toContain('Cannot convert');
+    await expect(stat(out)).rejects.toThrow(); // nothing written
+  });
+
+  it('reports a lossy structural rename in the --json output without blocking the export', async () => {
+    captureStdout();
+    captureStderr();
+    const { dir, src } = await makeInput();
+    // Two coefficients, not three: the carrier that writes SelfWeightCoefficients
+    // as a property set (#9668) refuses it, so the loss is real.
+    const withLoadCase = MODEL.replace(
+      'ENDSEC;\nEND-ISO-10303-21;',
+      "#312= IFCSTRUCTURALLOADCASE('2fv4DZfY55exwX8QDy8dmw',#45,'Case',$,$,.LOAD_CASE.,.NOTDEFINED.,.NOTDEFINED.,1.,$,(0.,-1.));\n" +
+      'ENDSEC;\nEND-ISO-10303-21;',
+    ).replace("FILE_SCHEMA(('IFC2X3'));", "FILE_SCHEMA(('IFC4'));");
+    await writeFile(src, withLoadCase);
+    const out = join(dir, 'out.ifc');
+
+    await convertCommand([src, '--schema', 'IFC2X3', '--out', out, '--json']);
+
+    expect(stderrBuf).toContain('IFCSTRUCTURALLOADCASE');
+    expect(stderrBuf).toContain('SelfWeightCoefficients');
+    const report = JSON.parse(stdoutBuf);
+    const entry = report.lossReport.find((e: { type: string }) => e.type === 'IFCSTRUCTURALLOADCASE');
+    expect(entry).toMatchObject({
+      targetType: 'IFCSTRUCTURALLOADGROUP',
+      kind: 'lossy',
+      count: 1,
+      droppedAttributes: ['SelfWeightCoefficients'],
+    });
+    const written = await readFile(out, 'utf-8');
+    expect(written).toContain('IFCSTRUCTURALLOADGROUP');
+  });
+
+  it('preserves per-record loss groups in JSON (#10597, #10670)', async () => {
+    captureStdout();
+    captureStderr();
+    const { dir, src } = await makeInput();
+    // #70 converts, but its CausedBy names a load rather than a reaction.
+    // #71 names a reaction but stays unconverted: one aspect for two loads.
+    const mixed = MODEL.replace('ENDSEC;\nEND-ISO-10303-21;', () => `
+#60=IFCLOCALPLACEMENT($,#21);
+#61=IFCSTRUCTURALLOADLINEARFORCE('line',0.,0.,-5.,0.,0.,0.);
+#62=IFCSTRUCTURALLOADSINGLEDISPLACEMENT('disp',0.,0.,-0.001,0.,0.,0.);
+#63=IFCSTRUCTURALPOINTREACTION('0KQ0efL39PrP5DeqBwaUNp',#45,'R',$,$,#60,$,#62,.GLOBAL_COORDS.);
+#64=IFCSHAPEREPRESENTATION(#20,'Reference','Point',(#22));
+#65=IFCSHAPEREPRESENTATION(#20,'Reference','Point',(#22));
+#66=IFCPRODUCTDEFINITIONSHAPE($,$,(#64));
+#67=IFCSHAPEASPECT((#64,#65,#65),'Coverage aspect',$,.T.,#66);
+#68=IFCPRODUCTDEFINITIONSHAPE($,$,(#64));
+#69=IFCSHAPEASPECT((#65),'Coverage aspect',$,.T.,#68);
+#70=IFCSTRUCTURALLINEARACTIONVARYING('3sXjCM_kPHN8ZCpuBhV_98',#45,'V',$,$,#60,#66,#61,.GLOBAL_COORDS.,.F.,#62,.TRUE_LENGTH.,#67,(#61,#61));
+#71=IFCSTRUCTURALLINEARACTIONVARYING('4sXjCM_kPHN8ZCpuBhV_98',#45,'W',$,$,#60,#68,#61,.GLOBAL_COORDS.,.F.,#63,.TRUE_LENGTH.,#69,(#61,#61));
+ENDSEC;
+END-ISO-10303-21;`);
+    await writeFile(src, mixed);
+    const expected = analyzeConversionLoss(await loadIfcFile(src), 'IFC2X3', 'IFC4').entries
+      .find(e => e.sourceType === 'IFCSTRUCTURALLINEARACTIONVARYING');
+    expect(expected?.recordGroups).toEqual([
+      { targetType: 'IFCSTRUCTURALCURVEACTION', expressIds: [70], count: 1, droppedAttributes: ['CausedBy'] },
+      { targetType: 'IFCSTRUCTURALLINEARACTIONVARYING', expressIds: [71], count: 1, droppedAttributes: ['CausedBy'] },
+    ]);
+
+    await convertCommand([src, '--schema', 'IFC4', '--out', join(dir, 'out.ifc'), '--json']);
+
+    const entry = JSON.parse(stdoutBuf).lossReport.find(
+      (e: { type: string }) => e.type === 'IFCSTRUCTURALLINEARACTIONVARYING',
+    );
+    expect(entry).toEqual({
+      type: expected?.sourceType,
+      targetType: expected?.targetType,
+      kind: expected?.kind,
+      count: expected?.count,
+      expressIds: expected?.expressIds,
+      droppedAttributes: expected?.droppedAttributes,
+      recordGroups: expected?.recordGroups,
+    });
   });
 });

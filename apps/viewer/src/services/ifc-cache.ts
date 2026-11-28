@@ -9,6 +9,9 @@
  * Uses xxhash64 of the source file as the cache key.
  */
 
+import { IdbConnectionLifecycle } from './idb-connection.js';
+import type { SceneSnapshotWrite } from './cacheService.js';
+
 const DB_NAME = 'ifc-lite-cache';
 const DB_VERSION = 1;
 const STORE_NAME = 'models';
@@ -39,6 +42,12 @@ interface CacheEntry {
    * fingerprint. Absent when Web Crypto was unavailable at write.
    */
   fullSourceHash?: string;
+  /** The source's `IfcSourceBytes.contentKey` at write, so a hit need not re-hash the source on the main thread. */
+  sourceContentKey?: string;
+  /** The finished scene, attached after finalize (`putSceneSnapshot`). A second Blob, so deleting the record purges both and old readers ignore it. */
+  sceneSnapshot?: Blob;
+  /** The renderer policy `sceneSnapshot` was built under. */
+  sceneSnapshotKey?: string;
 }
 
 /**
@@ -57,20 +66,12 @@ export const PER_ENTRY_MAX_BYTES = 1.5 * 1024 * 1024 * 1024;
  */
 export const QUOTA_HEADROOM_BYTES = 128 * 1024 * 1024;
 
-let dbPromise: Promise<IDBDatabase> | null = null;
-
-/**
- * The connection `dbPromise` last resolved to. Kept alongside the memo so an
- * invalidation can be IDENTITY-CHECKED: a caller that trips over a dead
- * connection must only clear the memo if the memo still holds *that* dead
- * connection, never one a concurrent caller has already reopened.
- */
-let memoisedDb: IDBDatabase | null = null;
+const connection = new IdbConnectionLifecycle('[IFC Cache]');
 
 /** Bytes a cache record occupies on disk (cache buffer + optional source). */
-function entryBytes(buffer: Blob | ArrayBuffer, sourceBuffer?: ArrayBuffer): number {
+function entryBytes(buffer: Blob | ArrayBuffer, sourceBuffer?: ArrayBuffer, sceneSnapshot?: Blob): number {
   const bufferBytes = buffer instanceof Blob ? buffer.size : buffer.byteLength;
-  return bufferBytes + (sourceBuffer?.byteLength ?? 0);
+  return bufferBytes + (sourceBuffer?.byteLength ?? 0) + (sceneSnapshot?.size ?? 0);
 }
 
 /**
@@ -118,7 +119,7 @@ export function evictToFree(db: IDBDatabase, targetBytes: number, keepKey: strin
       if (cursor && cumulative < targetBytes) {
         const entry = cursor.value as CacheEntry;
         if (entry.key !== keepKey) {
-          cumulative += entryBytes(entry.buffer, entry.sourceBuffer);
+          cumulative += entryBytes(entry.buffer, entry.sourceBuffer, entry.sceneSnapshot);
           victims.push(cursor.primaryKey);
         }
         cursor.continue();
@@ -170,14 +171,11 @@ export async function ensureRoomForEntry(db: IDBDatabase, bytes: number, keepKey
  * Open the IndexedDB database
  */
 export function openDatabase(): Promise<IDBDatabase> {
-  if (dbPromise) return dbPromise;
-
-  dbPromise = new Promise((resolve, reject) => {
+  return connection.open(() => new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
 
     request.onerror = () => {
       console.error('[IFC Cache] Failed to open database:', request.error);
-      dbPromise = null; // Reset so we can retry
       reject(request.error);
     };
 
@@ -188,8 +186,7 @@ export function openDatabase(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         console.warn('[IFC Cache] Object store missing, recreating database...');
         db.close();
-        dbPromise = null;
-        memoisedDb = null;
+        connection.reset();
 
         // Delete and recreate the database
         const deleteRequest = indexedDB.deleteDatabase(DB_NAME);
@@ -203,25 +200,6 @@ export function openDatabase(): Promise<IDBDatabase> {
         return;
       }
 
-      // A connection can go away underneath the memo. Drop it PROACTIVELY on
-      // the two events that announce it, so the next call opens a fresh one
-      // instead of handing out a dead handle:
-      //  - `versionchange`: another tab is upgrading/deleting the database. We
-      //    must close, or we block it; after our own close() no `close` event
-      //    fires, so invalidate here explicitly.
-      //  - `close`: the connection was closed ABNORMALLY (e.g. the browser
-      //    reclaiming storage), which is the case no code path can predict.
-      db.onversionchange = () => {
-        console.warn('[IFC Cache] Database version change requested elsewhere; closing connection');
-        db.close();
-        invalidateConnection(db);
-      };
-      db.onclose = () => {
-        console.warn('[IFC Cache] Database connection closed unexpectedly; will reopen on next use');
-        invalidateConnection(db);
-      };
-
-      memoisedDb = db;
       resolve(db);
     };
 
@@ -235,59 +213,11 @@ export function openDatabase(): Promise<IDBDatabase> {
         store.createIndex('fileName', 'fileName', { unique: false });
       }
     };
-  });
-
-  return dbPromise;
+  }));
 }
 
-/**
- * Drop the memoised connection, but only if it is still `dead`. Concurrent
- * callers all trip over the same dead connection; without this check the second
- * one would clear the memo the first has already refilled, and we would open
- * the database once per in-flight operation instead of once.
- */
-function invalidateConnection(dead: IDBDatabase): void {
-  if (memoisedDb !== dead) return;
-  memoisedDb = null;
-  dbPromise = null;
-}
-
-/**
- * A closed connection is the one failure that `openDatabase`'s memo cannot see:
- * `IDBDatabase.transaction()` throws `InvalidStateError` SYNCHRONOUSLY once the
- * connection is closed, and none of the operations below can produce that name
- * any other way (an inactive/finished transaction throws
- * `TransactionInactiveError`, a read-only write throws `ReadOnlyError`).
- */
-function isClosedConnectionError(err: unknown): boolean {
-  return err instanceof Error && err.name === 'InvalidStateError';
-}
-
-/**
- * Run `use` against the memoised connection, reopening ONCE if that connection
- * turns out to be closed.
- *
- * `use` must be synchronous and must not have applied any persistent effect
- * before it throws — the only failure treated as retryable is the synchronous
- * `InvalidStateError` from `transaction()`, which means no transaction was ever
- * created and therefore nothing was written. That is what makes the retry
- * safe: it replays a no-op, never a half-applied write.
- *
- * Bounded on purpose: exactly one reopen per operation. If the fresh connection
- * also fails (or the database cannot be opened at all) the error propagates to
- * the caller's non-fatal handler — one broken database must not become an
- * endless open loop.
- */
-async function withConnection<T>(use: (db: IDBDatabase) => T): Promise<T> {
-  const db = await openDatabase();
-  try {
-    return use(db);
-  } catch (err) {
-    if (!isClosedConnectionError(err)) throw err;
-    console.warn('[IFC Cache] Connection was closed underneath the cache; reopening', err);
-    invalidateConnection(db);
-    return use(await openDatabase());
-  }
+function withConnection<T>(use: (db: IDBDatabase) => T): Promise<T> {
+  return connection.withConnection(openDatabase, use);
 }
 
 /**
@@ -325,12 +255,20 @@ export interface CacheResult {
   lastModified?: number;
   /** True full-file content hash (SHA-256 hex) stored at write; see {@link CacheEntry}. */
   fullSourceHash?: string;
+  /** The source's `IfcSourceBytes.contentKey` at write, so a hit need not re-hash the source on the main thread. */
+  sourceContentKey?: string;
+  /** When this entry was written; a scene snapshot only attaches to the same write. */
+  createdAt?: number;
+  sceneSnapshot?: Blob;
+  sceneSnapshotKey?: string;
 }
 
 /** Extra validation metadata persisted alongside a cache entry (mesh-only tier). */
 export interface CacheEntryMeta {
   lastModified?: number;
   fullSourceHash?: string;
+  /** The source's `IfcSourceBytes.contentKey` at write, so a hit need not re-hash the source on the main thread. */
+  sourceContentKey?: string;
 }
 
 /**
@@ -354,6 +292,10 @@ export async function getCached(key: string): Promise<CacheResult | null> {
             sourceBuffer: entry.sourceBuffer,
             lastModified: entry.lastModified,
             fullSourceHash: entry.fullSourceHash,
+            sourceContentKey: entry.sourceContentKey,
+            createdAt: entry.createdAt,
+            sceneSnapshot: entry.sceneSnapshot,
+            sceneSnapshotKey: entry.sceneSnapshotKey,
           });
         } else {
           resolve(null);
@@ -381,7 +323,7 @@ export async function setCached(
   fileSize: number,
   sourceBuffer?: ArrayBuffer,
   meta?: CacheEntryMeta,
-): Promise<void> {
+): Promise<SceneSnapshotWrite | null> {
   try {
     // A connection verified live, so a write does not silently skip just
     // because the memo was holding a closed one (the quota guard below opens
@@ -392,7 +334,7 @@ export async function setCached(
     // 100s of MB): refuse oversized records and LRU-evict older entries when the
     // origin quota is tight, so a large write can't blow the quota app-wide.
     const roomOk = await ensureRoomForEntry(db, entryBytes(buffer, sourceBuffer), key);
-    if (!roomOk) return; // non-fatal: a cache miss next open is a slow load, not a crash
+    if (!roomOk) return null; // non-fatal: a cache miss next open is a slow load, not a crash
 
     // A cache write must NEVER break the load (AGENTS.md; task blocker #2): every
     // failure mode here is caught and turned into a non-fatal skip. We resolve
@@ -400,12 +342,14 @@ export async function setCached(
     // wire the transaction's abort/error too — a QuotaExceededError or a
     // blob-too-large record on Safari often surfaces as a tx abort rather than a
     // request error, and without this the promise would hang forever.
-    await new Promise<void>((resolve) => {
+    // The write's identity, once its transaction committed: a scene snapshot attaches to exactly this write.
+    return await new Promise<SceneSnapshotWrite | null>((resolve) => {
       let settled = false;
-      const done = () => {
+      const createdAt = Date.now();
+      const done = (stored = false) => {
         if (settled) return;
         settled = true;
-        resolve();
+        resolve(stored ? { createdAt, fullSourceHash: meta?.fullSourceHash } : null);
       };
       let tx: IDBTransaction;
       try {
@@ -428,12 +372,13 @@ export async function setCached(
         sourceBuffer,
         fileName,
         fileSize,
-        createdAt: Date.now(),
+        createdAt,
         lastModified: meta?.lastModified,
         fullSourceHash: meta?.fullSourceHash,
+        sourceContentKey: meta?.sourceContentKey,
       };
 
-      tx.oncomplete = () => done();
+      tx.oncomplete = () => done(true);
       tx.onabort = () => {
         console.warn('[IFC Cache] Cache write transaction aborted (quota / blob too large); skipping', tx.error);
         done();
@@ -459,6 +404,7 @@ export async function setCached(
     });
   } catch (err) {
     console.warn('[IFC Cache] Cache write failed:', err);
+    return null;
   }
 }
 
@@ -557,5 +503,53 @@ export async function getCacheStats(): Promise<{
   } catch (err) {
     console.warn('[IFC Cache] Cache stats read failed; reporting an empty cache:', err);
     return { entryCount: 0, totalSize: 0, entries: [] };
+  }
+}
+
+/** Rewrite the record if it is still the one from `write`, in one transaction. Resolves whether it was. */
+async function updateEntryOfWrite(key: string, write: SceneSnapshotWrite, update: (entry: CacheEntry) => CacheEntry | null): Promise<boolean> {
+  const tx = await beginTransaction('readwrite');
+  return new Promise<boolean>((resolve, reject) => {
+    let stored = false;
+    const store = tx.objectStore(STORE_NAME);
+    const read = store.get(key);
+    read.onsuccess = () => {
+      const entry = read.result as CacheEntry | undefined;
+      if (!entry || entry.createdAt !== write.createdAt || entry.fullSourceHash !== write.fullSourceHash) return;
+      const next = update(entry);
+      if (!next) return;
+      store.put(next);
+      stored = true;
+    };
+    tx.oncomplete = () => resolve(stored);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+/**
+ * Attach a finished scene to the write it was built from. Compare and set in
+ * one transaction: a purged or replaced entry keeps no snapshot of another
+ * write's geometry. The hash separates two writes in one millisecond. Resolves
+ * whether it was stored.
+ */
+export async function putSceneSnapshot(key: string, write: SceneSnapshotWrite, snapshot: Blob, snapshotKey: string): Promise<boolean> {
+  try {
+    // Optional, so it never evicts another model: the entry serves without it.
+    if (await availableQuotaBytes() < snapshot.size + QUOTA_HEADROOM_BYTES) return false;
+    return await updateEntryOfWrite(key, write, (entry) => ({ ...entry, sceneSnapshot: snapshot, sceneSnapshotKey: snapshotKey }));
+  } catch (err) {
+    console.warn('[IFC Cache] Scene snapshot write failed:', err);
+    return false;
+  }
+}
+
+/** Remove a snapshot that hydration refused, keeping the entry. Same write check as {@link putSceneSnapshot}. */
+export async function clearSceneSnapshot(key: string, write: SceneSnapshotWrite): Promise<boolean> {
+  try {
+    return await updateEntryOfWrite(key, write, ({ sceneSnapshot, sceneSnapshotKey, ...entry }) => (sceneSnapshot ? entry : null));
+  } catch (err) {
+    console.warn('[IFC Cache] Scene snapshot removal failed:', err);
+    return false;
   }
 }

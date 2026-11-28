@@ -1,8 +1,12 @@
 {
   "name": "@ifc-lite/mutations",
-  "version": "1.26.0",
+  "version": "4.1.0",
   "description": "Mutation tracking and property editing for IFC-Lite",
   "type": "module",
+  "sideEffects": [
+    "./src/change-set-to-ops.ts",
+    "./dist/change-set-to-ops.js"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -16,15 +20,17 @@
     "build": "pnpm exec tsc",
     "typecheck": "node ../../scripts/typecheck-tests.mjs",
     "dev": "pnpm exec tsc --watch",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run"
   },
   "dependencies": {
     "@ifc-lite/data": "workspace:^",
-    "@noble/hashes": "^2.3.0"
+    "@ifc-lite/regex-guard": "workspace:^",
+    "@noble/hashes": "^2.4.0"
   },
   "devDependencies": {
+    "@mergifyio/vitest": "^2026.11.8",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^5.1.0"
   },
   "license": "MPL-2.0",
   "author": "Louis True",

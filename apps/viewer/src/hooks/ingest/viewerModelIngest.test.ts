@@ -11,9 +11,11 @@ import {
   QuantityTableBuilder,
   RelationshipGraphBuilder,
 } from '@ifc-lite/data';
-import { isSourceBytes } from '@ifc-lite/parser';
+import { highestExistingExpressId, MutablePropertyView, StoreEditor } from '@ifc-lite/mutations';
+import { fixtureDataStore } from '@/test/store-fixture';
+import { buildCompactEntityIndex, isSourceBytes } from '@ifc-lite/parser';
 
-import { buildIfcxDataStore } from './viewerModelIngest.js';
+import { buildIfcxDataStore, convertIfcxMeshes, getMaxExpressId } from './viewerModelIngest.js';
 
 /**
  * Build a minimal IFCX parse-result shape: a populated entity table (so the
@@ -28,7 +30,6 @@ function makeIfcxResult() {
   entityBuilder.add(2, 'IfcSlab', '', 'Slab B', '', '');
   return {
     fileSize: 0,
-    entityCount: 2,
     parseTime: 0,
     strings,
     entities: entityBuilder.build(),
@@ -124,4 +125,58 @@ describe('buildIfcxDataStore source contract (#2183)', () => {
     // Lengths alone would pass on a zero-filled placeholder of the right size.
     assert.deepEqual(store.source.materialize(), new Uint8Array(buffer));
   });
+});
+
+
+it('retains IFCX texture bytes and UV associations at the canonical viewer ingest boundary (#4325)', () => {
+  const uvs = new Float32Array([0, 0, 1, 0, 0, 1]);
+  const rgba = new Uint8Array([255, 20, 40, 128]);
+  const result = convertIfcxMeshes([{
+    expressId: 8, positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
+    indices: new Uint32Array([0, 1, 2]), normals: new Float32Array(9), uvs,
+    texture: { rgba, width: 1, height: 1, repeatS: true, repeatT: false },
+  }]);
+  assert.equal(result[0].expressId, 8);
+  assert.equal(result[0].uvs, uvs);
+  assert.equal(result[0].texture?.rgba, rgba);
+  assert.equal(result[0].texture?.repeatS, true);
+});
+
+it('carries projected IFCX placement into the canonical store georeference consumer', async () => {
+  const { parseIfcx, extractGeoreferencingOnDemand } = await import('@ifc-lite/parser');
+  const bytes = new TextEncoder().encode(JSON.stringify({ header: { ifcxVersion: 'ifcx_alpha' }, imports: [], schemas: {}, data: [{
+    path: 'site', attributes: { 'ifclite::georeference::v1': {
+      IfcProjectedCRS: { Name: 'EPSG:32632', MapUnit: 'METRE' },
+      IfcMapConversion: { Eastings: 500000, Northings: 6000000, OrthogonalHeight: 0, XAxisAbscissa: 1, XAxisOrdinate: 0, Scale: 1 },
+    } },
+  }] })).buffer;
+  const parsed = await parseIfcx(bytes);
+  const store = buildIfcxDataStore(parsed, bytes);
+  const placement = extractGeoreferencingOnDemand(store);
+  assert.equal(placement?.projectedCRS?.name, 'EPSG:32632');
+  assert.equal(placement?.mapConversion?.eastings, 500000);
+  assert.equal(placement?.mapConversion?.orthogonalHeight, 0);
+});
+
+it('shared compact watermark skips key walks and includes deferred IDs (#10139)', () => {
+  const store = fixtureDataStore([{ expressId: 300, type: 'IfcWall' }]);
+  const index = buildCompactEntityIndex([{ expressId: 300, type: 'IFCWALL', byteOffset: 0, byteLength: 0, lineNumber: 0 }]);
+  index.keys = () => { throw new Error('compact keys must not be scanned'); };
+  store.entityIndex.byId = index;
+  store.deferredEntityIndex = new Map([[700, { expressId: 700, type: 'IFCPROPERTYSINGLEVALUE', byteOffset: 0, byteLength: 0, lineNumber: 0 }]]);
+  assert.equal(highestExistingExpressId(store), 700, 'deferred atoms can exceed the primary compact maximum');
+  assert.equal(getMaxExpressId(store, []), 700);
+  assert.equal(highestExistingExpressId(store), 700);
+  const view = new MutablePropertyView(null, 'compact');
+  assert.equal(new StoreEditor(store, view).addEntity('IfcMaterial', ['Authored']).expressId, 701);
+});
+
+it('shared map-store watermark includes table-only IDs above deferred IDs (#10139)', () => {
+  const store = fixtureDataStore([{ expressId: 900, type: 'IfcWall' }]);
+  store.entityIndex.byId = new Map();
+  store.deferredEntityIndex = new Map([[700, { expressId: 700, type: 'IFCPROPERTYSINGLEVALUE', byteOffset: 0, byteLength: 0, lineNumber: 0 }]]);
+  assert.equal(highestExistingExpressId(store), 900);
+  assert.equal(getMaxExpressId(store, []), 900);
+  const view = new MutablePropertyView(null, 'map');
+  assert.equal(new StoreEditor(store, view).addEntity('IfcMaterial', ['Authored']).expressId, 901);
 });

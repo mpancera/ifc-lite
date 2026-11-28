@@ -64,6 +64,8 @@ describe('isTypeVisible', () => {
       ['IfcSpace', 'spaces'],
       ['IfcSpatialZone', 'spatialZones'],
       ['IfcOpeningElement', 'openings'],
+      // #5409: IFC4's standard-case opening rode no toggle at all.
+      ['IfcOpeningStandardCase', 'openings'],
       ['IfcVirtualElement', 'virtualElements'],
       ['IfcSite', 'site'],
       ['IfcGeographicElement', 'site'],
@@ -115,7 +117,7 @@ describe('buildHiddenIfcTypes', () => {
     const expected: Partial<Record<keyof typeof ALL_ON, string[]>> = {
       spaces: ['IfcSpace'],
       spatialZones: ['IfcSpatialZone'],
-      openings: ['IfcOpeningElement'],
+      openings: ['IfcOpeningElement', 'IfcOpeningStandardCase'],
       virtualElements: ['IfcVirtualElement'],
       site: ['IfcSite', 'IfcGeographicElement'],
       ifcAnnotations: ['IfcAnnotation'],
@@ -153,12 +155,21 @@ describe('buildHiddenIfcTypes', () => {
       'IfcAnnotation',
       'IfcGeographicElement',
       'IfcOpeningElement',
+      'IfcOpeningStandardCase',
       'IfcSite',
       'IfcSpace',
       'IfcSpatialZone',
       'IfcVirtualElement',
     ]);
   });
+});
+
+it('#9923 structural mode is a separate gate from the boolean class map', () => {
+  assert.equal(isTypeVisible('IfcBeam',ALL_ON,'physical'),true);
+  assert.equal(isTypeVisible('IfcStructuralCurveMember',ALL_ON,'physical'),false);
+  assert.equal(isTypeVisible('IfcBeam',ALL_ON,'analytical'),false);
+  assert.equal(isTypeVisible('IfcStructuralCurveMember',ALL_ON,'analytical'),true);
+  assert.equal(isTypeVisible('IfcBeam',ALL_ON,'both'),true);
 });
 
 describe('isTypeVisible · kinds of space', () => {
@@ -172,27 +183,27 @@ describe('isTypeVisible · kinds of space', () => {
   it('hides the storey-sized gross-area volume on its own', () => {
     // The whole point: look at rooms without a slab over the entire floor.
     const tv = { ...ALL_ON, storeySpaces: false };
-    assert.equal(isTypeVisible('IfcSpace', tv, 'storeySpace'), false);
-    assert.equal(isTypeVisible('IfcSpace', tv, 'room'), true);
-    assert.equal(isTypeVisible('IfcSpace', tv, 'parking'), true);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'both', 'storeySpace'), false);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'both', 'room'), true);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'both', 'parking'), true);
   });
 
   it('hides parking on its own', () => {
     const tv = { ...ALL_ON, parking: false };
-    assert.equal(isTypeVisible('IfcSpace', tv, 'parking'), false);
-    assert.equal(isTypeVisible('IfcSpace', tv, 'storeySpace'), true);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'both', 'parking'), false);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'both', 'storeySpace'), true);
   });
 
   it('hides rooms on their own', () => {
     const tv = { ...ALL_ON, rooms: false };
-    assert.equal(isTypeVisible('IfcSpace', tv, 'room'), false);
-    assert.equal(isTypeVisible('IfcSpace', tv, 'storeySpace'), true);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'both', 'room'), false);
+    assert.equal(isTypeVisible('IfcSpace', tv, 'both', 'storeySpace'), true);
   });
 
   it('lets the master switch beat every kind', () => {
     const tv = { ...ALL_ON, spaces: false };
     for (const kind of ['room', 'storeySpace', 'parking'] as const) {
-      assert.equal(isTypeVisible('IfcSpace', tv, kind), false, kind);
+      assert.equal(isTypeVisible('IfcSpace', tv, 'both', kind), false, kind);
     }
   });
 

@@ -687,6 +687,63 @@ END-ISO-10303-21;`;
       expect(classCodes).toContain('IfcBuilding');
       expect(classCodes).toContain('IfcBuildingStorey');
     });
+
+    // bsi::ifc::material ({code, uri}) is the only channel IFCX carries which
+    // material an element is made of — our own reader (property-extractor.ts)
+    // already unpacks it into a "Material" pset, but the writer never emitted
+    // it: an IfcRelAssociatesMaterial association from the STEP source was
+    // silently dropped on export, so a round trip through our own writer lost
+    // every element's material.
+    it('emits bsi::ifc::material for an entity with an IfcRelAssociatesMaterial association', async () => {
+      const withMaterial = REAL_IFC4.replace(
+        'ENDSEC;\nEND-ISO-10303-21;',
+        "#500=IFCMATERIAL('Concrete',$,$);\n"
+        + "#501=IFCRELASSOCIATESMATERIAL('3xJf$b$MP7XLbaHy6XT9EM',#18,$,$,(#139),#500);\n"
+        + 'ENDSEC;\nEND-ISO-10303-21;',
+      );
+      const parser = new IfcParser();
+      const store = await parser.parseColumnar(
+        new TextEncoder().encode(withMaterial).buffer,
+      );
+
+      const exporter = new Ifc5Exporter(store);
+      const result = exporter.export({ includeGeometry: false });
+      const file = JSON.parse(result.content);
+
+      const wallNode = file.data.find(
+        (n: any) => n.attributes?.['bsi::ifc::class']?.code === 'IfcWall'
+          && n.attributes?.['bsi::ifc::prop::Name']?.startsWith('Basic Wall:Holz Aussenwand'),
+      );
+      expect(wallNode).toBeDefined();
+      // `uri` is a required key per the official schema (same convention as
+      // `bsi::ifc::class` right above), but an arbitrary IFC4 material name
+      // cannot be resolved into a real buildingSMART `midas-materials`
+      // registry entry, so it is emitted empty rather than fabricated — see
+      // `ifc5-material.ts` and `ifc5-material.test.ts` for the full schema
+      // conformance check via `validateValue`.
+      expect(wallNode.attributes['bsi::ifc::material']).toEqual({ code: 'Concrete', uri: '' });
+
+      const schema = ALL_OFFICIAL_SCHEMAS['bsi::ifc::material'];
+      expect(schema.value.objectRestrictions?.values.code.dataType).toBe('String');
+    });
+
+    // Control: an entity with no material association still exports with no
+    // bsi::ifc::material attribute — proves the emission is conditional on a
+    // real association, not a blanket addition.
+    it('control: no bsi::ifc::material is emitted when nothing is associated', async () => {
+      const parser = new IfcParser();
+      const store = await parser.parseColumnar(
+        new TextEncoder().encode(REAL_IFC4).buffer,
+      );
+
+      const exporter = new Ifc5Exporter(store);
+      const result = exporter.export({ includeGeometry: false });
+      const file = JSON.parse(result.content);
+
+      for (const node of file.data) {
+        expect(node.attributes?.['bsi::ifc::material']).toBeUndefined();
+      }
+    });
   });
 
   // #2046: Ifc5Exporter never consulted the overlay for deletions — it walked
@@ -1385,6 +1442,19 @@ END-ISO-10303-21;`;
       expectAllReachable(file);
     });
 
+    it('a hidden entity stays out of an isolation that includes it (#10695)', () => {
+      const exporter = new Ifc5Exporter(buildVisibilityTreeStore(), null);
+      const file = JSON.parse(exporter.export({
+        visibleOnly: true,
+        isolatedEntityIds: new Set([1, 10]),
+        hiddenEntityIds: new Set([1]),
+      }).content);
+      const named = (name: string) => file.data.find((n: IfcxNodeLike) => n.attributes?.['bsi::ifc::prop::Name'] === name);
+      expect(named('Wall1')).toBeUndefined();
+      expect(named('Storey1')).toBeDefined();
+      expectNoDanglingChildren(file);
+    });
+
     // The spatial-tree filter has the same shape of hole, in one narrow spot:
     // `buildTreeEntitySet` adds the *values* of the containment maps but not
     // their keys, so a container that only ever appears as a map KEY (no
@@ -1432,5 +1502,33 @@ END-ISO-10303-21;`;
       expectNoDanglingChildren(file);
       expectAllReachable(file);
     });
+  });
+});
+
+describe('Ifc5Exporter geometry frame (#7734)', () => {
+  const RTC = { x: 2_600_000.5, y: 1_200_000.25, z: 500 };
+  const meshPoints = (frame?: object) => {
+    const store = buildMinimalDataStore([{ expressId: 1, type: 'IFCWALL', globalId: 'abc-123', name: 'W' }]);
+    const geometryResult = { meshes: makeMockMeshes(1), coordinateInfo: frame } as any;
+    const file = JSON.parse(new Ifc5Exporter(store, geometryResult).export({ onlyTreeEntities: false }).content);
+    const node = file.data.find((n: any) => n.attributes?.['usd::usdgeom::mesh']);
+    return node.attributes['usd::usdgeom::mesh'].points as number[][];
+  };
+  const info = (partial: object) => ({
+    originShift: { x: 0, y: 0, z: 0 },
+    originalBounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 0, y: 0, z: 0 } },
+    shiftedBounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 0, y: 0, z: 0 } },
+    hasLargeCoordinates: false,
+    ...partial,
+  });
+
+  it('writes the points in IFC world, not the viewer\'s shifted render frame', () => {
+    // Render frame is Y-up: mock mesh vertex (1, 0, 0) -> IFC Z-up (1, -0, 0).
+    expect(meshPoints(info({}))[1]).toEqual([1, 0, 0]);
+    const shifted = meshPoints(info({ wasmRtcOffset: RTC }));
+    expect(shifted[0]).toEqual([RTC.x, RTC.y, RTC.z]);
+    expect(shifted[1]).toEqual([RTC.x + 1, RTC.y, RTC.z]);
+    // The point (0, 1, 0) in Y-up is one metre up in Z-up.
+    expect(shifted[2]).toEqual([RTC.x, RTC.y, RTC.z + 1]);
   });
 });

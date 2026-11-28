@@ -23,12 +23,121 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DECODER_IMPORT, tableModuleSection } from './schema-table-module.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const upstreamDir = path.join(here, 'upstream');
 const outDir = path.join(here, '..', 'src', 'ifc-schema', 'generated');
 
 type IfcVersion = 'Ifc2x3' | 'Ifc4' | 'Ifc4x3';
+
+/**
+ * Find `marker` in `src` as a whole identifier token, starting at `from`.
+ *
+ * A bare `indexOf` prefix-aliases across the per-version markers in the
+ * upstream sources: `GetPropertiesIFC4` is a prefix of
+ * `GetPropertiesIFC4x3`, `IfcSchemaVersions.Ifc4` of
+ * `IfcSchemaVersions.Ifc4x3`, `GetRelationTypesIFC4` of
+ * `GetRelationTypesIFC4x3`. A renamed or removed IFC4 marker therefore
+ * resolved onto the IFC4X3 one instead of returning -1, so the
+ * missing-marker throws below never fired: the generator misfiled whole
+ * blocks (the IFC4 table becoming a copy of IFC4X3) and still exited 0.
+ * Requiring the next character not to continue an identifier makes a
+ * missing marker actually read as missing.
+ */
+function indexOfMarker(src: string, marker: string, from = 0): number {
+  const rx = new RegExp(
+    marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![A-Za-z0-9_])',
+    'g'
+  );
+  rx.lastIndex = from;
+  const m = rx.exec(src);
+  return m ? m.index : -1;
+}
+
+/** Every whole-token occurrence of `marker` in `src`. */
+function indicesOfMarker(src: string, marker: string): number[] {
+  const out: number[] = [];
+  for (
+    let i = indexOfMarker(src, marker);
+    i !== -1;
+    i = indexOfMarker(src, marker, i + 1)
+  ) {
+    out.push(i);
+  }
+  return out;
+}
+
+interface Section {
+  version: IfcVersion;
+  marker: string;
+  /** IFC2X3 has no GetRelationTypesIFC2x3 upstream; that absence is legitimate. */
+  optional?: true;
+}
+
+/**
+ * Resolve the byte range each per-version block occupies in one upstream file.
+ *
+ * Making a missing marker read as missing was only half the hazard. The
+ * slicing also assumes each marker occurs EXACTLY ONCE and that the markers
+ * appear in the order the sections are listed, and neither held by
+ * construction — so `start !== -1` could still name the wrong occurrence and
+ * the generator would write a corrupted table and exit 0. Both were
+ * reproduced against the real vendored data:
+ *
+ *   - a second `GetPropertiesIFC4` ahead of the definitions (the dispatcher
+ *     shape) resolved IFC4's start onto it, and psets-ifc4.ts was emitted with
+ *     725 psets against a 408 baseline — the whole IFC2X3 block absorbed —
+ *     printing "Done." and exiting 0;
+ *   - moving the IFC4X3 method above the IFC4 one made every end lookup, which
+ *     searches forward from the section's own start, miss it: IFC2X3 ran to
+ *     the IFC4X3 marker (1077 psets) and IFC4X3 ran to end of file (1168),
+ *     again exit 0.
+ *
+ * So both invariants are checked here rather than assumed, once, for every
+ * parser: duplicates throw naming the count, out-of-order markers throw naming
+ * the pair, and each block ends where the next present one begins.
+ */
+function sectionBounds(
+  src: string,
+  file: string,
+  sections: Section[]
+): { version: IfcVersion; from: number; to: number }[] {
+  const resolved: { version: IfcVersion; marker: string; from: number }[] = [];
+  for (const section of sections) {
+    const hits = indicesOfMarker(src, section.marker);
+    if (hits.length === 0) {
+      if (section.optional) continue;
+      throw new Error(`Could not find ${section.marker} in ${file}`);
+    }
+    if (hits.length > 1) {
+      throw new Error(
+        `${section.marker} occurs ${hits.length} times in ${file}; the ` +
+          'per-version block boundaries assume exactly one occurrence, so ' +
+          'the first is not necessarily the definition'
+      );
+    }
+    resolved.push({
+      version: section.version,
+      marker: section.marker,
+      from: hits[0],
+    });
+  }
+  for (let i = 1; i < resolved.length; i++) {
+    if (resolved[i].from <= resolved[i - 1].from) {
+      throw new Error(
+        `${resolved[i].marker} appears before ${resolved[i - 1].marker} in ` +
+          `${file}; the per-version block boundaries assume the upstream ` +
+          'order, so a reordered source would misfile whole blocks'
+      );
+    }
+  }
+  return resolved.map((section, i) => ({
+    version: section.version,
+    from: section.from,
+    to: i + 1 < resolved.length ? resolved[i + 1].from : src.length,
+  }));
+}
 
 interface ClassInfo {
   name: string;
@@ -231,19 +340,14 @@ function parseSchemas(): Record<IfcVersion, ClassInfo[]> {
     Ifc4: [],
     Ifc4x3: [],
   };
-  const sections: { version: IfcVersion; from: number; to: number }[] = [];
-  for (const v of ['Ifc2x3', 'Ifc4', 'Ifc4x3'] as IfcVersion[]) {
-    const startMarker = `GetClassesIFC${v.slice(3)}()`;
-    const start = src.indexOf(startMarker);
-    if (start === -1) {
-      throw new Error(`Could not find ${startMarker} in Schemas.g.cs`);
-    }
-    sections.push({ version: v, from: start, to: src.length });
-  }
-  for (let i = 0; i < sections.length; i++) {
-    const s = sections[i];
-    if (i + 1 < sections.length) s.to = sections[i + 1].from;
-  }
+  const sections = sectionBounds(
+    src,
+    'Schemas.g.cs',
+    (['Ifc2x3', 'Ifc4', 'Ifc4x3'] as IfcVersion[]).map((v) => ({
+      version: v,
+      marker: `GetClassesIFC${v.slice(3)}()`,
+    }))
+  );
   for (const sec of sections) {
     const slice = src.slice(sec.from, sec.to);
     versions[sec.version] = parseClassInfoBlock(slice);
@@ -356,16 +460,15 @@ function parseProperties(): Record<IfcVersion, PsetInfo[]> {
     Ifc4: [],
     Ifc4x3: [],
   };
-  for (const v of ['Ifc2x3', 'Ifc4', 'Ifc4x3'] as IfcVersion[]) {
-    const startMarker = `GetPropertiesIFC${v.slice(3)}`;
-    const startIdx = src.indexOf(startMarker);
-    if (startIdx === -1) continue;
-    let endIdx: number;
-    if (v === 'Ifc2x3') endIdx = src.indexOf('GetPropertiesIFC4', startIdx + 5);
-    else if (v === 'Ifc4') endIdx = src.indexOf('GetPropertiesIFC4x3', startIdx + 5);
-    else endIdx = src.length;
-    if (endIdx === -1) endIdx = src.length;
-    out[v] = parsePropertyBlock(src.slice(startIdx, endIdx));
+  for (const sec of sectionBounds(
+    src,
+    'Properties.g.cs',
+    (['Ifc2x3', 'Ifc4', 'Ifc4x3'] as IfcVersion[]).map((v) => ({
+      version: v,
+      marker: `GetPropertiesIFC${v.slice(3)}`,
+    }))
+  )) {
+    out[sec.version] = parsePropertyBlock(src.slice(sec.from, sec.to));
   }
   return out;
 }
@@ -552,23 +655,17 @@ function parsePartOfRelations(): Record<IfcVersion, PartOfRelation[]> {
     Ifc4: [],
     Ifc4x3: [],
   };
-  const sections: { version: IfcVersion; marker: string }[] = [
+  const sections: Section[] = [
     { version: 'Ifc2x3', marker: 'IfcSchemaVersions.Ifc2x3' },
     { version: 'Ifc4', marker: 'IfcSchemaVersions.Ifc4' },
     { version: 'Ifc4x3', marker: 'IfcSchemaVersions.Ifc4x3' },
   ];
-  for (let i = 0; i < sections.length; i++) {
-    const start = src.indexOf(sections[i].marker);
-    const end =
-      i + 1 < sections.length
-        ? src.indexOf(sections[i + 1].marker)
-        : src.length;
-    if (start === -1) continue;
-    const slice = src.slice(start, end);
+  for (const sec of sectionBounds(src, 'PartOfRelations.g.cs', sections)) {
+    const slice = src.slice(sec.from, sec.to);
     const callRx = /new PartOfRelationInformation\("([^"]+)",\s*"([^"]+)",\s*"([^"]+)"\)/g;
     let m: RegExpExecArray | null;
     while ((m = callRx.exec(slice)) !== null) {
-      out[sections[i].version].push({
+      out[sec.version].push({
         relation: m[1],
         owner: m[2],
         member: m[3],
@@ -698,23 +795,15 @@ function parseAttributes(): Record<IfcVersion, AttrRow[]> {
     Ifc4: [],
     Ifc4x3: [],
   };
-  const sections: { version: IfcVersion; marker: string }[] = [
+  const sections: Section[] = [
     { version: 'Ifc2x3', marker: 'GetAttributesIFC2x3' },
-    { version: 'Ifc4', marker: 'GetAttributesIFC4(' },
+    // No trailing `(` needed to disambiguate from `GetAttributesIFC4x3`:
+    // `indexOfMarker` already requires a non-identifier character next.
+    { version: 'Ifc4', marker: 'GetAttributesIFC4' },
     { version: 'Ifc4x3', marker: 'GetAttributesIFC4x3' },
   ];
-  for (let s = 0; s < sections.length; s++) {
-    const start = src.indexOf(sections[s].marker);
-    if (start === -1) continue;
-    let end = src.length;
-    for (let t = s + 1; t < sections.length; t++) {
-      const e = src.indexOf(sections[t].marker, start + 5);
-      if (e !== -1) {
-        end = e;
-        break;
-      }
-    }
-    const slice = src.slice(start, end);
+  for (const sec of sectionBounds(src, 'Attributes.g.cs', sections)) {
+    const slice = src.slice(sec.from, sec.to);
     const calls = slice.split('AddAttribute(').slice(1);
     for (const call of calls) {
       // Find the matching close paren.
@@ -752,7 +841,7 @@ function parseAttributes(): Record<IfcVersion, AttrRow[]> {
       // can reason about strict-cast semantics (xs:integer rejects
       // decimal literals, etc.).
       const xsdTypes = arrays.length >= 3 ? [...arrays[2].items] : [];
-      out[sections[s].version].push({
+      out[sec.version].push({
         name,
         entities: allEntities,
         hasSimpleValue,
@@ -765,7 +854,8 @@ function parseAttributes(): Record<IfcVersion, AttrRow[]> {
 
 function emitAttributes(rows: Record<IfcVersion, AttrRow[]>): void {
   const lines: string[] = [HEADER];
-  lines.push("import type { IfcAttributeInfo } from '../types.js';\n");
+  lines.push("import type { IfcAttributeInfo } from '../types.js';");
+  lines.push(DECODER_IMPORT);
   for (const [v, list] of Object.entries(rows) as [IfcVersion, AttrRow[]][]) {
     // Aggregate per-attribute (name → {entities, hasSimpleValue, hasComplex,
     // xsdTypesByEntity}). The same name can appear with both kinds and
@@ -809,24 +899,17 @@ function emitAttributes(rows: Record<IfcVersion, AttrRow[]>): void {
         }
       }
     }
-    lines.push(
-      `export const ATTRIBUTES_${VERSION_KEY[v]}: readonly IfcAttributeInfo[] = [`
-    );
-    for (const [name, info] of merged) {
-      const xsdEntries = [...info.xsdTypesByEntity.entries()]
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([entity, types]) => `${ts(entity)}: ${ts([...types].sort())}`);
-      const xsdLiteral =
-        xsdEntries.length === 0 ? '{}' : `{ ${xsdEntries.join(', ')} }`;
-      lines.push(
-        `  { name: ${ts(name)}, simpleValueEntities: ${ts(
-          [...info.entitiesWithValue].sort()
-        )}, complexEntities: ${ts(
-          [...info.entitiesWithoutValue].sort()
-        )}, xsdTypesByEntity: ${xsdLiteral} },`
-      );
-    }
-    lines.push('];\n');
+    const table = [...merged].map(([name, info]) => ({
+      name,
+      simpleValueEntities: [...info.entitiesWithValue].sort(),
+      complexEntities: [...info.entitiesWithoutValue].sort(),
+      xsdTypesByEntity: Object.fromEntries(
+        [...info.xsdTypesByEntity.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([entity, types]) => [entity, [...types].sort()])
+      ),
+    }));
+    lines.push(tableModuleSection(`ATTRIBUTES_${VERSION_KEY[v]}`, 'readonly IfcAttributeInfo[]', table));
   }
   fs.writeFileSync(path.join(outDir, 'attributes.ts'), lines.join('\n'));
   console.log('  attributes.ts — emitted');
@@ -834,16 +917,10 @@ function emitAttributes(rows: Record<IfcVersion, AttrRow[]>): void {
 
 function emitDataTypes(rows: DataTypeRow[]): void {
   const lines: string[] = [HEADER];
-  lines.push("import type { IfcDataTypeInfo } from '../types.js';\n");
-  lines.push(
-    `export const IFC_DATA_TYPES: readonly IfcDataTypeInfo[] = [`
-  );
-  for (const r of rows) {
-    lines.push(
-      `  { name: ${ts(r.name)}, versions: ${ts(r.versions.map(versionKey))}, backingType: ${ts(r.backingType)} },`
-    );
-  }
-  lines.push('];\n');
+  lines.push("import type { IfcDataTypeInfo } from '../types.js';");
+  lines.push(DECODER_IMPORT);
+  const table = rows.map((r) => ({ name: r.name, versions: r.versions.map(versionKey), backingType: r.backingType }));
+  lines.push(tableModuleSection('IFC_DATA_TYPES', 'readonly IfcDataTypeInfo[]', table));
   fs.writeFileSync(path.join(outDir, 'data-types.ts'), lines.join('\n'));
   console.log(`  data-types.ts — ${rows.length} dataTypes`);
 }
@@ -862,27 +939,23 @@ function parseObjectTypes(): Record<IfcVersion, [string, string][]> {
     Ifc4: [],
     Ifc4x3: [],
   };
-  const sections: { version: IfcVersion; marker: string }[] = [
-    { version: 'Ifc2x3', marker: 'GetRelationTypesIFC2x3' },
+  // Unlike the other SchemaInfo.*.g.cs sources, the upstream ObjectTypes
+  // file has no `GetRelationTypesIFC2x3` method at all — IFC2X3 genuinely
+  // contributes 0 obj→type pairs, so a missing marker there is expected
+  // and must not throw the way it does in the sibling parsers below. The
+  // IFC4 and IFC4X3 methods do exist, so a missing marker for those is a
+  // drifted upstream, not an absence — hence `optional`.
+  const sections: Section[] = [
+    { version: 'Ifc2x3', marker: 'GetRelationTypesIFC2x3', optional: true },
     { version: 'Ifc4', marker: 'GetRelationTypesIFC4' },
     { version: 'Ifc4x3', marker: 'GetRelationTypesIFC4x3' },
   ];
-  for (let i = 0; i < sections.length; i++) {
-    const start = src.indexOf(sections[i].marker);
-    if (start === -1) continue;
-    let end = src.length;
-    for (let j = i + 1; j < sections.length; j++) {
-      const e = src.indexOf(sections[j].marker, start + 5);
-      if (e !== -1) {
-        end = e;
-        break;
-      }
-    }
-    const slice = src.slice(start, end);
+  for (const sec of sectionBounds(src, 'ObjectTypes.g.cs', sections)) {
+    const slice = src.slice(sec.from, sec.to);
     const callRx = /AddRelationType\("([^"]+)",\s*"([^"]+)"\)/g;
     let m: RegExpExecArray | null;
     while ((m = callRx.exec(slice)) !== null) {
-      out[sections[i].version].push([m[1], m[2]]);
+      out[sec.version].push([m[1], m[2]]);
     }
   }
   return out;
@@ -910,19 +983,21 @@ function emitEntities(
     const otMap = new Map(objectTypes[v]);
     const lines: string[] = [];
     lines.push(HEADER);
-    lines.push("import type { IfcEntityInfo } from '../types.js';\n");
-    lines.push(`export const ENTITIES_${VERSION_KEY[v]}: readonly IfcEntityInfo[] = [`);
-    for (const c of list) {
+    lines.push("import type { IfcEntityInfo } from '../types.js';");
+    lines.push(DECODER_IMPORT);
+    const table = list.map((c) => {
       const objType = otMap.get(c.name.toUpperCase());
-      lines.push(
-        `  { name: ${ts(c.name)}, parent: ${ts(c.parent || undefined)}, ` +
-          `abstract: ${c.abstract}, predefinedTypes: ${ts(c.predefinedTypes)}, ` +
-          `attributes: ${ts(c.attributes)}, source: ${ts(c.source || undefined)}` +
-          (objType ? `, typeEntity: ${ts(objType)}` : '') +
-          ' },'
-      );
-    }
-    lines.push('];\n');
+      return {
+        name: c.name,
+        parent: c.parent || undefined,
+        abstract: c.abstract,
+        predefinedTypes: c.predefinedTypes,
+        attributes: c.attributes,
+        source: c.source || undefined,
+        ...(objType ? { typeEntity: objType } : {}),
+      };
+    });
+    lines.push(tableModuleSection(`ENTITIES_${VERSION_KEY[v]}`, 'readonly IfcEntityInfo[]', table));
     fs.writeFileSync(
       path.join(outDir, `entities-${v.toLowerCase()}.ts`),
       lines.join('\n')
@@ -939,27 +1014,19 @@ function emitPropertySets(
   for (const [v, list] of Object.entries(psets) as [IfcVersion, PsetInfo[]][]) {
     const lines: string[] = [];
     lines.push(HEADER);
-    lines.push("import type { IfcPropertySetInfo } from '../types.js';\n");
-    lines.push(
-      `export const PROPERTY_SETS_${VERSION_KEY[v]}: readonly IfcPropertySetInfo[] = [`
-    );
-    for (const p of list) {
-      lines.push('  {');
-      lines.push(`    name: ${ts(p.name)},`);
-      lines.push(`    applicableEntities: ${ts(p.applicableEntities)},`);
-      lines.push(`    properties: [`);
-      for (const prop of p.properties) {
-        lines.push(
-          `      { name: ${ts(prop.name)}, kind: ${ts(prop.kind)}` +
-            (prop.dataType ? `, dataType: ${ts(prop.dataType)}` : '') +
-            (prop.enumeration ? `, enumeration: ${ts(prop.enumeration)}` : '') +
-            ' },'
-        );
-      }
-      lines.push(`    ],`);
-      lines.push('  },');
-    }
-    lines.push('];\n');
+    lines.push("import type { IfcPropertySetInfo } from '../types.js';");
+    lines.push(DECODER_IMPORT);
+    const table = list.map((p) => ({
+      name: p.name,
+      applicableEntities: p.applicableEntities,
+      properties: p.properties.map((prop) => ({
+        name: prop.name,
+        kind: prop.kind,
+        ...(prop.dataType ? { dataType: prop.dataType } : {}),
+        ...(prop.enumeration ? { enumeration: prop.enumeration } : {}),
+      })),
+    }));
+    lines.push(tableModuleSection(`PROPERTY_SETS_${VERSION_KEY[v]}`, 'readonly IfcPropertySetInfo[]', table));
     fs.writeFileSync(
       path.join(outDir, `psets-${v.toLowerCase()}.ts`),
       lines.join('\n')

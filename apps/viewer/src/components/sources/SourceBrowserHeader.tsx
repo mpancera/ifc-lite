@@ -4,9 +4,13 @@
 
 import type { SourceContainer, SourceProject } from '@ifc-lite/plugin-api';
 import { Button } from '@/components/ui/button';
-import { ChevronLeft, Loader2, RefreshCw } from 'lucide-react';
+import { IconButton } from '@/components/ui/icon-button';
+import { ChevronLeft, RefreshCw } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
+import { useTranslation } from '@/i18n';
 
 type Step = 'projects' | 'file-areas' | 'folders';
+type Translate = ReturnType<typeof useTranslation>['t'];
 
 interface SourceBrowserHeaderProps {
   step: Step;
@@ -16,15 +20,22 @@ interface SourceBrowserHeaderProps {
   catalogUpdatedAt: number | null;
   syncing: boolean;
   busy: boolean;
+  onCancelDownload?: () => void;
   onBack: () => void;
   onSync: () => void;
 }
 
-function formatSyncTime(timestamp: number): string {
+function formatSyncTime(t: Translate, timestamp: number): string {
   const deltaMs = Math.max(0, Date.now() - timestamp);
-  if (deltaMs < 60_000) return 'just now';
-  if (deltaMs < 3_600_000) return `${Math.floor(deltaMs / 60_000)}m ago`;
-  return `${Math.floor(deltaMs / 3_600_000)}h ago`;
+  if (deltaMs < 60_000) return t('sources.sourceBrowserHeader.syncedJustNow');
+  if (deltaMs < 3_600_000) {
+    return t('sources.sourceBrowserHeader.syncedMinutesAgo', {
+      count: Math.floor(deltaMs / 60_000),
+    });
+  }
+  return t('sources.sourceBrowserHeader.syncedHoursAgo', {
+    count: Math.floor(deltaMs / 3_600_000),
+  });
 }
 
 export function SourceBrowserHeader({
@@ -35,24 +46,31 @@ export function SourceBrowserHeader({
   catalogUpdatedAt,
   syncing,
   busy,
+  onCancelDownload,
   onBack,
   onSync,
 }: SourceBrowserHeaderProps) {
+  const { t } = useTranslation();
   return (
     <div className="flex items-center gap-2 border-b px-3 py-2">
-      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onBack} aria-label="Back">
+      <IconButton
+        label={t('sources.sourceBrowserHeader.backAria')}
+        className="h-7 w-7"
+        onClick={onBack}
+      >
         <ChevronLeft className="h-4 w-4" />
-      </Button>
+      </IconButton>
       <span className="truncate text-sm font-medium">
         {step === 'projects' && providerTitle}
         {step === 'file-areas' && selectedProject?.name}
-        {step === 'folders' && `${selectedProject?.name} / ${selectedFileArea?.name}`}
+        {busy && onCancelDownload && <Button variant="outline" size="sm" onClick={onCancelDownload}>{t('sources.sourceBrowserHeader.cancelDownload')}</Button>}
+      {step === 'folders' && `${selectedProject?.name} / ${selectedFileArea?.name}`}
       </span>
       {step === 'folders' && selectedProject && selectedFileArea && (
         <div className="ml-auto flex items-center gap-2">
           {catalogUpdatedAt != null && (
             <span className="text-xs text-muted-foreground">
-              Synced {formatSyncTime(catalogUpdatedAt)}
+              {t('sources.sourceBrowserHeader.syncedAt', { time: formatSyncTime(t, catalogUpdatedAt) })}
             </span>
           )}
           <Button
@@ -63,11 +81,11 @@ export function SourceBrowserHeader({
             disabled={syncing || busy}
           >
             {syncing ? (
-              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              <Spinner size="sm" className="mr-1.5" />
             ) : (
               <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
             )}
-            Sync
+            {t('sources.sourceBrowserHeader.sync')}
           </Button>
         </div>
       )}

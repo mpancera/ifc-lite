@@ -1,5 +1,115 @@
 # @ifc-lite/pointcloud
 
+## 0.16.0
+
+### Minor Changes
+
+- [#11166](https://github.com/LTplus-AG/ifc-lite/pull/11166) [`90889b7`](https://github.com/LTplus-AG/ifc-lite/commit/90889b75e6e7063c2a120ee1eacdcb9a5aa863cd) Thanks [@quotentiroler](https://github.com/quotentiroler)! - `@ifc-lite/pointcloud/ifcx` exports the IFCx point attribute decoders (`POINTCLOUD_ATTR`, `POINTCLOUD_ATTR_KEYS`, `decodeIfcxPointAttribute`, `decodeIfcxPointSource` and their types) without the streaming sources. `@ifc-lite/ifcx` now imports from it, so bundling `@ifc-lite/ifcx` (and `@ifc-lite/sdk`, which depends on it) with esbuild or wrangler no longer reaches the LAZ decoder's Vite-only `laz-perf/lib/web/laz-perf.wasm?url` import and no longer needs the package aliased to its attribute module.
+
+### Patch Changes
+
+- Updated dependencies [[`40dd89f`](https://github.com/LTplus-AG/ifc-lite/commit/40dd89f534f021f5ebfa6dca0ede28274adf168a)]:
+  - @ifc-lite/geo@0.2.0
+
+## 0.15.0
+
+### Minor Changes
+
+- [#8809](https://github.com/LTplus-AG/ifc-lite/pull/8809) [`e4c95a6`](https://github.com/LTplus-AG/ifc-lite/commit/e4c95a6ccde8eaa013810c46bfa6dcc2ddbc4186) Thanks [@louistrue](https://github.com/louistrue)! - A large PLY point cloud that needs a bounds scan (`streamPointCloud` downsampling or picking a local origin) is read twice instead of three times: once to scan bounds, once to decode. `streamPointCloud` now calls a source's new optional `reopen()`, which keeps the first bounds scan. Worker sources without `reopen()` of their own are rebuilt inside the worker as before.
+  
+  Cancelling a point-cloud load while the source is still opening now stops the work promptly. Previously the cancel waited for the full bounds scan of a multi-GB PLY to finish.
+
+- [#8915](https://github.com/LTplus-AG/ifc-lite/pull/8915) [`0f57524`](https://github.com/LTplus-AG/ifc-lite/commit/0f57524cfe347d29d68f53df7fc97f0b1f80d61a) Thanks [@louistrue](https://github.com/louistrue)! - Add bounded CPU Gaussian placement export batches and PCD header inspection for positioned downloads. Preserve unsigned-byte point classifications when reading binary and ASCII PLY files, including streaming and variable-length rows. Keep unsupported classification declarations ignored for compatibility with existing files.
+  
+  Treat malformed optional ASCII byte classifications as unclassified so geometry remains loadable.
+
+- [#8782](https://github.com/LTplus-AG/ifc-lite/pull/8782) [`cc5dcbd`](https://github.com/LTplus-AG/ifc-lite/commit/cc5dcbd4ee6cf35d624b0247edbb89ef35381c6e) Thanks [@louistrue](https://github.com/louistrue)! - Load E57, PLY and LAS point clouds larger than 4 GB. `streamPointCloud` now applies its 4 GB default `maxFileSize` only to formats whose source reads the whole file (PCD, PTS, XYZ, LAZ); E57, PLY and LAS stream from bounded windows and have no default ceiling. LAS strided reads are now capped at 16 MiB per read, so LAS peak memory no longer grows with file size. An explicit `maxFileSize` still applies to every format ([#8773](https://github.com/LTplus-AG/ifc-lite/issues/8773)).
+
+### Patch Changes
+
+- [#10385](https://github.com/LTplus-AG/ifc-lite/pull/10385) [`e15f582`](https://github.com/LTplus-AG/ifc-lite/commit/e15f5824cb0747471e0f2dc15c16ef47972fcb89) Thanks [@louistrue](https://github.com/louistrue)! - The WKT helpers (`extractWktSpatialMetadata`, `extractWktCrsIdentifiers`, `extractWktHorizontalCrs`, `extractWktBoundingBox` and their types) now live in `@ifc-lite/geo/wkt`; `@ifc-lite/pointcloud` depends on `@ifc-lite/geo` and re-exports them under the same names, so its API is unchanged.
+
+- [#9534](https://github.com/LTplus-AG/ifc-lite/pull/9534) [`67519f8`](https://github.com/LTplus-AG/ifc-lite/commit/67519f89ef51b53ae6bd1677bec9fd0ef29773f4) Thanks [@louistrue](https://github.com/louistrue)! - Add `createWorkerRpc` to `@ifc-lite/wasm-lifecycle`: one request/response client with a dead latch (the first worker `error`, `messageerror`, missed deadline, failed start or `dispose()` rejects everything pending and every later call), cleanup when a `postMessage` throws, clamped deadlines, abort support and an init handshake. The point-cloud decode worker, the re-mesh client, the IDS agent's worker model bridge and the embed SDK now use it instead of their own copies.
+  
+  `createWorkerModelBridge` no longer leaves a call made after `dispose()` waiting forever: it rejects at once. Its new `watchErrors` option makes a worker crash or an unreadable message reject every pending and later call. A model-bridge or embed command whose `postMessage` throws no longer leaves a timer and a pending entry behind.
+
+- [#9483](https://github.com/LTplus-AG/ifc-lite/pull/9483) [`1ba591b`](https://github.com/LTplus-AG/ifc-lite/commit/1ba591b8b8ca2e232a49c000e285dca154749432) Thanks [@louistrue](https://github.com/louistrue)! - Worker RPC clients no longer hang when their worker dies. The point-cloud decode worker session now rejects every pending open/next/COPC request on a worker `error` or `messageerror`, terminates the worker, and is evicted from the shared cache so the next load spawns a fresh one; a throwing `postMessage` rejects only its own request. `RemeshClient.create()` now rejects (and terminates the worker) on a `messageerror` during start or when the engine does not report ready within the new `startTimeoutMs` option (default 120 s, separate from `requestTimeoutMs`), and a request whose post throws no longer leaves a deadline behind that later kills the client under unrelated requests. Both `startTimeoutMs` and `requestTimeoutMs` are clamped to 2^31-1 ms (a larger value or `Infinity` used to make `setTimeout` fire almost at once), and `0`, a negative number, `NaN` or `Infinity` now means no deadline.
+- Updated dependencies [[`e15f582`](https://github.com/LTplus-AG/ifc-lite/commit/e15f5824cb0747471e0f2dc15c16ef47972fcb89), [`353d056`](https://github.com/LTplus-AG/ifc-lite/commit/353d0569469242c92b709c7ee21a10d3de342e4b), [`67519f8`](https://github.com/LTplus-AG/ifc-lite/commit/67519f89ef51b53ae6bd1677bec9fd0ef29773f4)]:
+  - @ifc-lite/geo@0.1.0
+  - @ifc-lite/wasm-lifecycle@0.3.0
+
+## 0.14.0
+
+### Minor Changes
+
+- [#8170](https://github.com/LTplus-AG/ifc-lite/pull/8170) [`8260d88`](https://github.com/LTplus-AG/ifc-lite/commit/8260d88c72c6857a585f90b816468d227d8e6042) Thanks [@louistrue](https://github.com/louistrue)! - Georeferencing reads the IFC4X3 coordinate operations beside `IfcMapConversion`. An `IfcRigidOperation` (a pure translation) is read into `mapConversion` with `operation: 'rigidOperation'`, an identity axis and unit scale, and `source: 'rigidOperation'`. Length measures translate map coordinates. Plane-angle measures translate (longitude, latitude) of an `IfcGeographicCRS` in its AngleUnit, else the project plane-angle unit. An `IfcMapConversion` still takes precedence when both are authored. The CRS read is now the operation's own TargetCRS (`IfcProjectedCRS` or `IfcGeographicCRS`, the latter with `kind: 'geographic'`), falling back to the first CRS in the file as before. An `IfcWellKnownText` attached to that CRS is exposed as `projectedCRS.wellKnownText`, and a CRS defined only by its WKT counts as georeferenced together with a parsed coordinate operation (on its own it places nothing, and the IfcSite/ePSet fallbacks run as before). `@ifc-lite/pointcloud` adds `extractWktHorizontalCrs` and `extractWktBoundingBox`.
+
+## 0.13.0
+
+### Minor Changes
+
+- [#7959](https://github.com/LTplus-AG/ifc-lite/pull/7959) [`ca6991f`](https://github.com/LTplus-AG/ifc-lite/commit/ca6991fdbe10633a0b879914daa8d8211091ba81) Thanks [@louistrue](https://github.com/louistrue)! - Add decodeIfcxPointSource for authored IFCX numeric channels before float32 staging, preserving ASCII and binary float64 PCD and inline array precision through shared codecs. Existing chunk decoders retain their float32 outputs, validation, offsets, and bounds.
+
+### Patch Changes
+
+- [#7648](https://github.com/LTplus-AG/ifc-lite/pull/7648) [`d1fdb6f`](https://github.com/LTplus-AG/ifc-lite/commit/d1fdb6fb9fcd4a8904be3a6e7c707ada896e47af) Thanks [@louistrue](https://github.com/louistrue)! - Share emitted worker URL rewriting and verification across worker packages. Inspect every emitted module so new callers such as the geometry worker pool resolve shipped JavaScript workers in npm installations. Preserve parser all-asset verification and verify script assets separately where WASM is supplied by another package.
+
+## 0.12.0
+
+### Minor Changes
+
+- [#6875](https://github.com/LTplus-AG/ifc-lite/pull/6875) [`2cb6753`](https://github.com/LTplus-AG/ifc-lite/commit/2cb67534655cefd18da735e375a0bd91a4cefe8a) Thanks [@louistrue](https://github.com/louistrue)! - Add renderer-agnostic view-dependent LOD selection for point octrees ([#6869](https://github.com/LTplus-AG/ifc-lite/issues/6869)). `selectLod` frustum-culls, refines the node with the largest projected screen span first while it exceeds a pixel threshold and the node cap allows, and water-fills the point budget across the selection with per-node stride hints. `LodPacer` sizes a fast first pass to a time budget from a learned read rate (asymmetric EMA with outlier clipping), `shouldReplacePass` only replaces what is on screen with a better pass, and `createCopcLodTree` presents a partially loaded COPC hierarchy as LOD nodes.
+
+- [#6874](https://github.com/LTplus-AG/ifc-lite/pull/6874) [`9e5487b`](https://github.com/LTplus-AG/ifc-lite/commit/9e5487b56ca55a66b325bf3666371efe0c4166ad) Thanks [@louistrue](https://github.com/louistrue)! - Read COPC (cloud-optimized point cloud) files node by node ([#6869](https://github.com/LTplus-AG/ifc-lite/issues/6869)). `HttpRangeSource` reads a remote file through HTTP Range requests (refusing servers that ignore `Range`, and working when CORS hides `Content-Range`); `openCopcWorkerReader` parses the LAS 1.4 header, the `copc`/`info` VLR and the hierarchy pages, and decodes individual octree nodes with laz-perf's `ChunkDecoder` in the decode worker through the existing LAS point-record decoder and origin-offset handling. The hierarchy page walk is iterative and bounded against malicious files.
+
+## 0.11.0
+
+### Minor Changes
+
+- [#5258](https://github.com/LTplus-AG/ifc-lite/pull/5258) [`c0f6caa`](https://github.com/LTplus-AG/ifc-lite/commit/c0f6caab3c726369707173e8aa48017a609e7cc0) Thanks [@louistrue](https://github.com/louistrue)! - `inspectE57SpatialMetadata` and `E57StreamingSource.open()` now throw when the E57 XML metadata section reads shorter than its declared length (a truncated blob), instead of silently returning `undefined` as if the file had no CRS. Point-data reads keep their existing tolerance for an over-reported `recordCount`.
+
+## 0.10.0
+
+### Minor Changes
+
+- [#5112](https://github.com/LTplus-AG/ifc-lite/pull/5112) [`35e54fc`](https://github.com/LTplus-AG/ifc-lite/commit/35e54fc20bc8a7632b9caec26cdb820e1ee0c0b7) Thanks [@louistrue](https://github.com/louistrue)! - Expose explicit E57 `coordinateMetadata` CRS identifiers through streaming source-open metadata before point decoding begins.
+
+## 0.9.0
+
+### Minor Changes
+
+- [#4587](https://github.com/LTplus-AG/ifc-lite/pull/4587) [`e94a233`](https://github.com/LTplus-AG/ifc-lite/commit/e94a233a8fce5be0e9d6fa833f6a5fc121961e08) Thanks [@louistrue](https://github.com/louistrue)! - Preserve invalid PLY normal provenance through streaming and exact worker transfers, and keep floating RGB normalization consistent across chunks.
+
+- [#4570](https://github.com/LTplus-AG/ifc-lite/pull/4570) [`ed38bfc`](https://github.com/LTplus-AG/ifc-lite/commit/ed38bfc562cb170458141c5abecf15c0c0e2ea4d) Thanks [@louistrue](https://github.com/louistrue)! - Expose source-supplied PLY `nx`/`ny`/`nz` normals on decoded and streamed point chunks while preserving row order through bounded, stride-aware decoding and the worker wire protocol.
+
+## 0.8.0
+
+### Minor Changes
+
+- [#4255](https://github.com/LTplus-AG/ifc-lite/pull/4255) [`bc26223`](https://github.com/LTplus-AG/ifc-lite/commit/bc26223b5b7e09c8bafcdf7f95afafe033622867) Thanks [@louistrue](https://github.com/louistrue)! - Support absolute model and pointcloud translations without rewriting mesh or scan vertices. Keep model draw origins independent, compose scan alignment and manual offsets in double precision, and retain placement bounds after CPU geometry release. Streaming pointcloud callers can choose a nearby decode origin before narrowing coordinates to float32.
+
+### Patch Changes
+
+- [#4348](https://github.com/LTplus-AG/ifc-lite/pull/4348) [`8369d06`](https://github.com/LTplus-AG/ifc-lite/commit/8369d067dba22a7ca69b0420d49bf94bd698edd5) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Reject a zero or non-finite X/Y/Z scale factor and a non-finite offset in a LAS/LAZ header instead of silently collapsing every point to the header offset (or NaN). `decodeLasPoints`'s bbox fold now also skips a non-finite coordinate rather than letting one bad point poison the whole chunk's box. When every coordinate in a chunk is non-finite (e.g. a finite-but-huge scale that overflows on multiplication), the chunk's bbox is left at its `±Infinity` seed — an absorbing no-op in the multi-chunk union `streaming/host.ts` does across a streamed file — so the bad chunk drops out of the aggregate instead of a finite fallback value pulling it toward the origin, and a wholly non-finite file still falls back to the header's own bbox.
+
+## 0.7.2
+
+### Patch Changes
+
+- [#3680](https://github.com/LTplus-AG/ifc-lite/pull/3680) [`445d813`](https://github.com/LTplus-AG/ifc-lite/commit/445d813b8ea3b6a09f2930a3e409ccaeff316a85) Thanks [@BIMvoice](https://github.com/BIMvoice)! - The E57 decoder defaulted a ScaledInteger/Integer prototype field's `minimum`/`maximum` to `0` when a producer's XML omitted them, instead of refusing. Those attributes have no valid default under the E57 spec (ASTM E2807 §6.3.4) — the bitpack codec needs the declared range to know how many bits a record occupies, and the ScaledInteger decode formula `(raw + minimum) * scale + offset` uses `minimum` directly — so a non-conformant file that omits them was decoded anyway, silently shifting or mis-scaling every point, colour, intensity, and classification value with no error and nothing in the output to indicate it. `parseE57Xml` now leaves `minimum`/`maximum` undefined rather than defaulting them, and the decoder throws a clear error identifying the field instead of guessing. `scale`/`offset` keep their spec-defined defaults of `1.0`/`0.0`, which were already correct. This only affects a non-conformant producer that omits a required attribute; a conformant file decodes exactly as before.
+  
+  The same file also parsed a `points` element's `fileOffset`/`recordCount` attributes with a bare `!fileOffsetAttr || !recordCountAttr` presence check: an empty string (`fileOffset=""`) was correctly treated as absent and the scan skipped, but a whitespace-only value (`fileOffset=" "`) is truthy and slipped through to `Number(...)`, where it coerces to `0` — a value that then passes the finite/non-negative guard. That decoded the scan from logical offset `0` (the file header) instead of skipping it, producing garbage points from misinterpreted header bytes with no error. `parseE57Xml` now trims both attributes before the presence check, so whitespace-only behaves exactly like absent (scan skipped).
+
+- [#3548](https://github.com/LTplus-AG/ifc-lite/pull/3548) [`801e697`](https://github.com/LTplus-AG/ifc-lite/commit/801e697ea09cad23839b032fd593eb363bf8455b) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix the PLY decoder mis-normalizing vertex colours declared with a type other than `uchar`. PLY has no single mandated colour encoding: `uchar` (0..255) is by far the most common, but writers that declare `property float red/green/blue` (or `double`) already store a 0..1 value, and 16-bit-colour exports (`property ushort red/green/blue`, e.g. many Leica/FARO scanner outputs and CloudCompare's 16-bit RGB option) store 0..65535. `decodePly` divided every RGB channel by 255 regardless of its declared type, so an already-normalized float `0.8` became `~0.0031` (crushed to near-black) and a `ushort` value like `32768` clamped to `1.0` (saturated to white). Colour channels are now normalized per their declared property type: `float`/`double` pass through (clamped to 0..1), `ushort`/`uint16` divide by 65535, `short`/`int16` divide by 32767, and the remaining integer types (`uchar` and friends, plus the undocumented 32-bit int types) still divide by 255 as before. Both the ascii and binary decode paths were affected.
+
+- [#3855](https://github.com/LTplus-AG/ifc-lite/pull/3855) [`182215a`](https://github.com/LTplus-AG/ifc-lite/commit/182215a835c4beac6a776bcb4eb1d019cab9063e) Thanks [@louistrue](https://github.com/louistrue)! - Corrected the code samples on each package's npm landing page: the README fences are now typechecked against the package's real exports, so the snippets import what they call, declare the values they read, and no longer show removed options or renamed methods. Patch-bumping every package whose README changed so the corrections actually reach npmjs.com.
+
+## 0.7.1
+
+### Patch Changes
+
+- [#3010](https://github.com/LTplus-AG/ifc-lite/pull/3010) [`20264d8`](https://github.com/LTplus-AG/ifc-lite/commit/20264d8b1ee82169a02f9dc588decc45fb8fdc00) Thanks [@BIMvoice](https://github.com/BIMvoice)! - Fix a decode-worker resource leak: `handleOpen` registered a newly-opened `StreamingPointSource` into the worker's `sources` map before reporting `{ kind: 'opened', sourceId }` back to the main thread. If that report failed to post, the client never learned the source's id and could therefore never send `close`/`abort` for it, leaking the source (its file reader / native buffers) for the life of the worker. The worker now reports success first and only registers the source once that succeeds, releasing it itself if reporting fails.
+
 ## 0.7.0
 
 ### Minor Changes

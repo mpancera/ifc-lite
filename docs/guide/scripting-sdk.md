@@ -15,9 +15,12 @@ The `bim` object (a `BimContext`) groups its capabilities into namespaces, plus 
 | `bim.store` | Document-level edits (add/remove entities, positional attributes) |
 | `bim.lens` | Lens visualization presets |
 | `bim.create` | Create IFC elements from scratch |
-| `bim.export` | Export to CSV, glTF, STEP, HBJSON, and more |
+| `bim.export` | Export to CSV, JSON, IFC/STEP, HBJSON, DFJSON |
 | `bim.clash` | Run clash rules and the discipline matrix |
-| `bim.ids` | IDS validation |
+| `bim.georef` | Read and write georeferencing (IfcProjectedCRS + IfcMapConversion; IFC2X3 ePSet convention), fail-closed — see [Georeferencing](#georeferencing) |
+| `bim.cost` | Read and evaluate IFC 5D cost schedules, items, values, and quantities |
+| `bim.structural` | Read-only access to IFC structural analysis data (analysis models, members, connections, activities, load/result groups) |
+| `bim.ids` | IDS validation; `bim.ids.authoring` opens, edits (through grounded operations), lints and writes IDS documents |
 | `bim.bcf` | BCF topics, comments, viewpoints |
 | `bim.files`, `bim.schedule`, `bim.spatial`, `bim.spaces`, `bim.drawing`, `bim.list`, `bim.bsdd`, `bim.events`, `bim.sandbox` | Supporting namespaces (file access, scheduling, spatial ops, space program, 2D drawings, entity tables, bSDD lookups, events, sandboxed sub-scripts) |
 
@@ -36,6 +39,93 @@ for (const s of storeys) {
   console.log(`${s.name}: ${bim.contains(s.ref).length} elements`);
 }
 ```
+
+### Authoring IDS from a script
+
+`bim.ids.authoring` edits IDS documents with the typed operations and
+grounding gate that the IDS editor and the MCP `ids_apply_ops` tool use (see
+[Writing IDS documents](ids.md#writing-ids-documents)). A batch that names an entity, property
+set or property the IFC schema does not have is refused as a whole. The
+result lists each problem with ranked candidates. Accepted batches can be
+undone.
+
+```ts
+declare const xml: string;
+const doc = await bim.ids.authoring.open(xml);
+const specId = doc.doc.nodes.specs[0].id;
+
+const res = doc.apply([
+  {
+    kind: 'facet.add',
+    opId: crypto.randomUUID(),
+    payload: {
+      specId,
+      section: 'requirements',
+      facetId: crypto.randomUUID(),
+      facet: {
+        type: 'property',
+        propertySet: { kind: 'equals', value: 'Pset_DoorCommon' },
+        baseName: { kind: 'equals', value: 'FireRatng' },
+      },
+    },
+  },
+]);
+if (!res.ok) console.log(res.errors[0].code, res.errors[0].candidates[0]?.value); // GATE-PROP-001 FireRating
+
+for (const d of doc.lint()) console.log(d.code, doc.pathOf(d.nodeId), d.message);
+const updated: string = doc.write(); // throws, with the reason, if the writer refuses the document
+```
+
+## Explicit property declarations
+
+The SDK's `bim.mutate.setProperty(ref, psetName, propName, value, dataType?)` accepts an optional IFC `IfcValue` defined type. Use the EXPRESS name, for example `IfcThermalTransmittanceMeasure` or `IfcLabel`. The shared schema registry validates membership, scalar value compatibility, declared numeric domains, and string width before writing. Invalid or unknown declarations throw; an integer JavaScript value can still declare a real-valued IFC measure.
+
+```js
+const wall = bim.query().byType('IfcWall').toArray()[0];
+if (wall) {
+  bim.mutate.setProperty(wall.ref, 'Pset_WallCommon', 'ThermalTransmittance', 1, 'IfcThermalTransmittanceMeasure');
+}
+```
+
+The declaration survives the effective property overlay, collaboration mirror/peer application, and IFC export/reimport. Without `dataType`, the existing string/boolean/integer/real inference remains unchanged. This optional argument belongs to the direct SDK and CLI `eval`/`run` API; the sandbox script bridge retains its existing four-argument contract.
+
+## Native Review normalization
+
+`@ifc-lite/sdk/review` contains the pure finding and coordination-card
+normalization used by the viewer. Hosts supply their actual native reports and
+model lookup functions; these helpers do not run an analysis, edit a model,
+create an artifact or make a human decision. Validation statuses and BCF topic
+statuses remain native facts. A historical resolution candidate remains a
+candidate.
+
+`clashFindings` preserves native clash statuses and revision coverage: stale or
+truncated runs cannot establish that a historical clash disappeared.
+`clashGlobalId` separates the IFC GlobalId from an occurrence suffix, while
+`clashOccurrenceKey` retains both model-qualified occurrences. Discipline
+candidates from `clashDisciplineCandidates` are hints, not responsibility
+assignments. `savedValidationFacts` projects actual saved IDS failure rows;
+saved evidence remains historical and incomplete, and callers supply any
+current re-examination outcomes. These helpers share the viewer's existing
+behavior and do not verify portable source identity.
+
+```ts
+import { snapshotFrom, validationFindings, type ReviewModel } from '@ifc-lite/sdk/review';
+import type { ValidationReport } from '@ifc-lite/ids';
+
+function nativeValidationReview(report: ValidationReport, models: readonly ReviewModel[], stale: boolean) {
+  return snapshotFrom([{ kind: 'validation', collect: currentModels =>
+    validationFindings({ report, stale }, currentModels) }], models);
+}
+```
+
+A native validation run that evaluates fewer applicable elements than it
+found carries an explicit incomplete/truncated gap. Omitting passing detail
+rows from an otherwise fully evaluated run does not imply incomplete coverage.
+A failed collector contributes an explicit `failed` entry. Missing native
+inputs are not a completed clean analysis; the host must report their source
+availability separately. Existing viewer card keys use a model name and IFC
+GlobalId and refuse ambiguous loaded owners. Those display/navigation keys
+are not proof of source-byte identity or portable captured-run provenance.
 
 ## Running scripts from the CLI
 
@@ -95,7 +185,27 @@ ifc-lite schema              # full schema with params and return types
 ifc-lite schema --compact    # names and descriptions only
 ```
 
-The schema covers the scriptable namespaces, `model`, `query`, `viewer`, `mutate`, `store`, `lens`, `create`, `files`, `schedule`, `clash`, and `export`, and includes each method's parameter names, return type, and LLM semantic hints (`useWhen`, task tags). Running `ifc-lite schema` first is the recommended way to author correct `eval`/`run` code. See [Using with LLM Terminals](cli.md#using-with-llm-terminals) for the wider agent workflow.
+`ifc-lite schema` documents the `bim` object `eval`/`run` actually hand your script — a root `bim` namespace of top-level methods, plus the scriptable namespaces `model`, `query`, `viewer`, `mutate`, `store`, `lens`, `create`, `files`, `schedule`, `cost`, `clash`, and `export` — and includes each method's parameter names, return type, and LLM semantic hints (`useWhen`, task tags). There `query` is the chain reached via `bim.query()` (`.byType(...).toArray()`), not a namespace of standalone lookups. That differs from the sandbox's own bridge schema shown below, where `bim.query.byType(...)` runs and returns data in one call — the sandbox and `eval`/`run` hand scripts different `bim` shapes, so pick the one matching where the script will run. Running `ifc-lite schema` first is the recommended way to author correct `eval`/`run` code. See [Using with LLM Terminals](cli.md#using-with-llm-terminals) for the wider agent workflow.
+
+### IFC 5D cost data
+
+`bim.cost` reads the canonical cost graph from the loaded IFC source snapshot.
+References are model-qualified and evaluated amounts remain decimal strings:
+
+The example below uses the canonical fixture at
+`tests/models/cost/buildingsmart-cost-composition.ifc` (fetch it with
+`pnpm fixtures`), which contains the `External wall total` item.
+
+```js
+const graph = bim.cost.data();
+const total = graph.CostItems.find(item => item.Name === 'External wall total');
+const result = bim.cost.evaluateItem(total.ref, { Precision: 34 });
+console.log(result.Amount, result.Currency, result.Diagnostics);
+```
+
+`CostValues`, `CostQuantities`, relationships, and diagnostic references all
+use `{ modelId, expressId }`. Generic mutation overlays are not folded into
+this read model; replacing or reloading the IFC source refreshes it.
 
 ## The sandbox
 
@@ -149,7 +259,73 @@ Check it while the sandbox is live: `dispose()` releases the module reference, a
 
 Use the direct path for your own scripts; use the sandbox when the code comes from somewhere you do not fully trust.
 
+## Open a headless model
+
+Import `openModel` from `@ifc-lite/sdk/headless` to use STEP or IFCZIP bytes without importing MCP or constructing a backend. In Node, pass a Buffer from `readFile`; in a browser, pass fetched bytes. The factory performs no file/network I/O and initializes no renderer or geometry runtime.
+
+```typescript
+import { readFile, writeFile } from 'node:fs/promises';
+import { openModel } from '@ifc-lite/sdk/headless';
+
+const model = await openModel(await readFile('model.ifc'), { modelId: 'architecture', modelName: 'model.ifc' });
+try {
+  if (model.report.completeness !== 'complete') throw new Error('Record coverage is incomplete or unknown');
+  const walls = model.bim.query().byType('IfcWall').toArray();
+  const wall = walls[0];
+  if (!wall) throw new Error('The input has no IfcWall occurrences');
+  model.bim.mutate.setProperty(wall.ref, 'Pset_WallCommon', 'FireRating', 'REI 120');
+  await writeFile('edited.ifc', model.bim.export.ifc());
+} finally {
+  model.close();
+}
+```
+
+The returned `store` is the parsed source snapshot; use `bim` for reads that include pending edits. References carry the session's `modelId` and a model-local `expressId`; IFC `GlobalId` values have a different identity role. Backend reads, edits and explicit query scopes reject a different model ID, even when two sessions contain the same EXPRESS IDs. [`parseModel`](parsing.md#load-step-data-without-a-viewer) documents the scan report: complete record scanning is not schema or geometry validation.
+
+Use `model.capability('store.roomCommand')` before offering a backend operation. `supported` describes an implemented/configured method, not guaranteed success for every input or environment. Unavailable calls through this session throw `UnsupportedOperationError` with code `UNSUPPORTED_OPERATION`, operation and reason. Data-only sessions do not silently accept viewer commands. Advanced hosts can supply Room/Align geometry providers through `options.backend`; MCP supplies its existing native providers to the shared `HeadlessBackend`.
+
+`close()` is idempotent and clears preparation caches. Capability checks then report unsupported with a closed-session reason. Retained backend queries and mutation namespaces then throw `HeadlessSessionClosedError` with code `SESSION_CLOSED`. In-flight injected geometry preparation rechecks the session before it can commit. Closing does not revoke the returned source store or pure helpers that operate on caller-supplied data. Existing MCP constructors and embedded/remote SDK entry points retain their behavior.
+
+The CLI and MCP compose the shared `@ifc-lite/sdk/headless` implementation. Query reads, pending mutations, standard exports, and model identity checks share one implementation. CLI-specific authoring, schedules, spaces, and energy exports remain host adapters; explicit aliases preserve its existing model-ID spellings.
+
+## Georeferencing
+
+`bim.georef` reads and writes a model's georeferencing on headless contexts (`openModel`, the CLI, MCP). IFC4 and IFC4X3 get `IfcProjectedCRS` + `IfcMapConversion` (IFC4X3 with `FactorX/Y/Z`: `IfcMapConversionScaled`); IFC2X3 gets the `ePSet_MapConversion` / `ePSet_ProjectedCRS` property sets on IfcSite (updates preserve an existing host). A write is held in the session and lands in the file with the next `bim.export.ifc()`.
+
+```typescript
+import { readFile, writeFile } from 'node:fs/promises';
+import { openModel } from '@ifc-lite/sdk/headless';
+
+const model = await openModel(await readFile('model.ifc'));
+try {
+  const result = model.bim.georef.set({
+    ProjectedCRS: { Name: 'EPSG:2056', GeodeticDatum: 'CH1903+', VerticalDatum: 'LN02', MapUnit: 'METRE' },
+    MapConversion: { Eastings: 2600000, Northings: 1200000, OrthogonalHeight: 400, Scale: 1 },
+    rotationDegrees: 12.5,
+  });
+  console.log(result.mapUnit, result.notes);
+  model.bim.georef.update({ MapConversion: { OrthogonalHeight: 401 } });
+  console.log(model.bim.georef.get().MapConversion);
+  await writeFile('georeferenced.ifc', model.bim.export.ifc());
+} finally {
+  model.close();
+}
+```
+
+Writes fail closed and throw a `GeoreferencingError` whose `code` says why and whose `missing` names the inputs that would let it proceed:
+
+- No CRS, map unit, scale or factor is assumed. `ProjectedCRS.MapUnit` must be given, or come from an IfcProjectedCRS of the same `Name` being replaced or updated whose unit the reader resolved (`result.mapUnit.source` says which); the writer supports metres with any SI prefix, `FOOT` and `US SURVEY FOOT`.
+- A model without an `IfcGeometricRepresentationContext` (the map conversion's `SourceCRS`) is refused; for IFC2X3, a model without exactly one IfcSite.
+- `set` on a georeferenced model is refused unless `replace: true`, which removes the existing map conversions, CRSs and their `IfcWellKnownText` and writes one map conversion (for the 3D `Model` context); `result.notes` names any other context that loses its conversion.
+- Contradictions are refused: an angle and an `XAxisAbscissa`/`XAxisOrdinate` vector that disagree, half a vector, factors outside FILE_SCHEMA `IFC4X3` / `IFC4X3_ADD2`, unknown keys, factors on a plain `IfcMapConversion` (use `set` with `replace`), or an `update` that renames the CRS while keeping the old datum or unit.
+
+`get()` reports EXPRESS attribute names plus `rotationDegrees`, `source`, `storage` and `pending`. `readGeoreferencing(store)` gives the same shape for a parsed store without a session. `set`/`update` leave IfcSite `RefLatitude`/`RefLongitude` untouched and say so in `notes`; `setSite({ RefLatitude, RefLongitude, RefElevation })` writes them (decimal degrees, written as `IfcCompoundPlaneAngleMeasure`; RefElevation in project length units), as one undo step.
+
+`check()`, `planFixes()` and `fix()` are the georeferencing doctor: what is wrong, which fixes the write API can apply, and applying them. See [Georeferencing](georeferencing.md).
+
 ## Embedding programmatically
+
+Host adapters can reuse the live-overlay query implementation from `@ifc-lite/sdk/headless`: `createQueryAdapter` accepts the parsed store, model ID and getters for the current pending overlay and mutation view. `overlayFromView` derives that overlay from an existing `MutablePropertyView`. CLI and MCP consume these SDK-owned readers, so source records, queued creations, deletions, retypes and relationships share one query implementation. No renderer or geometry runtime is initialized by the read adapter.
 
 Create a `BimContext` yourself with `createBimContext`. It needs either a local `backend` (viewer-embedded) or a `transport` (connected to a running viewer):
 
@@ -166,3 +342,254 @@ remote.viewer.colorize(refs, '#ff0000');
 ```
 
 In remote mode `bim.viewer.*` calls are forwarded to the connected viewer, which is exactly how `ifc-lite run script.js model.ifc --viewer <port>` works under the hood. For the full type surface, see the [`@ifc-lite/sdk` README](https://github.com/LTplus-AG/ifc-lite/tree/main/packages/sdk) and the [TypeScript API reference](../api/typescript.md).
+
+### Exporting the whole model vs. a subset
+
+`bim.export.ifc(refs, options)` reads its first argument as an isolation filter,
+and the *absence* of that argument is what asks for the whole model:
+
+```ts
+bim.export.ifc();                                   // no filter: the whole model
+bim.export.ifc(bim.query().byType('IfcWall').refs()); // only the walls (plus their reference closure)
+```
+
+An **empty array is not the same as no argument**. It means a filter that
+matched nothing, and it is refused:
+
+```ts
+const refs = bim.query().byType('IfcNonExistentType').refs(); // []
+bim.export.ifc(refs); // throws: the isolation filter matched nothing
+```
+
+An empty array used to mean "no filter", so a query that matched nothing
+silently exported every entity in the model and reported success. The release
+that changed this is the `@ifc-lite/sdk` major carrying issue #4738 in its
+changelog; before it, the refusal above did not happen. A call that used the
+empty array to mean the whole model, `bim.export.ifc([], options)`, becomes
+`bim.export.ifc(undefined, options)`.
+
+The same distinction holds in a sandboxed script (`bim.export.ifc()` with no
+arguments) and behind the CLI's `--format ifc`, which refuses a zero-match
+`--type`/`--where`/`--storey`/`--limit` rather than exporting everything.
+
+### Textured IFC exports in the web viewer
+
+The viewer's `bim.export.ifc(refs, options)` returns IFCZIP `Uint8Array` bytes
+when retained texture images accompany the exported model or subset. Its existing
+return type remains `string | Uint8Array`; do not decode archive bytes as STEP
+text. Supplying an `.ifc` download filename automatically changes it to
+`.ifczip` with ZIP MIME type. Untextured exports retain their ordinary STEP
+content. This packaging belongs to the web viewer adapter; other SDK backends
+provide their own resource packaging.
+
+### Canonical structural profiles
+
+Sandbox `bim.store.addColumn`, `addBeam` and `addMember` accept the same
+parameterized `Profile` union as the typed SDK. A supplied `Profile` replaces
+the rectangular Width/Depth or Width/Height inputs; column Height and element
+placement remain required. Profile dimensions keep their IFC names and use
+metres. The shared builder validates the actual profile before committing.
+Ordinary creation through the viewer SDK records the complete authored graph,
+so one Undo removes auxiliary placement, profile and containment records too.
+
+### Align loaded elements
+
+`await bim.store.alignElements(modelId, reference, targets, mode)` aligns current
+native mesh edges or centres in one storey workplane. Modes are `left`, `centre`,
+`right`, `top`, `middle` and `bottom`. It derives bounds from fresh owning-model
+geometry and records one atomic Undo batch. A selected host governs its placement dependants, which move once, and
+joined neighbours follow. Stale geometry, unavailable native geometry, unsafe
+shared placements, incompatible hosted/joined shifts, or a reference that would
+move with a target refuse without partial IFC writes. Supply the owning model
+ID when federated; lengths are IFC storey-local metres.
+
+### Generic groups
+
+`bim.store.addGroup`, `readGroup`, `updateGroup`, and `removeGroup` author exact
+`IfcGroup` records in IFC4/IFC4X3. Each member pins its owning `modelId`, native
+`expressId`, and current `GlobalId`. Pass the complete intended `RelatedObjects`
+list on every create/update; an explicit `[]` clears membership. An update or
+delete also requires the complete current snapshot returned by `readGroup`.
+
+```ts
+import type { BimContext, GroupStoreIdentity } from '@ifc-lite/sdk';
+
+function createInspectionGroup(bim: BimContext, member: GroupStoreIdentity) {
+  const group = bim.store.addGroup(member.modelId, {
+    Name: 'Inspection group', RelatedObjects: [member],
+  });
+  const expected = bim.store.readGroup(group);
+  bim.store.updateGroup(expected, {
+    Description: 'Ready for inspection', RelatedObjects: [member],
+  });
+  return group;
+}
+```
+
+Updates preserve the group and reuse an existing exact membership relationship.
+Deleting a group preserves its member objects and other group memberships;
+shared incoming memberships are rewritten safely. Other incoming dependencies,
+ambiguous/deleted identities, specialized assignment semantics, and exceeded
+graph budgets refuse the whole edit. The viewer records one native Undo batch.
+Replacement refuses typed `RelatedObjectsType` assignments and consolidation
+of assignments with distinct OwnerHistory, Name or Description. Their separate
+semantics cannot be represented by this complete-member-list update; reading
+and safe deletion remain supported.
+Specialized Structural groups retain their separate authoring methods.
+
+## Native Review capture lifecycle
+
+The Review leaf's `NativeReviewCaptures` and `readNativeReview` serve actual
+native hosts. A host supplies `NativeReviewModel` handles with the real source,
+owner/store identity, read-only GlobalId lookups and current overlay revision.
+`begin` captures source and definition proof before evaluation; `finish` retains
+the native report; `readNativeReview` produces the common bounded native host read.
+Captures with unavailable proof refuse explicitly, and partial overlays cannot
+confirm complete effective-state coverage. These live captures are distinct
+from portable saved facts; see the lifecycle contract below.
+
+Capture start and projection take a callback that enumerates the current host-owned models and a live permission predicate. They revalidate every captured owner, store, source, mutation view and monotonic revision after all awaited hashes. The bounded projection runs synchronously inside that final check. `presentationComplete` describes response clipping; `nativeCoverageComplete` describes the retained native runs, including their freshness and evaluation coverage.
+
+A native host that resolves Flow credentials calls `enrollCredentials` with only
+its already authorized values before execution. Credentials remain in bounded
+owner-local memory; `begin`, `finish` and `read` refuse sensitive capture/envelope
+content. `acceptsEvidence` also guards the final card projection's current display
+metadata. Exceeding the credential bound fails the owner closed without dropping
+previously known values. Concurrent `begin` calls reserve pending capacity before proof work and recheck ownership and permission synchronously after hashing.
+
+Successful reruns replace the same producer/definition/full-source ownership context only after settlement. Relative ordering follows operation initiation, before proof hashing; older asynchronous completion cannot replace newer success or clear a newer refusal. Producer failure or cancellation releases its pending reservation. A proven newer failed attempt keeps earlier matching facts under their original run ID and completion time as historical, incomplete evidence, including when the older proof completes after the newer failure. If that failure proof is replaced by a later operation before an older pending proof can establish exact context equality, the older capture is conservatively omitted as `capture-bound`, with unknown historical coverage instead of a guessed match. `latestAttempt` reports the latest operation outcome and its proof when available; failure before proof does not invent a matching definition or source identity. A later genuine operation can recover transient refusal.
+
+Distinct contexts use bounded oldest-settled retention. Eviction sets `retention.inventoryOmitted`; omitted historical run counts remain unknown. `bounds.knownFindingsScope` is `retained-current-contexts`, so retained row counts never claim a complete historical inventory. If an older proof-pending operation outlives eviction of potentially newer context evidence, its later capture is conservatively refused as `capture-bound`; its independent native report remains intact. This uncertainty uses only a flag on the bounded pending record; `retention.captureRefusal` discloses the resulting `capture-bound` omission without relabelling a newer successful operation. Reads do not change retention or analysis state. If a retained context is replaced or evicted while a read awaits its source proof, that read returns `capture-bound` unavailability rather than claiming older rows as current; a later read can project the newer facts.
+
+Native Review bounds separate `presentationComplete` (all retained rows and text fit the response limits) from `nativeCoverageComplete` (the retained native runs are complete and fresh, with no omitted capture inventory). A complete presentation can still describe a stale or partially evaluated run. Both checks use current model ownership and permissions after source hashing; access revoked during that await suppresses the entire captured target envelope.
+
+
+Hosts must call `abandon(token)` when native evaluation throws, and use `abandon(token, "aborted")` on cancellation before rethrowing the original failure. `begin` releases refused proof reservations itself. Successful completion calls `finish(token, report)` exactly once. Credential overflow remains a permanent owner-local security refusal; ordinary source, ownership, permission, producer, or capacity failure does not disable later genuine capture attempts.
+
+Native Review `modelIds` selects whole captured target sets independently of current authorization. A wholly permitted capture outside the request is omitted; a capture spanning requested and excluded models is refused as a whole. Permission revocation remains fail-closed after source hashing. Hash reuse follows the actual source object, including models that share a host owner. An older delayed proof cannot revive a newer same-context capture after retention eviction.
+
+Native capture admission and portable reads share the existing text budget: object-property names and string values both count toward 1,048,576 UTF-16 code units, with a 16,384 UTF-16 code-unit limit per key or value. A report that exceeds it is refused as `capture-bound` at native `finish`; the independent analysis report is retained by its producer, and the Review capture records unknown inventory rather than silently truncating it.
+
+### Portable report contracts
+
+The Review entry point shares the viewer's existing `SavedAnalysisRun` and
+`SavedValidationReport` contracts. Use `decodeSavedAnalysisRun` or
+`validateSavedReport` to validate an imported payload; use
+`bindSavedAnalysisModels` with actual source, edit, and placement evidence to
+bind a saved analysis scope. Full-content source hashes remain distinct from
+legacy sampled fingerprints. A valid payload remains historical evidence:
+validation does not make its execution attested, its freshness current, or its
+manual answers the result of a native evaluation. The codecs perform no save
+or model mutation.
+
+
+For supplied history, pass `createNativeReviewIdentityTable(store)` with each
+`NativeReviewModel` and call
+`readPortableReview(captures, liveModels, request, allowed)`. The request accepts
+`savedAnalysisRuns` and `savedValidationReports`. The reader verifies full source
+SHA-256 and duplicate-checked identity columns under current owner, revision and
+permission leases. Legacy or ambiguous evidence remains explicitly unbound.
+`records` retains original bounded native facts; `bindings` describes identity
+proof separately. Imported findings stay historical and not evaluated, with
+incomplete native coverage. No analysis, editor, persistence or scene mutation
+is performed.
+
+Supplied-history binding leases the whole requested model catalog, but an unrelated source-free, edited, or identity-less peer does not erase other records. Such a peer cannot bind history; its records remain historical and explicitly unbound. Every source-bearing peer still participates in full-hash collision checks, including edited or identity-less peers, so an identical-source peer cannot be silently excluded to invent unique ownership. Catalog membership, source, revision, identity references and permissions are rechecked after awaits. Existing source-byte, identity-row, credential and work bounds still apply to the scoped catalog; `modelIds` explicitly narrows that scope. Invalid counts, source-read failures, duplicate hashes and changed leases remain whole-read refusals.
+
+Portable `bounds` describe the supplied finding inventory, while cards and totals describe only the visible rows. A zero row limit retains the original records and reports hidden findings. Saved omissions, source gaps, truncated clash/IDS evaluation, or missing failed detail keep complete inventory and omission counts unknown and `presentationComplete` false; imported evidence never establishes complete native coverage.
+Non-IDS saved report kinds retain their original records but expose `unsupported-kind` binding and no projected findings; a matching model source alone does not certify manual element identity or evaluation.
+
+### Authored base quantities
+
+Headless SDK sessions (including CLI and MCP) derive wall, slab, roof, column and beam base quantities from live session-authored geometry. Read them with `bim.quantities(ref)`; `bim.export.ifc` includes the same values in IFC4, IFC2X3 and IFC4X3. Existing loaded quantity sets retain precedence and are not refreshed.
+
+Custom mutation-view hosts can call `configureAuthoredQuantityReader(dataStore, mutationView)` from `@ifc-lite/create` to install the same source-first reader. An optional third argument supplies the host's source quantity reader. User quantity edits and deletions apply above these derived values.
+
+### Structural surfaces and connections
+
+The in-store create API provides `addStructuralSurfaceMemberToStore`,
+`addStructuralCurveConnectionToStore`, and `addStructuralSurfaceConnectionToStore`.
+The SDK exposes them as `bim.store.addStructuralSurfaceMember`,
+`bim.store.addStructuralCurveConnection`, and `bim.store.addStructuralSurfaceConnection`,
+each taking `(modelId, storeyExpressId, params)`, like the existing curve member builder.
+The SDK backend and direct builders support IFC2X3, IFC4 and IFC4X3.
+Each `bim.store` method throws on a backend that does not implement it.
+
+Surface builders take `Boundary`, an ordered list of at least three distinct,
+coplanar points in storey-local metres that does not cross itself. Points off the
+plane by up to a millionth of the face size (never less than 1 µm) are snapped onto it. They write planar
+`Face` topology whose normal follows the boundary's winding.
+The member also accepts `PredefinedType` and optional positive `Thickness` in metres.
+Curve connections take `Start` and `End` and write `Edge` topology, with optional
+`Axis` for IFC4 or `AxisDirection` for IFC4X3: the connection's local z direction in
+storey coordinates, not parallel to the edge. It defaults to storey up, or +X for an
+edge within about 2.5 degrees of vertical. IFC2X3 has neither axis attribute and
+refuses either parameter.
+
+Connections accept `BoundaryCondition`: edge conditions use
+`TranslationalStiffnessByLengthX/Y/Z` and `RotationalStiffnessByLengthX/Y/Z`;
+face conditions use `TranslationalStiffnessByAreaX/Y/Z`. Components accept numbers
+in the model's stiffness units or booleans (`true` fixed, `false` free).
+IFC2X3 emits plain measures under its `LinearStiffness*` attribute names,
+using -1 and 0 for fixed and free. IFC4 and IFC4X3 emit typed SELECT members.
+Use the existing structural relationship builders to connect and group the items.
+
+
+Structural members accept `Type: 'IfcStructuralCurveMemberVarying'` or
+`Type: 'IfcStructuralSurfaceMemberVarying'` on their existing builders.
+IFC2X3 varying surfaces also require `SubsequentThickness` (at least two positive
+thicknesses in metres) and `VaryingThicknessLocation` (an existing `IfcShapeAspect` id).
+The builder copies the aspect and its point representations into the new member
+without re-parenting the original. The aspect must supply one representation per
+thickness value, including the initial thickness. Referenced point resources stay shared.
+These two attributes are refused in IFC4 and IFC4X3, where they do not exist.
+Point connections accept `BoundaryCondition.WarpingStiffness` to emit
+`IfcBoundaryNodeConditionWarping`, with the same fixed/free/measure convention.
+
+`connectStructuralMemberToConnectionInStore` accepts an optional options argument
+following its random source. The SDK's `bim.store.connectStructuralMemberToConnection`
+accepts the same options after the two endpoint ids. `AdditionalConditions` chooses
+`IfcFailureConnectionCondition` or `IfcSlippageConnectionCondition` using `Type` and
+exact EXPRESS component names; unknown condition attributes are refused before mutation.
+`ConnectionConstraint` supplies `PointOnRelatingElement`,
+optional `PointOnRelatedElement`, and `EccentricityInX/Y/Z` in native model units;
+it emits `IfcConnectionPointEccentricity` and `IfcRelConnectsWithEccentricity`.
+The relationship owns these fresh resources. In IFC2X3,
+`bim.store.connectStructuralElement(modelId, RelatingElement, RelatedStructuralMember)`
+creates the physical-to-analytical link; other schemas refuse it.
+
+Point reactions accept `AppliedLoad.Type` of `IfcStructuralLoadSingleForceWarping`
+(with `WarpingMoment`) or `IfcStructuralLoadSingleDisplacementDistortion`
+(with `Distortion`), alongside their inherited components in native model units.
+IFC2X3 linear and planar action builders accept `VaryingAppliedLoadLocation`
+(an existing `IfcShapeAspect` id) and `SubsequentAppliedLoads` (existing load ids).
+Linear actions require at least one subsequent load; planar actions require two.
+Their SDK methods forward these options unchanged. IFC4+ refuses these attributes.
+
+In IFC4 and IFC4X3, `bim.store.addStructuralLoad(modelId, params)` authors reusable
+resources. `Type: 'IfcStructuralLoadConfiguration'` takes nonempty `Values` (existing
+load/result ids), and optional `Locations` (one or two native length coordinates per
+value). `Type: 'IfcSurfaceReinforcementArea'` takes `SurfaceReinforcement1/2`
+(two or three nonnegative native length values) and/or nonnegative `ShearReinforcement`.
+`bim.store.addStructuralCurveAction(modelId, params)` accepts an `AppliedLoad` id,
+including a configuration, and an optional `PredefinedType` such as `LINEAR`.
+The direct equivalents are `addStructuralLoadToStore` and
+`addStructuralCurveActionToStore`. References supplied to these builders are borrowed.
+
+
+Varying action station aspects must contain one shape representation per load,
+including the initial `AppliedLoad`. IFC2X3 varying surfaces require the initial
+`Thickness` as well as their subsequent thicknesses. Configuration `Locations`
+must be unique. Curve actions enforce the distribution's sample shape: `LINEAR`
+uses two samples, `POLYGONAL` at least three, and `DISCRETE` at least two;
+every curve-action configuration uses matching, ascending one-dimensional locations
+and a single load type, including omitted, `NOTDEFINED`, or `USERDEFINED` distributions.
+Curve actions accept linear-force and temperature loads; point-force and
+point-displacement samples require `DISCRETE` configurations. Planar-force and
+reinforcement resources cannot be used as curve loads. `CONST`, `SINUS`, and `PARABOLA` accept
+individual loads rather than configurations.
+
+For direct action builders borrowing imported configurations or station aspects,
+or the varying surface builder copying an imported thickness aspect,
+pass the parsed source store as the optional fourth argument so validation reads
+source attributes and pending edits together. SDK methods provide it automatically.

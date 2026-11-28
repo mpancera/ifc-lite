@@ -2,36 +2,63 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import { sectionExclusions, withSectionExclusions } from './section-exclusions.js';
 /**
  * WebGPU render pipeline setup
  */
 
 import { WebGPUDevice } from './device.js';
+import { OpaqueVisibilityPass } from './opaque-visibility-pass.js';
 import { mainShaderSource } from './shaders/main.wgsl.js';
+import { ghostShaderSource } from './shaders/ghost.wgsl.js';
+import { INSTANCED_VERTEX_BUFFERS, MESH_VERTEX_BUFFERS, QUANTIZED_VERTEX_BUFFERS, TEXTURED_HIGHLIGHT_VERTEX_BUFFERS } from './instanced-vertex-layout.js';
+import { OpaqueDrawVariants, type OpaqueDrawKind, type OpaqueDrawMode } from './opaque-draw-variants.js';
+import { opaqueFastShaderSource } from './shaders/main-opaque-fast.wgsl.js';
 import { texturedShaderSource } from './shaders/textured.wgsl.js';
 import { packClipBox } from './clip-box.js';
+import { MESH_FLAGS_BYTE_OFFSET, MESH_UNIFORM_BYTES, MESH_UNIFORM_FLOATS } from './mesh-rte-uniforms.js';
+import { packMeshMaterial } from './mesh-material.js';
 import {
     ENVIRONMENT_UNIFORM_SIZE,
     packEnvironmentUniforms,
     resolveEnvironment,
     type LightingEnvironment,
 } from './environment.js';
+import { SelectionColorUniform } from './overlay-theme-uniforms.js';
+
+/**
+ * Bytes of the sun shadow uniform (#2670): lightViewProj mat4 (64) + two vec4
+ * param rows (32). Row 1 = (texelSize, enabled, normalBias, pcfRadius); row 2 =
+ * (depthBias, _, _, _). Kept in lockstep with the WGSL `Shadow` struct.
+ */
+const SHADOW_UNIFORM_SIZE = 96;
 
 export class RenderPipeline {
+    readonly visibility: OpaqueVisibilityPass;
+    /** Discard-free / no-object-id twins of the opaque pipelines (opaque-draw-variants.ts). */
+    readonly opaqueVariants: OpaqueDrawVariants;
     private device: GPUDevice;
     private webgpuDevice: WebGPUDevice;
     private pipeline: GPURenderPipeline;
     private instancedPipeline!: GPURenderPipeline;  // GPU-instancing: template (slot 0) + per-instance buffer (slot 1)
     private instancedTransparentPipeline: GPURenderPipeline | null = null;  // instanced pipeline with alpha blend (lens/x-ray/compare overlays); lazily built, null if unbuilt/rejected
     private makeInstancedTransparentPipeline: (() => GPURenderPipeline) | null = null;  // deferred factory (see constructor)
-    private makeQuantizedPipelineAsync: ((kind: 'opaque' | 'transparent' | 'overlay') => Promise<GPURenderPipeline>) | null = null;
-    private quantizedPipelines: Partial<Record<'opaque' | 'transparent' | 'overlay', GPURenderPipeline>> = {};
+    private makeQuantizedPipelineAsync: ((kind: 'opaque' | 'transparent' | 'selection') => Promise<GPURenderPipeline>) | null = null;
+    private quantizedPipelines: Partial<Record<'opaque' | 'transparent' | 'overlay' | 'selection', GPURenderPipeline>> = {};
+    private quantizedSelectionBuilding = false;
+    private makeGhostPipelineAsync: ((quantized: boolean) => Promise<GPURenderPipeline>) | null = null;
+    private readonly ghostPipelines = new Map<boolean, GPURenderPipeline | null>();
     private instancedTransparentPipelineTried = false;  // built-or-failed once; don't retry a rejecting backend every frame
+    private texturedSelectionPipeline: GPURenderPipeline;
     private selectionPipeline: GPURenderPipeline;  // Pipeline for selected meshes (renders on top)
     private transparentPipeline: GPURenderPipeline;  // Pipeline for transparent meshes with alpha blending
-    private overlayPipeline: GPURenderPipeline;  // Pipeline for color overlays (lens) - renders at exact same depth
+    private overlayPipeline: GPURenderPipeline | null = null;  // deprecated equal-depth overlay (#6076); built only if getOverlayPipeline() is called
+    private makeOverlayPipeline!: () => GPURenderPipeline;
+    private readonly emptyEntityColorTable: GPUBuffer;  // header-only table bound until a scene writes one (#6076)
+    private entityColorTableBuffer: GPUBuffer;
     private texturedPipeline: GPURenderPipeline;  // Pipeline for textured meshes (#961): UV lane + albedo texture/sampler
     private texturedBindGroupLayout: GPUBindGroupLayout;  // group(0): uniform + texture + sampler
+    private streamBaseDescriptor!: GPURenderPipelineDescriptor; // opaque base the draw-stream pipelines derive from
     private depthTexture: GPUTexture;
     private depthTextureView: GPUTextureView;
     // depth-only view of depthTexture for sampling as texture_depth_2d in
@@ -62,6 +89,18 @@ export class RenderPipeline {
     private environmentBindGroup: GPUBindGroup;
     private environmentBindGroupLayout: GPUBindGroupLayout;
     private environmentScratch = new Float32Array(ENVIRONMENT_UNIFORM_SIZE / 4);
+    // Sun shadow map (#2670, Phase 2b): the depth map lives in ShadowPass; the
+    // environment bind group (group 1) carries a view of it at binding 1, a
+    // comparison sampler at binding 2, and the light matrix + params at binding
+    // 3 — so EVERY main-family pipeline (all already bind group 1) can sample
+    // shadows with no pipeline-layout change. A 1×1 dummy depth texture is
+    // bound while shadows are off (the uniform's `enabled` flag gates sampling).
+    private shadowSampler: GPUSampler;
+    private shadowUniformBuffer: GPUBuffer;
+    private dummyShadowTexture: GPUTexture;
+    private dummyShadowView: GPUTextureView;
+    private currentShadowView: GPUTextureView;
+    readonly selectionColorUniform: SelectionColorUniform; // (#5484) — Renderer.setOverlayTheme writes it via .update()
     private currentWidth: number;
     private currentHeight: number;
 
@@ -76,6 +115,7 @@ export class RenderPipeline {
         // 4x MSAA provides good anti-aliasing for thin geometry
         const maxSampleCount = (this.device.limits as unknown as Record<string, number>)?.maxSampleCount ?? 4;
         this.sampleCount = Math.min(4, maxSampleCount);
+        this.visibility = new OpaqueVisibilityPass(this.device, this.sampleCount, () => sectionExclusions(this.device).bindGroup);
 
         // Create depth texture with MSAA support
         this.depthTexture = this.device.createTexture({
@@ -106,11 +146,8 @@ export class RenderPipeline {
             this.multisampleTextureView = this.multisampleTexture.createView();
         }
 
-        // Create uniform buffer for camera matrices, PBR material, section plane + clip box
-        // Layout: viewProj (64 bytes) + model (64 bytes) + baseColor (16 bytes) + metallicRoughness (8 bytes) +
-        //         sectionPlane (16 bytes: vec3 normal + float distance) + flags (16 bytes) +
-        //         clipBoxMin (16 bytes) + clipBoxMax (16 bytes) = 224 bytes
-        // WebGPU requires uniform buffers to be aligned to 16 bytes
+        // Per-draw mesh uniform: camera, model, colour, material, section/clip, quant params,
+        // the appended RTE frame and overrideParams (MESH_UNIFORM_OFFSET, mesh-rte-uniforms.ts).
         this.uniformBuffer = this.device.createBuffer({
             size: this.getUniformBufferSize(), // keep in lockstep with the WGSL Uniforms struct
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -129,6 +166,8 @@ export class RenderPipeline {
 
         // Lighting environment at group(1) — written once per frame from
         // RenderOptions.environment, initialized to the legacy default look.
+        // Bindings 1..3 carry the sun shadow map (#2670): depth texture,
+        // comparison sampler, and the light matrix + params uniform.
         this.environmentBindGroupLayout = this.device.createBindGroupLayout({
             label: 'environment-bgl',
             entries: [
@@ -137,6 +176,19 @@ export class RenderPipeline {
                     visibility: GPUShaderStage.FRAGMENT,
                     buffer: { type: 'uniform' },
                 },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'depth' },
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    sampler: { type: 'comparison' },
+                },
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }, // selectionColorUniform (#5484)
+                { binding: 5, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } }, // entity colour table (#6076); vertex: painted depth nudge
             ],
         });
         this.environmentBuffer = this.device.createBuffer({
@@ -144,20 +196,42 @@ export class RenderPipeline {
             size: ENVIRONMENT_UNIFORM_SIZE,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
-        this.environmentBindGroup = this.device.createBindGroup({
-            layout: this.environmentBindGroupLayout,
-            entries: [{ binding: 0, resource: { buffer: this.environmentBuffer } }],
+        this.selectionColorUniform = new SelectionColorUniform(this.device);
+        // Shadow-sampling resources. The comparison direction mirrors the
+        // reverse-Z depth pass (a receiver is lit when its depth is ≥ the stored
+        // closest-occluder depth). The dummy 1×1 depth texture is bound whenever
+        // no shadow map is active.
+        this.shadowSampler = this.device.createSampler({
+            label: 'shadow-cmp-sampler',
+            compare: 'greater-equal',
+            magFilter: 'linear',
+            minFilter: 'linear',
         });
+        this.shadowUniformBuffer = this.device.createBuffer({
+            label: 'shadow-uniforms',
+            size: SHADOW_UNIFORM_SIZE,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this.dummyShadowTexture = this.device.createTexture({
+            label: 'shadow-dummy-depth',
+            size: { width: 1, height: 1 },
+            format: 'depth32float',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        });
+        this.dummyShadowView = this.dummyShadowTexture.createView();
+        this.currentShadowView = this.dummyShadowView;
+        this.emptyEntityColorTable = this.device.createBuffer({ label: 'entity-color-table-empty', size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        this.entityColorTableBuffer = this.emptyEntityColorTable;
+        sectionExclusions(this.device).retain();
+        this.environmentBindGroup = this.buildEnvironmentBindGroup();
         this.updateEnvironment();
 
-        // Create shader module with PBR lighting, section plane clipping, and selection outline
         const shaderModule = this.device.createShaderModule({
             code: mainShaderSource,
         });
 
-        // Create explicit pipeline layout (shared between main and selection pipelines)
         const pipelineLayout = this.device.createPipelineLayout({
-            bindGroupLayouts: [this.bindGroupLayout, this.environmentBindGroupLayout],
+            bindGroupLayouts: withSectionExclusions(this.device, [this.bindGroupLayout, this.environmentBindGroupLayout]),
         });
 
         // Create render pipeline descriptor
@@ -166,16 +240,7 @@ export class RenderPipeline {
             vertex: {
                 module: shaderModule,
                 entryPoint: 'vs_main',
-                buffers: [
-                    {
-                        arrayStride: 28, // 7 floats * 4 bytes
-                        attributes: [
-                            { shaderLocation: 0, offset: 0, format: 'float32x3' }, // position
-                            { shaderLocation: 1, offset: 12, format: 'float32x3' }, // normal
-                            { shaderLocation: 2, offset: 24, format: 'uint32' }, // expressId
-                        ],
-                    },
-                ],
+                buffers: MESH_VERTEX_BUFFERS, // position, normal, expressId (28 bytes)
             },
             fragment: {
                 module: shaderModule,
@@ -201,45 +266,21 @@ export class RenderPipeline {
             },
         } as GPURenderPipelineDescriptor;
 
-        this.pipeline = this.device.createRenderPipeline(pipelineDescriptor);
+        this.pipeline = this.visibility.create(pipelineDescriptor);
+        this.streamBaseDescriptor = pipelineDescriptor;
 
         // GPU-instancing pipeline: same fragment/targets/depth/MSAA as the opaque
         // pipeline, but vs_instanced + a SECOND vertex buffer (slot 1, stepMode
-        // 'instance') carrying the per-occurrence mat4 (4 column vec4s) + entityId
-        // + rgba. Slot 0 stays the template's 28-byte vertex (pos+norm+entityId);
-        // the per-vertex entityId there is unused (vs_instanced reads the
-        // per-instance id) but kept so slot 0 matches the flat layout exactly.
-        // Shared vertex stage for both instanced pipelines (opaque + transparent):
-        // template vertex (slot 0) + per-occurrence buffer (slot 1).
+        // 'instance') carrying the per-occurrence record. The layout is shared
+        // with the selection mask (instanced-vertex-layout.ts, #5745).
+        // Shared vertex stage for both instanced pipelines (opaque + transparent).
         const instancedVertex: GPUVertexState = {
             module: shaderModule,
             entryPoint: 'vs_instanced',
-            buffers: [
-                {
-                    arrayStride: 28,
-                    attributes: [
-                        { shaderLocation: 0, offset: 0, format: 'float32x3' }, // position
-                        { shaderLocation: 1, offset: 12, format: 'float32x3' }, // normal
-                        { shaderLocation: 2, offset: 24, format: 'uint32' }, // entityId (unused here)
-                    ],
-                },
-                {
-                    arrayStride: 88, // mat4(64) + entityId(4) + rgba(16) + flags(4) — INSTANCE_STRIDE_BYTES
-                    stepMode: 'instance',
-                    attributes: [
-                        { shaderLocation: 3, offset: 0, format: 'float32x4' }, // instMat col0
-                        { shaderLocation: 4, offset: 16, format: 'float32x4' }, // col1
-                        { shaderLocation: 5, offset: 32, format: 'float32x4' }, // col2
-                        { shaderLocation: 6, offset: 48, format: 'float32x4' }, // col3
-                        { shaderLocation: 7, offset: 64, format: 'uint32' }, // entityId
-                        { shaderLocation: 8, offset: 68, format: 'float32x4' }, // rgba
-                        { shaderLocation: 9, offset: 84, format: 'uint32' }, // flags (bit 0 = selected, bit 1 = hidden)
-                    ],
-                },
-            ],
+            buffers: INSTANCED_VERTEX_BUFFERS,
         };
 
-        this.instancedPipeline = this.device.createRenderPipeline({
+        this.instancedPipeline = this.visibility.create({
             ...pipelineDescriptor,
             vertex: instancedVertex,
         } as GPURenderPipelineDescriptor);
@@ -253,16 +294,7 @@ export class RenderPipeline {
             vertex: {
                 module: shaderModule,
                 entryPoint: 'vs_main',
-                buffers: [
-                    {
-                        arrayStride: 28,
-                        attributes: [
-                            { shaderLocation: 0, offset: 0, format: 'float32x3' },
-                            { shaderLocation: 1, offset: 12, format: 'float32x3' },
-                            { shaderLocation: 2, offset: 24, format: 'uint32' },
-                        ],
-                    },
-                ],
+                buffers: MESH_VERTEX_BUFFERS,
             },
             fragment: {
                 module: shaderModule,
@@ -277,9 +309,8 @@ export class RenderPipeline {
                 format: this.depthFormat,
                 depthWriteEnabled: false,  // Don't overwrite depth - selected objects render on top of existing depth
                 depthCompare: 'greater-equal',  // Allow rendering at same depth, but still respect objects in front
-                // No depth bias: the highlight mesh's VBO is built to be
-                // BIT-IDENTICAL to how its source surface renders (same shared
-                // origin + same f32 relativization — see createMeshFromData), so
+                // No extra highlight bias. Its canonical upload matches the base.
+                // Same shared origin and f32 reconstruction as its base, so
                 // it sits exactly coincident and 'greater-equal' draws it on top
                 // without a bias. A bias here would x-ray the highlight through
                 // neighbouring geometry and spike at grazing angles.
@@ -292,7 +323,9 @@ export class RenderPipeline {
             },
         } as GPURenderPipelineDescriptor;
 
-        this.selectionPipeline = this.device.createRenderPipeline(selectionPipelineDescriptor);
+        this.selectionPipeline = this.visibility.create(selectionPipelineDescriptor);
+        this.texturedSelectionPipeline = this.visibility.create({ ...selectionPipelineDescriptor,
+            vertex: { ...selectionPipelineDescriptor.vertex, buffers: TEXTURED_HIGHLIGHT_VERTEX_BUFFERS } });
 
         // Create transparent pipeline descriptor (same shader, but with alpha blending)
         const transparentPipelineDescriptor: GPURenderPipelineDescriptor = {
@@ -300,16 +333,7 @@ export class RenderPipeline {
             vertex: {
                 module: shaderModule,
                 entryPoint: 'vs_main',
-                buffers: [
-                    {
-                        arrayStride: 28,
-                        attributes: [
-                            { shaderLocation: 0, offset: 0, format: 'float32x3' },
-                            { shaderLocation: 1, offset: 12, format: 'float32x3' },
-                            { shaderLocation: 2, offset: 24, format: 'uint32' },
-                        ],
-                    },
-                ],
+                buffers: MESH_VERTEX_BUFFERS,
             },
             fragment: {
                 module: shaderModule,
@@ -343,7 +367,7 @@ export class RenderPipeline {
             },
         } as GPURenderPipelineDescriptor;
 
-        this.transparentPipeline = this.device.createRenderPipeline(transparentPipelineDescriptor);
+        this.transparentPipeline = this.visibility.create(transparentPipelineDescriptor);
 
         // Transparent instanced pipeline: the transparent descriptor (src-alpha blend,
         // no depth write) but with the instanced vertex stage. Drives the second
@@ -358,36 +382,19 @@ export class RenderPipeline {
         // real WebGPU builds it on demand when an overlay first needs it. A creation
         // failure leaves it null and the renderer skips the transparent instanced pass.
         this.makeInstancedTransparentPipeline = () =>
-            this.device.createRenderPipeline({
+            this.visibility.create({
                 ...transparentPipelineDescriptor,
                 vertex: instancedVertexStage,
             } as GPURenderPipelineDescriptor);
 
-        // Create overlay pipeline for lens color overrides
-        // Uses depthCompare 'equal' so it ONLY renders where original geometry already wrote depth.
-        // This prevents hidden entities from "leaking through" overlay batches.
-        // depthWriteEnabled: false — don't disturb the depth buffer for subsequent passes.
-        //
-        // Src-alpha blending on the COLOR target only — the second target is the
-        // objectId buffer used for GPU picking and must stay unblended so low-alpha
-        // ghosts don't corrupt picks. With srcFactor=src-alpha, alpha=1.0 callers
-        // (lens, active-phase paints) still composite fully opaque, so this is
-        // backward-compatible for every caller that doesn't set alpha < 1.
+        // Equal-depth overlay pipeline: unused since colour overrides shade in the base pass
+        // (#6076); built only on request, for the deprecated public getOverlayPipeline().
         const overlayPipelineDescriptor: GPURenderPipelineDescriptor = {
             layout: pipelineLayout,
             vertex: {
                 module: shaderModule,
                 entryPoint: 'vs_main',
-                buffers: [
-                    {
-                        arrayStride: 28,
-                        attributes: [
-                            { shaderLocation: 0, offset: 0, format: 'float32x3' },
-                            { shaderLocation: 1, offset: 12, format: 'float32x3' },
-                            { shaderLocation: 2, offset: 24, format: 'uint32' },
-                        ],
-                    },
-                ],
+                buffers: MESH_VERTEX_BUFFERS,
             },
             fragment: {
                 module: shaderModule,
@@ -417,7 +424,7 @@ export class RenderPipeline {
             },
         } as GPURenderPipelineDescriptor;
 
-        this.overlayPipeline = this.device.createRenderPipeline(overlayPipelineDescriptor);
+        this.makeOverlayPipeline = () => this.visibility.create(overlayPipelineDescriptor);
 
         // ── Quantized-vertex pipeline variants (issue #1682 phase 6) ──
         // Same fragment/blend/depth state as their f32 bases, but the
@@ -425,26 +432,23 @@ export class RenderPipeline {
         // Created LAZILY on first use for the same SwiftShader-init
         // fragility reason as the instanced-transparent pipeline above —
         // a knob-off load never builds them.
-        const quantizedVertex: GPUVertexState = {
-            module: shaderModule,
-            entryPoint: 'vs_main_quantized',
-            buffers: [
-                {
-                    arrayStride: 12,
-                    attributes: [
-                        { shaderLocation: 0, offset: 0, format: 'uint16x4' }, // qpos.xyz + packed oct
-                        { shaderLocation: 2, offset: 8, format: 'uint32' },   // entityId lane
-                    ],
-                },
-            ],
-        };
+        const quantizedVertex: GPUVertexState = { module: shaderModule, entryPoint: 'vs_main_quantized', buffers: QUANTIZED_VERTEX_BUFFERS };
+        this.opaqueVariants = new OpaqueDrawVariants(this.device, opaqueFastShaderSource, {
+            flat: pipelineDescriptor,
+            quantized: { ...pipelineDescriptor, vertex: quantizedVertex },
+            instanced: { ...pipelineDescriptor, vertex: instancedVertex },
+        });
         this.makeQuantizedPipelineAsync = (kind) => {
-            const base =
-                kind === 'opaque' ? pipelineDescriptor :
-                kind === 'transparent' ? transparentPipelineDescriptor :
-                overlayPipelineDescriptor;
-            return this.device.createRenderPipelineAsync({ ...base, vertex: quantizedVertex });
+            const base = kind === 'opaque' ? pipelineDescriptor : kind === 'selection' ? selectionPipelineDescriptor : transparentPipelineDescriptor;
+            return this.visibility.createAsync({ ...base, vertex: quantizedVertex });
         };
+        // X-Ray ghosts: the transparent descriptor with the ghost fragment stage
+        // (ghost.wgsl.ts). Built on first use, like the instanced transparent pipeline.
+        this.makeGhostPipelineAsync = (quantized) => this.visibility.createAsync({
+            ...transparentPipelineDescriptor,
+            ...(quantized && { vertex: quantizedVertex }),
+            fragment: { ...transparentPipelineDescriptor.fragment!, module: this.device.createShaderModule({ code: ghostShaderSource }) },
+        }, ghostShaderSource);
 
         // ── Textured pipeline (#961) ──
         // A separate pipeline for meshes carrying an IFC surface texture. It
@@ -470,10 +474,10 @@ export class RenderPipeline {
             label: 'textured-shader',
             code: texturedShaderSource,
         });
-        this.texturedPipeline = this.device.createRenderPipeline({
+        this.texturedPipeline = this.visibility.create({
             label: 'textured-pipeline',
             layout: this.device.createPipelineLayout({
-                bindGroupLayouts: [this.texturedBindGroupLayout, this.environmentBindGroupLayout],
+                bindGroupLayouts: withSectionExclusions(this.device, [this.texturedBindGroupLayout, this.environmentBindGroupLayout]),
             }),
             vertex: {
                 module: texturedModule,
@@ -486,11 +490,11 @@ export class RenderPipeline {
                             { shaderLocation: 0, offset: 0, format: 'float32x3' },
                             { shaderLocation: 1, offset: 12, format: 'float32x3' },
                             { shaderLocation: 2, offset: 24, format: 'uint32' },
-                            // uv at @location(10): main.wgsl's vs_instanced/InstanceInput
-                            // occupy vertex-input @location 3..9 in this derived module,
+                            // uv at @location(12): main.wgsl's vs_instanced/InstanceInput
+                            // occupy vertex-input @location 3..11 in this derived module,
                             // so the textured uv lane moves clear of them (see
                             // textured.wgsl.ts). Byte offset (28) is unchanged.
-                            { shaderLocation: 10, offset: 28, format: 'float32x2' },
+                            { shaderLocation: 12, offset: 28, format: 'float32x2' },
                         ],
                     },
                 ],
@@ -507,8 +511,7 @@ export class RenderPipeline {
                 depthCompare: 'greater', // Reverse-Z, matches the opaque pipeline
             },
             multisample: { count: this.sampleCount },
-        } as GPURenderPipelineDescriptor);
-
+        } as GPURenderPipelineDescriptor, texturedShaderSource);
         // Create bind group using the explicit bind group layout
         this.bindGroup = this.device.createBindGroup({
             layout: this.bindGroupLayout,
@@ -535,9 +538,9 @@ export class RenderPipeline {
     ): void {
         // Create buffer with proper alignment:
         // viewProj (16) + model (16) + baseColor (4) + metallicRoughness (2) + padding (2)
-        // + sectionPlane (4) + flags (4 u32) + clipBoxMin (4) + clipBoxMax (4) = 56 floats = 224 bytes
-        const buffer = new Float32Array(56);
-        const flagBuffer = new Uint32Array(buffer.buffer, 176, 4); // flags at byte 176
+        // + sectionPlane/flags/clip (16) + quant(4) + RTE frame/origin/camera(32) + overrideParams(4) = 96 floats.
+        const buffer = new Float32Array(MESH_UNIFORM_FLOATS);
+        const flagBuffer = new Uint32Array(buffer.buffer, MESH_FLAGS_BYTE_OFFSET, 4); // flags at byte 176
 
         // viewProj: mat4x4<f32> at offset 0 (16 floats)
         buffer.set(viewProj, 0);
@@ -553,13 +556,8 @@ export class RenderPipeline {
             buffer.set([1.0, 1.0, 1.0, 1.0], 32);
         }
 
-        // metallicRoughness: vec2<f32> at offset 36 (2 floats)
-        const metallic = material?.metallic ?? 0.0;
-        const roughness = material?.roughness ?? 0.6;
-        buffer[36] = metallic;
-        buffer[37] = roughness;
-
-        // padding at offset 38-39 (2 floats)
+        // metallicRoughness: vec2<f32> at offset 36 (2 floats) + padding
+        packMeshMaterial(buffer, color?.[3], material);
 
         // sectionPlane: vec4<f32> at offset 40 (4 floats - normal xyz + distance w)
         if (sectionPlane) {
@@ -580,47 +578,38 @@ export class RenderPipeline {
             (sectionPlane?.enabled ? 1 : 0) |
             (sectionPlane?.flipped ? 2 : 0) |
             clipBit;
-        flagBuffer[2] = 0;                             // reserved (edgeEnabled written by Renderer)
-        flagBuffer[3] = 0;                             // reserved (edgeIntensity written by Renderer)
+        flagBuffer[2] = 0;                             // unused since #5746, kept for layout
+        flagBuffer[3] = 0;                             // unused since #5746, kept for layout
 
         // Write the buffer
         this.device.queue.writeBuffer(this.uniformBuffer, 0, buffer);
     }
 
-    /**
-     * Write a raw 56-float (224-byte) uniform block into the SHARED uniform
-     * buffer, whose bind group is `getBindGroup()`. Used by the GPU-instancing
-     * pass, which reuses the frame's viewProj + section + flags from the
-     * renderer's prebuilt template (model + baseColor are unused — vs_instanced
-     * takes the transform + colour per-occurrence from the instance buffer).
-     */
-    /**
-     * Create-and-VALIDATE the quantized pipeline variants. Uses
-     * createRenderPipelineAsync so WebGPU's asynchronous validation completes
-     * before anything is cached — a sync createRenderPipeline can hand back a
-     * pipeline whose validation later fails on the device, and caching that
-     * would make every quantized draw error. This is the ONLY creator; the
-     * sync getter below reads the cache. Returns whether all variants exist.
-     */
+    /** Validate BOTH variants before admitting quantized batches. A synchronous
+     * createRenderPipeline result is not proof that GPU validation succeeded.
+     * #7655: an async completion belongs only to this live device lifetime. */
     async ensureQuantizedPipelines(): Promise<boolean> {
         const factory = this.makeQuantizedPipelineAsync;
-        if (!factory) return false;
-        const kinds = ['opaque', 'transparent', 'overlay'] as const;
+        if (this.destroyed || !factory) return false;
+        const kinds = ['opaque', 'transparent'] as const;
         try {
             for (const kind of kinds) {
                 if (!this.quantizedPipelines[kind]) {
-                    this.quantizedPipelines[kind] = await factory(kind);
+                    const pipeline = await factory(kind);
+                    if (this.destroyed) return false;
+                    this.quantizedPipelines[kind] = pipeline;
                 }
             }
             return true;
         } catch (err) {
+            if (this.destroyed) return false;
             console.warn('[Pipeline] quantized pipeline validation failed; staying on f32 vertices:', err);
             this.makeQuantizedPipelineAsync = null;
             return false;
         }
     }
 
-    /** Cache-only reader for the quantized variants (see ensureQuantizedPipelines). */
+    /** Cache-only reader for the quantized variants (see ensureQuantizedPipelines); `'overlay'` is never built since #6076. */
     getQuantizedPipelineVariant(kind: 'opaque' | 'transparent' | 'overlay'): GPURenderPipeline | null {
         return this.quantizedPipelines[kind] ?? null;
     }
@@ -632,10 +621,10 @@ export class RenderPipeline {
         // pass, bit 3 = transparent instanced sub-pass (the shader routes per-instance
         // opacity off these).
         if (extraFlagsX !== 0) {
-            const baseFlagsX = new Uint32Array(data.buffer, data.byteOffset + 176, 1)[0];
+            const baseFlagsX = new Uint32Array(data.buffer, data.byteOffset + MESH_FLAGS_BYTE_OFFSET, 1)[0];
             this.device.queue.writeBuffer(
                 this.uniformBuffer,
-                176,
+                MESH_FLAGS_BYTE_OFFSET,
                 new Uint32Array([baseFlagsX | extraFlagsX]),
             );
         }
@@ -650,9 +639,53 @@ export class RenderPipeline {
         this.device.queue.writeBuffer(this.environmentBuffer, 0, this.environmentScratch);
     }
 
+    /** Base opaque descriptor + group(1) layout for the draw-stream pipelines (draw-stream.ts). */
+    getStreamBase(): { descriptor: GPURenderPipelineDescriptor; environmentLayout: GPUBindGroupLayout; colorFormat: GPUTextureFormat; depthFormat: GPUTextureFormat; sampleCount: number } { return { descriptor: this.streamBaseDescriptor, environmentLayout: this.environmentBindGroupLayout, colorFormat: this.colorFormat, depthFormat: this.depthFormat, sampleCount: this.sampleCount }; }
     /** Lighting-environment bind group — set at group(1) once per render pass. */
     getEnvironmentBindGroup(): GPUBindGroup {
         return this.environmentBindGroup;
+    }
+
+    /** (Re)build the group(1) bind group over the current shadow depth view. */
+    private buildEnvironmentBindGroup(): GPUBindGroup {
+        return this.device.createBindGroup({
+            label: 'environment-bg',
+            layout: this.environmentBindGroupLayout,
+            entries: [
+                { binding: 0, resource: { buffer: this.environmentBuffer } },
+                { binding: 1, resource: this.currentShadowView },
+                { binding: 2, resource: this.shadowSampler },
+                { binding: 3, resource: { buffer: this.shadowUniformBuffer } },
+                { binding: 4, resource: { buffer: this.selectionColorUniform.buffer } },
+                { binding: 5, resource: { buffer: this.entityColorTableBuffer } },
+            ],
+        });
+    }
+
+    /** Bind the scene's entity colour table (#6076); null binds the empty one. Rebuilds only on change. */
+    setEntityColorTableBuffer(buffer: GPUBuffer | null): void {
+        const next = buffer ?? this.emptyEntityColorTable;
+        if (next === this.entityColorTableBuffer) return;
+        this.entityColorTableBuffer = next;
+        this.environmentBindGroup = this.buildEnvironmentBindGroup();
+    }
+
+    /**
+     * Point the environment bind group at the active shadow depth map (#2670).
+     * Pass `null` to fall back to the 1×1 dummy (shadows off). Rebuilds the bind
+     * group only when the view actually changes, so a steady enabled/disabled
+     * state costs nothing per frame.
+     */
+    setShadowDepthView(view: GPUTextureView | null): void {
+        const next = view ?? this.dummyShadowView;
+        if (next === this.currentShadowView) return;
+        this.currentShadowView = next;
+        this.environmentBindGroup = this.buildEnvironmentBindGroup();
+    }
+
+    /** Write the sun shadow uniform (light matrix + params). 96 bytes. */
+    updateShadowUniform(data: Float32Array): void {
+        this.device.queue.writeBuffer(this.shadowUniformBuffer, 0, data);
     }
 
     /**
@@ -718,6 +751,12 @@ export class RenderPipeline {
         return this.pipeline;
     }
 
+    /** An opaque draw of `kind` under this frame's `mode`: its ready twin (opaque-draw-variants.ts), else the base pipeline. */
+    opaquePipeline(kind: OpaqueDrawKind, mode: OpaqueDrawMode): GPURenderPipeline {
+        const base = kind === 'instanced' ? this.instancedPipeline : kind === 'quantized' ? this.quantizedPipelines.opaque ?? this.pipeline : this.pipeline;
+        return this.opaqueVariants.get(kind, mode) ?? base;
+    }
+
     /** GPU-instancing pipeline (template vertex buffer at slot 0 + per-instance buffer at slot 1). */
     getInstancedPipeline(): GPURenderPipeline {
         return this.instancedPipeline;
@@ -755,16 +794,47 @@ export class RenderPipeline {
         return this.instancedTransparentPipeline;
     }
 
+    getTexturedSelectionPipeline(): GPURenderPipeline { return this.texturedSelectionPipeline; }
+
     getSelectionPipeline(): GPURenderPipeline {
         return this.selectionPipeline;
+    }
+
+    /** The highlight draw of a colour batch (#10264 S3). The quantized one is built on first ask, outside the admission probe; null until then. */
+    getBatchSelectionPipeline(quantized: boolean, onReady?: () => void): GPURenderPipeline | null {
+        if (!quantized) return this.selectionPipeline;
+        const factory = this.makeQuantizedPipelineAsync;
+        if (!this.quantizedPipelines.selection && !this.quantizedSelectionBuilding && factory) {
+            this.quantizedSelectionBuilding = true;
+            factory('selection').then((pipeline) => { if (!this.destroyed) { this.quantizedPipelines.selection = pipeline; onReady?.(); } },
+                (err) => console.warn('[Pipeline] quantized selection pipeline build failed; quantized batches keep highlight copies:', err));
+        }
+        return this.quantizedPipelines.selection ?? null;
     }
 
     getTransparentPipeline(): GPURenderPipeline {
         return this.transparentPipeline;
     }
 
+    /**
+     * The X-Ray ghost pipeline, or null until it is built: the first call starts
+     * the async build and `onReady` runs when it lands. A failed build leaves
+     * ghosts on the transparent pipeline.
+     */
+    getGhostPipeline(quantized: boolean, onReady: () => void): GPURenderPipeline | null {
+        if (!this.ghostPipelines.has(quantized)) {
+            this.ghostPipelines.set(quantized, null);
+            this.makeGhostPipelineAsync?.(quantized).then(
+                (pipeline) => { this.ghostPipelines.set(quantized, pipeline); onReady(); },
+                (err) => console.warn('[Pipeline] ghost pipeline build failed; X-Ray ghosts stay on the transparent pipeline:', err),
+            );
+        }
+        return this.ghostPipelines.get(quantized) ?? null;
+    }
+
+    /** @deprecated Unused since #6076 (overrides shade from the entity colour table). TODO(remove-by: next major, #6076) */
     getOverlayPipeline(): GPURenderPipeline {
-        return this.overlayPipeline;
+        return (this.overlayPipeline ??= this.makeOverlayPipeline());
     }
 
     /** Textured-mesh pipeline (#961). */
@@ -791,6 +861,10 @@ export class RenderPipeline {
         });
     }
 
+    getDepthTexture(): GPUTexture {
+        return this.depthTexture;
+    }
+
     getDepthTextureView(): GPUTextureView {
         return this.depthTextureView;
     }
@@ -811,6 +885,11 @@ export class RenderPipeline {
 
     getObjectIdTextureView(): GPUTextureView {
         return this.objectIdTextureView;
+    }
+
+    /** Screen-sized attachments this pipeline owns, for render-target telemetry. */
+    renderTargets(): (GPUTexture | null)[] {
+        return [this.depthTexture, this.objectIdTexture, this.multisampleTexture, this.visibility.renderTarget()];
     }
 
     /**
@@ -836,10 +915,10 @@ export class RenderPipeline {
     }
 
     getUniformBufferSize(): number {
-        // 60 floats * 4 bytes: section plane + clip box + quantParams
-        // (issue #1682 phase 6). Must match the WGSL Uniforms struct and the
+        // 96 floats * 4 bytes: legacy material/clip/quant fields plus appended
+        // RTE view-projection, drawable high/low lanes and overrideParams. Must match WGSL and
         // renderer's uniformScratch length.
-        return 240;
+        return MESH_UNIFORM_BYTES;
     }
 
     private destroyed = false;
@@ -850,8 +929,12 @@ export class RenderPipeline {
      * Safe to call multiple times.
      */
     destroy(): void {
+        this.visibility.destroy();
+        this.opaqueVariants.destroy();
         if (this.destroyed) return;
         this.destroyed = true;
+        this.makeQuantizedPipelineAsync = null;
+        this.quantizedPipelines = {};
         this.depthTexture.destroy();
         this.objectIdTexture.destroy();
         this.multisampleTexture?.destroy();
@@ -859,5 +942,10 @@ export class RenderPipeline {
         this.multisampleTextureView = null;
         this.uniformBuffer.destroy();
         this.environmentBuffer.destroy();
+        this.shadowUniformBuffer.destroy();
+        this.selectionColorUniform.destroy();
+        this.dummyShadowTexture.destroy();
+        this.emptyEntityColorTable.destroy();
+        sectionExclusions(this.device).release();
     }
 }

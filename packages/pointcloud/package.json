@@ -1,6 +1,6 @@
 {
   "name": "@ifc-lite/pointcloud",
-  "version": "0.7.0",
+  "version": "0.16.0",
   "description": "Point cloud decoders and types for IFC-Lite",
   "type": "module",
   "main": "./dist/index.js",
@@ -10,21 +10,29 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./ifcx": {
+      "types": "./dist/ifcx.d.ts",
+      "import": "./dist/ifcx.js",
+      "default": "./dist/ifcx.js"
     }
   },
   "scripts": {
-    "build": "pnpm exec tsc && node -e \"const f='dist/streaming/worker-client.js';require('fs').writeFileSync(f,require('fs').readFileSync(f,'utf8').replace(/decode-worker\\.ts/g,'decode-worker.js'))\" && node scripts/build-worker-bundle.mjs",
+    "build": "pnpm exec tsc && node ../../scripts/rewrite-worker-urls.mjs dist && node ../../scripts/verify-dist-worker-urls.mjs dist --scripts-only && node scripts/build-worker-bundle.mjs",
     "typecheck": "node ../../scripts/typecheck-tests.mjs",
     "dev": "pnpm exec tsc --watch",
     "test": "vitest run"
   },
   "dependencies": {
+    "@ifc-lite/geo": "workspace:^",
+    "@ifc-lite/wasm-lifecycle": "workspace:^",
     "laz-perf": "^0.0.7"
   },
   "devDependencies": {
+    "@mergifyio/vitest": "^2026.11.8",
     "esbuild": "^0.28.2",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^5.1.0"
   },
   "license": "MPL-2.0",
   "author": "Louis True",

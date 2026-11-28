@@ -11,11 +11,12 @@
  */
 
 import { EntityNode } from '@ifc-lite/query';
+import { iterateEffectiveEntityIds } from '@ifc-lite/mutations';
 import type { CallToolResult, ContentBlock } from '../protocol/index.js';
 import type { LoadedModel, ToolContext } from '../context.js';
 import { ToolErrorCode, ToolExecutionError } from '../errors.js';
 import { modelAllowed } from '../auth/scope.js';
-import { pendingOverlay } from '../overlay.js';
+import { pendingOverlay } from '@ifc-lite/sdk/headless';
 
 /**
  * Throw PERMISSION_DENIED when the caller's scope carries a model allowlist
@@ -33,7 +34,7 @@ export function assertModelAccess(ctx: ToolContext, model: LoadedModel): LoadedM
 }
 
 /** Model IDs the caller's scope permits — never leak identifiers outside scope. */
-function listAllowedModelIds(ctx: ToolContext): string[] {
+export function listAllowedModelIds(ctx: ToolContext): string[] {
   return ctx.registry.list().filter((m) => modelAllowed(ctx.scope, m.id)).map((m) => m.id);
 }
 
@@ -65,6 +66,28 @@ export function resolveModel(ctx: ToolContext, modelId?: string): LoadedModel {
   const only = ctx.registry.resolve();
   if (!only) throw new ToolExecutionError({ code: ToolErrorCode.MODEL_NOT_FOUND, message: 'No model available.' });
   return assertModelAccess(ctx, only);
+}
+
+/**
+ * An entity "not found" in a model the scan read short may be one of the
+ * records it dropped (an unescaped apostrophe, #7541) rather than one the file
+ * never declared. Say so on the error's `hint` (#7610), where a tool's error
+ * becomes a result: the dispatcher, and `mutation_batch`, which runs its
+ * sub-tools itself. The lookup mirrors resolveModel without its errors, and a
+ * model the caller may not access is never mentioned: a tool can miss an
+ * entity (a BCF topic, say) without resolving any model.
+ */
+export function withScanHint(err: ToolExecutionError, ctx: ToolContext, modelId?: string): ToolExecutionError {
+  if (err.code !== ToolErrorCode.ENTITY_NOT_FOUND || err.hint) return err;
+  const model = modelId ? ctx.registry.get(modelId) : ctx.registry.count() === 1 ? ctx.registry.resolve() : undefined;
+  if (!model?.scanWarnings?.length || !modelAllowed(ctx.scope, model.id)) return err;
+  return new ToolExecutionError({
+    code: err.code,
+    message: err.message,
+    details: err.details,
+    hint: `Model '${model.id}' was read short: the scan dropped or skipped records its file declares ` +
+      '(see the warnings `model_load` returned), so this entity may be one of them.',
+  });
 }
 
 /**
@@ -100,11 +123,9 @@ export function findByGlobalId(model: LoadedModel, globalId: string): number | n
   for (const created of overlay?.created ?? []) {
     if (created.globalId === globalId) return created.expressId;
   }
-  for (const [, ids] of model.store.entityIndex.byType) {
-    for (const id of ids) {
-      if (overlay?.deleted.has(id)) continue;
-      if (new EntityNode(model.store, id).globalId === globalId) return id;
-    }
+  for (const { expressId, overlayCreated } of iterateEffectiveEntityIds(model.store, model.backend.getMutationView())) {
+    if (overlayCreated) continue; // Queued carriers already took precedence.
+    if (new EntityNode(model.store, expressId).globalId === globalId) return expressId;
   }
   return null;
 }
@@ -129,19 +150,19 @@ export function resolveGlobalIds(model: LoadedModel, globalIds: Iterable<string>
   for (const created of overlay?.created ?? []) {
     if (wanted.has(created.globalId)) note(created.globalId, created.expressId);
   }
-  for (const [, ids] of model.store.entityIndex.byType) {
-    for (const id of ids) {
-      if (overlay?.deleted.has(id)) continue;
-      // A store entity's GlobalId is the one attribute no MCP write can change —
-      // `entity_set_attribute` accepts Name/Description/ObjectType/Tag — so
-      // reading it off the store is exact, not stale.
-      const globalId = new EntityNode(model.store, id).globalId;
-      if (wanted.has(globalId)) note(globalId, id);
-    }
+  for (const { expressId, overlayCreated } of iterateEffectiveEntityIds(model.store, model.backend.getMutationView())) {
+    if (overlayCreated) continue; // Queued carriers already took precedence.
+    // A store entity's GlobalId is the one attribute no MCP write can change —
+    // `entity_set_attribute` accepts Name/Description/ObjectType/Tag — so
+    // reading it off the store is exact, not stale.
+    const globalId = new EntityNode(model.store, expressId).globalId;
+    if (wanted.has(globalId)) note(globalId, expressId);
   }
   return carriers;
 }
 
+export function okResult<T extends Record<string, unknown>>(text: string, structured: T): CallToolResult & { structuredContent: T };
+export function okResult(text: string, structured?: Record<string, unknown>): CallToolResult;
 export function okResult(text: string, structured?: Record<string, unknown>): CallToolResult {
   const content: ContentBlock[] = [{ type: 'text', text }];
   if (structured) {
@@ -150,9 +171,22 @@ export function okResult(text: string, structured?: Record<string, unknown>): Ca
   return { content };
 }
 
+/**
+ * A number for tool TEXT, grouped the en-US way (`2,500`) on every host.
+ *
+ * `toLocaleString()` with no argument follows the host's `LC_ALL` / `LANG`, so
+ * the same tool call answered `2 500` on a Swedish machine and `2.500` on a
+ * German one (#7027). Tool text is English prose read by a model and a person;
+ * its numbers are en-US wherever the server runs. Machine-read values do not
+ * come through here: they travel as plain numbers in `structuredContent`.
+ */
+export function fmtInt(n: number): string {
+  return n.toLocaleString('en-US');
+}
+
 export function fmtCount(n: number, singular: string, plural?: string): string {
   if (n === 1) return `1 ${singular}`;
-  return `${n.toLocaleString()} ${plural ?? singular + 's'}`;
+  return `${fmtInt(n)} ${plural ?? singular + 's'}`;
 }
 
 /** Slice a large array down to `limit` and return `{ items, truncated }`. */

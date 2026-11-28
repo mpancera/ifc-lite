@@ -95,7 +95,7 @@ export function HousekeepingPanel({ onClose }: { onClose: () => void }): React.R
     // Georeferencing is a section of the Information panel, not a panel of its
     // own — so both land in the same place, for now.
     if (target === 'georeference' || target === 'properties') openPanel('properties');
-    else if (target === 'ids') openPanel('ids');
+    else if (target === 'ids') openPanel('validation');
     else if (target === 'proxy-triage') openPanel('proxyTriage');
   };
 

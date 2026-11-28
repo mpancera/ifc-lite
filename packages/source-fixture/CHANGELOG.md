@@ -1,5 +1,34 @@
 # @ifc-lite/source-fixture
 
+## 0.4.0
+
+### Minor Changes
+
+- [#9526](https://github.com/LTplus-AG/ifc-lite/pull/9526) [`dbb660f`](https://github.com/LTplus-AG/ifc-lite/commit/dbb660fecb80156fa194656005d5c4cfb2eed3ae) Thanks [@bruadam](https://github.com/bruadam)! - The source provider contract can now describe writing back to a source. A provider may declare `capabilities.writeBack` with any of `new-version`, `new-file` and `new-location`, and implement the optional `uploadFile(ctx, target, bytes, options)`. It returns the created file and revision, or `{ ok: false, conflict }` with `stale-base` (the file changed since the edit's base revision) or `name-exists`. `uploadFile` never overwrites. Existing providers are unaffected: without `writeBack` a provider is read-only. `@ifc-lite/source-fixture` implements the contract (`capabilities.writeBack`, an `uploadFile` failure-injection key), and the conformance kit checks that `uploadFile` is present exactly when `writeBack` lists a mode. Part of [#9522](https://github.com/LTplus-AG/ifc-lite/issues/9522).
+
+### Patch Changes
+
+- Updated dependencies [[`dbb660f`](https://github.com/LTplus-AG/ifc-lite/commit/dbb660fecb80156fa194656005d5c4cfb2eed3ae)]:
+  - @ifc-lite/plugin-api@0.6.0
+
+## 0.3.1
+
+### Patch Changes
+
+- Updated dependencies [[`7c00fad`](https://github.com/LTplus-AG/ifc-lite/commit/7c00fadaf7bb702f8fe3d9a98541bd1d3db2d3b2)]:
+  - @ifc-lite/plugin-api@0.5.0
+
+## 0.3.0
+
+### Minor Changes
+
+- [#6460](https://github.com/LTplus-AG/ifc-lite/pull/6460) [`9bbe599`](https://github.com/LTplus-AG/ifc-lite/commit/9bbe599a1d256bff7648584517eb258bbe42cb65) Thanks [@louistrue](https://github.com/louistrue)! - Report download progress from the Dropbox, OneDrive/SharePoint and Dalux providers. `@ifc-lite/plugin-api` gains `readWithProgress(response, onProgress, fallbackTotal)`, which streams a response body and calls `DownloadOptions.onProgress` about ten times a second, starting at `(0, total)` and ending at `(byteLength, byteLength)`. When `Content-Length` is missing, the total falls back to the file's listed size. The `@ifc-lite/source-fixture` conformance suite now checks that a provider's download progress only increases and ends at the byte length.
+
+### Patch Changes
+
+- Updated dependencies [[`9bbe599`](https://github.com/LTplus-AG/ifc-lite/commit/9bbe599a1d256bff7648584517eb258bbe42cb65)]:
+  - @ifc-lite/plugin-api@0.4.0
+
 ## 0.2.0
 
 ### Minor Changes

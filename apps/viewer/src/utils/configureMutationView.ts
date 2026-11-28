@@ -2,11 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import { configureAuthoredQuantityReader, refreshedBaseQuantitySets, withRefreshedBaseQuantities } from '@ifc-lite/create';
+import { isEditedQuantityRefreshEnabled } from '@/lib/quantities/edited-quantity-refresh';
 import { MutablePropertyView } from '@ifc-lite/mutations';
 import {
+  getRawNamedAttributes,
   extractPropertiesOnDemand,
   extractQuantitiesOnDemand,
-  extractTypeEntityOwnProperties,
   type IfcDataStore,
 } from '@ifc-lite/parser';
 
@@ -27,6 +29,18 @@ export function resolveBaseAttributeValue(
 ): string | null {
   const entities = dataStore.entities;
   if (!entities) return null;
+  // IfcClassification / IfcClassificationReference are not IfcRoot records:
+  // their Name occupies different EXPRESS slots from the columnar root table.
+  // Use the canonical named source reader so native undo restores their actual
+  // base value and no-op effective changes disappear (#7131).
+  const type = entities.getTypeName(entityId).toUpperCase();
+  if (type === 'IFCCLASSIFICATION' || type === 'IFCCLASSIFICATIONREFERENCE') {
+    if (!dataStore.source?.length) return null;
+    const entity = dataStore.getEntity(entityId);
+    const raw = entity ? getRawNamedAttributes(entity, dataStore.schemaVersion === 'IFC5' ? undefined : dataStore.schemaVersion)
+      .find(attribute => attribute.name === attrName)?.raw : undefined;
+    return typeof raw === 'number' ? `#${raw}` : typeof raw === 'string' ? raw : null;
+  }
   switch (attrName) {
     case 'GlobalId':
       return entities.getGlobalId(entityId) || null;
@@ -44,28 +58,62 @@ export function resolveBaseAttributeValue(
 }
 
 /**
+ * The store each view's base readers were last pointed at by
+ * {@link configureMutationView}. Weak, so it never keeps a view or a store
+ * alive. Read by the store-swap rebinding in
+ * `store/mutation-view-store-binding.ts` (#5672).
+ */
+const baseStoreByView = new WeakMap<MutablePropertyView, IfcDataStore>();
+const inspectionSource = new WeakMap<MutablePropertyView, MutablePropertyView>();
+
+/** The store `view`'s base readers currently read, or `undefined` if it was never configured here. */
+export function mutationViewBaseStore(view: MutablePropertyView): IfcDataStore | undefined {
+  return baseStoreByView.get(view);
+}
+
+/** Preserve source ownership alongside the detached overlay and base readers. */
+export function snapshotMutationViewForInspection(view: MutablePropertyView): MutablePropertyView {
+  const snapshot = view.snapshotForInspection();
+  inspectionSource.set(snapshot, view);
+  const base = baseStoreByView.get(view);
+  if (base) baseStoreByView.set(snapshot, base);
+  return snapshot;
+}
+
+/** Compare operation ownership against the live overlay across held rerenders. */
+export function mutationViewIdentity(view: MutablePropertyView | undefined): MutablePropertyView | undefined {
+  return view && (inspectionSource.get(view) ?? view);
+}
+
+/**
  * Configure a mutation view so its base reads match the viewer's property panel.
  * Type entities need a dedicated extraction path because their own HasPropertySets
  * are not exposed through the regular occurrence property extractor.
+ *
+ * Safe to call again on the same view with a newer store that has source bytes
+ * (the loader's partial -> full swap): the property, quantity and attribute
+ * readers are all replaced, so the view then reads the new store's base data
+ * (#5672). The constructor's base property table cannot be re-pointed, so a
+ * sourceless (table-backed) store is not a valid rebind target.
  */
 export function configureMutationView(
   mutationView: MutablePropertyView,
   dataStore: IfcDataStore
 ): void {
+  baseStoreByView.set(mutationView, dataStore);
   if (dataStore.source?.length > 0) {
-    mutationView.setOnDemandExtractor((entityId: number) => {
-      const typeName = dataStore.entities?.getTypeName(entityId) ?? '';
-      if (typeName.endsWith('Type')) {
-        return extractTypeEntityOwnProperties(dataStore, entityId);
-      }
-      return extractPropertiesOnDemand(dataStore, entityId);
-    });
+    mutationView.setOnDemandExtractor((id, current = mutationView, occurrenceId = id) => extractPropertiesOnDemand(dataStore, id, current, occurrenceId));
   }
 
-  if (dataStore.onDemandQuantityMap && dataStore.source?.length > 0) {
-    mutationView.setQuantityExtractor((entityId: number) => {
-      return extractQuantitiesOnDemand(dataStore, entityId);
+  if (dataStore.source?.length > 0) {
+    configureAuthoredQuantityReader(dataStore, mutationView, (entityId, view, occurrenceId) => {
+      const own = extractQuantitiesOnDemand(dataStore, entityId, view);
+      if (own.length === 0) return own;
+      // Opt-in (#9026): a loaded element's own set follows its edited geometry. A copy reads its source's sets as before.
+      return isEditedQuantityRefreshEnabled() && entityId === occurrenceId ? withRefreshedBaseQuantities(dataStore, view, entityId, own) : own;
     });
+    // The export writes a refreshed set as it writes an edited one, so the file says what the tab does.
+    mutationView.setQuantityBaseRevisions((view) => (isEditedQuantityRefreshEnabled() ? refreshedBaseQuantitySets(dataStore, view) : []));
   }
 
   mutationView.setAttributeExtractor((entityId: number, attrName: string) =>

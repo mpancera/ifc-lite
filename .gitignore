@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 package-lock.json
 dist/
 build/
@@ -22,6 +22,8 @@ rustc-ice-*.txt
 
 # MkDocs build output
 site/
+docs/api/generated/
+apps/landing/.venv-docs/
 
 # Rust compiled binaries in tests
 tests/test_geometry
@@ -64,6 +66,10 @@ packages/wasm/pkg/ifc-lite.js
 
 # Threaded WASM bundle (build-wasm.sh BUILD_THREADED=1) — build artifact, like pkg/.
 packages/wasm/pkg-threaded/
+# Separate feature-gated fingerprint ownership test bundle; never published.
+packages/wasm/pkg-diff-decode-test/
+# CI WASM build cache manifest (scripts/ci-wasm-cache.mjs); CI-only.
+.ci-wasm-cache/
 
 # csg-thread-bench: rung-2 measurement artifacts (wasm-pack output, copied IFC
 # fixtures, generated corpus blobs). Source (Cargo.toml, src/, web/index.html,
@@ -90,17 +96,66 @@ tests/models/local
 # naming it may land in it. See apps/viewer/src/lib/screenflow/README.md.
 apps/viewer/public/demo-local/
 
-# IFC test fixtures are fetched on demand via `pnpm fixtures` and listed in
+# Model test fixtures are fetched on demand via `pnpm fixtures` and listed in
 # tests/models/manifest.json. They must NOT be committed to the repo. The
 # fixture directories themselves are ignored too: in a worktree they may be
 # machine-local symlinks into the primary checkout.
 tests/models/ara3d
 tests/models/issues
 tests/models/various
+tests/models/georeferencer
+tests/models/edinburgh
+tests/models/rhino
 tests/models/**/*.ifc
 tests/models/**/*.IFC
+# Explicit case variants also work with the CI path auditor's basic globs.
+tests/models/**/*.ply
+tests/models/**/*.plY
+tests/models/**/*.pLy
+tests/models/**/*.pLY
+tests/models/**/*.Ply
+tests/models/**/*.PlY
+tests/models/**/*.PLy
+tests/models/**/*.PLY
+tests/models/**/*.splat
+tests/models/**/*.splaT
+tests/models/**/*.splAt
+tests/models/**/*.splAT
+tests/models/**/*.spLat
+tests/models/**/*.spLaT
+tests/models/**/*.spLAt
+tests/models/**/*.spLAT
+tests/models/**/*.sPlat
+tests/models/**/*.sPlaT
+tests/models/**/*.sPlAt
+tests/models/**/*.sPlAT
+tests/models/**/*.sPLat
+tests/models/**/*.sPLaT
+tests/models/**/*.sPLAt
+tests/models/**/*.sPLAT
+tests/models/**/*.Splat
+tests/models/**/*.SplaT
+tests/models/**/*.SplAt
+tests/models/**/*.SplAT
+tests/models/**/*.SpLat
+tests/models/**/*.SpLaT
+tests/models/**/*.SpLAt
+tests/models/**/*.SpLAT
+tests/models/**/*.SPlat
+tests/models/**/*.SPlaT
+tests/models/**/*.SPlAt
+tests/models/**/*.SPlAT
+tests/models/**/*.SPLat
+tests/models/**/*.SPLaT
+tests/models/**/*.SPLAt
+tests/models/**/*.SPLAT
 tests/models/**/*.ifcx
 tests/models/**/*.ifczip
+tests/models/**/*.xml
+tests/models/**/*.XML
+tests/models/landxml/**/*.json
+tests/models/landxml/**/*.xyz
+tests/models/landxml/**/*.tif
 # Partial downloads from the fetcher.
 tests/models/**/*.part
 
@@ -114,6 +169,11 @@ tests/benchmark/benchmark-results/viewer-*.console.log
 # Playwright default run artifacts (test-results/ is Playwright's outputDir;
 # these are regenerated on every run and must never be committed)
 /test-results/
+# Local command-palette validation receipts; compact evidence is retained separately.
+/.palette-access-validation/
+# node:test JUnit reports the CI uploads to Mergify Test Engine.
+mergify-junit.xml
+mergify-junit-retry-*.xml
 /playwright-report/
 /blob-report/
 /playwright/.cache/
@@ -133,3 +193,55 @@ tests/benchmark/benchmark-results/viewer-*.console.log
 # are rebuilt on every run rather than committed. See tsconfig.tests.base.json.
 packages/*/tsconfig.tests.json
 apps/*/tsconfig.tests.json
+examples/*/tsconfig.tests.json
+# The ROOT path is here for a different reason: `audit()` only writes for
+# `packages/*` (typecheck-tests.mjs, `rel.startsWith('packages/')`), so
+# `pnpm typecheck` never produces this one. It appears from the bare-cwd mode
+# the script's own header calls a misuse (#2664). Untracked it is harmless;
+# tracked, every branch that adds or removes a test file carries a spurious
+# diff of a ~1.5k-line generated file, and those conflict between branches.
+/tsconfig.tests.json
+
+# Cursor's local tool output. `.cursorrules` is TRACKED and must stay so: it is the
+# pointer that sends Cursor at AGENTS.md. Only the log directory is ignored, and it
+# is ignored because this repository is public and nothing here reviews a 1.6 MB
+# debug log before `git add -A` publishes it.
+# Do NOT add a `!.cursorrules` negation here: `.cursor/` never matched that file, so
+# the negation is a no-op, and scripts/check-ci-path-coverage.mjs throws on any
+# negated pattern in this file.
+.cursor/
+
+# scripts/perf/browser-cold-ab.mts (#3978): raw per-sample JSON/console-log/
+# screenshot evidence and any private local-corpus manifest. The corpus
+# manifest points at local file paths outside the repo (private, sometimes
+# multi-GB models) and must never be committed; see browser-corpus.example.json
+# for the shape.
+scripts/perf/.browser-cold-ab-results/
+scripts/perf/.frame-gpu-rig-results/
+scripts/perf/.native-count-results/
+scripts/perf/browser-corpus.local.json
+
+# Autodesk SDK worker build outputs (proprietary SDK/native dependencies).
+apps/autodesk-exchange-worker/bin/
+apps/autodesk-exchange-worker/obj/
+
+# Unreviewed live AI evaluation runs (scripts/ai-eval/run-live-eval.mjs); only reviewed recordings are promoted.
+tests/ai-eval/results/
+
+# Python bytecode caches
+__pycache__/
+# Spelled out: scripts/lib/ci-path-coverage.mjs's glob matcher has no [..] classes.
+*.pyc
+*.pyo
+*.pyd
+
+# Staged SMLib browser bundles (scripts/stage-retained-browser-assets.mjs)
+apps/viewer/public/smlib/
+rust/*/smlib/
+rust/wasm-bindings/retained-test/
+
+# Local retained release proof summaries (fleet receipt is authoritative).
+/retained-package-proof-*.json
+
+# MCP Registry server.json and .mcpb bundle built by packages/mcp/release/build.mjs
+packages/mcp/release-out/

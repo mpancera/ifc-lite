@@ -21,11 +21,12 @@ use ifc_lite_geometry::Mesh;
 use std::cell::Cell;
 
 thread_local! {
-    /// Per-element drop tally. Reset by [`begin_element`], incremented by
+    /// Per-element drop tally. Installed by [`ElementState::with_scope`], incremented by
     /// [`clean`], read by [`dropped_this_element`].
     ///
-    /// Thread-local is correct on both pipelines: the native rayon loop runs one
-    /// element entirely on one worker thread, and the wasm batch loop is serial.
+    /// Thread-local, installed by [`ElementState::with_scope`]: a native rayon
+    /// worker can run a stolen element to completion in the middle of another
+    /// one, so the scope saves the enclosing element's tally and restores it.
     static DROPPED: Cell<u64> = const { Cell::new(0) };
 }
 
@@ -34,15 +35,78 @@ thread_local! {
 /// On by default. Set `IFC_LITE_DISABLE_DEGENERATE_BACKSTOP=1` to keep the raw
 /// (possibly fan-corrupted) triangles — an escape hatch for debugging the
 /// heuristic or measuring exactly what it removes. Read once and cached.
-fn disabled() -> bool {
+pub(crate) fn disabled() -> bool {
     static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *DISABLED.get_or_init(|| std::env::var("IFC_LITE_DISABLE_DEGENERATE_BACKSTOP").is_ok())
 }
 
-/// Open one element's tally scope (same begin/drain shape as the kernel's
-/// per-element CSG budget).
-pub(crate) fn begin_element() {
-    DROPPED.with(|c| c.set(0));
+/// Owned tally between execution slices. The state can move between workers;
+/// only its short-lived installed scope is bound to the executing thread.
+#[derive(Debug, Default)]
+pub(crate) struct ElementState {
+    dropped: u64,
+}
+
+impl ElementState {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// Install this element for one synchronous slice, retaining its tally on
+    /// normal return, an error value, or unwinding. No TLS guard crosses a yield.
+    pub(crate) fn with_scope<T>(&mut self, operation: impl FnOnce() -> T) -> T {
+        let saved = DROPPED.with(|counter| counter.replace(self.dropped));
+        let _scope = StateScope {
+            saved,
+            state: self,
+            _thread_bound: std::marker::PhantomData,
+        };
+        operation()
+    }
+}
+
+struct StateScope<'a> {
+    saved: u64,
+    state: &'a mut ElementState,
+    /// Not `Send`: it restores this thread's tally, so it must drop here.
+    _thread_bound: std::marker::PhantomData<*const ()>,
+}
+
+impl Drop for StateScope<'_> {
+    fn drop(&mut self) {
+        self.state.dropped = DROPPED.with(|counter| counter.replace(self.saved));
+    }
+}
+
+/// One element's open tally scope; dropping it restores the enclosing
+/// element's tally.
+#[cfg(test)]
+#[must_use = "dropping the scope immediately restores the enclosing element's tally"]
+pub(crate) struct ElementTally {
+    saved: u64,
+    /// Not `Send`: it restores this thread's tally, so it must drop here.
+    _thread_bound: std::marker::PhantomData<*const ()>,
+}
+
+#[cfg(test)]
+impl Drop for ElementTally {
+    fn drop(&mut self) {
+        DROPPED.with(|c| c.set(self.saved));
+    }
+}
+
+/// Open one element's tally scope.
+#[cfg(test)]
+pub(crate) fn begin_element() -> ElementTally {
+    ElementTally {
+        saved: DROPPED.with(|c| c.replace(0)),
+        _thread_bound: std::marker::PhantomData,
+    }
 }
 
 /// Drop this mesh's collapsed triangles, tallying how many went.
@@ -54,19 +118,28 @@ pub(crate) fn begin_element() {
 /// With local-frame precision on, the mesh is stored relative to `origin` (small
 /// coords) so collapse is PREVENTED upstream and this drops nothing; it stays as
 /// the defence-in-depth safety net for any element still too large for its frame.
+///
+/// A mesh whose every edge is used exactly once in each direction is left
+/// alone: there a 1e5 aspect needle is a real face triangle, and dropping it
+/// opened two side faces of a gable wall (#8156).
 pub(crate) fn clean(mesh: &mut Mesh) {
     if disabled() {
         return;
     }
     let indices_before = mesh.indices.len();
-    mesh.drop_degenerate_triangles();
+    mesh.drop_degenerate_triangles_unless_closed();
     let dropped = ((indices_before - mesh.indices.len()) / 3) as u64;
     if dropped > 0 {
         DROPPED.with(|c| c.set(c.get() + dropped));
     }
 }
 
-/// Triangles dropped since [`begin_element`], across every mesh of this element.
+/// Triangles dropped in the installed element scope, across every mesh of this
+/// element.
 pub(crate) fn dropped_this_element() -> u64 {
     DROPPED.with(|c| c.get())
 }
+
+#[cfg(test)]
+#[path = "degenerate_state_tests.rs"]
+mod state_tests;

@@ -1,0 +1,67 @@
+{
+  "family": "bundle",
+  "description": "Transfer and boot size of what the viewer ships, measured by scripts/perf-ratchet/measure-bundle.mjs from the build job's artifacts: raw bytes of the engine WASM, of the viewer's main entry chunk, of every JS file dist/index.html loads eagerly (eager bytes are the blocking ceiling, #7002) and of the parser worker's own chunk, which every cold load fetches, compiles and evaluates before it can parse. Everything is gated raw because brotli-11 does not track its input smoothly: the viewer JS jumps by ~0.5% on a same-length timestamp change (#7007), and edits that left the engine WASM's raw size unchanged moved its brotli size by more than a PR's typical growth (scripts/perf/README.md). Brotli sizes, the engine WASM's among them, are reported, not gated. Raising a ceiling is a human PR with a justification (docs/guide/performance.md, 'Perf ratchet ceilings'); lowering is the daily perf-ratchet-lower.yml job.",
+  "entries": [
+    {
+      "id": "engine-wasm-bytes",
+      "metric": "raw-bytes",
+      "unit": "bytes",
+      "description": "raw size of packages/wasm/pkg/ifc-lite_bg.wasm, the single-thread engine bundle; its brotli size is reported, not gated",
+      "ceiling": 10782669,
+      "headroom": 0.01,
+      "tolerance": {
+        "kind": "relative",
+        "value": 0.001
+      },
+      "provenance": {
+        "commit": "e186d8c4e2b3e58fd957946520d06d437a4983d9",
+        "measuredAt": "2026-11-25T05:30:34.825Z"
+      }
+    },
+    {
+      "id": "viewer-entry-js-bytes",
+      "metric": "raw-bytes",
+      "unit": "bytes",
+      "description": "raw size of the single <script type=\"module\" src> chunk of apps/viewer/dist/index.html",
+      "ceiling": 2012040,
+      "tolerance": {
+        "kind": "relative",
+        "value": 0.001
+      },
+      "provenance": {
+        "commit": "a50001da9a4fe85cc2a6cefd4215d49f63c3b32f",
+        "measuredAt": "2026-11-20T18:38:09.350Z"
+      }
+    },
+    {
+      "id": "viewer-eager-js-bytes",
+      "metric": "raw-bytes",
+      "unit": "bytes",
+      "description": "summed raw size of every JS file dist/index.html loads eagerly: the module <script src> plus <link rel=modulepreload>",
+      "ceiling": 13618673,
+      "tolerance": {
+        "kind": "relative",
+        "value": 0.001
+      },
+      "provenance": {
+        "commit": "356ece76880b114fa7bc3a8f85779c927bea1885",
+        "measuredAt": "2026-11-24T10:11:32.761Z"
+      }
+    },
+    {
+      "id": "viewer-parser-worker-js-bytes",
+      "metric": "raw-bytes",
+      "unit": "bytes",
+      "description": "raw size of apps/viewer/dist/assets/parser.worker-*.js, the parser worker's own chunk (chunks it imports on demand are not counted)",
+      "ceiling": 1475391,
+      "tolerance": {
+        "kind": "relative",
+        "value": 0.001
+      },
+      "provenance": {
+        "commit": "356ece76880b114fa7bc3a8f85779c927bea1885",
+        "measuredAt": "2026-11-24T10:11:32.761Z"
+      }
+    }
+  ]
+}

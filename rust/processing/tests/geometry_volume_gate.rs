@@ -31,20 +31,10 @@ use ifc_lite_processing::element::{
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
-const FIXTURE: &str = "../../tests/models/ara3d/AC20-FZK-Haus.ifc";
+const FIXTURE: &str = "ara3d/AC20-FZK-Haus.ifc";
 
 fn read_fixture() -> Option<Vec<u8>> {
-    match std::fs::read(FIXTURE) {
-        Ok(b) => Some(b),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!(
-                "skipping geometry-volume gate test: fixture missing at {FIXTURE} — \
-                 run `pnpm fixtures` (sha256 in tests/models/manifest.json)"
-            );
-            None
-        }
-        Err(e) => panic!("failed to read fixture {FIXTURE}: {e}"),
-    }
+    ifc_lite_testkit::fixture_bytes(FIXTURE)
 }
 
 fn produce_all(
@@ -69,7 +59,7 @@ fn produce_all(
         texture_index: &texture_index,
         site_local_rotation: None,
     };
-    let opts = MeshProductionOptions { geometry_hash: hash };
+    let opts = MeshProductionOptions { geometry_hash: hash, ..Default::default() };
 
     let mut jobs: Vec<(u32, usize, usize)> = Vec::new();
     let mut scanner = EntityScanner::new(content);
@@ -84,7 +74,7 @@ fn produce_all(
         let Ok(entity) = decoder.decode_at_with_id(id, start, end) else {
             continue;
         };
-        let ifc_type = entity.ifc_type;
+        let ifc_type = entity.ifc_type.clone();
         out.push((
             id,
             produce_element_meshes(

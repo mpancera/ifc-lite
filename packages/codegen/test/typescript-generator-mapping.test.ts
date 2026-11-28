@@ -195,10 +195,10 @@ describe('SCHEMA_REGISTRY escapes values that would break the generated file', (
   };
   const code = generateTypeScript(schema);
 
-  it('escapes quotes and flattens newlines in the emitted source', () => {
-    expect(code.schemaRegistry).toContain("IfcQuoted: 'STRING WITH \\'quote\\''");
-    expect(code.schemaRegistry).toContain("IfcQuotedEnum: ['IT\\'S']");
-    expect(code.schemaRegistry).toContain("IfcQuotedSelect: ['A\\'B']");
+  it('keeps every value inside the one encoded string: no raw newline reaches the source', () => {
+    const encodedLine = code.schemaRegistry.split('\n').find((line) => line.startsWith('const ENCODED_SCHEMA_REGISTRY = '));
+    expect(encodedLine).toBeDefined();
+    expect(encodedLine).toContain('IT');
   });
 
   it('produces a registry that still parses and carries the original values', async () => {
@@ -299,6 +299,25 @@ describe('emitted SCHEMA_REGISTRY runtime helpers (executed, not substring-match
     expect(mod.isKnownEntity('IFCWALL')).toBe(true);
     expect(mod.isKnownEntity('IFCNOTATHING')).toBe(false);
   });
+
+  // The registry is a plain object literal, so `in` and `obj[key]` both reach
+  // Object.prototype. Every lookup the generator emits has to be an
+  // own-property check, and getEntityMetadata is the one that matters: it
+  // feeds isInstantiable and normalizeIfcTypeName in @ifc-lite/parser, so
+  // before #3063 `isInstantiable('constructor')` was true and
+  // `normalizeIfcTypeName('constructor')` was the string "Object".
+  //
+  // `__proto__` is the case that is not like the others: it resolves to an
+  // object rather than a function, and its `.name` is undefined, which made
+  // normalizeIfcTypeName return undefined from a signature promising string.
+  it.each(['constructor', 'toString', 'hasOwnProperty', '__proto__'])(
+    'does not treat the inherited property %s as an entity',
+    async (name) => {
+      const mod = await evalEmitted(code.schemaRegistry);
+      expect(mod.isKnownEntity(name)).toBe(false);
+      expect(mod.getEntityMetadata(name)).toBeUndefined();
+    }
+  );
 
   it('carries isAbstract through to the runtime metadata, both values', async () => {
     const mod = await evalEmitted(code.schemaRegistry);

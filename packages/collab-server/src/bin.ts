@@ -7,6 +7,7 @@
 
 import { FilePersistence, startCollabServer } from './server.js';
 import { FsBlobStorage } from './blob-route.js';
+import { resolveBlobGcConfig, startBlobGc } from './blob-gc-worker.js';
 import { FsLayerRegistry } from './layer-registry-fs.js';
 import { createAccessControl } from './access-control.js';
 
@@ -65,6 +66,10 @@ async function main() {
         secret: tokenSecret,
         dir: dataDir,
         maxClaimedRooms: Number(process.env.COLLAB_MAX_CLAIMED_ROOMS ?? 100_000),
+        // Joins below go through `accessControl.serverOptions.authenticate`
+        // unchanged, which is what confirms a room, so an unused claim can
+        // be released or expire (#6581).
+        claimsPendingUntilJoin: true,
         // Only honor X-Forwarded-For behind a trusted reverse proxy; a directly
         // reachable server that trusts the header lets every mint request pick
         // a fresh spoofed IP (its own rate-limit bucket). Default OFF.
@@ -73,6 +78,10 @@ async function main() {
         ),
       })
     : null;
+  const blobStorage = new FsBlobStorage(dataDir);
+  // Fail at startup, not on the first blob request, if the blobs dir can't be made.
+  await blobStorage.ready;
+  const blobGcConfig = resolveBlobGcConfig();
   const handle = await startCollabServer({
     port,
     host,
@@ -80,7 +89,7 @@ async function main() {
     // Disk-backed blobs (not the in-RAM default): mesh blobs dominate a room's
     // size, so keeping them in memory made memory the top hosting cost and lost
     // them on restart. On a mounted volume this is durable and far cheaper.
-    blobStorage: new FsBlobStorage(dataDir),
+    blobStorage,
     maxRooms,
     // Evict idle rooms so a long-lived server doesn't accumulate loaded rooms
     // up to `maxRooms` and then reject all new connections (see const above).
@@ -91,14 +100,30 @@ async function main() {
     ...(accessControl ? accessControl.serverOptions : {}),
   });
   // eslint-disable-next-line no-console
+  const blobGc = startBlobGc({
+    dataDir,
+    storage: blobStorage,
+    roomManager: handle.roomManager,
+    config: blobGcConfig,
+  });
+  // eslint-disable-next-line no-console
   console.log(
-    `[collab-server] listening at ${handle.url} (data: ${dataDir}, auth: ${tokenSecret ? 'room-token' : 'anonymous'}, registry: ${layerRegistryEnabled ? 'fs' : 'off'})`,
+    `[collab-server] listening at ${handle.url} (data: ${dataDir}, auth: ${tokenSecret ? 'room-token' : 'anonymous'}, registry: ${layerRegistryEnabled ? 'fs' : 'off'}, blob-gc: ${blobGc ? `every ${Math.round(blobGcConfig.intervalMs / 60000)}m` : 'off'})`,
   );
 
   const shutdown = async () => {
     // eslint-disable-next-line no-console
     console.log('[collab-server] shutting down…');
-    await handle.stop();
+    blobGc?.stop();
+    // A failed stop must not skip the access-control flush below.
+    let exitCode = 0;
+    try {
+      await handle.stop();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[collab-server] shutdown error (continuing to flush):', err);
+      exitCode = 1;
+    }
     // A SIGTERM during the persist debounce (or mid-write) must not lose
     // claims/revocations: await the pending/in-flight state write. flush()
     // rejects when the state never reached disk — exit non-zero and say so
@@ -115,7 +140,7 @@ async function main() {
         process.exit(1);
       }
     }
-    process.exit(0);
+    process.exit(exitCode);
   };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);

@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import { createModelMutationView } from '@/utils/model-mutation-view';
 /**
  * Emit a zone set as `IfcSpatialZone` entities (issue #2508 item 3), so the
  * zones themselves - not just the numbers about them - survive an export.
@@ -19,7 +20,7 @@
  * each model gets its OWN copy of the zones, referencing its own elements -
  * each converted out of the render frame by THAT model's own offsets, because
  * an unaligned model is drawn in its own local frame rather than the anchor's
- * (see {@link frameFor}).
+ * (see {@link zoneEmissionFrameFor}).
  *
  * A model that federation alignment RE-BASED is refused rather than emitted
  * into: its render coordinates undo to the anchor file's coordinate system, so
@@ -38,10 +39,10 @@ import { MutablePropertyView, StoreEditor } from '@ifc-lite/mutations';
 import type { IfcDataStore } from '@ifc-lite/parser';
 import { isSyntheticId } from '@/lib/mutations/syntheticIds';
 import { useViewerStore } from '@/store';
+import { canMutate, mutationPermission, type MutationDenialReason } from '@/store/mutation-permission';
 import type { FederatedModel } from '@/store/types';
 import type { RenderFrameOffsets } from '@/components/viewer/tools/measure-modes/coordinates';
 import { resolveEntityRef } from '@/store/resolveEntityRef';
-import { configureMutationView } from '@/utils/configureMutationView';
 import { geometryVolumesSurviveAlignment } from '@/lib/compare/alignmentTrust';
 import { resolveRenderFrame } from './useRenderFrameOffsets.js';
 import { collidesByName } from './useZoneWriteBack.js';
@@ -69,17 +70,18 @@ export interface ZoneEmitResult {
    *  apart from `zonesReplaced`, which is a model that got new zones back. */
   staleRemoved: number;
   /** Set when nothing was emitted anywhere, and why. */
-  blocked: 'collab-role' | 'no-members' | 'duplicate-set-name' | null;
+  blocked: MutationDenialReason | 'no-members' | 'duplicate-set-name' | null;
   elapsedMs: number;
 }
 
 /** Per-model handles the loop would otherwise re-derive. */
 interface ModelContext {
   editor: StoreEditor;
+  view: MutablePropertyView;
   store: IfcDataStore;
   name: string;
   rebased: boolean;
-  /** THIS model's offsets, not the scene's. See {@link frameFor}. */
+  /** THIS model's offsets, not the scene's. See {@link zoneEmissionFrameFor}. */
   frame: RenderFrameOffsets;
 }
 
@@ -97,7 +99,7 @@ interface ModelContext {
  * The scene-wide frame remains the fallback for the legacy single-model path,
  * where there is no per-model geometry result to read.
  */
-function frameFor(model: FederatedModel | undefined, scene: RenderFrameOffsets): RenderFrameOffsets {
+export function zoneEmissionFrameFor(model: FederatedModel | undefined, scene: RenderFrameOffsets): RenderFrameOffsets {
   const info = model?.geometryResult?.coordinateInfo;
   if (!info) return scene;
   return { originShift: info.originShift ?? null, wasmRtcOffsetIfc: info.wasmRtcOffset ?? null };
@@ -120,6 +122,12 @@ function contextFor(
   if (cached !== undefined) return cached;
 
   const state = useViewerStore.getState();
+  // Metadata-only/unavailable models are reported as skipped by this command.
+  // Reject before allocating a view/editor, including stale-overlay sweeps.
+  if (!canMutate(state, modelId)) {
+    cache.set(modelId, null);
+    return null;
+  }
   const model = state.models.get(modelId);
   const store = (model?.ifcDataStore ?? (modelId === 'legacy' ? state.ifcDataStore : null)) as IfcDataStore | null;
   if (!store) {
@@ -129,8 +137,7 @@ function contextFor(
 
   let view = state.getMutationView(modelId);
   if (!view) {
-    view = new MutablePropertyView(store.properties || null, modelId);
-    configureMutationView(view, store);
+    view = createModelMutationView(store, modelId);
     state.registerMutationView(modelId, view);
   }
   let editor = state.storeEditors.get(modelId);
@@ -141,10 +148,11 @@ function contextFor(
 
   const context: ModelContext = {
     editor,
+    view,
     store,
     name: model?.name ?? modelId,
     rebased: model ? !geometryVolumesSurviveAlignment(model.federationAlignmentStatus) : false,
-    frame: frameFor(model, scene),
+    frame: zoneEmissionFrameFor(model, scene),
   };
   cache.set(modelId, context);
   return context;
@@ -172,7 +180,8 @@ function membersByModel(zoneSet: ZoneSet): Map<string, ZoneMembership[]> {
 /** Emit `zoneSet` into every model it reaches. */
 export function emitZoneSpatialZones(zoneSet: ZoneSet): ZoneEmitResult {
   const state = useViewerStore.getState();
-  if (!state.canCollabEdit()) return { models: [], staleRemoved: 0, blocked: 'collab-role', elapsedMs: 0 };
+  const permission = mutationPermission(state);
+  if (!permission.allowed) return { models: [], staleRemoved: 0, blocked: permission.reason, elapsedMs: 0 };
   // The set's name is the only handle the FILE has on which run wrote which
   // zones (`LongName`), so two sets sharing one would make each emission delete
   // the other's zones. Refused for the same reason, and by the same test, as
@@ -183,7 +192,7 @@ export function emitZoneSpatialZones(zoneSet: ZoneSet): ZoneEmitResult {
   const byModel = membersByModel(zoneSet);
 
   // The scene-wide frame, resolved by the readouts' own rule, is only the
-  // FALLBACK here: each model is written in its own frame (see `frameFor`).
+  // FALLBACK here: each model is written in its own frame (see `zoneEmissionFrameFor`).
   const scene = resolveRenderFrame(state.models, state.geometryResult);
 
   const contexts = new Map<string, ModelContext | null>();
@@ -207,6 +216,7 @@ export function emitZoneSpatialZones(zoneSet: ZoneSet): ZoneEmitResult {
     if (!context) continue;
     const result = emitSpatialZones(context.editor, context.store, zoneSet, members, context.frame, {
       rebased: context.rebased,
+      view: context.view,
     });
     outcomes.push({
       modelId,
@@ -250,7 +260,7 @@ function sweepModelsWithoutMembers(
 export interface ZoneEmitRemoval {
   /** Zones removed, across every model. */
   removed: number;
-  blocked: 'collab-role' | 'duplicate-set-name' | null;
+  blocked: MutationDenialReason | 'duplicate-set-name' | null;
 }
 
 /**
@@ -262,7 +272,8 @@ export interface ZoneEmitRemoval {
  */
 export function removeZoneSpatialZones(zoneSet: ZoneSet): ZoneEmitRemoval {
   const state = useViewerStore.getState();
-  if (!state.canCollabEdit()) return { removed: 0, blocked: 'collab-role' };
+  const permission = mutationPermission(state);
+  if (!permission.allowed) return { removed: 0, blocked: permission.reason };
   // Removal sweeps by name too, so a collision here would take the other set's
   // zones with it.
   if (collidesByName(zoneSet)) return { removed: 0, blocked: 'duplicate-set-name' };

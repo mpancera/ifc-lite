@@ -21,44 +21,8 @@ impl ProfileProcessor {
         line: &DecodedEntity,
         decoder: &mut EntityDecoder,
     ) -> Result<(Point3<f64>, Vector3<f64>)> {
-        let pnt_attr = line
-            .get(0)
-            .ok_or_else(|| Error::geometry("Line missing Pnt".to_string()))?;
-        let pnt = decoder
-            .resolve_ref(pnt_attr)?
-            .ok_or_else(|| Error::geometry("Failed to resolve Line Pnt".to_string()))?;
-        let coords = pnt
-            .get(0)
-            .and_then(|v| v.as_list())
-            .ok_or_else(|| Error::geometry("Line Pnt missing coordinates".to_string()))?;
-        let origin = Point3::new(
-            coords.first().and_then(|v| v.as_float()).unwrap_or(0.0),
-            coords.get(1).and_then(|v| v.as_float()).unwrap_or(0.0),
-            coords.get(2).and_then(|v| v.as_float()).unwrap_or(0.0),
-        );
-
-        // Dir is an IfcVector: 0=Orientation (IfcDirection), 1=Magnitude.
-        let dir_attr = line
-            .get(1)
-            .ok_or_else(|| Error::geometry("Line missing Dir".to_string()))?;
-        let vector = decoder
-            .resolve_ref(dir_attr)?
-            .ok_or_else(|| Error::geometry("Failed to resolve Line Dir".to_string()))?;
-        let magnitude = vector.get(1).and_then(|v| v.as_float()).unwrap_or(1.0);
-        let orientation = vector
-            .get(0)
-            .and_then(|a| decoder.resolve_ref(a).ok().flatten())
-            .and_then(|d| {
-                let coords = d.get(0).and_then(|v| v.as_list())?;
-                Some(Vector3::new(
-                    coords.first().and_then(|v| v.as_float()).unwrap_or(0.0),
-                    coords.get(1).and_then(|v| v.as_float()).unwrap_or(0.0),
-                    coords.get(2).and_then(|v| v.as_float()).unwrap_or(0.0),
-                ))
-            })
-            .and_then(|v| v.try_normalize(1e-12))
-            .unwrap_or_else(|| Vector3::new(1.0, 0.0, 0.0));
-        Ok((origin, orientation * magnitude))
+        let (origin, direction) = crate::curve_source::mesh_line_basis(line, decoder)?;
+        Ok((Point3::from(origin), Vector3::from(direction)))
     }
 
     /// Sample a bare (untrimmed) `IfcLine` as the two-point segment spanning the
@@ -75,97 +39,34 @@ impl ProfileProcessor {
         Ok(vec![origin + v * t_start, origin + v * t_end])
     }
 
-    /// Resolve one `IfcTrimmingSelect` bound on a trimmed `IfcLine` to a 3D point.
-    /// A parameter bound `t` maps to `origin + t·v`; a cartesian bound is used as
-    /// authored. Mirrors [`Self::extract_trim_select`] but keeps the full 3D
-    /// coordinate (the 2D variant drops z, which a swept directrix must retain).
-    fn line_trim_point_3d(
-        &self,
-        attr: Option<&AttributeValue>,
-        origin: &Point3<f64>,
-        v: &Vector3<f64>,
-        prefer_cartesian: bool,
-        decoder: &mut EntityDecoder,
-    ) -> Option<Point3<f64>> {
-        let list = attr?.as_list()?;
-        let mut param: Option<f64> = None;
-        let mut point: Option<Point3<f64>> = None;
-        for item in list {
-            // IFCPARAMETERVALUE(value) is stored as List(["IFCPARAMETERVALUE", value]).
-            if let Some(inner) = item.as_list() {
-                if let Some(name) = inner.first().and_then(|v| v.as_string()) {
-                    if name == "IFCPARAMETERVALUE" {
-                        param = inner.get(1).and_then(|v| v.as_float());
-                        continue;
-                    }
-                }
-            }
-            if item.as_entity_ref().is_some() {
-                if let Ok(Some(pt)) = decoder.resolve_ref(item) {
-                    if pt.ifc_type == IfcType::IfcCartesianPoint {
-                        if let Some(coords) = pt.get(0).and_then(|v| v.as_list()) {
-                            point = Some(Point3::new(
-                                coords.first().and_then(|v| v.as_float()).unwrap_or(0.0),
-                                coords.get(1).and_then(|v| v.as_float()).unwrap_or(0.0),
-                                coords.get(2).and_then(|v| v.as_float()).unwrap_or(0.0),
-                            ));
-                        }
-                    }
-                }
-                continue;
-            }
-            if let Some(f) = item.as_float() {
-                param = Some(f);
-            }
-        }
-        match (prefer_cartesian, point, param) {
-            (true, Some(p), _) => Some(p),
-            (_, _, Some(t)) => Some(origin + v * t),
-            (_, Some(p), None) => Some(p),
-            _ => None,
-        }
-    }
-
-    /// Sample a trimmed `IfcLine` directrix in 3D, honoring Trim1/Trim2 (parameter
-    /// or cartesian) and SenseAgreement. Returns the segment endpoints in sweep
-    /// order.
+    /// Sample the shared IFC trimmed-line interpretation in sweep order.
     pub(super) fn process_trimmed_line_3d(
         &self,
         trimmed: &DecodedEntity,
         line: &DecodedEntity,
         decoder: &mut EntityDecoder,
     ) -> Result<Vec<Point3<f64>>> {
-        let (origin, v) = self.read_line_3d(line, decoder)?;
-        let prefer_cartesian = trimmed
-            .get(4)
-            .and_then(|m| m.as_enum())
-            .map(|m| m == "CARTESIAN")
-            .unwrap_or(false);
-        let p_start = self.line_trim_point_3d(trimmed.get(1), &origin, &v, prefer_cartesian, decoder);
-        let p_end = self.line_trim_point_3d(trimmed.get(2), &origin, &v, prefer_cartesian, decoder);
-        let sense = trimmed
-            .get(3)
-            .and_then(|x| match x {
-                AttributeValue::Enum(s) => Some(s == "T"),
-                _ => None,
-            })
-            .unwrap_or(true);
-        let start = p_start.unwrap_or(origin);
-        let end = p_end.unwrap_or(origin + v);
-        Ok(if sense {
-            vec![start, end]
-        } else {
-            vec![end, start]
-        })
+        use crate::trimmed_curve::{decode_trimmed_primitive, TrimRecovery, TrimmedPrimitive};
+        let Some(TrimmedPrimitive::Line { start, end }) =
+            decode_trimmed_primitive(trimmed, line, decoder, TrimRecovery::BasisDefaults)?
+        else {
+            return Err(Error::geometry("Expected trimmed line".to_string()));
+        };
+        Ok(vec![Point3::from(start), Point3::from(end)])
     }
 
     /// Read a conic's placement (`IfcCircle`/`IfcEllipse` Position) as a full 3D
-    /// frame: `(center, x_axis, y_axis)`. Handles both `IfcAxis2Placement3D`
-    /// (Location + Axis(Z) + RefDirection(X), with Y = Z × X) and the planar
-    /// `IfcAxis2Placement2D` (Location + RefDirection(X) in the XY plane, Y the
-    /// 90° CCW perpendicular). Used by both the full-circle sampler and the
-    /// trimmed-arc sampler so a 3D-placed arc is never flattened to z=0.
-    fn read_conic_placement_3d(
+    /// frame: `(center, x_axis, y_axis)`, from either `IfcAxis2Placement3D` or
+    /// the planar `IfcAxis2Placement2D`. Used by both the full-circle sampler
+    /// and the trimmed-arc sampler so a 3D-placed arc is never flattened to z=0.
+    ///
+    /// Both kinds go through the canonical reader, [`crate::placement::Axis2Placement`],
+    /// (#7687, PROC-13), as the trimmed-circle path (`circle_basis`) already
+    /// did. This reader's own copy normalised a zero Axis to NaN and used a
+    /// RefDirection not perpendicular to Axis as written, tilting the circle
+    /// out of its plane, so a full circle and a trimmed circle on the same
+    /// placement sampled different curves.
+    pub(super) fn read_conic_placement_3d(
         &self,
         curve: &DecodedEntity,
         decoder: &mut EntityDecoder,
@@ -176,122 +77,10 @@ impl ProfileProcessor {
         let position = decoder
             .resolve_ref(position_attr)?
             .ok_or_else(|| Error::geometry("Failed to resolve conic position".to_string()))?;
-
-        if position.ifc_type == IfcType::IfcAxis2Placement3D {
-            // IfcAxis2Placement3D: Location, Axis (Z), RefDirection (X)
-            let loc_attr = position
-                .get(0)
-                .ok_or_else(|| Error::geometry("Axis2Placement3D missing Location".to_string()))?;
-            let loc = decoder
-                .resolve_ref(loc_attr)?
-                .ok_or_else(|| Error::geometry("Failed to resolve location".to_string()))?;
-            let coords = loc
-                .get(0)
-                .and_then(|v| v.as_list())
-                .ok_or_else(|| Error::geometry("Location missing coordinates".to_string()))?;
-            let center = Point3::new(
-                coords.first().and_then(|v| v.as_float()).unwrap_or(0.0),
-                coords.get(1).and_then(|v| v.as_float()).unwrap_or(0.0),
-                coords.get(2).and_then(|v| v.as_float()).unwrap_or(0.0),
-            );
-
-            // Get Z axis (Axis attribute)
-            let z_axis = if let Some(axis_attr) = position.get(1) {
-                if !axis_attr.is_null() {
-                    let axis = decoder.resolve_ref(axis_attr)?;
-                    if let Some(axis) = axis {
-                        let coords = axis.get(0).and_then(|v| v.as_list());
-                        if let Some(coords) = coords {
-                            Vector3::new(
-                                coords.first().and_then(|v| v.as_float()).unwrap_or(0.0),
-                                coords.get(1).and_then(|v| v.as_float()).unwrap_or(0.0),
-                                coords.get(2).and_then(|v| v.as_float()).unwrap_or(1.0),
-                            )
-                            .normalize()
-                        } else {
-                            Vector3::new(0.0, 0.0, 1.0)
-                        }
-                    } else {
-                        Vector3::new(0.0, 0.0, 1.0)
-                    }
-                } else {
-                    Vector3::new(0.0, 0.0, 1.0)
-                }
-            } else {
-                Vector3::new(0.0, 0.0, 1.0)
-            };
-
-            // Get X axis (RefDirection attribute)
-            let x_axis = if let Some(ref_attr) = position.get(2) {
-                if !ref_attr.is_null() {
-                    let ref_dir = decoder.resolve_ref(ref_attr)?;
-                    if let Some(ref_dir) = ref_dir {
-                        let coords = ref_dir.get(0).and_then(|v| v.as_list());
-                        if let Some(coords) = coords {
-                            Vector3::new(
-                                coords.first().and_then(|v| v.as_float()).unwrap_or(1.0),
-                                coords.get(1).and_then(|v| v.as_float()).unwrap_or(0.0),
-                                coords.get(2).and_then(|v| v.as_float()).unwrap_or(0.0),
-                            )
-                            .normalize()
-                        } else {
-                            Vector3::new(1.0, 0.0, 0.0)
-                        }
-                    } else {
-                        Vector3::new(1.0, 0.0, 0.0)
-                    }
-                } else {
-                    Vector3::new(1.0, 0.0, 0.0)
-                }
-            } else {
-                Vector3::new(1.0, 0.0, 0.0)
-            };
-
-            // Y axis = Z cross X
-            let y_axis = z_axis.cross(&x_axis).normalize();
-
-            Ok((center, x_axis, y_axis))
-        } else {
-            // Planar IfcAxis2Placement2D: Location + RefDirection (X) at index 1.
-            // Build the frame in the XY plane (z = 0), honouring RefDirection so a
-            // rotated arc keeps its orientation (matches the 2D conic sampler).
-            let loc_attr = position.get(0);
-            let (cx, cy) = if let Some(attr) = loc_attr {
-                let loc = decoder.resolve_ref(attr)?;
-                if let Some(loc) = loc {
-                    let coords = loc.get(0).and_then(|v| v.as_list());
-                    if let Some(coords) = coords {
-                        (
-                            coords.first().and_then(|v| v.as_float()).unwrap_or(0.0),
-                            coords.get(1).and_then(|v| v.as_float()).unwrap_or(0.0),
-                        )
-                    } else {
-                        (0.0, 0.0)
-                    }
-                } else {
-                    (0.0, 0.0)
-                }
-            } else {
-                (0.0, 0.0)
-            };
-            let x_axis = position
-                .get(1)
-                .filter(|a| !a.is_null())
-                .and_then(|a| decoder.resolve_ref(a).ok().flatten())
-                .and_then(|d| {
-                    let coords = d.get(0).and_then(|v| v.as_list())?;
-                    Some(Vector3::new(
-                        coords.first().and_then(|v| v.as_float()).unwrap_or(1.0),
-                        coords.get(1).and_then(|v| v.as_float()).unwrap_or(0.0),
-                        0.0,
-                    ))
-                })
-                .and_then(|v| v.try_normalize(1e-12))
-                .unwrap_or_else(|| Vector3::new(1.0, 0.0, 0.0));
-            // 90° CCW perpendicular in the XY plane.
-            let y_axis = Vector3::new(-x_axis.y, x_axis.x, 0.0);
-            Ok((Point3::new(cx, cy, 0.0), x_axis, y_axis))
-        }
+        let frame = crate::placement::Axis2Placement::read(&position, decoder)?.matrix();
+        let column = |c: usize| Vector3::new(frame[(0, c)], frame[(1, c)], frame[(2, c)]);
+        let center = Point3::new(frame[(0, 3)], frame[(1, 3)], frame[(2, 3)]);
+        Ok((center, column(0), column(1)))
     }
 
     /// Process circle curve in 3D space (for swept disk solid, etc.)
@@ -335,6 +124,54 @@ impl ProfileProcessor {
         basis: &DecodedEntity,
         decoder: &mut EntityDecoder,
     ) -> Result<Vec<Point3<f64>>> {
+        if basis.ifc_type == IfcType::IfcCircle {
+            use crate::trimmed_curve::{decode_trimmed_primitive, TrimRecovery, TrimmedPrimitive};
+            // The source description rejects malformed circle bases; keep the
+            // mesh sampler's prior recovery for those files (notably #5566).
+            let decoded = match decode_trimmed_primitive(
+                trimmed,
+                basis,
+                decoder,
+                TrimRecovery::BasisDefaultsStrictPoints,
+            ) {
+                Ok(decoded) => decoded,
+                Err(_) => return self.process_trimmed_ellipse_3d(trimmed, basis, decoder),
+            };
+            let Some(TrimmedPrimitive::Circle {
+                center,
+                normal: _,
+                x_axis,
+                y_axis,
+                radius,
+                start_angle,
+                sweep_angle,
+            }) = decoded
+            else {
+                return Err(Error::geometry("Expected trimmed circle".to_string()));
+            };
+            return Ok(self.sample_conic_arc_3d(
+                (
+                    Point3::from(center),
+                    Vector3::from(x_axis),
+                    Vector3::from(y_axis),
+                ),
+                (radius, radius),
+                start_angle,
+                start_angle + sweep_angle,
+                decoder,
+            ));
+        }
+        self.process_trimmed_ellipse_3d(trimmed, basis, decoder)
+    }
+
+    /// Existing ellipse interpretation remains separate: analytic source segments
+    /// currently support circles only.
+    fn process_trimmed_ellipse_3d(
+        &self,
+        trimmed: &DecodedEntity,
+        basis: &DecodedEntity,
+        decoder: &mut EntityDecoder,
+    ) -> Result<Vec<Point3<f64>>> {
         let radius = basis.get_float(1).unwrap_or(1.0);
         let radius2 = if basis.ifc_type == IfcType::IfcEllipse {
             basis.get_float(2).unwrap_or(radius)
@@ -352,13 +189,7 @@ impl ProfileProcessor {
             .map(|m| m == "CARTESIAN")
             .unwrap_or(false);
 
-        let sense = trimmed
-            .get(3)
-            .and_then(|v| match v {
-                AttributeValue::Enum(s) => Some(s == "T"),
-                _ => None,
-            })
-            .unwrap_or(true);
+        let sense = trimmed.get_bool(3).unwrap_or(true);
 
         let angle_scale = decoder.plane_angle_to_radians();
         let start_angle = self
@@ -372,7 +203,7 @@ impl ProfileProcessor {
                 radius2,
                 angle_scale,
                 decoder,
-            )
+            )?
             .unwrap_or(0.0);
         let mut end_angle = self
             .trim_to_angle_3d(
@@ -385,7 +216,7 @@ impl ProfileProcessor {
                 radius2,
                 angle_scale,
                 decoder,
-            )
+            )?
             .unwrap_or(2.0 * PI);
 
         // Wrap so a sense-T arc whose end angle dropped below the start (crossed
@@ -396,52 +227,13 @@ impl ProfileProcessor {
             end_angle -= 2.0 * PI;
         }
 
-        // Segment count: same angular floor + chord-deviation budget as the 2D
-        // conic sampler so density matches across the codebase.
-        let arc_angle = (end_angle - start_angle).abs();
-        let by_angle = (arc_angle / std::f64::consts::FRAC_PI_2 * 8.0).ceil() as usize;
-        let by_chord = {
-            const CHORD_TOL_M: f64 = 5.0e-4; // 0.5 mm absolute deviation budget
-            let r_eff = radius.abs().max(radius2.abs());
-            let radius_m = r_eff * decoder.length_unit_scale();
-            if radius_m > CHORD_TOL_M {
-                let rel = (CHORD_TOL_M / radius_m).clamp(1e-9, 0.5);
-                let max_step = 2.0 * (1.0 - rel).acos();
-                if max_step > 1e-9 {
-                    (arc_angle / max_step).ceil() as usize
-                } else {
-                    0
-                }
-            } else {
-                0
-            }
-        };
-        let num_segments = self
-            .quality()
-            .profile_arc_segments(by_angle.max(by_chord), 2)
-            .min(128);
-
-        let angle_range = if sense {
-            end_angle - start_angle
-        } else {
-            start_angle - end_angle
-        };
-
-        let mut points = Vec::with_capacity(num_segments + 1);
-        for i in 0..=num_segments {
-            let t = i as f64 / num_segments as f64;
-            let angle = if sense {
-                start_angle + t * angle_range
-            } else {
-                start_angle - t * angle_range.abs()
-            };
-            let p = center
-                + x_axis * (radius * angle.cos())
-                + y_axis * (radius2 * angle.sin());
-            points.push(p);
-        }
-
-        Ok(points)
+        Ok(self.sample_conic_arc_3d(
+            (center, x_axis, y_axis),
+            (radius, radius2),
+            start_angle,
+            end_angle,
+            decoder,
+        ))
     }
 
     /// Resolve one bound of an `IfcTrimmingSelect` on a 3D-placed conic to an
@@ -462,34 +254,21 @@ impl ProfileProcessor {
         radius2: f64,
         angle_scale: f64,
         decoder: &mut EntityDecoder,
-    ) -> Option<f64> {
-        let list = attr?.as_list()?;
+    ) -> Result<Option<f64>> {
+        let Some(list) = attr.and_then(|a| a.as_list()) else {
+            return Ok(None);
+        };
         let mut param: Option<f64> = None;
         let mut point: Option<Point3<f64>> = None;
 
         for item in list {
-            // IFCPARAMETERVALUE(value) is stored as List(["IFCPARAMETERVALUE", value]).
-            if let Some(inner_list) = item.as_list() {
-                if let Some(type_name) = inner_list.first().and_then(|v| v.as_string()) {
-                    if type_name == "IFCPARAMETERVALUE" {
-                        param = inner_list.get(1).and_then(|v| v.as_float());
-                        continue;
-                    }
-                }
+            if let Some(value) = item.typed_value("IFCPARAMETERVALUE") {
+                param = value.as_float();
+                continue;
             }
             // A reference to an IfcCartesianPoint (kept in full 3D).
-            if item.as_entity_ref().is_some() {
-                if let Ok(Some(pt)) = decoder.resolve_ref(item) {
-                    if pt.ifc_type == IfcType::IfcCartesianPoint {
-                        if let Some(coords) = pt.get(0).and_then(|v| v.as_list()) {
-                            point = Some(Point3::new(
-                                coords.first().and_then(|v| v.as_float()).unwrap_or(0.0),
-                                coords.get(1).and_then(|v| v.as_float()).unwrap_or(0.0),
-                                coords.get(2).and_then(|v| v.as_float()).unwrap_or(0.0),
-                            ));
-                        }
-                    }
-                }
+            if let Some(id) = item.as_entity_ref() {
+                point = Some(Point3::from(decoder.point3(id)?));
                 continue;
             }
             // Bare numeric fallback: a parameter without the IFCPARAMETERVALUE wrapper.
@@ -504,10 +283,10 @@ impl ProfileProcessor {
                 let d = p - center;
                 let lx = d.dot(x_axis);
                 let ly = d.dot(y_axis);
-                return Some((ly / radius2).atan2(lx / radius));
+                return Ok(Some((ly / radius2).atan2(lx / radius)));
             }
         }
-        param.map(|v| v * angle_scale)
+        Ok(param.map(|v| v * angle_scale))
     }
 
     /// Process polyline into 3D points
@@ -525,18 +304,7 @@ impl ProfileProcessor {
         let mut result = Vec::with_capacity(points.len());
 
         for point in points {
-            // IfcCartesianPoint: Coordinates
-            let coords_attr = point
-                .get(0)
-                .ok_or_else(|| Error::geometry("CartesianPoint missing Coordinates".to_string()))?;
-
-            let coords = coords_attr
-                .as_list()
-                .ok_or_else(|| Error::geometry("Coordinates is not a list".to_string()))?;
-
-            let x = coords.first().and_then(|v| v.as_float()).unwrap_or(0.0);
-            let y = coords.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
-            let z = coords.get(2).and_then(|v| v.as_float()).unwrap_or(0.0);
+            let [x, y, z] = decoder.point3_decoded(&point)?;
 
             result.push(Point3::new(x, y, z));
         }
@@ -599,20 +367,27 @@ impl ProfileProcessor {
             .and_then(|a| a.as_list())
             .ok_or_else(|| Error::geometry("CartesianPointList missing CoordList".to_string()))?;
 
-        // IfcCartesianPointList3D has 3-tuples; IfcCartesianPointList2D has
-        // 2-tuples. Read whatever is there and default missing components to 0.
+        // Point-list rows are inline tuples, not CartesianPoint entities.
+        // Preserve row identity: a bad row refuses the curve, never shifts indices.
+        let dimension = match points_list.ifc_type.as_str() {
+            "IFCCARTESIANPOINTLIST2D" => 2,
+            "IFCCARTESIANPOINTLIST3D" => 3,
+            _ => {
+                return Err(Error::geometry(
+                    "Expected CartesianPointList2D or CartesianPointList3D",
+                ))
+            }
+        };
         let all_points: Vec<Point3<f64>> = coord_list
             .iter()
-            .filter_map(|coord| {
-                coord.as_list().map(|coords| {
-                    let x = coords.first().and_then(|v| v.as_float()).unwrap_or(0.0);
-                    let y = coords.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
-                    let z = coords.get(2).and_then(|v| v.as_float()).unwrap_or(0.0);
-                    Point3::new(x, y, z)
-                })
+            .map(|coord| {
+                let row = coord
+                    .as_list()
+                    .filter(|row| row.len() == dimension)
+                    .ok_or_else(|| Error::geometry("Invalid CartesianPointList row dimensions"))?;
+                crate::curve_source::point_values(row).map(Point3::from)
             })
-            .collect();
-
+            .collect::<Result<_>>()?;
         let segments_attr = curve.get(1);
         if segments_attr.is_none() || segments_attr.map(|a| a.is_null()).unwrap_or(true) {
             return Ok(all_points);
@@ -625,26 +400,7 @@ impl ProfileProcessor {
 
         let mut result: Vec<Point3<f64>> = Vec::new();
         for segment in segments {
-            // Each segment is IFCLINEINDEX((i1,i2,...)) or IFCARCINDEX((i1,i2,i3)).
-            // Typed values arrive as List([String("IFCLINEINDEX"), List([indices...])]).
-            let (is_arc, indices) = if let Some(segment_list) = segment.as_list() {
-                if segment_list.len() >= 2 {
-                    let type_name = segment_list
-                        .first()
-                        .and_then(|v| v.as_string())
-                        .unwrap_or("");
-                    let is_arc_type = type_name.to_uppercase().contains("ARC");
-                    if let Some(AttributeValue::List(indices_list)) = segment_list.get(1) {
-                        (is_arc_type, Some(indices_list.as_slice()))
-                    } else {
-                        (false, Some(segment_list))
-                    }
-                } else {
-                    (false, Some(segment_list))
-                }
-            } else {
-                (false, None)
-            };
+            let (is_arc, indices) = super::curves_2d::indexed_segment(segment);
 
             let Some(indices) = indices else { continue };
             let idx_values: Vec<usize> = indices
@@ -669,11 +425,12 @@ impl ProfileProcessor {
                     // mid-deviation, same heuristic as the 2D path.
                     let chord = end - start;
                     let chord_len = chord.norm();
-                    let mid_offset = mid - Point3::new(
-                        0.5 * (start.x + end.x),
-                        0.5 * (start.y + end.y),
-                        0.5 * (start.z + end.z),
-                    );
+                    let mid_offset = mid
+                        - Point3::new(
+                            0.5 * (start.x + end.x),
+                            0.5 * (start.y + end.y),
+                            0.5 * (start.z + end.z),
+                        );
                     let mid_dev = mid_offset.norm();
                     // Sweep angle phi = 4*atan(2s/c) (s = sagitta, c = chord);
                     // the old 2*acos(s/c) was inverted. Same fix as the 2D path.

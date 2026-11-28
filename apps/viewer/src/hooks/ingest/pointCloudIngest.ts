@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * LAS / LAZ ingest path for the viewer.
+ * LAS / LAZ (and COPC, via `copc/copcLodStream.ts`) ingest path for the viewer.
  *
  * Streams a Blob through `@ifc-lite/pointcloud`'s decode worker and
  * pushes chunks directly into the renderer via the streaming API. The
@@ -17,26 +17,31 @@ import {
   accumulateClassificationCounts,
   classificationCountEntries,
   createClassificationCounts,
-  streamPointCloud,
   type DecodedPointChunk,
+  type StreamPointCloudOptions,
   type StreamHandle,
+  type PointSourceSpatialMetadata,
 } from '@ifc-lite/pointcloud';
-import type { CoordinateInfo, GeometryResult, PointCloudAsset } from '@ifc-lite/geometry';
+import type { CoordinateInfo, GeometryResult, ModelSpatialReference, PointCloudAsset } from '@ifc-lite/geometry';
 import { createSyntheticDataStore, type IfcDataStore } from '@ifc-lite/parser';
 import type { SchemaVersion } from '../../store/types.js';
 import { createCoordinateInfo } from '../../utils/localParsingUtils.js';
 import {
-  registerPointCloudAlignment,
+  registerPointCloudAlignment, retargetPointCloudDecodeOrigin,
   unregisterPointCloudAlignment,
   type PointCloudAlignmentTransform,
 } from './pointCloudAlignment.js';
 import {
   addPointsToScanCache,
   registerPointCloudScanCache,
-  removePointCloudScanCache,
+  removePointCloudScanCache, setPointCloudScanCacheOrigin,
 } from './pointCloudScanCache.js';
+import { swapZupChunkToYup } from './pointCloudFrame.js';
+import { syncPointCloudRenderFrame, watchPointCloudRenderFrame } from './pointCloudFrameSync.js';
+import { streamPointCloudOrCopc } from './copc/copcLodStream.js';
 
-export type PointCloudFormat = 'las' | 'laz' | 'ply' | 'pcd' | 'e57' | 'pts' | 'xyz';
+import type { PointCloudFormat } from './pointCloudFormat.js';
+export type { PointCloudFormat } from './pointCloudFormat.js';
 
 /**
  * Synthetic IfcDataStore for a point-cloud-only model. Picking a point sets
@@ -92,13 +97,13 @@ export interface PointCloudIngestOptions {
   fileSize: number;
   /** Renderer to push chunks into. Streaming starts immediately. */
   renderer: Renderer;
-  /** Express ID assigned to this asset (for picking + federation). */
+  /** Express ID assigned to this asset (for picking + federation). The
+   *  global id and model index are bound after registration (#6887,
+   *  `pointCloudIdentity.ts`), since neither exists while streaming starts. */
   expressId?: number;
-  /** Federation index (set when the model registry is multi-model). */
-  modelIndex?: number;
   /** Soft cap on points held on the GPU. Default: 25M. */
   maxPointsInMemory?: number;
-  /** Hard cap on file size in bytes. Default: 4 GB. */
+  /** Hard cap on file size in bytes. Default: per format, see `streamPointCloud`. */
   maxFileSize?: number;
   /**
    * Points retained CPU-side (reservoir-sampled) for the 2D section scan
@@ -109,6 +114,8 @@ export interface PointCloudIngestOptions {
   maxScanCachePoints?: number;
   /** Progress callback shared with the existing UI. */
   onProgress?: (progress: { phase: string; percent: number }) => void;
+  /** Source-declared CRS metadata, delivered before the first GPU chunk. */
+  onSpatialMetadata?: (metadata: PointSourceSpatialMetadata | undefined) => void;
   /** Notified with +1 when streaming starts and -1 if it errors. */
   onAssetCountDelta?: (delta: number) => void;
   /**
@@ -122,16 +129,18 @@ export interface PointCloudIngestOptions {
   onClassCounts?: (handleId: number, counts: Record<number, number> | null) => void;
   /** Abort signal to cancel ingest. */
   signal?: AbortSignal;
+  /** In-process decoder seam used by integration tests; production uses the worker source. */
+  createSource?: StreamPointCloudOptions['createSource'];
   /**
    * IfcMapConversion-derived alignment transform for this scan (issue
    * #1804), computed by the caller from the reference model's
    * georeference (`computePointCloudAlignment`). `undefined` when the
-   * loaded model has no usable `IfcMapConversion` — the scan streams at
-   * its raw native coordinates, exactly as before this feature existed.
+   * loaded model has no usable `IfcMapConversion` — the scan keeps its
+   * native coordinates relative to the shared render origin.
    * When present:
-   *   - `decodeOriginOffset` is threaded into `streamPointCloud` so every
-   *     format's decoder subtracts it in f64 before narrowing to f32 (all
-   *     seven point-cloud formats consume it, not just LAS/LAZ).
+   *   - decoding subtracts a nearby scan origin in f64 before narrowing,
+   *     then retargets this alignment to that origin before the first chunk.
+   *     This preserves detail even when the scan is far from the IFC.
    *   - the asset defaults to the ALIGNED matrix (alignment ON) and is
    *     registered so the panel's toggle can flip every loaded scan
    *     between aligned/unaligned without re-streaming.
@@ -141,103 +150,13 @@ export interface PointCloudIngestOptions {
    *  (aligned) — matches the issue's "on by default" requirement. Only
    *  consulted when `alignment` is provided. */
   alignmentEnabled?: boolean;
+  /** Declared scan CRS retained even when no compatible anchor exists yet. */
+  spatialReference?: ModelSpatialReference;
 }
 
-/**
- * Detect a supported point-cloud format from filename or magic bytes.
- * Returns null when the buffer isn't a recognised format.
- *
- * Magic-byte sniffing covers files renamed by users:
- *   - LAS:  "LASF" (0x4653414c)
- *   - PLY:  "ply\n" or "ply\r\n" at offset 0
- *   - PCD:  "# .PCD" or any `.PCD` token in first 32 bytes
- *   - LAZ:  shares LAS magic; we trust the extension here
- */
-export function detectPointCloudFormat(
-  fileName: string,
-  buffer: ArrayBuffer | null,
-): PointCloudFormat | null {
-  // Magic bytes win over extension when both are available — a LAS
-  // file dropped as `*.ply` should still load as LAS, not be forced
-  // through the wrong decoder. PTS / XYZ are ASCII so they have no
-  // distinctive magic and stay extension-only at the bottom.
-  if (buffer && buffer.byteLength >= 8) {
-    const view = new DataView(buffer, 0, Math.min(buffer.byteLength, 32));
-    // E57 magic = "ASTM-E57" (8 bytes) — check before LAS so files
-    // can't accidentally match on the LAS magic in their first 4 bytes.
-    if (
-      view.getUint8(0) === 0x41 && view.getUint8(1) === 0x53
-      && view.getUint8(2) === 0x54 && view.getUint8(3) === 0x4d
-      && view.getUint8(4) === 0x2d && view.getUint8(5) === 0x45
-      && view.getUint8(6) === 0x35 && view.getUint8(7) === 0x37
-    ) return 'e57';
-    if (view.getUint32(0, true) === 0x4653414c /* "LASF" little-endian */) {
-      // LAS and LAZ share the LASF magic; differentiate by extension
-      // when available, otherwise default to LAS (laz-perf will throw
-      // a clear error on a non-LAZ payload).
-      const lower = fileName.toLowerCase();
-      if (lower.endsWith('.laz')) return 'laz';
-      return 'las';
-    }
-    // ASCII probes: "ply" header / PCD header line.
-    const b0 = view.getUint8(0), b1 = view.getUint8(1), b2 = view.getUint8(2);
-    if (b0 === 0x70 /* p */ && b1 === 0x6c /* l */ && b2 === 0x79 /* y */) return 'ply';
-    // PCDs in the wild use three header shapes:
-    //   1. `# .PCD v0.7\n…`              — original commented header
-    //   2. `VERSION 0.7\n…`              — version-first (PCL pcl_io)
-    //   3. `FIELDS x y z\n…`             — fields-first (some converters)
-    // Match all three so a renamed PCD doesn't fall through to the
-    // extension-based detector.
-    if (b0 === 0x23 /* # */ && view.byteLength > 4 && view.getUint8(2) === 0x2e /* . */) return 'pcd';
-    if (
-      b0 === 0x56 /* V */ && b1 === 0x45 /* E */ && b2 === 0x52 /* R */
-      && view.byteLength > 7 && view.getUint8(3) === 0x53 /* S */
-      && view.getUint8(4) === 0x49 /* I */ && view.getUint8(5) === 0x4f /* O */
-      && view.getUint8(6) === 0x4e /* N */
-    ) return 'pcd';
-    if (
-      b0 === 0x46 /* F */ && b1 === 0x49 /* I */ && b2 === 0x45 /* E */
-      && view.byteLength > 6 && view.getUint8(3) === 0x4c /* L */
-      && view.getUint8(4) === 0x44 /* D */ && view.getUint8(5) === 0x53 /* S */
-    ) return 'pcd';
-  }
-  // Fall back to extension when the buffer is missing / too short
-  // OR for ASCII formats (PTS / XYZ) that don't carry a magic header.
-  const lower = fileName.toLowerCase();
-  if (lower.endsWith('.las')) return 'las';
-  if (lower.endsWith('.laz')) return 'laz';
-  if (lower.endsWith('.ply')) return 'ply';
-  if (lower.endsWith('.pcd')) return 'pcd';
-  if (lower.endsWith('.e57')) return 'e57';
-  if (lower.endsWith('.pts')) return 'pts';
-  if (lower.endsWith('.xyz')) return 'xyz';
-  return null;
-}
-
-/**
- * Map common unsupported formats to a user-facing explanation. Drop
- * handlers call this when nothing else recognises a dropped file so the
- * user sees "this is a Recap project, export to E57" instead of nothing
- * happening.
- */
-export function describeUnsupportedFormat(fileName: string): string | null {
-  const lower = fileName.toLowerCase();
-  if (lower.endsWith('.zip')) {
-    return 'ZIP archive — please extract first. .ply / .las / .laz / .e57 files inside will load.';
-  }
-  if (
-    lower.endsWith('.rwp') || lower.endsWith('.rwi')
-    || lower.endsWith('.rwcx') || lower.endsWith('.dmt')
-    || lower.endsWith('.lay') || lower.endsWith('.db1')
-  ) {
-    return 'Autodesk ReCap (.rwp/.rwi/.rwcx) is a proprietary format we cannot decode. Export to E57 or LAS from ReCap.';
-  }
-  if (lower.endsWith('.skp')) return 'SketchUp model — not a point cloud.';
-  if (lower.endsWith('.fls') || lower.endsWith('.lsproj')) {
-    return 'Faro Scene project — export to E57 from Scene to load it here.';
-  }
-  return null;
-}
+// `describeUnsupportedFormat` moved to ./unsupportedFormat.ts (#4099) — this
+// module was at its module-size budget and that function has no dependency
+// on the point-cloud pipeline below.
 
 /**
  * Counter for synthetic expressIds when callers don't supply one.
@@ -330,7 +249,6 @@ export function ingestPointCloud(opts: PointCloudIngestOptions): PointCloudInges
   const handle = opts.renderer.beginPointCloudStream({
     expressId,
     ifcType: 'IfcGeographicElement',
-    modelIndex: opts.modelIndex,
   });
   const onCountChange = opts.onAssetCountDelta ?? (() => {});
   onCountChange(+1);
@@ -349,13 +267,24 @@ export function ingestPointCloud(opts: PointCloudIngestOptions): PointCloudInges
   // (originally LAS/LAZ-only; extended to E57/PLY/PCD/PTS/XYZ), so the
   // matrix is valid for any format here — no gate needed.
   const alignment = opts.alignment;
-  if (alignment) {
-    registerPointCloudAlignment(handle, alignment);
-    const enabled = opts.alignmentEnabled ?? true;
-    opts.renderer.setPointCloudTransform(
-      handle,
-      enabled ? alignment.alignedMatrix : alignment.unalignedMatrix,
-    );
+  const alignmentEnabled = opts.alignmentEnabled ?? true;
+  // Register every scan, even before a compatible anchor exists. The registry
+  // retains its explicit source CRS and can atomically realign it when an IFC
+  // anchor loads later; omitting raw scans made model-after-scan order depend
+  // on a manual reload.
+  try {
+    watchPointCloudRenderFrame(opts.renderer);
+    registerPointCloudAlignment(handle, alignment, alignmentEnabled, {
+      sourceSpatialReference: opts.spatialReference,
+      sourceUnit: opts.format === 'las' || opts.format === 'laz' ? 'mapUnit' : 'metre',
+    });
+    retargetPointCloudDecodeOrigin(opts.renderer, handle, alignment?.decodeOriginOffset ?? [0, 0, 0]);
+  } catch (error) {
+    opts.renderer.removePointCloudAsset(handle);
+    unregisterPointCloudAlignment(handle.id);
+    removePointCloudScanCache(handle.id);
+    onCountChange(-1);
+    throw error;
   }
 
   // Running per-class histogram, pushed to the caller periodically so
@@ -391,15 +320,20 @@ export function ingestPointCloud(opts: PointCloudIngestOptions): PointCloudInges
   // permanently inflated.
   let stream: StreamHandle;
   try {
-    stream = streamPointCloud({
+    // A COPC file (detected by its VLR) streams view-dependent LOD nodes instead (#6869).
+    stream = streamPointCloudOrCopc({
       format: opts.format,
       blob: opts.blob,
       label: opts.fileName,
       maxPointsInMemory: opts.maxPointsInMemory,
       maxFileSize: opts.maxFileSize,
       signal: opts.signal,
-      originOffset: alignment?.decodeOriginOffset,
+      createSource: opts.createSource,
+      autoOrigin: true,
       onOpen: (info) => {
+        opts.onSpatialMetadata?.(info.spatialMetadata);
+        syncPointCloudRenderFrame(opts.renderer);
+        if (info.originOffset) { retargetPointCloudDecodeOrigin(opts.renderer, handle, info.originOffset); setPointCloudScanCacheOrigin(handle.id, info.originOffset); }
         opts.onProgress?.({
           phase: info.stride > 1
             ? `Streaming (${info.stride}× downsampled, ${info.totalPointCount.toLocaleString()} pts)`
@@ -459,7 +393,7 @@ export function ingestPointCloud(opts: PointCloudIngestOptions): PointCloudInges
         removePointCloudScanCache(handle.id);
         onCountChange(-1);
       },
-    });
+    }, { renderer: opts.renderer, handle, onClassCounts: (counts) => opts.onClassCounts?.(handle.id, counts) });
   } catch (err) {
     opts.renderer.removePointCloudAsset(handle);
     opts.onClassCounts?.(handle.id, null);
@@ -475,15 +409,14 @@ export function ingestPointCloud(opts: PointCloudIngestOptions): PointCloudInges
     min: { x: 0, y: 0, z: 0 },
     max: { x: 0, y: 0, z: 0 },
   });
-  // Synthetic pointcloud descriptor. Federation (`useIfcFederation`)
-  // folds `idOffset` into every entry's `expressId` and then calls
-  // `relabelPointCloudAsset` on the renderer; without an entry here
-  // streamed assets keep their local synthetic id and pick collisions
-  // appear once a second model is added.
+  // Synthetic pointcloud descriptor. `finalizeModel` folds `idOffset` into
+  // every entry's `expressId`, and `bindPointCloudIdentity` then relabels the
+  // renderer asset with it (#6887); without an entry here streamed assets
+  // keep their local synthetic id and pick collisions appear once a second
+  // model is added.
   const pointClouds: PointCloudAsset[] = [{
     expressId,
     ifcType: 'IfcGeographicElement',
-    modelIndex: opts.modelIndex,
     chunk: {
       // Empty placeholder — actual point data is GPU-resident, never
       // re-uploaded from JS.
@@ -507,39 +440,5 @@ export function ingestPointCloud(opts: PointCloudIngestOptions): PointCloudInges
     rendererHandle: handle,
     streamHandle: stream,
     done: stream.done,
-  };
-}
-
-/**
- * Re-orient a Z-up chunk into the renderer's Y-up convention.
- *   Z-up: X=right, Y=forward, Z=up
- *   Y-up: X=right, Y=up,      Z=back   (negate Y to keep right-hand rule)
- *
- * Mirrors the geometry / pointcloud extractors' Z↔Y handling for IFCx.
- * Allocates a fresh positions buffer so the source chunk's typed array
- * (often a transferable from the worker) stays untouched.
- */
-function swapZupChunkToYup(chunk: DecodedPointChunk): DecodedPointChunk {
-  const src = chunk.positions;
-  const positions = new Float32Array(src.length);
-  for (let i = 0; i < src.length; i += 3) {
-    const x = src[i];
-    const y = src[i + 1];
-    const z = src[i + 2];
-    positions[i] = x;
-    positions[i + 1] = z;        // new Y = old Z
-    positions[i + 2] = -y;       // new Z = -old Y
-  }
-  // BBox transforms the same way. New min/max derive from the swapped
-  // axes; note the negation flips min and max on the Z-back axis.
-  const oldMin = chunk.bbox.min;
-  const oldMax = chunk.bbox.max;
-  return {
-    ...chunk,
-    positions,
-    bbox: {
-      min: [oldMin[0], oldMin[2], -oldMax[1]],
-      max: [oldMax[0], oldMax[2], -oldMin[1]],
-    },
   };
 }

@@ -21,6 +21,13 @@ import { render, click, cleanup } from '@/test/render.js';
 import { useViewerStore, type FederatedModel } from '@/store/index.js';
 import { RoomTriagePanel } from './RoomTriagePanel.js';
 
+/** Wait in coarse steps: the edit window waits for a quiet event loop, and a
+ *  tight poll keeps it from ever being quiet. */
+async function eventually(done: () => boolean, message: string): Promise<void> {
+  for (let i = 0; i < 50 && !done(); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.ok(done(), message);
+}
+
 /** Two rooms under one storey: one finished, one missing its description. */
 const MINI_IFC = `ISO-10303-21;
 HEADER;
@@ -55,8 +62,11 @@ function seed(role = 'editor'): void {
     ifcDataStore: store,
     geometryResult: null,
     mutationViews: new Map(),
+    storeEditors: new Map(),
     mutationVersion: 0,
     activeDisciplineSystemId: role,
+    // Upstream: deleting an element needs Edit mode.
+    editEnabled: true,
     selectedEntityId: null,
     ghostExceptEntities: null,
   });
@@ -150,7 +160,7 @@ describe('RoomTriagePanel', () => {
     assert.deepEqual([...(state.ghostExceptEntities ?? [])], [31]);
   });
 
-  it('writes the description into the model and shows it back', () => {
+  it('writes the description into the model and shows it back', async () => {
     const container = render(<RoomTriagePanel onClose={() => {}} />);
     click(row(container, '0.02'));
     fill(container, 'room-name', 'Garderobe');
@@ -160,7 +170,8 @@ describe('RoomTriagePanel', () => {
     const written = overlay?.getAttributeMutationsForEntity(31)
       ?.find((attribute) => attribute.name === 'LongName')?.value;
     assert.equal(written, 'Garderobe');
-    assert.ok(container.textContent?.includes('Garderobe'));
+    // Panels converge after the renderer-first edit window, not in the same tick.
+    await eventually(() => container.textContent?.includes('Garderobe') ?? false, 'the new name shows');
   });
 
   it('refuses the write in the read-only role instead of pretending', () => {
@@ -176,10 +187,10 @@ describe('RoomTriagePanel', () => {
     assert.equal(overlay?.getAttributeMutationsForEntity(31)?.length ?? 0, 0);
   });
 
-  it('discards a region that is not a room', () => {
+  it('discards a region that is not a room', async () => {
     const container = render(<RoomTriagePanel onClose={() => {}} />);
     click(row(container, '0.02'));
     click(button(container, 'Verwerfen'));
-    assert.equal(container.textContent?.includes('0.02'), false);
+    await eventually(() => container.textContent?.includes('0.02') === false, 'the region leaves the list');
   });
 });

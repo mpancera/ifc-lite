@@ -1,0 +1,184 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/**
+ * A main-viewer tool outcome as the bridge's `result` frame (#9523).
+ *
+ * The agent must not be able to tell the bridge from the stdio server, so the
+ * shapes follow `@ifc-lite/mcp`'s own helpers: a success is `okResult`
+ * (one text block, `structuredContent` when the value is an object), and a
+ * failure is `toolError` (`structuredContent: { code, message, details,
+ * hint }`, `isError: true`).
+ *
+ * Numbers: the bridge refuses any frame with a non-finite number. Frames are
+ * built with `JSON.stringify`, which writes NaN and +/-Infinity as `null`, so a
+ * tool value the viewer cannot compute (a volume of an open shell, say)
+ * arrives as `null`, never as an invalid frame (pinned by a test).
+ *
+ * Images: an outcome's `image` becomes an MCP image block only when the
+ * bridge's `welcome` advertised `image-content`; an older bridge would refuse
+ * the whole result, so it gets a text line asking for an update instead.
+ *
+ * A result the bridge would refuse (over `BRIDGE_LIMITS.maxResultBytes`, or
+ * nested too deep, or with too many values) would fail the call, so it is
+ * cut down here instead, with a note telling the agent what happened and how
+ * to ask for less. Images are dropped first, with their own note.
+ */
+
+import {
+  BRIDGE_LIMITS, parseTabMessage, type BridgeCallResult, type BridgeImageContent, type BridgeResultMessage,
+} from '@ifc-lite/mcp/bridge-protocol';
+import { digest } from '@ifc-lite/flow';
+import type { AgentBridgeEdit } from './state';
+
+/** A tool outcome, as `dispatchMainViewerTool` returns it. */
+export interface ToolOutcome {
+  text: string;
+  structured: unknown;
+  isError: boolean;
+  errorCode?: string;
+  hint?: string;
+  /** What an edit changed, for the activity log only; never sent (the frame carries `structured`). */
+  edit?: AgentBridgeEdit;
+  /** An image for the agent, sent as an image block when the bridge supports it. */
+  image?: Omit<BridgeImageContent, 'type'>;
+}
+
+/** Sent in place of an image when the bridge did not advertise `image-content`. */
+export const IMAGE_NEEDS_NEWER_BRIDGE = '[This result includes an image, but the connected ifc-lite MCP bridge cannot forward images. '
+  + 'Update it and pair again: npx @ifc-lite/mcp@latest --bridge]';
+
+/** Room left in a frame for the envelope, the note and JSON escaping slack. */
+const ENVELOPE_RESERVE_BYTES = 4096;
+/** Large replies stay separate so activity logging adds bounded work. */
+const MAX_ACTIVITY_RESULT_CHARS = 64 * 1024;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The MCP `CallToolResult` the stdio server would have returned for this
+ * outcome. `imageContent`: the bridge's welcome listed `image-content`.
+ */
+export function toCallToolResult(outcome: ToolOutcome, imageContent = false): BridgeCallResult {
+  const content: BridgeCallResult['content'] = [{ type: 'text', text: outcome.text }];
+  if (outcome.image && !outcome.isError) {
+    content.push(imageContent
+      ? { type: 'image', data: outcome.image.data, mimeType: outcome.image.mimeType }
+      : { type: 'text', text: IMAGE_NEEDS_NEWER_BRIDGE });
+  }
+  if (outcome.isError) {
+    return {
+      content,
+      structuredContent: {
+        code: outcome.errorCode ?? 'INTERNAL_ERROR',
+        message: outcome.text,
+        details: isPlainObject(outcome.structured) ? outcome.structured : {},
+        ...(outcome.hint !== undefined ? { hint: outcome.hint } : {}),
+      },
+      isError: true,
+    };
+  }
+  return isPlainObject(outcome.structured) ? { content, structuredContent: outcome.structured } : { content };
+}
+
+const encoder = new TextEncoder();
+
+function byteLength(text: string): number {
+  return encoder.encode(text).byteLength;
+}
+
+/** The first `maxBytes` UTF-8 bytes of `text`, never ending inside a character. */
+function utf8Prefix(text: string, maxBytes: number): string {
+  const bytes = encoder.encode(text);
+  if (bytes.byteLength <= maxBytes) return text;
+  let end = maxBytes;
+  // Back up to a character boundary: continuation bytes are 0b10xxxxxx.
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return new TextDecoder().decode(bytes.subarray(0, end));
+}
+
+export interface ResultFrame {
+  /** The serialised `result` frame, which the bridge's own validator accepts. */
+  json: string;
+  truncated: boolean;
+  /** Session-scoped digest of a small, complete result for activity folding. */
+  resultDigest?: string;
+}
+
+/**
+ * Serialise the `result` frame for call `id`. The frame is checked with the
+ * bridge's own validator (`parseTabMessage`: text and image content, result bytes,
+ * depth and node count) and against `maxResultBytes`; one that would be
+ * refused is cut down instead. A cut result keeps `isError` and, for an
+ * error, its code; it drops `structuredContent` (which cannot be cut without
+ * becoming wrong) and keeps as much text as fits, followed by a note.
+ */
+export function buildResultFrame(
+  sessionId: string,
+  id: string,
+  result: BridgeCallResult,
+  maxResultBytes: number = BRIDGE_LIMITS.maxResultBytes,
+  digestForActivity = false,
+  resultAck = false,
+): ResultFrame {
+  const frame = (r: BridgeCallResult, ack = false): string =>
+    JSON.stringify({ type: 'result', sessionId, id, ...(ack ? { resultAck: true } : {}), result: r } satisfies BridgeResultMessage);
+  // A frame is its result's JSON inside a fixed envelope, so a result's size is
+  // its frame's size minus the envelope: one encode per check, not a re-stringify.
+  const empty: BridgeCallResult = { content: [] };
+  const emptyFrame = frame(empty);
+  const emptyResult = JSON.stringify(empty);
+  const envelopeBytes = byteLength(emptyFrame) - byteLength(emptyResult);
+  const fullEmptyFrame = resultAck ? frame(empty, true) : emptyFrame;
+  const fullEnvelopeBytes = resultAck ? byteLength(fullEmptyFrame) - byteLength(emptyResult) : envelopeBytes;
+  const resultBytes = (json: string, ack = false): number => byteLength(json) - (ack ? fullEnvelopeBytes : envelopeBytes);
+  const refusal = (json: string, ack = false): string | null => {
+    const checked = parseTabMessage(json);
+    if (!checked.ok) return checked.error;
+    const bytes = resultBytes(json, ack);
+    return bytes > maxResultBytes ? `result is ${bytes} bytes; the limit is ${maxResultBytes}` : null;
+  };
+  const full = frame(result, resultAck);
+  const why = refusal(full, resultAck);
+  if (why === null) {
+    const envelopeChars = fullEmptyFrame.length - emptyResult.length;
+    const resultDigest = digestForActivity && full.length - envelopeChars <= MAX_ACTIVITY_RESULT_CHARS
+      // The serialised result begins after the prefix and ends before the envelope's closing brace.
+      ? digest([sessionId, full.slice(envelopeChars - 1, -1)]) : undefined;
+    return { json: full, truncated: false, resultDigest };
+  }
+
+  const originalBytes = resultBytes(full, resultAck);
+  const texts = result.content.filter((block) => block.type === 'text');
+  const images = result.content.length - texts.length;
+  if (images > 0) {
+    // Drop the images first: the text and structured content usually fit without them.
+    const imageNote = `[The viewer dropped ${images} image(s): the result (${originalBytes} bytes) is more than the bridge accepts (${why}). `
+      + 'Ask for a smaller image (e.g. a lower max_width or JPEG).]';
+    const withoutImages: BridgeCallResult = { ...result, content: [...texts, { type: 'text', text: imageNote }] };
+    const json = frame(withoutImages);
+    if (refusal(json) === null) return { json, truncated: true };
+  }
+  const text = texts.map((block) => block.text).join('\n');
+  const note = `\n\n[Truncated by the viewer: the full result (${originalBytes} bytes) is more than the bridge accepts `
+    + `(${why})${images > 0 ? `, so its ${images} image(s) were dropped` : ''}. Ask for less: a smaller limit, fewer fields, or one model_id.]`;
+  const code = isPlainObject(result.structuredContent) && typeof result.structuredContent.code === 'string'
+    ? result.structuredContent.code : undefined;
+  const marker = { truncated: true, originalBytes, limitBytes: maxResultBytes, ...(code ? { code } : {}) };
+  // JSON escaping can grow text (quotes, control characters), so shrink the
+  // budget until the frame passes rather than trusting one estimate.
+  let budget = Math.max(0, maxResultBytes - ENVELOPE_RESERVE_BYTES);
+  for (;;) {
+    const cut: BridgeCallResult = {
+      content: [{ type: 'text', text: utf8Prefix(text, budget) + note }],
+      structuredContent: marker,
+      ...(result.isError ? { isError: true } : {}),
+    };
+    const json = frame(cut);
+    if (refusal(json) === null || budget === 0) return { json, truncated: true };
+    budget = Math.floor(budget / 2);
+  }
+}

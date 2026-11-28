@@ -38,7 +38,9 @@
 
 import { useCallback } from 'react';
 import { QuantityType, PropertyValueType } from '@ifc-lite/data';
+import { OccurrenceQuantityReadError } from '@ifc-lite/parser';
 import { useViewerStore } from '@/store';
+import { canMutate, mutationPermission, type MutationDenialReason } from '@/store/mutation-permission';
 import { resolveEntityRef } from '@/store/resolveEntityRef';
 import {
   buildElementWriteBack,
@@ -57,7 +59,13 @@ import { computeZoneApportionmentNow, gatherProvedVolumes } from './useZoneAppor
 // The numbers themselves come from ONE place, shared with the table export:
 // two producers of a per-zone volume is exactly the disagreement #2508's
 // verification bar exists to prevent.
-import { contextFor, quantitySetsFor, zoneFactsFor, type ModelContext } from './zoneFacts.js';
+import { contextFor, quantitySetsFor, quantitySetsWithStatusFor, zoneFactsFor, type ModelContext } from './zoneFacts.js';
+
+/** This command skips unavailable IFC models and reports only files it wrote. */
+function writableContextFor(modelId: string, cache: Map<string, ModelContext | null>): ModelContext | null {
+  if (!canMutate(useViewerStore.getState(), modelId)) return null;
+  return contextFor(modelId, cache);
+}
 
 export interface ZoneWriteBackResult {
   summary: WriteBackSummary;
@@ -65,7 +73,7 @@ export interface ZoneWriteBackResult {
   modelIds: string[];
   elapsedMs: number;
   /** Set when nothing was written, and why. */
-  blocked: 'collab-role' | 'duplicate-set-name' | null;
+  blocked: MutationDenialReason | 'duplicate-set-name' | null;
 }
 
 /**
@@ -101,21 +109,26 @@ const EMPTY: ZoneWriteBackResult = {
  * is matched, and the quantity sets are then found by the bracket text of the
  * property set that names them.
  */
+/** The owned property sets that the write path can sweep for one element. */
+export function zonePropertySetNamesOnElement(view: ModelContext['view'], expressId: number, zoneSetId: string): string[] {
+  const psets: string[] = [];
+  for (const pset of view.getForEntity(expressId)) {
+    if (!pset.name.startsWith(`${ZONE_SET_NAME_PREFIX} [`)) continue;
+    const owner = pset.properties.find((p) => p.name === ZONE_PROPERTY_NAMES.zoneSetId)?.value;
+    if (owner !== zoneSetId) continue;
+    psets.push(pset.name);
+  }
+  return psets;
+}
+
 function zoneSetsOnElement(
   context: ModelContext,
   expressId: number,
   zoneSetId: string,
   knownQsets?: ReturnType<typeof quantitySetsFor>,
 ): { psets: string[]; qsets: string[] } {
-  const psets: string[] = [];
-  const brackets: string[] = [];
-  for (const pset of context.view.getForEntity(expressId)) {
-    if (!pset.name.startsWith(`${ZONE_SET_NAME_PREFIX} [`)) continue;
-    const owner = pset.properties.find((p) => p.name === ZONE_PROPERTY_NAMES.zoneSetId)?.value;
-    if (owner !== zoneSetId) continue;
-    psets.push(pset.name);
-    brackets.push(pset.name.slice(`${ZONE_SET_NAME_PREFIX} [`.length, -1));
-  }
+  const psets = zonePropertySetNamesOnElement(context.view, expressId, zoneSetId);
+  const brackets = psets.map((name) => name.slice(`${ZONE_SET_NAME_PREFIX} [`.length, -1));
   // Reuses the caller's read when it has one. Each of these is an on-demand
   // extraction, and the write path already reads the element's quantity sets to
   // resolve its declared basis, so asking again would double the run's cost for
@@ -157,10 +170,10 @@ function sweepZoneSets(
  */
 export function applyZoneWriteBack(zoneSet: ZoneSet, basis: VolumeBasis): ZoneWriteBackResult {
   const state = useViewerStore.getState();
-  // Checked ONCE for the run rather than per element, which is the only
-  // difference from the per-mutation actions' own gate: a read-only collab
-  // participant must not accumulate local edits no peer will ever see.
-  if (!state.canCollabEdit()) return { ...EMPTY, blocked: 'collab-role' };
+  // Check once before any direct overlay write; every target element shares
+  // the same viewer edit mode and collaboration role.
+  const permission = mutationPermission(state);
+  if (!permission.allowed) return { ...EMPTY, blocked: permission.reason };
   if (collidesByName(zoneSet)) return { ...EMPTY, blocked: 'duplicate-set-name' };
 
   const t0 = performance.now();
@@ -171,11 +184,22 @@ export function applyZoneWriteBack(zoneSet: ZoneSet, basis: VolumeBasis): ZoneWr
   const contexts = new Map<string, ModelContext | null>();
   const results: Array<ElementWriteBack | null> = [];
   const touchedModels = new Set<string>();
+  const quantityReads = new Map<number, ReturnType<typeof quantitySetsWithStatusFor>>();
+  // Validate all inventories before the first edit. A later bounded refusal
+  // must not leave earlier elements changed without a completed run receipt.
+  for (const [globalId, record] of state.zoneAssignments) {
+    const ref = resolveEntityRef(globalId);
+    const context = writableContextFor(ref.modelId, contexts);
+    if (!context || (!record[zoneSet.id]?.touchedZoneIds.length && !context.view.hasChanges(ref.expressId))) continue;
+    const read = quantitySetsWithStatusFor(context, ref.expressId);
+    if (read.ownUnavailable) throw new OccurrenceQuantityReadError('Native occurrence quantities are unavailable for write-back');
+    quantityReads.set(globalId, read);
+  }
 
   for (const [globalId, record] of state.zoneAssignments) {
     const assignment = record[zoneSet.id];
     const ref = resolveEntityRef(globalId);
-    const context = contextFor(ref.modelId, contexts);
+    const context = writableContextFor(ref.modelId, contexts);
     if (!assignment || assignment.touchedZoneIds.length === 0) {
       // An element that has LEFT the set (a zone moved or was deleted) would
       // otherwise keep the previous run's zone and volumes forever, since the
@@ -185,7 +209,7 @@ export function applyZoneWriteBack(zoneSet: ZoneSet, basis: VolumeBasis): ZoneWr
       // EARLIER session and re-imported is not reachable this cheaply; the
       // panel's Remove sweeps unconditionally for exactly that.
       if (context && context.view.hasChanges(ref.expressId)) {
-        if (sweepZoneSets(context, ref.expressId, zoneSet.id) > 0) touchedModels.add(ref.modelId);
+        if (sweepZoneSets(context, ref.expressId, zoneSet.id, quantityReads.get(globalId)?.quantitySets) > 0) touchedModels.add(ref.modelId);
       }
       results.push(null);
       continue;
@@ -198,9 +222,17 @@ export function applyZoneWriteBack(zoneSet: ZoneSet, basis: VolumeBasis): ZoneWr
     // ONE read of the entity's quantity sets per element, serving both the
     // declared basis and the stale-zone-qset sweep below. Each read is an
     // on-demand extraction, so asking twice would double the run's cost.
-    const qsets = quantitySetsFor(context, ref.expressId);
-    const facts = zoneFactsFor(globalId, assignment, zoneNameById, basis, context, qsets, proved, apportioned);
-    const built = buildElementWriteBack(facts, {
+    const quantityRead = quantityReads.get(globalId) ?? quantitySetsWithStatusFor(context, ref.expressId);
+    if (quantityRead.ownUnavailable) throw new OccurrenceQuantityReadError('Native occurrence quantities are unavailable for write-back');
+    const qsets = quantityRead.quantitySets;
+    const facts = zoneFactsFor(globalId, assignment, zoneNameById, basis, context.declaredUnitsAvailable === false ? null : context.volumeSiScale, qsets, proved, apportioned, quantityRead.inheritedUnavailable);
+    // Read-only explicit quantities can remain physical without project units,
+    // but a new unitless IfcQuantityVolume needs a known target project scale.
+    // Preserve any earlier geometry/quantity refusal and the safe label/sweep path.
+    const writeFacts: typeof facts = context.declaredUnitsAvailable === false && facts.refusal === null
+      ? { ...facts, shares: [], outsideM3: 0, refusal: 'writeback-unit-unavailable' }
+      : facts;
+    const built = buildElementWriteBack(writeFacts, {
       zoneSetName: zoneSet.name,
       zoneSetId: zoneSet.id,
       basis,
@@ -250,73 +282,85 @@ export interface ZoneWriteBackRemoval {
   /** Elements something was actually deleted from. */
   removed: number;
   modelIds: string[];
-  blocked: 'collab-role' | 'duplicate-set-name' | null;
+  blocked: MutationDenialReason | 'duplicate-set-name' | null;
 }
 
-/**
- * Remove what any run wrote for one zone set, from every element.
- *
- * The inverse exists because the run does not enter the undo stack (see the
- * module doc). Three things it deliberately does not narrow:
- *
- *  - it visits EVERY element, not only the ones currently in the set, because
- *    an element that has since left it is exactly the one carrying a stale
- *    assignment nothing else will clear;
- *  - it matches on the set's ID rather than its name, so a rename does not
- *    strand the earlier output;
- *  - it counts only elements where something was actually deleted. A count of
- *    "removed from 12,000 elements" on a model that was never written to, with
- *    an unsaved-changes flag to match, is a false report of an edit.
- */
-export function removeZoneWriteBack(zoneSet: ZoneSet): ZoneWriteBackRemoval {
-  const state = useViewerStore.getState();
-  // Reported rather than folded into `removed: 0`: "nothing to remove" and "you
-  // were not allowed to" are different answers, and only one of them means the
-  // user should do something next.
-  if (!state.canCollabEdit()) return { removed: 0, modelIds: [], blocked: 'collab-role' };
-  if (collidesByName(zoneSet)) return { removed: 0, modelIds: [], blocked: 'duplicate-set-name' };
-  const contexts = new Map<string, ModelContext | null>();
-  const touchedModels = new Set<string>();
-  let removed = 0;
+interface ZoneRemovalTarget {
+  modelId: string;
+  expressId: number;
+  psets: string[];
+  qsets: string[];
+}
 
+interface PlannedZoneRemoval {
+  targets: ZoneRemovalTarget[];
+  contexts: Map<string, ModelContext | null>;
+  blocked: ZoneWriteBackRemoval['blocked'];
+}
+
+/** Inventory owned output, including prior writes on elements that left the zone. */
+export function planZoneRemoval(zoneSet: ZoneSet): PlannedZoneRemoval {
+  const state = useViewerStore.getState();
+  const contexts = new Map<string, ModelContext | null>();
+  const permission = mutationPermission(state);
+  if (!permission.allowed) return { targets: [], contexts, blocked: permission.reason };
+  if (collidesByName(zoneSet)) return { targets: [], contexts, blocked: 'duplicate-set-name' };
+
+  const candidates = new Map<string, { modelId: string; expressId: number }>();
+  const addTarget = (modelId: string, expressId: number) => {
+    if (canMutate(state, modelId)) candidates.set(`${modelId}:${expressId}`, { modelId, expressId });
+  };
   for (const [globalId] of state.zoneAssignments) {
     const ref = resolveEntityRef(globalId);
-    const context = contextFor(ref.modelId, contexts);
-    if (!context) continue;
-    if (sweepZoneSets(context, ref.expressId, zoneSet.id) === 0) continue;
-    touchedModels.add(ref.modelId);
-    removed++;
+    addTarget(ref.modelId, ref.expressId);
   }
-
-  // The assignment cache holds only elements the renderer has geometry for, so
-  // an element whose geometry was released to reclaim memory (#2183) has left
-  // it while its property set has not. Every element THIS SESSION wrote to is
-  // still named in its model's mutation history, which is an in-memory walk
-  // with no extraction behind it, so the two together cover everything the
-  // feature can have produced. What remains out of reach is an element written
-  // in an EARLIER session whose geometry is not loaded now; loading the model's
-  // geometry brings it back into the first pass.
+  // Geometry can be released before the related edits are exported.
   for (const [modelId, view] of state.mutationViews) {
-    const context = contextFor(modelId, contexts);
-    if (!context) continue;
-    const seen = new Set<number>();
     for (const mutation of view.getMutations()) {
-      if (!mutation.psetName?.startsWith(ZONE_SET_NAME_PREFIX)
-        && !mutation.psetName?.startsWith(ZONE_QUANTITY_SET_NAME_PREFIX)) continue;
-      if (seen.has(mutation.entityId)) continue;
-      seen.add(mutation.entityId);
-      if (sweepZoneSets(context, mutation.entityId, zoneSet.id) === 0) continue;
-      touchedModels.add(modelId);
-      removed++;
+      if (mutation.psetName?.startsWith(ZONE_SET_NAME_PREFIX)
+        || mutation.psetName?.startsWith(ZONE_QUANTITY_SET_NAME_PREFIX)) addTarget(modelId, mutation.entityId);
     }
   }
 
-  const modelIds = [...touchedModels];
-  if (modelIds.length > 0) useViewerStore.getState().markModelsDirty(modelIds);
-  return { removed, modelIds, blocked: null };
+  const targets: ZoneRemovalTarget[] = [];
+  // Two model ids can resolve to one view (legacy single-model ids); plan each element once.
+  const planned = new Map<ModelContext['view'], Set<number>>();
+  // Complete every bounded inventory before applying any deletion.
+  for (const candidate of candidates.values()) {
+    const context = contextFor(candidate.modelId, contexts, false);
+    if (!context) continue;
+    let seen = planned.get(context.view);
+    if (!seen) planned.set(context.view, seen = new Set());
+    if (seen.has(candidate.expressId)) continue;
+    seen.add(candidate.expressId);
+    const sets = zoneSetsOnElement(context, candidate.expressId, zoneSet.id);
+    if (sets.psets.length || sets.qsets.length) targets.push({ ...candidate, ...sets });
+  }
+  // A stable order, so the reviewed digest does not depend on assignment or history order.
+  targets.sort((a, b) => (a.modelId < b.modelId ? -1 : a.modelId > b.modelId ? 1 : a.expressId - b.expressId));
+  return { targets, contexts, blocked: null };
 }
 
-/** React-facing handles. */
+/** Remove output owned by this zone set, including output written before a rename. A caller that already checked a plan passes it. */
+export function removeZoneWriteBack(zoneSet: ZoneSet, plan = planZoneRemoval(zoneSet)): ZoneWriteBackRemoval {
+  const { targets, contexts, blocked } = plan;
+  if (blocked) return { removed: 0, modelIds: [], blocked };
+
+  const touchedModels = new Set<string>();
+  const state = useViewerStore.getState();
+  for (const { modelId, expressId, psets, qsets } of targets) {
+    const view = contexts.get(modelId)!.view;
+    for (const name of psets) view.deletePropertySet(expressId, name);
+    for (const name of qsets) view.deleteQuantitySet(expressId, name);
+    if (!touchedModels.has(modelId) && !state.getMutationView(modelId)) state.registerMutationView(modelId, view);
+    touchedModels.add(modelId);
+  }
+
+  const modelIds = [...touchedModels];
+  if (modelIds.length > 0) state.markModelsDirty(modelIds);
+  return { removed: targets.length, modelIds, blocked: null };
+}
+
 export function useZoneWriteBack() {
   const write = useCallback((zoneSet: ZoneSet, basis: VolumeBasis) => applyZoneWriteBack(zoneSet, basis), []);
   const remove = useCallback((zoneSet: ZoneSet) => removeZoneWriteBack(zoneSet), []);

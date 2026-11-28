@@ -2,8 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { okResult, paginate, fmtCount } from './util.js';
+import { materialFallbackName } from '../material-naming.js';
 
 describe('tool utilities', () => {
   it('paginates with truncation flag', () => {
@@ -49,9 +50,79 @@ describe('tool utilities', () => {
     expect(fmtCount(2500, 'wall')).toBe('2,500 walls');
   });
 
+  describe('on a host whose default locale is not en-US', () => {
+    // Tool text is read by agents and pinned by tests; it must not change with
+    // the LANG of whichever machine runs the server. Node derives the default
+    // locale from the environment (sv-SE groups thousands with a no-break
+    // space), so simulate that host by defaulting the locale argument.
+    afterEach(() => vi.restoreAllMocks());
+
+    it('formats counts the same as on an en-US host', () => {
+      const original = Number.prototype.toLocaleString;
+      vi.spyOn(Number.prototype, 'toLocaleString').mockImplementation(function (
+        this: number,
+        locales?: Intl.LocalesArgument,
+        options?: Intl.NumberFormatOptions,
+      ) {
+        return original.call(this, locales ?? 'sv-SE', options);
+      });
+      expect((2500).toLocaleString()).not.toBe('2,500'); // the simulation bites
+      expect(fmtCount(2500, 'wall')).toBe('2,500 walls');
+    });
+  });
+
   it('okResult builds structured shape', () => {
     const r = okResult('ok', { count: 1 });
     expect(r.content[0]).toEqual({ type: 'text', text: 'ok' });
     expect(r.structuredContent).toEqual({ count: 1 });
+  });
+
+  describe('materialFallbackName', () => {
+    it('reads the top-level name for a plain Material', () => {
+      expect(materialFallbackName({ type: 'Material', name: 'Steel' })).toBe('Steel');
+    });
+
+    it('undefined for null/undefined, not a thrown error', () => {
+      expect(materialFallbackName(null)).toBeUndefined();
+      expect(materialFallbackName(undefined)).toBeUndefined();
+    });
+
+    it('falls back to the first entry of an IfcMaterialList, which has no list-level name', () => {
+      expect(
+        materialFallbackName({ type: 'MaterialList', materials: [{ name: 'Concrete' }, { name: 'Steel' }] }),
+      ).toBe('Concrete');
+    });
+
+    it('falls back to a layer/profile/constituent materialName when the set itself is unnamed', () => {
+      expect(
+        materialFallbackName({ type: 'MaterialLayerSet', layers: [{ materialName: 'Brick' }] }),
+      ).toBe('Brick');
+      expect(
+        materialFallbackName({ type: 'MaterialProfileSet', profiles: [{ materialName: 'Aluminium' }] }),
+      ).toBe('Aluminium');
+      expect(
+        materialFallbackName({ type: 'MaterialConstituentSet', constituents: [{ materialName: 'Glass' }] }),
+      ).toBe('Glass');
+    });
+
+    it('prefers a set-level name over its members when both are present', () => {
+      expect(
+        materialFallbackName({
+          type: 'MaterialLayerSet',
+          name: 'Exterior Wall Build-up',
+          layers: [{ materialName: 'Brick' }],
+        }),
+      ).toBe('Exterior Wall Build-up');
+    });
+
+    it('uses a named IfcMaterialProfileSet when every profile material is unnamed', () => {
+      expect(
+        materialFallbackName({
+          type: 'MaterialProfileSet',
+          name: 'Primary framing',
+          profiles: [{ materialName: undefined }, { materialName: undefined }],
+        }),
+      ).toBe('Primary framing');
+    });
   });
 });

@@ -13,6 +13,9 @@
  * diff that changes matching semantics is worth being able to read on its own.
  */
 
+import { WASM_SOURCE_BYTE_LIMIT, WasmSourceSizeError } from '@ifc-lite/parser';
+import { resolve as translate } from '../i18n/registry.js';
+
 import {
   classifyLoadError,
   messageOf,
@@ -25,9 +28,17 @@ import {
  * never hide useful detail.
  *
  * @param fileName Optional file name to attribute the failure to.
+ * @param context  The capture site's `context`, where the caller has one. Only
+ *   one WebKit wording depends on it (see `isFileNotFoundMessage` in
+ *   ./file-not-found-errors.ts); omitting it costs that string its guidance and nothing
+ *   else. A caller that is NOT a model load should omit it rather than invent
+ *   one, because that is precisely the case the gate exists to exclude.
  */
-export function formatLoadError(err: unknown, fileName?: string): string {
-  const kind = classifyLoadError(err);
+export function formatLoadError(err: unknown, fileName?: string, context?: unknown): string {
+  if (err instanceof WasmSourceSizeError) {
+    return translate('viewportLighting.container.loadErrorCard.sourceTooLarge', { limit: `${WASM_SOURCE_BYTE_LIMIT / (1024 ** 3)} GiB` });
+  }
+  const kind = classifyLoadError(err, context);
   const subject = fileName ? `"${fileName}"` : 'the model';
   switch (kind) {
     case 'wasm_engine_load':
@@ -36,6 +47,8 @@ export function formatLoadError(err: unknown, fileName?: string): string {
         `This usually means the app updated in the background, or a proxy/antivirus blocked it. ` +
         `Please reload the page (Ctrl/Cmd+Shift+R). If it persists, check your network or extensions.`
       );
+    case 'wasm_simd_unsupported':
+      return translate('viewportLighting.container.loadErrorCard.wasmSimdUnsupported');
     case 'out_of_memory':
       return (
         `Ran out of memory while processing ${subject}. ` +
@@ -53,11 +66,21 @@ export function formatLoadError(err: unknown, fileName?: string): string {
         `The model may be too large or complex for this device. ` +
         `Try closing other tabs, or load fewer/smaller models at once.`
       );
+    case 'invalid_input':
+      return translate('viewportLighting.container.loadErrorCard.invalidInput');
+    case 'invalid_archive':
+      return (
+        `Couldn't open ${subject} as an .ifcZIP archive. ` +
+        `It must contain exactly one .ifc/.ifcxml model within the extraction size limit. ` +
+        `Extract and open a single model directly, or export a smaller model and create a new archive.`
+      );
     case 'file_unreadable':
       return (
-        `Couldn't read ${subject} — the file is no longer available to the browser. ` +
-        `It may have been moved, renamed, deleted, or unloaded by a cloud-sync client ` +
-        `(OneDrive/Dropbox/iCloud) since you picked it. Please select the file again.`
+        `Couldn't read ${subject} — the browser can no longer read the file. ` +
+        `If it is in OneDrive, Dropbox, Google Drive or iCloud, it may be an online-only ` +
+        `placeholder: make it available offline ("Always keep on this device"), or copy it ` +
+        `to a local folder, then open it again. It may also have been moved, renamed or ` +
+        `changed since you picked it — open it again from its current location.`
       );
     case 'wasm_runtime_crashed':
       // Two sub-cases, and the difference matters to the user: a trap taken by
